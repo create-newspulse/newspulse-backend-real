@@ -39,7 +39,7 @@ app.get('/', (req, res) => {
 });
 
 // API Routes
-app.use('/api', newsRoutes);
+app.use('/api/news', newsRoutes);
 
 // Global Error Handling Middleware
 app.use((err, req, res, next) => {
