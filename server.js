@@ -35,7 +35,7 @@ mongoose
 
 // Simple homepage route
 app.get('/', (req, res) => {
-  res.send('🎉 NewsPulse Backend is Live!');
+  res.send('🎉 News Pulse Backend is Live!');
 });
 
 // API Routes
