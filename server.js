@@ -9,7 +9,16 @@ dotenv.config(); // Load environment variables from .env file
 const app = express();
 
 // Middleware
-app.use(cors()); // Enable CORS
+app.use(
+  cors({
+    origin: [
+      'http://localhost:3000',
+      'https://newspulse-frontend-main.vercel.app',
+    ],
+    credentials: true, // Optional: if you plan to use cookies or auth headers
+  }),
+);
+
 app.use(express.json()); // Parse incoming JSON requests
 
 // MongoDB Connection
@@ -24,10 +33,15 @@ mongoose
     process.exit(1); // Exit the process with a failure status
   });
 
-// Routes
+// Simple homepage route
+app.get('/', (req, res) => {
+  res.send('🎉 NewsPulse Backend is Live!');
+});
+
+// API Routes
 app.use('/api', newsRoutes);
 
-// Global Error Handling Middleware (for unexpected errors)
+// Global Error Handling Middleware
 app.use((err, req, res, next) => {
   console.error('Unexpected error:', err);
   res
