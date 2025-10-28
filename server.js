@@ -23,17 +23,25 @@ app.use(
 
 app.use(express.json()); // Parse incoming JSON requests
 
-// MongoDB Connection
-mongoose
-  .connect(process.env.MONGO_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => console.log('✅ MongoDB connected'))
-  .catch((err) => {
-    console.error('❌ MongoDB connection error:', err);
-    process.exit(1); // Exit the process with a failure status
-  });
+// MongoDB Connection (resilient: don't crash app if DB is temporarily unreachable)
+const MONGO_URI = process.env.MONGO_URI;
+const connectWithRetry = async (delayMs = 30000) => {
+  if (!MONGO_URI) {
+    console.warn('⚠️  MONGO_URI not set. API will run with limited functionality.');
+    return;
+  }
+  try {
+    await mongoose.connect(MONGO_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+    console.log('✅ MongoDB connected');
+  } catch (err) {
+    console.error('❌ MongoDB connection error (will retry):', err?.message || err);
+    setTimeout(() => connectWithRetry(delayMs), delayMs);
+  }
+};
+connectWithRetry();
 
 // Simple homepage route
 app.get('/', (req, res) => {
