@@ -31,14 +31,21 @@ app.use(
 app.use(express.json()); // Parse incoming JSON requests
 
 // MongoDB Connection (resilient: don't crash app if DB is temporarily unreachable)
-const MONGO_URI = process.env.MONGO_URI;
+const rawMongoUri = (process.env.MONGO_URI || '').trim();
 const connectWithRetry = async (delayMs = 30000) => {
-  if (!MONGO_URI) {
+  const uri = (process.env.MONGO_URI || '').trim();
+  if (!uri) {
     console.warn('⚠️  MONGO_URI not set. API will run with limited functionality.');
     return;
   }
+  if (!/^mongodb(\+srv)?:\/\//i.test(uri)) {
+    const preview = uri.length > 12 ? uri.slice(0, 12) + '…' : uri;
+    console.error(`❌ Invalid MONGO_URI scheme: "${preview}". Expected it to start with "mongodb://" or "mongodb+srv://". Will retry.`);
+    setTimeout(() => connectWithRetry(delayMs), delayMs);
+    return;
+  }
   try {
-    await mongoose.connect(MONGO_URI, {
+    await mongoose.connect(uri, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });
