@@ -53,6 +53,8 @@ app.get('/', (req, res) => {
 app.use('/api/news', newsRoutes);
 app.use('/api/ai-activity-log', aiActivityLog);
 app.use('/api/system/health', systemHealth);
+// Optional compatibility path
+app.use('/api/health', systemHealth);
 
 // Global Error Handling Middleware
 app.use((err, req, res, next) => {
