@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 const cors = require('cors');
 const newsRoutes = require('./routes/news');
+const aiActivityLog = require('./routes/safezone/aiActivityLog');
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -40,6 +41,7 @@ app.get('/', (req, res) => {
 
 // API Routes
 app.use('/api/news', newsRoutes);
+app.use('/api/ai-activity-log', aiActivityLog);
 
 // Global Error Handling Middleware
 app.use((err, req, res, next) => {
