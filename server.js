@@ -15,6 +15,7 @@ app.use(
     origin: [
       'http://localhost:3000',
       'https://newspulse-frontend-main.vercel.app',
+      'https://admin.newspulse.co.in',
     ],
     credentials: true, // Optional: if you plan to use cookies or auth headers
   }),
