@@ -25,7 +25,8 @@ router.get('/session', (req, res) => {
   if (bearer || cookieEmail) {
     // Minimal shape expected by the admin UI
     const email = cookieEmail || 'admin@newspulse.ai';
-    return res.json({ ok: true, authenticated: true, user: { id: 'self', email, role: 'admin' } });
+    // Include top-level email for legacy consumers in the admin UI
+    return res.json({ ok: true, authenticated: true, email, user: { id: 'self', email, role: 'admin' } });
   }
   return res.status(401).json({ ok: false, authenticated: false });
 });
