@@ -13,8 +13,6 @@ const monitorHub = require('./routes/system/monitorHub');
 const aiTrainingInfo = require('./routes/system/aiTrainingInfo');
 const adminAuth = require('./routes/adminAuth');
 const reportsExport = require('./routes/reports/export');
-const adminAuthSession = require('./routes/adminAuth');
-const aiTrainingInfo = require('./routes/system/aiTrainingInfo');
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -90,9 +88,6 @@ app.use('/api/system/monitor-hub', monitorHub);
 app.use('/api/system/ai-training-info', aiTrainingInfo);
 app.use('/api/admin-auth', adminAuth);
 app.use('/api/reports/export', reportsExport);
-// New lightweight endpoints to satisfy admin UI probes
-app.use('/api', adminAuthSession); // GET /api/admin-auth/session
-app.use('/api', aiTrainingInfo);   // GET /api/system/ai-training-info
 
 // Socket.IO for realtime active user count
 const io = new Server(server, {
