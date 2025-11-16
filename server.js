@@ -6,10 +6,15 @@ const http = require('http');
 const { Server } = require('socket.io');
 const state = require('./lib/state');
 const newsRoutes = require('./routes/news');
+const alertsRoutes = require('./routes/alerts');
 const aiActivityLog = require('./routes/safezone/aiActivityLog');
 const systemHealth = require('./routes/system/health');
 const monitorHub = require('./routes/system/monitorHub');
+const aiTrainingInfo = require('./routes/system/aiTrainingInfo');
+const adminAuth = require('./routes/adminAuth');
 const reportsExport = require('./routes/reports/export');
+const adminAuthSession = require('./routes/adminAuth');
+const aiTrainingInfo = require('./routes/system/aiTrainingInfo');
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -17,14 +22,26 @@ const app = express();
 const server = http.createServer(app);
 
 // Middleware
+// CORS: allow localhost, admin domain, and Vercel preview/production domains
+const allowList = new Set([
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'https://newspulse-frontend-main.vercel.app',
+  'https://admin.newspulse.co.in',
+]);
+
 app.use(
   cors({
-    origin: [
-      'http://localhost:3000',
-      'https://newspulse-frontend-main.vercel.app',
-      'https://admin.newspulse.co.in',
-    ],
-    credentials: true, // Optional: if you plan to use cookies or auth headers
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true); // allow non-browser tools
+      const ok =
+        allowList.has(origin) ||
+        /\.vercel\.app$/i.test(origin) ||
+        /newspulse\-admin\-panel\-real.*\.vercel\.app$/i.test(origin);
+      if (ok) return callback(null, true);
+      return callback(new Error(`CORS: origin not allowed -> ${origin}`));
+    },
+    credentials: true,
   }),
 );
 
@@ -64,12 +81,18 @@ app.get('/', (req, res) => {
 
 // API Routes
 app.use('/api/news', newsRoutes);
+app.use('/api/alerts', alertsRoutes); // Added minimal alerts settings endpoints
 app.use('/api/ai-activity-log', aiActivityLog);
 app.use('/api/system/health', systemHealth);
 // Optional compatibility path
 app.use('/api/health', systemHealth);
 app.use('/api/system/monitor-hub', monitorHub);
+app.use('/api/system/ai-training-info', aiTrainingInfo);
+app.use('/api/admin-auth', adminAuth);
 app.use('/api/reports/export', reportsExport);
+// New lightweight endpoints to satisfy admin UI probes
+app.use('/api', adminAuthSession); // GET /api/admin-auth/session
+app.use('/api', aiTrainingInfo);   // GET /api/system/ai-training-info
 
 // Socket.IO for realtime active user count
 const io = new Server(server, {
