@@ -20,28 +20,17 @@ const app = express();
 const server = http.createServer(app);
 
 // Middleware
-// CORS: allow localhost, admin domain, and Vercel preview/production domains
-const allowList = new Set([
-  'http://localhost:3000',
-  'http://localhost:5173',
-  'https://newspulse-frontend-main.vercel.app',
-  'https://admin.newspulse.co.in',
-]);
-
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin) return callback(null, true); // allow non-browser tools
-      const ok =
-        allowList.has(origin) ||
-        /\.vercel\.app$/i.test(origin) ||
-        /newspulse\-admin\-panel\-real.*\.vercel\.app$/i.test(origin);
-      if (ok) return callback(null, true);
-      return callback(new Error(`CORS: origin not allowed -> ${origin}`));
-    },
-    credentials: true,
-  }),
-);
+// CHANGE: CORS allow only localhost:5173 and admin.newspulse.co.in, with credentials + OPTIONS
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    const allowed = origin === 'http://localhost:5173' || origin === 'https://admin.newspulse.co.in';
+    return allowed ? callback(null, true) : callback(new Error(`CORS: origin not allowed -> ${origin}`));
+  },
+  credentials: true,
+};
+app.use(cors(corsOptions)); // CHANGE
+app.options('*', cors(corsOptions)); // CHANGE: handle preflight requests
 
 app.use(express.json()); // Parse incoming JSON requests
 
@@ -75,6 +64,28 @@ connectWithRetry();
 // Simple homepage route
 app.get('/', (req, res) => {
   res.send('🎉 News Pulse Backend is Live!');
+});
+
+// CHANGE: Root-level admin routes that always return JSON and never crash
+app.get('/admin/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+app.get('/admin-auth/session', (req, res) => {
+  res.json({ authenticated: false });
+});
+
+app.post('/admin/login', (req, res) => {
+  const { email = '', password = '' } = req.body || {};
+  const ok =
+    (process.env.FOUNDER_EMAIL || '').toLowerCase() === String(email).toLowerCase() &&
+    (process.env.FOUNDER_PASSWORD || '') === String(password);
+  if (ok) return res.json({ ok: true, user: { email } });
+  return res.status(401).json({ ok: false, message: 'Invalid credentials' });
+});
+
+app.get('/system/ai-training-info', (_req, res) => {
+  res.json({ status: 'online', timestamp: new Date().toISOString() });
 });
 
 // API Routes
@@ -113,6 +124,17 @@ io.on('connection', (socket) => {
   });
 });
 
+// JSON 404 handler (after all routes)
+app.use((req, res) => {
+  res.status(404).json({
+    ok: false,
+    success: false,
+    status: 404,
+    message: 'Route not found',
+    path: req.originalUrl,
+  });
+});
+
 // Global Error Handling Middleware
 app.use((err, req, res, next) => {
   console.error('Unexpected error:', err);
@@ -122,7 +144,8 @@ app.use((err, req, res, next) => {
 });
 
 // Start the server
-const PORT = process.env.PORT || 5000;
+// CHANGE: use PORT with fallback 10000 and log it
+const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
