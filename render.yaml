@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: newspulse-backend-real
+    env: node
+    rootDir: newspulse-backend-real-main
+    buildCommand: npm install
+    startCommand: npm start
