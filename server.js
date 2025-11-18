@@ -6,7 +6,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const state = require('./lib/state');
 const newsRoutes = require('./routes/news');
-const alertsRoutes = require('./routes/alerts');
+// const alertsRoutes = require('./routes/alerts');
 const aiActivityLog = require('./routes/safezone/aiActivityLog');
 const systemHealth = require('./routes/system/health');
 const monitorHub = require('./routes/system/monitorHub');
@@ -79,7 +79,7 @@ app.get('/', (req, res) => {
 
 // API Routes
 app.use('/api/news', newsRoutes);
-app.use('/api/alerts', alertsRoutes); // Added minimal alerts settings endpoints
+// app.use('/api/alerts', alertsRoutes); // Disabled: alerts route file not present on Render
 app.use('/api/ai-activity-log', aiActivityLog);
 app.use('/api/system/health', systemHealth);
 // Optional compatibility path
