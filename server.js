@@ -2,36 +2,75 @@ const express = require('express');
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 const cors = require('cors');
+const http = require('http');
+const { Server } = require('socket.io');
+const state = require('./lib/state');
 const newsRoutes = require('./routes/news');
+const alertsRoutes = require('./routes/alerts');
+const aiActivityLog = require('./routes/safezone/aiActivityLog');
+const systemHealth = require('./routes/system/health');
+const monitorHub = require('./routes/system/monitorHub');
+const aiTrainingInfo = require('./routes/system/aiTrainingInfo');
+const adminAuth = require('./routes/adminAuth');
+const reportsExport = require('./routes/reports/export');
 
 dotenv.config(); // Load environment variables from .env file
 
 const app = express();
+const server = http.createServer(app);
 
 // Middleware
+// CORS: allow localhost, admin domain, and Vercel preview/production domains
+const allowList = new Set([
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'https://newspulse-frontend-main.vercel.app',
+  'https://admin.newspulse.co.in',
+]);
+
 app.use(
   cors({
-    origin: [
-      'http://localhost:3000',
-      'https://newspulse-frontend-main.vercel.app',
-    ],
-    credentials: true, // Optional: if you plan to use cookies or auth headers
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true); // allow non-browser tools
+      const ok =
+        allowList.has(origin) ||
+        /\.vercel\.app$/i.test(origin) ||
+        /newspulse\-admin\-panel\-real.*\.vercel\.app$/i.test(origin);
+      if (ok) return callback(null, true);
+      return callback(new Error(`CORS: origin not allowed -> ${origin}`));
+    },
+    credentials: true,
   }),
 );
 
 app.use(express.json()); // Parse incoming JSON requests
 
-// MongoDB Connection
-mongoose
-  .connect(process.env.MONGO_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => console.log('✅ MongoDB connected'))
-  .catch((err) => {
-    console.error('❌ MongoDB connection error:', err);
-    process.exit(1); // Exit the process with a failure status
-  });
+// MongoDB Connection (resilient: don't crash app if DB is temporarily unreachable)
+const rawMongoUri = (process.env.MONGO_URI || '').trim();
+const connectWithRetry = async (delayMs = 30000) => {
+  const uri = (process.env.MONGO_URI || '').trim();
+  if (!uri) {
+    console.warn('⚠️  MONGO_URI not set. API will run with limited functionality.');
+    return;
+  }
+  if (!/^mongodb(\+srv)?:\/\//i.test(uri)) {
+    const preview = uri.length > 12 ? uri.slice(0, 12) + '…' : uri;
+    console.error(`❌ Invalid MONGO_URI scheme: "${preview}". Expected it to start with "mongodb://" or "mongodb+srv://". Will retry.`);
+    setTimeout(() => connectWithRetry(delayMs), delayMs);
+    return;
+  }
+  try {
+    await mongoose.connect(uri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+    console.log('✅ MongoDB connected');
+  } catch (err) {
+    console.error('❌ MongoDB connection error (will retry):', err?.message || err);
+    setTimeout(() => connectWithRetry(delayMs), delayMs);
+  }
+};
+connectWithRetry();
 
 // Simple homepage route
 app.get('/', (req, res) => {
@@ -40,6 +79,39 @@ app.get('/', (req, res) => {
 
 // API Routes
 app.use('/api/news', newsRoutes);
+app.use('/api/alerts', alertsRoutes); // Added minimal alerts settings endpoints
+app.use('/api/ai-activity-log', aiActivityLog);
+app.use('/api/system/health', systemHealth);
+// Optional compatibility path
+app.use('/api/health', systemHealth);
+app.use('/api/system/monitor-hub', monitorHub);
+app.use('/api/system/ai-training-info', aiTrainingInfo);
+app.use('/api/admin-auth', adminAuth);
+app.use('/api/reports/export', reportsExport);
+
+// Socket.IO for realtime active user count
+const io = new Server(server, {
+  path: '/socket.io',
+  transports: ['websocket', 'polling'],
+  cors: {
+    origin: [
+      'http://localhost:3000',
+      'https://newspulse-frontend-main.vercel.app',
+      'https://admin.newspulse.co.in',
+    ],
+    credentials: true,
+  },
+});
+
+io.on('connection', (socket) => {
+  state.activeUsers = (state.activeUsers || 0) + 1;
+  io.emit('activeUserCount', state.activeUsers);
+
+  socket.on('disconnect', () => {
+    state.activeUsers = Math.max(0, (state.activeUsers || 0) - 1);
+    io.emit('activeUserCount', state.activeUsers);
+  });
+});
 
 // Global Error Handling Middleware
 app.use((err, req, res, next) => {
@@ -51,6 +123,6 @@ app.use((err, req, res, next) => {
 
 // Start the server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
