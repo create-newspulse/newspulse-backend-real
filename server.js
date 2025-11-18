@@ -4,6 +4,7 @@ const dotenv = require('dotenv');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
 const state = require('./lib/state');
 const newsRoutes = require('./routes/news');
 // const alertsRoutes = require('./routes/alerts');
@@ -72,7 +73,25 @@ app.get('/admin/health', (req, res) => {
 });
 
 app.get('/admin-auth/session', (req, res) => {
-  res.json({ authenticated: false });
+  try {
+    const auth = req.headers['authorization'] || '';
+    const token = auth.startsWith('Bearer ')
+      ? auth.slice('Bearer '.length).trim()
+      : '';
+    if (!token) return res.json({ success: false, user: null });
+
+    const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
+    const payload = jwt.verify(token, secret);
+    const user = {
+      id: payload.sub,
+      email: payload.email,
+      name: payload.name,
+      role: payload.role,
+    };
+    return res.json({ success: true, user });
+  } catch (err) {
+    return res.json({ success: false, user: null });
+  }
 });
 
 app.post('/admin/login', (req, res) => {
@@ -80,12 +99,20 @@ app.post('/admin/login', (req, res) => {
   const ok =
     (process.env.FOUNDER_EMAIL || '').toLowerCase() === String(email).toLowerCase() &&
     (process.env.FOUNDER_PASSWORD || '') === String(password);
-  if (ok) return res.json({ ok: true, user: { email } });
-  return res.status(401).json({ ok: false, message: 'Invalid credentials' });
+  if (ok) {
+    const id = process.env.FOUNDER_ID || 'founder-1';
+    const name = process.env.FOUNDER_NAME || 'Founder';
+    const role = 'founder';
+    const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
+    const payload = { sub: id, email, name, role };
+    const token = jwt.sign(payload, secret, { expiresIn: '7d' });
+    return res.json({ success: true, token, user: { id, email, name, role } });
+  }
+  return res.status(401).json({ success: false, user: null, message: 'Invalid credentials' });
 });
 
 app.get('/system/ai-training-info', (_req, res) => {
-  res.json({ status: 'online', timestamp: new Date().toISOString() });
+  res.json({ success: true, status: 'online', lastUpdated: new Date().toISOString() });
 });
 
 // API Routes
