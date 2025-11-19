@@ -14,11 +14,14 @@ Server will attempt to listen on `PORT` (default 10000) and auto-fallback up to 
 | Name | Purpose | Notes |
 |------|---------|-------|
 | PORT | Preferred listen port | Fallback logic tries next ports if busy |
-| MONGO_URI | MongoDB connection string | Leave blank to run in limited mode |
-| FOUNDER_EMAIL | Admin login email | Required for /admin/login success |
-| FOUNDER_PASSWORD | Admin login password | Required for /admin/login success |
-| FOUNDER_NAME | Display name for user | Defaults to `Founder` |
-| FOUNDER_ID | Stable user id | Defaults to `founder-1` |
+{
+  "success": true,
+  "accessToken": "<ACCESS_JWT>",
+  "refreshToken": "<REFRESH_JWT>",
+  "user": { "id": "founder-1", "email": "founder@example.com", "name": "Site Founder", "role": "founder" },
+  "accessExpiresInMinutes": 15,
+  "refreshExpiresInDays": 30
+}
 | JWT_SECRET | Token signing secret | Change in production |
 
 ## Auth Endpoints
@@ -29,10 +32,37 @@ Body:
 ```
 Success:
 ```json
+
+### POST /admin/refresh
+Body:
+```json
+{ "refreshToken": "<REFRESH_JWT>" }
+```
+Success:
+```json
+{ "success": true, "accessToken": "<NEW_ACCESS_JWT>", "user": { "id": "founder-1", "email": "founder@example.com", "name": "Site Founder", "role": "founder" }, "accessExpiresInMinutes": 15 }
+```
+Failure:
+```json
+{ "success": false, "message": "Refresh failed" }
+```
 {
   "success": true,
   "token": "<JWT>",
   "user": { "id": "founder-1", "email": "founder@example.com", "name": "Site Founder", "role": "founder" }
+
+### GET /admin/metrics
+Returns uptime, activeUsers count, rate limiting backend (memory/redis), and token TTLs:
+```json
+{
+  "success": true,
+  "uptimeSeconds": 1234,
+  "activeUsers": 0,
+  "rateLimit": { "windowMs": 900000, "maxAttempts": 20, "backend": "memory", "inMemoryTracked": 3 },
+  "tokens": { "accessTtlMinutes": 15, "refreshTtlDays": 30, "refreshStoreSize": 1 },
+  "timestamp": "2025-11-20T00:00:00.000Z"
+}
+```
 }
 ```
 Failure: `401 { success: false, user: null, message: "Invalid credentials" }`
@@ -43,16 +73,19 @@ Requires `Authorization: Bearer <JWT>` header.
 Responses:
 ```json
 { "success": true, "user": { "id": "founder-1", "email": "...", "name": "...", "role": "founder" } }
+| REDIS_URL | Redis connection string | Enables distributed rate limiting |
+| ACCESS_TOKEN_TTL_MINUTES | Access token lifetime | Default 15 |
+| REFRESH_TOKEN_TTL_DAYS | Refresh token lifetime | Default 30 |
 { "success": false, "user": null }
 ```
-
-### GET /system/ai-training-info
-Returns a stub:
+- Blacklist or rotate refresh tokens per logout.
+- Move refresh token to httpOnly secure cookie.
+- Redis cluster or sentinel for HA.
 ```json
 { "success": true, "status": "online", "lastUpdated": "2025-11-20T00:00:00.000Z" }
-```
-
-### GET /admin/health
+- Access tokens default to 15 minutes; refresh tokens 30 days.
+- Rate limiter automatically prefers Redis if `REDIS_URL` is set, otherwise in-memory.
+- Metrics endpoint supplies operational snapshot for dashboards.
 Returns a simple JSON health indicator.
 
 ### 404 Handling

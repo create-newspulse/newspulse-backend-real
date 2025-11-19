@@ -19,6 +19,21 @@ dotenv.config(); // Load environment variables from .env file
 
 const app = express();
 const server = http.createServer(app);
+const startTime = Date.now();
+
+// Optional Redis connection for distributed rate limiting
+let redisClient = null;
+const REDIS_URL = process.env.REDIS_URL || '';
+if (REDIS_URL) {
+  try {
+    const { createClient } = require('redis');
+    redisClient = createClient({ url: REDIS_URL });
+    redisClient.on('error', (e) => console.error('Redis error:', e?.message || e));
+    redisClient.connect().then(() => console.log('✅ Redis connected')).catch(err => console.error('❌ Redis connect failed:', err?.message || err));
+  } catch (e) {
+    console.warn('⚠️  Redis not initialized (missing dependency or connection issue). Falling back to in-memory limiter.');
+  }
+}
 
 // Middleware
 // CHANGE: CORS allow only localhost:5173 and admin.newspulse.co.in, with credentials + OPTIONS
@@ -60,7 +75,9 @@ const connectWithRetry = async (delayMs = 30000) => {
     setTimeout(() => connectWithRetry(delayMs), delayMs);
   }
 };
-connectWithRetry();
+if (process.env.NODE_ENV !== 'test') {
+  connectWithRetry();
+}
 
 // Simple homepage route
 app.get('/', (req, res) => {
@@ -94,15 +111,20 @@ app.get('/admin-auth/session', (req, res) => {
   }
 });
 
-// Simple in-memory rate limiter for login (IP based)
+// Rate limiting (in-memory fallback or Redis-backed)
 const loginRateLimit = {
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   maxAttempts: 20,
-  attempts: new Map(), // key: ip, value: { count, firstAttemptTs }
+  attempts: new Map(),
 };
 
-function isRateLimited(ip) {
+async function isRateLimited(ip) {
   const now = Date.now();
+  if (redisClient) {
+    const key = `login:attempts:${ip}`;
+    const count = parseInt(await redisClient.get(key) || '0', 10);
+    return count >= loginRateLimit.maxAttempts;
+  }
   const record = loginRateLimit.attempts.get(ip);
   if (!record) return false;
   if (now - record.firstAttemptTs > loginRateLimit.windowMs) {
@@ -112,24 +134,41 @@ function isRateLimited(ip) {
   return record.count >= loginRateLimit.maxAttempts;
 }
 
-function registerAttempt(ip) {
+async function registerAttempt(ip) {
   const now = Date.now();
+  if (redisClient) {
+    const key = `login:attempts:${ip}`;
+    const exists = await redisClient.exists(key);
+    const count = parseInt(await redisClient.incr(key), 10);
+    if (!exists) {
+      await redisClient.pexpire(key, loginRateLimit.windowMs);
+    }
+    return count;
+  }
   const record = loginRateLimit.attempts.get(ip);
-  if (!record) {
+  if (!record || now - record.firstAttemptTs > loginRateLimit.windowMs) {
     loginRateLimit.attempts.set(ip, { count: 1, firstAttemptTs: now });
-  } else if (now - record.firstAttemptTs > loginRateLimit.windowMs) {
-    loginRateLimit.attempts.set(ip, { count: 1, firstAttemptTs: now });
+    return 1;
   } else {
     record.count += 1;
+    return record.count;
   }
 }
 
-app.post('/admin/login', (req, res) => {
+// Token TTL configuration
+const ACCESS_TOKEN_TTL_MINUTES = parseInt(process.env.ACCESS_TOKEN_TTL_MINUTES || '15', 10);
+const REFRESH_TOKEN_TTL_DAYS = parseInt(process.env.REFRESH_TOKEN_TTL_DAYS || '30', 10);
+const refreshStore = new Map(); // key: refreshToken -> { sub, exp }
+
+function minutesToSeconds(m) { return m * 60; }
+function daysToSeconds(d) { return d * 86400; }
+
+app.post('/admin/login', async (req, res) => {
   const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
-  if (isRateLimited(ip)) {
+  if (await isRateLimited(ip)) {
     return res.status(429).json({ success: false, message: 'Too many login attempts. Please wait and try again.' });
   }
-  registerAttempt(ip);
+  await registerAttempt(ip);
 
   const { email = '', password = '' } = req.body || {};
   const ok =
@@ -140,15 +179,67 @@ app.post('/admin/login', (req, res) => {
     const name = process.env.FOUNDER_NAME || 'Founder';
     const role = 'founder';
     const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
-    const payload = { sub: id, email, name, role };
-    const token = jwt.sign(payload, secret, { expiresIn: '7d' });
-    return res.json({ success: true, token, user: { id, email, name, role } });
+    const accessPayload = { sub: id, email, name, role, type: 'access' };
+    const refreshPayload = { sub: id, email, name, role, type: 'refresh' };
+    const accessToken = jwt.sign(accessPayload, secret, { expiresIn: `${ACCESS_TOKEN_TTL_MINUTES}m` });
+    const refreshToken = jwt.sign(refreshPayload, secret, { expiresIn: `${REFRESH_TOKEN_TTL_DAYS}d` });
+    refreshStore.set(refreshToken, { sub: id, exp: Date.now() + daysToSeconds(REFRESH_TOKEN_TTL_DAYS) * 1000 });
+    return res.json({ success: true, accessToken, refreshToken, user: { id, email, name, role }, accessExpiresInMinutes: ACCESS_TOKEN_TTL_MINUTES, refreshExpiresInDays: REFRESH_TOKEN_TTL_DAYS });
   }
   return res.status(401).json({ success: false, user: null, message: 'Invalid credentials' });
 });
 
+app.post('/admin/refresh', (req, res) => {
+  const { refreshToken = '' } = req.body || {};
+  if (!refreshToken || !refreshStore.has(refreshToken)) {
+    return res.status(401).json({ success: false, message: 'Invalid refresh token' });
+  }
+  try {
+    const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
+    const payload = jwt.verify(refreshToken, secret);
+    if (payload.type !== 'refresh') throw new Error('Not a refresh token');
+    const id = payload.sub;
+    const email = payload.email;
+    const name = payload.name;
+    const role = payload.role;
+    const accessPayload = { sub: id, email, name, role, type: 'access' };
+    const accessToken = jwt.sign(accessPayload, secret, { expiresIn: `${ACCESS_TOKEN_TTL_MINUTES}m` });
+    return res.json({ success: true, accessToken, user: { id, email, name, role }, accessExpiresInMinutes: ACCESS_TOKEN_TTL_MINUTES });
+  } catch (e) {
+    refreshStore.delete(refreshToken);
+    return res.status(401).json({ success: false, message: 'Refresh failed' });
+  }
+});
+
 app.get('/system/ai-training-info', (_req, res) => {
   res.json({ success: true, status: 'online', lastUpdated: new Date().toISOString() });
+});
+
+app.get('/admin/metrics', async (req, res) => {
+  const uptimeSec = Math.round((Date.now() - startTime) / 1000);
+  let redisMode = false;
+  if (redisClient) {
+    redisMode = true;
+  }
+  // Basic snapshot of in-memory attempts size (not exposing IP list for privacy)
+  const inMemoryActiveKeys = loginRateLimit.attempts.size;
+  res.json({
+    success: true,
+    uptimeSeconds: uptimeSec,
+    activeUsers: state.activeUsers || 0,
+    rateLimit: {
+      windowMs: loginRateLimit.windowMs,
+      maxAttempts: loginRateLimit.maxAttempts,
+      backend: redisMode ? 'redis' : 'memory',
+      inMemoryTracked: inMemoryActiveKeys,
+    },
+    tokens: {
+      accessTtlMinutes: ACCESS_TOKEN_TTL_MINUTES,
+      refreshTtlDays: REFRESH_TOKEN_TTL_DAYS,
+      refreshStoreSize: refreshStore.size,
+    },
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // API Routes
@@ -224,4 +315,10 @@ function tryListen(port, attempt = 1) {
   });
 }
 
-tryListen(BASE_PORT);
+if (process.env.NODE_ENV !== 'test') {
+  tryListen(BASE_PORT);
+} else {
+  console.log('🧪 Test mode: skipping server listen & Mongo retries');
+}
+
+module.exports = app;
