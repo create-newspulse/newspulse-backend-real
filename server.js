@@ -14,6 +14,8 @@ const monitorHub = require('./routes/system/monitorHub');
 const aiTrainingInfo = require('./routes/system/aiTrainingInfo');
 const adminAuth = require('./routes/adminAuth');
 const reportsExport = require('./routes/reports/export');
+const dashboardStats = require('./routes/dashboardStats');
+const authOtp = require('./routes/authOtp');
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -214,6 +216,12 @@ app.post('/admin/refresh', (req, res) => {
 app.get('/system/ai-training-info', (_req, res) => {
   res.json({ success: true, status: 'online', lastUpdated: new Date().toISOString() });
 });
+
+// Dashboard stats routes (root-level, no /api prefix)
+app.use('/', dashboardStats);
+
+// OTP request route (root-level)
+app.use('/', authOtp);
 
 app.get('/admin/metrics', async (req, res) => {
   const uptimeSec = Math.round((Date.now() - startTime) / 1000);
