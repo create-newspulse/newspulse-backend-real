@@ -171,42 +171,66 @@ const refreshStore = new Map(); // key: refreshToken -> { sub, exp }
 function minutesToSeconds(m) { return m * 60; }
 function daysToSeconds(d) { return d * 86400; }
 
+// ADMIN LOGIN ROUTE (currently used by frontend):
+// POST /admin/login
+// FINAL FOUNDER LOGIN ENDPOINT:
+// POST /admin/login
 app.post('/admin/login', async (req, res) => {
-  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
-  if (await isRateLimited(ip)) {
-    return res.status(429).json({ success: false, message: 'Too many login attempts. Please wait and try again.' });
-  }
-  await registerAttempt(ip);
+  const { email, password } = req.body || {};
 
-  const { email = '', password = '' } = req.body || {};
-  let user = await User.findOne({ email: email.toLowerCase() });
-  let passwordValid = false;
-  if (user) {
-    passwordValid = await bcrypt.compare(password, user.passwordHash);
-  } else {
-    // Fallback to founder env credentials and auto-provision user
-    const founderMatch = (process.env.FOUNDER_EMAIL || '').toLowerCase() === email.toLowerCase() && (process.env.FOUNDER_PASSWORD || '') === password;
-    if (founderMatch) {
-      const rounds = parseInt(process.env.PASSWORD_HASH_ROUNDS || '10', 10);
-      user = await User.create({ email: email.toLowerCase(), name: process.env.FOUNDER_NAME || 'Founder', passwordHash: await bcrypt.hash(password, rounds), role: 'founder' });
-      passwordValid = true;
-    }
+  const founderEmail = (process.env.FOUNDER_EMAIL || '').trim().toLowerCase();
+  const founderPassword = process.env.FOUNDER_PASSWORD || '';
+  const candidateEmail = (email || '').trim().toLowerCase();
+  const candidatePassword = password || '';
+
+  if (!candidateEmail || !candidatePassword) {
+    return res.status(400).json({ ok: false, success: false, message: 'Email and password are required' });
   }
-  if (!passwordValid) {
-    await ActivityLog.create({ type: 'login_fail', email: email.toLowerCase(), meta: { ip } });
-    return res.status(401).json({ success: false, user: null, message: 'Invalid credentials' });
+
+  if (candidateEmail !== founderEmail || candidatePassword !== founderPassword) {
+    return res.status(401).json({ ok: false, success: false, message: 'Invalid email or password' });
   }
+
+  // Optional: issue tokens using existing JWT secret & TTLs.
   const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
-  const accessPayload = { sub: user._id.toString(), email: user.email, name: user.name, role: user.role, type: 'access' };
-  const refreshPayload = { sub: user._id.toString(), email: user.email, name: user.name, role: user.role, type: 'refresh' };
-  const accessToken = jwt.sign(accessPayload, secret, { expiresIn: `${ACCESS_TOKEN_TTL_MINUTES}m` });
-  const refreshToken = jwt.sign(refreshPayload, secret, { expiresIn: `${REFRESH_TOKEN_TTL_DAYS}d` });
-  const expiresAt = new Date(Date.now() + daysToSeconds(REFRESH_TOKEN_TTL_DAYS) * 1000);
-  await RefreshToken.create({ user: user._id, token: refreshToken, expiresAt });
-  const cookieSecure = (process.env.SECURE_COOKIE || 'true') === 'true';
-  res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: cookieSecure, sameSite: 'strict', path: '/admin/refresh', expires: expiresAt });
-  await ActivityLog.create({ type: 'login_success', email: user.email, meta: { ip } });
-  return res.json({ success: true, accessToken, user: { id: user._id.toString(), email: user.email, name: user.name, role: user.role }, accessExpiresInMinutes: ACCESS_TOKEN_TTL_MINUTES, refreshExpiresInDays: REFRESH_TOKEN_TTL_DAYS });
+  const ACCESS_MIN = ACCESS_TOKEN_TTL_MINUTES;
+  const REFRESH_DAYS = REFRESH_TOKEN_TTL_DAYS;
+  const userId = process.env.FOUNDER_ID || 'founder-001';
+  const name = process.env.FOUNDER_NAME || 'Founder';
+
+  let accessToken = null;
+  let refreshToken = null;
+  try {
+    const accessPayload = { sub: userId, email: founderEmail, name, role: 'founder', type: 'access' };
+    const refreshPayload = { sub: userId, email: founderEmail, name, role: 'founder', type: 'refresh' };
+    accessToken = jwt.sign(accessPayload, secret, { expiresIn: `${ACCESS_MIN}m` });
+    refreshToken = jwt.sign(refreshPayload, secret, { expiresIn: `${REFRESH_DAYS}d` });
+    const expiresAt = new Date(Date.now() + daysToSeconds(REFRESH_DAYS) * 1000);
+    // Persist refresh token only if model/schema available (defensive try)
+    try {
+      await RefreshToken.create({ user: userId, token: refreshToken, expiresAt });
+    } catch (_) {}
+    const cookieSecure = (process.env.SECURE_COOKIE || 'true') === 'true';
+    res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: cookieSecure, sameSite: 'strict', path: '/admin/refresh', expires: expiresAt });
+  } catch (e) {
+    // If token creation fails, still allow login per spec (omit tokens)
+    console.warn('Founder login token issuance failed (continuing without tokens):', e?.message || e);
+  }
+
+  return res.json({
+    ok: true,
+    success: true,
+    user: {
+      id: userId,
+      email: process.env.FOUNDER_EMAIL,
+      name,
+      role: 'founder',
+    },
+    accessToken,
+    refreshToken,
+    accessExpiresInMinutes: accessToken ? ACCESS_MIN : undefined,
+    refreshExpiresInDays: refreshToken ? REFRESH_DAYS : undefined,
+  });
 });
 
 app.post('/admin/refresh', async (req, res) => {
