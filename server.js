@@ -94,7 +94,43 @@ app.get('/admin-auth/session', (req, res) => {
   }
 });
 
+// Simple in-memory rate limiter for login (IP based)
+const loginRateLimit = {
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  maxAttempts: 20,
+  attempts: new Map(), // key: ip, value: { count, firstAttemptTs }
+};
+
+function isRateLimited(ip) {
+  const now = Date.now();
+  const record = loginRateLimit.attempts.get(ip);
+  if (!record) return false;
+  if (now - record.firstAttemptTs > loginRateLimit.windowMs) {
+    loginRateLimit.attempts.delete(ip);
+    return false;
+  }
+  return record.count >= loginRateLimit.maxAttempts;
+}
+
+function registerAttempt(ip) {
+  const now = Date.now();
+  const record = loginRateLimit.attempts.get(ip);
+  if (!record) {
+    loginRateLimit.attempts.set(ip, { count: 1, firstAttemptTs: now });
+  } else if (now - record.firstAttemptTs > loginRateLimit.windowMs) {
+    loginRateLimit.attempts.set(ip, { count: 1, firstAttemptTs: now });
+  } else {
+    record.count += 1;
+  }
+}
+
 app.post('/admin/login', (req, res) => {
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  if (isRateLimited(ip)) {
+    return res.status(429).json({ success: false, message: 'Too many login attempts. Please wait and try again.' });
+  }
+  registerAttempt(ip);
+
   const { email = '', password = '' } = req.body || {};
   const ok =
     (process.env.FOUNDER_EMAIL || '').toLowerCase() === String(email).toLowerCase() &&
@@ -170,9 +206,22 @@ app.use((err, req, res, next) => {
     .json({ message: 'Something went wrong, please try again later.' });
 });
 
-// Start the server
-// CHANGE: use PORT with fallback 10000 and log it
-const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
-});
+// Start the server with port fallback logic
+const BASE_PORT = parseInt(process.env.PORT, 10) || 10000;
+const MAX_PORT_SEARCH = 5; // will try BASE_PORT..BASE_PORT+4
+
+function tryListen(port, attempt = 1) {
+  server.listen(port, () => {
+    console.log(`✅ Server running on port ${port}`);
+  }).on('error', (err) => {
+    if (err.code === 'EADDRINUSE' && attempt < MAX_PORT_SEARCH) {
+      console.warn(`⚠️  Port ${port} in use. Trying ${port + 1}...`);
+      tryListen(port + 1, attempt + 1);
+    } else {
+      console.error('❌ Failed to start server:', err.message || err);
+      process.exit(1);
+    }
+  });
+}
+
+tryListen(BASE_PORT);
