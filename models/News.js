@@ -8,6 +8,7 @@ const newsSchema = new mongoose.Schema({
   category: String,
   date: { type: Date, default: Date.now },
   imageURL: String,
+  views: { type: Number, default: 0 },
 });
 
 module.exports = mongoose.model('News', newsSchema);

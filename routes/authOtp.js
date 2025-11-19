@@ -1,7 +1,26 @@
 const express = require('express');
 const OtpToken = require('../models/OtpToken');
+const User = require('../models/User');
+const ActivityLog = require('../models/ActivityLog');
 const { sendOtpEmail } = require('../lib/emailService');
+const bcrypt = require('bcrypt');
 const router = express.Router();
+
+// OTP rate limiter (in-memory)
+const otpRateLimit = { windowMs: 15 * 60 * 1000, maxAttempts: 10, attempts: new Map() };
+function otpRegister(ip) {
+  const now = Date.now();
+  const rec = otpRateLimit.attempts.get(ip);
+  if (!rec || now - rec.first > otpRateLimit.windowMs) {
+    otpRateLimit.attempts.set(ip, { count: 1, first: now });
+  } else { rec.count += 1; }
+}
+function otpLimited(ip) {
+  const rec = otpRateLimit.attempts.get(ip);
+  if (!rec) return false;
+  if (Date.now() - rec.first > otpRateLimit.windowMs) { otpRateLimit.attempts.delete(ip); return false; }
+  return rec.count >= otpRateLimit.maxAttempts;
+}
 
 // Frontend expects:
 // POST /auth/otp/request { email } -> { ok: true, message: string }
@@ -18,6 +37,12 @@ router.post('/auth/otp/request', async (req, res) => {
     if (!email) {
       return res.status(400).json({ ok: false, message: 'Email is required' });
     }
+
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+    if (otpLimited(ip)) {
+      return res.status(429).json({ ok: false, message: 'Too many OTP requests. Please try later.' });
+    }
+    otpRegister(ip);
 
     // Check if email matches founder email (only founder can reset for now)
     const founderEmail = (process.env.FOUNDER_EMAIL || '').toLowerCase();
@@ -49,6 +74,7 @@ router.post('/auth/otp/request', async (req, res) => {
     // Send email
     try {
       await sendOtpEmail(email, code);
+      await ActivityLog.create({ type: 'otp_request', email: email.toLowerCase(), meta: { method: 'email' } });
       return res.json({
         ok: true,
         message: 'OTP has been sent to your email address.'
@@ -88,6 +114,7 @@ router.post('/auth/otp/verify', async (req, res) => {
       return res.status(400).json({ ok: false, message: 'OTP has expired' });
     }
 
+    await ActivityLog.create({ type: 'otp_verify', email: email.toLowerCase(), meta: { codeVerified: true } });
     return res.json({
       ok: true,
       message: 'OTP verified successfully'
@@ -128,15 +155,16 @@ router.post('/auth/reset-password', async (req, res) => {
     // Mark OTP as used
     otpRecord.used = true;
     await otpRecord.save();
-
-    // TODO: In production, update the password in the database
-    // For now, we just update the env variable (requires restart)
-    console.warn(`⚠️  Password reset requested for ${email}. Update FOUNDER_PASSWORD in env to: ${newPassword}`);
-
-    return res.json({
-      ok: true,
-      message: 'Password reset request processed. Contact admin to complete the change.'
-    });
+    const rounds = parseInt(process.env.PASSWORD_HASH_ROUNDS || '10', 10);
+    let user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      user = await User.create({ email: email.toLowerCase(), name: process.env.FOUNDER_NAME || 'Founder', passwordHash: await bcrypt.hash(newPassword, rounds), role: 'founder' });
+    } else {
+      user.passwordHash = await bcrypt.hash(newPassword, rounds);
+      await user.save();
+    }
+    await ActivityLog.create({ type: 'password_reset', email: email.toLowerCase(), meta: { via: 'otp' } });
+    return res.json({ ok: true, message: 'Password has been updated.' });
   } catch (err) {
     console.error('[auth/reset-password] error', err?.message || err);
     return res.status(500).json({ ok: false, message: 'Could not reset password' });

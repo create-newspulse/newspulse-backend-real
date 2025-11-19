@@ -5,6 +5,11 @@ const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
+const cookieParser = require('cookie-parser');
+const User = require('./models/User');
+const RefreshToken = require('./models/RefreshToken');
+const ActivityLog = require('./models/ActivityLog');
 const state = require('./lib/state');
 const newsRoutes = require('./routes/news');
 // const alertsRoutes = require('./routes/alerts');
@@ -51,6 +56,7 @@ app.use(cors(corsOptions)); // CHANGE
 app.options('*', cors(corsOptions)); // CHANGE: handle preflight requests
 
 app.use(express.json()); // Parse incoming JSON requests
+app.use(cookieParser());
 
 // MongoDB Connection (resilient: don't crash app if DB is temporarily unreachable)
 const rawMongoUri = (process.env.MONGO_URI || '').trim();
@@ -173,42 +179,64 @@ app.post('/admin/login', async (req, res) => {
   await registerAttempt(ip);
 
   const { email = '', password = '' } = req.body || {};
-  const ok =
-    (process.env.FOUNDER_EMAIL || '').toLowerCase() === String(email).toLowerCase() &&
-    (process.env.FOUNDER_PASSWORD || '') === String(password);
-  if (ok) {
-    const id = process.env.FOUNDER_ID || 'founder-1';
-    const name = process.env.FOUNDER_NAME || 'Founder';
-    const role = 'founder';
-    const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
-    const accessPayload = { sub: id, email, name, role, type: 'access' };
-    const refreshPayload = { sub: id, email, name, role, type: 'refresh' };
-    const accessToken = jwt.sign(accessPayload, secret, { expiresIn: `${ACCESS_TOKEN_TTL_MINUTES}m` });
-    const refreshToken = jwt.sign(refreshPayload, secret, { expiresIn: `${REFRESH_TOKEN_TTL_DAYS}d` });
-    refreshStore.set(refreshToken, { sub: id, exp: Date.now() + daysToSeconds(REFRESH_TOKEN_TTL_DAYS) * 1000 });
-    return res.json({ success: true, accessToken, refreshToken, user: { id, email, name, role }, accessExpiresInMinutes: ACCESS_TOKEN_TTL_MINUTES, refreshExpiresInDays: REFRESH_TOKEN_TTL_DAYS });
+  let user = await User.findOne({ email: email.toLowerCase() });
+  let passwordValid = false;
+  if (user) {
+    passwordValid = await bcrypt.compare(password, user.passwordHash);
+  } else {
+    // Fallback to founder env credentials and auto-provision user
+    const founderMatch = (process.env.FOUNDER_EMAIL || '').toLowerCase() === email.toLowerCase() && (process.env.FOUNDER_PASSWORD || '') === password;
+    if (founderMatch) {
+      const rounds = parseInt(process.env.PASSWORD_HASH_ROUNDS || '10', 10);
+      user = await User.create({ email: email.toLowerCase(), name: process.env.FOUNDER_NAME || 'Founder', passwordHash: await bcrypt.hash(password, rounds), role: 'founder' });
+      passwordValid = true;
+    }
   }
-  return res.status(401).json({ success: false, user: null, message: 'Invalid credentials' });
+  if (!passwordValid) {
+    await ActivityLog.create({ type: 'login_fail', email: email.toLowerCase(), meta: { ip } });
+    return res.status(401).json({ success: false, user: null, message: 'Invalid credentials' });
+  }
+  const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
+  const accessPayload = { sub: user._id.toString(), email: user.email, name: user.name, role: user.role, type: 'access' };
+  const refreshPayload = { sub: user._id.toString(), email: user.email, name: user.name, role: user.role, type: 'refresh' };
+  const accessToken = jwt.sign(accessPayload, secret, { expiresIn: `${ACCESS_TOKEN_TTL_MINUTES}m` });
+  const refreshToken = jwt.sign(refreshPayload, secret, { expiresIn: `${REFRESH_TOKEN_TTL_DAYS}d` });
+  const expiresAt = new Date(Date.now() + daysToSeconds(REFRESH_TOKEN_TTL_DAYS) * 1000);
+  await RefreshToken.create({ user: user._id, token: refreshToken, expiresAt });
+  const cookieSecure = (process.env.SECURE_COOKIE || 'true') === 'true';
+  res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: cookieSecure, sameSite: 'strict', path: '/admin/refresh', expires: expiresAt });
+  await ActivityLog.create({ type: 'login_success', email: user.email, meta: { ip } });
+  return res.json({ success: true, accessToken, user: { id: user._id.toString(), email: user.email, name: user.name, role: user.role }, accessExpiresInMinutes: ACCESS_TOKEN_TTL_MINUTES, refreshExpiresInDays: REFRESH_TOKEN_TTL_DAYS });
 });
 
-app.post('/admin/refresh', (req, res) => {
-  const { refreshToken = '' } = req.body || {};
-  if (!refreshToken || !refreshStore.has(refreshToken)) {
-    return res.status(401).json({ success: false, message: 'Invalid refresh token' });
-  }
+app.post('/admin/refresh', async (req, res) => {
+  const cookieToken = req.cookies?.refreshToken;
+  const bodyToken = req.body?.refreshToken;
+  const refreshToken = cookieToken || bodyToken || '';
+  if (!refreshToken) return res.status(401).json({ success: false, message: 'Missing refresh token' });
   try {
     const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
     const payload = jwt.verify(refreshToken, secret);
     if (payload.type !== 'refresh') throw new Error('Not a refresh token');
-    const id = payload.sub;
-    const email = payload.email;
-    const name = payload.name;
-    const role = payload.role;
-    const accessPayload = { sub: id, email, name, role, type: 'access' };
+    const stored = await RefreshToken.findOne({ token: refreshToken });
+    if (!stored || stored.rotatedAt) throw new Error('Token invalid');
+    if (new Date() > stored.expiresAt) throw new Error('Token expired');
+    const user = await User.findById(payload.sub);
+    if (!user) throw new Error('User missing');
+    // Rotate
+    stored.rotatedAt = new Date();
+    await stored.save();
+    const newRefreshPayload = { sub: user._id.toString(), email: user.email, name: user.name, role: user.role, type: 'refresh' };
+    const newRefreshToken = jwt.sign(newRefreshPayload, secret, { expiresIn: `${REFRESH_TOKEN_TTL_DAYS}d` });
+    const expiresAt = new Date(Date.now() + daysToSeconds(REFRESH_TOKEN_TTL_DAYS) * 1000);
+    await RefreshToken.create({ user: user._id, token: newRefreshToken, expiresAt });
+    const cookieSecure = (process.env.SECURE_COOKIE || 'true') === 'true';
+    res.cookie('refreshToken', newRefreshToken, { httpOnly: true, secure: cookieSecure, sameSite: 'strict', path: '/admin/refresh', expires: expiresAt });
+    const accessPayload = { sub: user._id.toString(), email: user.email, name: user.name, role: user.role, type: 'access' };
     const accessToken = jwt.sign(accessPayload, secret, { expiresIn: `${ACCESS_TOKEN_TTL_MINUTES}m` });
-    return res.json({ success: true, accessToken, user: { id, email, name, role }, accessExpiresInMinutes: ACCESS_TOKEN_TTL_MINUTES });
+    await ActivityLog.create({ type: 'refresh', email: user.email, meta: { rotated: true } });
+    return res.json({ success: true, accessToken, user: { id: user._id.toString(), email: user.email, name: user.name, role: user.role }, accessExpiresInMinutes: ACCESS_TOKEN_TTL_MINUTES });
   } catch (e) {
-    refreshStore.delete(refreshToken);
     return res.status(401).json({ success: false, message: 'Refresh failed' });
   }
 });
