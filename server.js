@@ -272,11 +272,13 @@ app.get('/system/ai-training-info', (_req, res) => {
 // Dashboard stats routes (root-level, no /api prefix)
 app.use('/', dashboardStats);
 
-// OTP routes: expose both legacy and standardized API paths
-// - Legacy:  /auth/otp/*
-// - API:     /api/auth/otp/*
-app.use('/', authOtp);      // serves /auth/otp/*
-app.use('/api', authOtp);   // serves /api/auth/otp/*
+// OTP routes: legacy + generalized + admin-scoped
+// Legacy absolute: /auth/otp/* (kept for existing SPA calls)
+app.use('/', authOtp);
+// Generic API absolute: /api/auth/otp/*
+app.use('/api', authOtp);
+// Admin-scoped standardized path: /api/admin/auth/otp/* (via relative handlers)
+app.use('/api/admin/auth/otp', authOtp);
 
 app.get('/admin/metrics', async (req, res) => {
   const uptimeSec = Math.round((Date.now() - startTime) / 1000);
