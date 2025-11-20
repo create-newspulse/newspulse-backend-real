@@ -91,8 +91,6 @@ async function handleRequest(req, res) {
 }
 
 router.post('/auth/otp/request', handleRequest);
-// Standardized /api mount will use relative path below
-router.post('/request', handleRequest);
 
 async function handleVerify(req, res) {
   try {
@@ -128,7 +126,6 @@ async function handleVerify(req, res) {
 }
 
 router.post('/auth/otp/verify', handleVerify);
-router.post('/verify', handleVerify);
 
 // Back-compat endpoint accepts { email, code, newPassword } or { email, resetToken, newPassword }
 router.post('/auth/reset-password', async (req, res) => {
@@ -241,10 +238,6 @@ router.post('/auth/otp/reset', async (req, res) => {
   }
 });
 
-// Standardized mounted path support
-router.post('/reset', async (req, res) => {
-  // Delegate to the same logic as /auth/otp/reset
-  return router.handle({ ...req, url: '/auth/otp/reset', method: 'POST' }, res);
-});
+// (No extra relative /reset route; use /auth/otp/reset for both legacy and /api mounts)
 
 module.exports = router;
