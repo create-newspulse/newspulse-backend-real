@@ -25,7 +25,7 @@ Server will attempt to listen on `PORT` (default 10000) and auto-fallback up to 
 | JWT_SECRET | Token signing secret | Change in production |
 
 ## Auth Endpoints
-### POST /admin/login
+### POST /admin/login 
 Body:
 ```json
 { "email": "<FOUNDER_EMAIL>", "password": "<FOUNDER_PASSWORD>" }
