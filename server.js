@@ -272,8 +272,8 @@ app.get('/system/ai-training-info', (_req, res) => {
 // Dashboard stats routes (root-level, no /api prefix)
 app.use('/', dashboardStats);
 
-// OTP request route (root-level)
-app.use('/', authOtp);
+// OTP routes: standardized under /api/auth/otp (also legacy absolute paths are provided inside the router)
+app.use('/api/auth/otp', authOtp);
 
 app.get('/admin/metrics', async (req, res) => {
   const uptimeSec = Math.round((Date.now() - startTime) / 1000);
