@@ -53,14 +53,19 @@ const allowList = new Set([
   'https://admin.newspulse.co.in',
 ]);
 
+// Precompile regex patterns for performance & clarity
+const vercelPreviewPattern = /https:\/\/newspulse-admin-panel-real-[a-z0-9]+-[a-z0-9-]+\.vercel\.app$/i;
+const genericVercelPattern = /https:\/\/[a-z0-9-]+\.vercel\.app$/i; // fallback (less strict)
+
 const dynamicCors = cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true); // non-browser / curl
     const ok =
       allowList.has(origin) ||
-      /\.vercel\.app$/i.test(origin) ||
-      /newspulse\-admin\-panel\-real.*\.vercel\.app$/i.test(origin) ||
-      /localhost:51\d{2}$/i.test(origin);
+      vercelPreviewPattern.test(origin) ||
+      /admin\.newspulse\.co\.in$/i.test(origin) ||
+      /localhost:51\d{2}$/i.test(origin) ||
+      (process.env.CORS_ALLOW_GENERIC_VERCEL === '1' && genericVercelPattern.test(origin));
     if (ok) return callback(null, true);
     return callback(new Error(`CORS: origin not allowed -> ${origin}`));
   },
