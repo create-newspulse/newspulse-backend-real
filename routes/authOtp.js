@@ -102,6 +102,9 @@ async function handleRequest(req, res) {
 router.post('/auth/otp/request', handleRequest);
 // Relative path for /api/admin/auth/otp mounting
 router.post('/request', handleRequest);
+// New explicit reset-request alias expected by admin panel
+router.post('/auth/otp/request-reset', handleRequest);
+router.post('/request-reset', handleRequest);
 
 async function handleVerify(req, res) {
   try {

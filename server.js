@@ -313,6 +313,8 @@ app.use('/', authOtp);
 app.use('/api', authOtp);
 // Admin-scoped standardized path: /api/admin/auth/otp/* (via relative handlers)
 app.use('/api/admin/auth/otp', authOtp);
+// Explicit mount so relative handlers map to /auth/otp/* (frontend expectation)
+app.use('/auth/otp', authOtp);
 
 app.get('/admin/metrics', async (req, res) => {
   const uptimeSec = Math.round((Date.now() - startTime) / 1000);
