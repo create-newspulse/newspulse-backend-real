@@ -346,11 +346,10 @@ app.use('/api/news', newsRoutes);
 // app.use('/api/alerts', alertsRoutes); // Disabled: alerts route file not present on Render
 app.use('/api/ai-activity-log', aiActivityLog);
 app.use('/api/system/health', systemHealth);
+app.use('/system/ai-health', aiHealth);
+app.use('/api/system/ai-health', aiHealth);
 // Optional compatibility path
 app.use('/api/health', systemHealth);
-app.use('/api/system/ai-health', aiHealth);
-// Non-/api alias for compatibility (admin UI may call /system/ai-health)
-app.use('/system/ai-health', aiHealth);
 app.use('/api/system/monitor-hub', monitorHub);
 // Non-/api alias for monitor hub stats (frontend direct call compatibility)
 app.use('/system/monitor-hub', monitorHub);
