@@ -46,10 +46,13 @@ async function handleRequest(req, res) {
     }
     otpRegister(ip);
     const lowerEmail = email.toLowerCase();
-    const user = await User.findOne({ email: lowerEmail });
-    if (!user) {
-      console.log('[OTP_REQUEST][ignored-no-user] email=', lowerEmail);
-      return res.json({ ok: true, message: 'OTP sent' });
+    // Gating logic: allow when founder matches OR founder email not set OR OTP_ALLOW_ANY=1.
+    const founderEmail = (process.env.FOUNDER_EMAIL || '').toLowerCase();
+    const allowAny = (process.env.OTP_ALLOW_ANY || '0') === '1';
+    const founderMatch = founderEmail && lowerEmail === founderEmail;
+    const gatingAllowed = allowAny || founderMatch || !founderEmail;
+    if (!gatingAllowed) {
+      return res.json({ ok: true, message: 'If this email is registered, an OTP has been sent.' });
     }
 
     // Invalidate any existing unused OTPs for this email
@@ -77,11 +80,19 @@ async function handleRequest(req, res) {
       });
       await ActivityLog.create({ type: 'otp_request', email: lowerEmail, meta: { method: 'email', expiresAt } });
       console.log('[OTP_REQUEST][sent] email=', lowerEmail, 'expiresAt=', expiresAt.toISOString());
+      const payload = { ok: true, message: 'If this email is registered, an OTP has been sent.' };
+      if ((process.env.OTP_DEV_ECHO || '') === '1') { payload.devCode = code; }
+      return res.json(payload);
     } catch (emailErr) {
       console.error('[OTP_ERROR][request-sendMail]', emailErr?.message || emailErr);
       await ActivityLog.create({ type: 'otp_request_fail', email: lowerEmail, meta: { error: emailErr?.message || 'send failed' } });
+      const payload = { ok: true, message: 'If this email is registered, an OTP has been sent.' };
+      if ((process.env.OTP_DEV_ECHO || '') === '1') {
+        payload.devCode = code;
+        payload.devMailError = emailErr?.message || String(emailErr);
+      }
+      return res.json(payload);
     }
-    return res.json({ ok: true, message: 'OTP sent' });
   } catch (err) {
     console.error('[OTP_ERROR][request-handler]', err?.message || err);
     return res.status(500).json({ ok: false, message: 'Could not process OTP request' });

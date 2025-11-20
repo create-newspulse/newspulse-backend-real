@@ -15,6 +15,7 @@ const newsRoutes = require('./routes/news');
 // const alertsRoutes = require('./routes/alerts');
 const aiActivityLog = require('./routes/safezone/aiActivityLog');
 const systemHealth = require('./routes/system/health');
+const aiHealth = require('./routes/system/aiHealth');
 const monitorHub = require('./routes/system/monitorHub');
 const aiTrainingInfo = require('./routes/system/aiTrainingInfo');
 const adminAuth = require('./routes/adminAuth');
@@ -43,17 +44,31 @@ if (REDIS_URL) {
 }
 
 // Middleware
-// CHANGE: CORS allow only localhost:5173 and admin.newspulse.co.in, with credentials + OPTIONS
-const corsOptions = {
+// Unified CORS: allow localhost dev ports, production/admin domain, and any Vercel preview/production domains.
+const allowList = new Set([
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'https://newspulse-frontend-main.vercel.app',
+  'https://admin.newspulse.co.in',
+]);
+
+const dynamicCors = cors({
   origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
-    const allowed = origin === 'http://localhost:5173' || origin === 'https://admin.newspulse.co.in';
-    return allowed ? callback(null, true) : callback(new Error(`CORS: origin not allowed -> ${origin}`));
+    if (!origin) return callback(null, true); // non-browser / curl
+    const ok =
+      allowList.has(origin) ||
+      /\.vercel\.app$/i.test(origin) ||
+      /newspulse\-admin\-panel\-real.*\.vercel\.app$/i.test(origin) ||
+      /localhost:51\d{2}$/i.test(origin);
+    if (ok) return callback(null, true);
+    return callback(new Error(`CORS: origin not allowed -> ${origin}`));
   },
   credentials: true,
-};
-app.use(cors(corsOptions)); // CHANGE
-app.options('*', cors(corsOptions)); // CHANGE: handle preflight requests
+});
+app.use(dynamicCors);
+// Explicit preflight handling so 404 aliases still return CORS headers
+app.options('*', dynamicCors);
 
 app.use(express.json()); // Parse incoming JSON requests
 app.use(cookieParser());
@@ -66,6 +81,11 @@ const connectWithRetry = async (delayMs = 30000) => {
     console.warn('⚠️  MONGO_URI not set. API will run with limited functionality.');
     return;
   }
+  // Allow skipping DB in local/dev with MONGO_URI=skip|none|disabled
+  if (/^(skip|none|disable|disabled)$/i.test(uri)) {
+    console.warn('⏭️  MongoDB connection disabled by MONGO_URI flag. Running without DB.');
+    return;
+  }
   if (!/^mongodb(\+srv)?:\/\//i.test(uri)) {
     const preview = uri.length > 12 ? uri.slice(0, 12) + '…' : uri;
     console.error(`❌ Invalid MONGO_URI scheme: "${preview}". Expected it to start with "mongodb://" or "mongodb+srv://". Will retry.`);
@@ -73,10 +93,7 @@ const connectWithRetry = async (delayMs = 30000) => {
     return;
   }
   try {
-    await mongoose.connect(uri, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+    await mongoose.connect(uri);
     console.log('✅ MongoDB connected');
   } catch (err) {
     console.error('❌ MongoDB connection error (will retry):', err?.message || err);
@@ -182,6 +199,18 @@ app.post('/admin/login', async (req, res) => {
   const founderPassword = process.env.FOUNDER_PASSWORD || '';
   const candidateEmail = (email || '').trim().toLowerCase();
   const candidatePassword = password || '';
+
+  // Diagnostic logging (guarded by env flag to avoid leaking secrets unintentionally)
+  if ((process.env.LOG_LOGIN_DEBUG || 'false') === 'true') {
+    console.log('[login-debug] incoming credentials:', {
+      candidateEmail,
+      candidatePasswordLength: candidatePassword.length,
+      founderEmail,
+      founderPasswordLength: founderPassword.length,
+      jwtSecretPresent: Boolean(process.env.JWT_SECRET),
+      nodeEnv: process.env.NODE_ENV,
+    });
+  }
 
   if (!candidateEmail || !candidatePassword) {
     return res.status(400).json({ ok: false, success: false, message: 'Email and password are required' });
@@ -314,10 +343,40 @@ app.use('/api/ai-activity-log', aiActivityLog);
 app.use('/api/system/health', systemHealth);
 // Optional compatibility path
 app.use('/api/health', systemHealth);
+app.use('/api/system/ai-health', aiHealth);
+// Non-/api alias for compatibility (admin UI may call /system/ai-health)
+app.use('/system/ai-health', aiHealth);
 app.use('/api/system/monitor-hub', monitorHub);
+// Non-/api alias for monitor hub stats (frontend direct call compatibility)
+app.use('/system/monitor-hub', monitorHub);
 app.use('/api/system/ai-training-info', aiTrainingInfo);
+// Non-/api alias for AI training info (frontend direct call compatibility)
+app.use('/system/ai-training-info', aiTrainingInfo);
 app.use('/api/admin-auth', adminAuth);
+// Mount under /api/admin as well so POST /api/admin/login resolves
+app.use('/api/admin', adminAuth);
+// Non-/api alias so POST /admin/login works (SPA expectation)
+app.use('/admin', adminAuth);
 app.use('/api/reports/export', reportsExport);
+
+// --- Compatibility alias (non-/api) for local dev code accidentally hitting /admin-auth/session
+// Provides a lightweight session probe identical to /api/admin-auth/session so CORS preflight succeeds.
+app.get('/admin-auth/session', (req, res) => {
+  // Mirror logic from routes/adminAuth.js
+  const rawAuth = String(req.headers['authorization'] || '');
+  const bearer = rawAuth.toLowerCase().startsWith('bearer ') ? rawAuth.slice(7).trim() : '';
+  const cookieHeader = req.headers.cookie || '';
+  let email = '';
+  cookieHeader.split(';').forEach(c => {
+    const [k, ...v] = c.trim().split('=');
+    if (k === 'np_admin') email = decodeURIComponent(v.join('=') || '');
+  });
+  if (bearer || email) {
+    const userEmail = email || 'admin@newspulse.ai';
+    return res.json({ ok: true, authenticated: true, email: userEmail, user: { id: 'self', email: userEmail, role: 'admin' } });
+  }
+  return res.status(401).json({ ok: false, authenticated: false });
+});
 
 // Socket.IO for realtime active user count
 const io = new Server(server, {
