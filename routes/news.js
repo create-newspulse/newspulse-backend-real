@@ -11,6 +11,9 @@ const express = require('express');
 const router = express.Router();
 const { createNews, getNews } = require('../controllers/newsController');
 
+// Primary root path so mounted at /api/news gives /api/news (list/create)
+router.route('/').post(createNews).get(getNews);
+// Backward compatibility path (legacy double /news/news)
 router.route('/news').post(createNews).get(getNews);
 
 module.exports = router;

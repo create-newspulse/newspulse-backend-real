@@ -426,6 +426,8 @@ app.get('/admin/metrics', async (req, res) => {
 
 // API Routes
 app.use('/api/news', newsRoutes);
+// Alias for frontend direct /news access (Back to News button)
+app.use('/news', newsRoutes);
 // app.use('/api/alerts', alertsRoutes); // Disabled: alerts route file not present on Render
 app.use('/api/ai-activity-log', aiActivityLog);
 app.use('/api/system/health', systemHealth);
