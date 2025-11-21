@@ -90,16 +90,19 @@ async function handleRequest(req, res) {
       to: lowerEmail,
       subject: 'News Pulse Admin OTP',
       text: `Your News Pulse verification code is ${code}. It expires in 10 minutes.`,
-    });
+    }).then(info => ({ sent: true, info })).catch(err => ({ sent: false, error: err }));
     // Wrap with timeout; if exceeded, we detach logging but user already has response.
     Promise.race([
-      sendPromise.then(() => ({ sent: true })),
+      sendPromise,
       new Promise(resolve => setTimeout(() => resolve({ sent: false, timeout: true }), EMAIL_TIMEOUT_MS)),
     ]).then(async (result) => {
       try {
-        if (result.sent) {
-          await ActivityLog.create({ type: 'otp_request', email: lowerEmail, meta: { method: 'email', expiresAt } });
-          console.log('[OTP_REQUEST][sent] email=', lowerEmail, 'expiresAt=', expiresAt.toISOString());
+        if (result.sent && result.info) {
+          await ActivityLog.create({ type: 'otp_request', email: lowerEmail, meta: { method: 'email', expiresAt, messageId: result.info.messageId } });
+          console.log('[OTP_REQUEST][sent] email=', lowerEmail, 'messageId=', result.info.messageId, 'expiresAt=', expiresAt.toISOString());
+        } else if (result.sent && result.error) {
+          console.error('[OTP_REQUEST][send-error]', result.error?.message || result.error);
+          await ActivityLog.create({ type: 'otp_request_fail', email: lowerEmail, meta: { error: result.error?.message || 'send_failed', expiresAt } });
         } else if (result.timeout) {
           console.warn('[OTP_REQUEST][timeout] email send taking too long (detached). email=', lowerEmail);
           // Attempt final resolution logging

@@ -18,6 +18,7 @@ const systemHealth = require('./routes/system/health');
 const aiHealth = require('./routes/system/aiHealth');
 const monitorHub = require('./routes/system/monitorHub');
 const aiTrainingInfo = require('./routes/system/aiTrainingInfo');
+const emailTest = require('./routes/system/emailTest');
 const adminAuth = require('./routes/adminAuth');
 const reportsExport = require('./routes/reports/export');
 const dashboardStats = require('./routes/dashboardStats');
@@ -446,6 +447,9 @@ app.use('/system/monitor-hub', monitorHub);
 app.use('/api/system/ai-training-info', aiTrainingInfo);
 // Non-/api alias for AI training info (frontend direct call compatibility)
 app.use('/system/ai-training-info', aiTrainingInfo);
+// Email test route (configuration + send test email)
+app.use('/api/system/email-test', emailTest);
+app.use('/system/email-test', emailTest);
 app.use('/api/admin-auth', adminAuth);
 // Mount under /api/admin as well so POST /api/admin/login resolves
 app.use('/api/admin', adminAuth);
