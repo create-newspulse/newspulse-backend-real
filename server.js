@@ -396,6 +396,8 @@ app.use('/api', authOtp);
 app.use('/api/admin/auth/otp', authOtp);
 // Explicit mount so relative handlers map to /auth/otp/* (frontend expectation)
 app.use('/auth/otp', authOtp);
+// Admin panel expected path prefix for OTP (final -> /admin-api/auth/otp/...)
+app.use('/admin-api/auth/otp', authOtp);
 
 app.get('/admin/metrics', async (req, res) => {
   const uptimeSec = Math.round((Date.now() - startTime) / 1000);
@@ -431,6 +433,8 @@ app.use('/news', newsRoutes);
 // app.use('/api/alerts', alertsRoutes); // Disabled: alerts route file not present on Render
 app.use('/api/ai-activity-log', aiActivityLog);
 app.use('/api/system/health', systemHealth);
+// Admin panel expected health path (final -> /admin-api/system/health)
+app.use('/admin-api/system/health', systemHealth);
 app.use('/system/ai-health', aiHealth);
 app.use('/api/system/ai-health', aiHealth);
 // Optional compatibility path
