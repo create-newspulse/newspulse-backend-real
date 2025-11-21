@@ -111,3 +111,46 @@ Blueprint `render.yaml` sets rootDir to `.`. Build with `npm install`, start wit
 - Persistent account storage (replace env-based founder credentials).
 - Proper refresh token rotation.
 - Centralized logging & metrics.
+
+## Email / OTP Configuration
+To enable OTP and other email sends, set these environment variables (Render dashboard or local `.env`). Minimum required:
+
+| Var | Example | Notes |
+|-----|---------|-------|
+| `SMTP_HOST` | `smtp.gmail.com` | Omit if using `SMTP_SERVICE` |
+| `SMTP_PORT` | `465` | Use 465 with `SMTP_SECURE=true`, or 587 with STARTTLS |
+| `SMTP_SECURE` | `true` | Auto-true if port 465; false for 587 |
+| `SMTP_SERVICE` | `gmail` | Optional shortcut (use instead of HOST/PORT) |
+| `SMTP_USER` | `newspulse.team@gmail.com` | Gmail address (must match App Password) |
+| `SMTP_PASS` | `<app-password>` | 16‑char Gmail App Password (not regular password) |
+| `EMAIL_FROM` | `"NewsPulse Admin <newspulse.team@gmail.com>"` | Display name + sender |
+| `SMTP_FROM` | `noreply@newspulse.co.in` | Optional envelope override |
+| `OTP_ALLOW_ANY` | `0` (prod) / `1` (dev) | Gating: restrict OTP requests to founder email |
+| `OTP_EMAIL_TIMEOUT_MS` | `5000` | Max wait before background send detaches |
+| `OTP_DEV_ECHO` | `0` | When `1` echoes OTP in response (dev only) |
+| `SMTP_POOL` | `true` | Enable connection pooling |
+| `SMTP_MAX_CONN` | `3` | Pool size |
+| `SMTP_DEBUG` | `false` | Set `true` for verbose Nodemailer logs |
+
+Gmail Setup:
+1. Enable 2FA on the account.
+2. Create an App Password (select Mail + Other). Use that as `SMTP_PASS`.
+3. Use either explicit host/port (`smtp.gmail.com`, `465`, `SMTP_SECURE=true`) or set `SMTP_SERVICE=gmail`.
+4. Set `EMAIL_FROM` to include a friendly display name.
+
+Testing Locally:
+```bash
+cp .env.example .env
+node scripts/test-email.js --to=your-test@gmail.com
+```
+If you see `[EMAIL][transporter-ready]` followed by `[EMAIL][sent]` with your address in `accepted`, the configuration is working. If not:
+- Check for missing vars printed by `[EMAIL][config-error]`.
+- With `SMTP_DEBUG=true` review low-level protocol logs.
+- Confirm the Gmail App Password is correct and not revoked.
+
+Render Deployment:
+- Add each SMTP/OTP variable in the Render dashboard (do NOT commit real secrets).
+- Redeploy; use `GET /system/email-test` to confirm transporter status; then `POST /system/email-test/send` to send a probe message.
+
+Deprecated File:
+`lib/emailService.js` is retained for reference but not used; all active email sending flows use `lib/mailer.js`.
