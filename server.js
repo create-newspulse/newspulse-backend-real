@@ -432,13 +432,14 @@ app.use('/api/news', newsRoutes);
 app.use('/news', newsRoutes);
 // app.use('/api/alerts', alertsRoutes); // Disabled: alerts route file not present on Render
 app.use('/api/ai-activity-log', aiActivityLog);
+// Health endpoints (API + compatibility aliases)
 app.use('/api/system/health', systemHealth);
-// Admin panel expected health path (final -> /admin-api/system/health)
-app.use('/admin-api/system/health', systemHealth);
-app.use('/system/ai-health', aiHealth);
+app.use('/api/health', systemHealth); // legacy alias
+app.use('/system/health', systemHealth); // supports rewrite from /admin-api/system/health
+
+// AI health endpoints (API + non-/api alias)
 app.use('/api/system/ai-health', aiHealth);
-// Optional compatibility path
-app.use('/api/health', systemHealth);
+app.use('/system/ai-health', aiHealth);
 app.use('/api/system/monitor-hub', monitorHub);
 // Non-/api alias for monitor hub stats (frontend direct call compatibility)
 app.use('/system/monitor-hub', monitorHub);
