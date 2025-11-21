@@ -21,6 +21,7 @@ const aiTrainingInfo = require('./routes/system/aiTrainingInfo');
 const adminAuth = require('./routes/adminAuth');
 const reportsExport = require('./routes/reports/export');
 const dashboardStats = require('./routes/dashboardStats');
+const News = require('./models/News');
 const authOtp = require('./routes/authOtp');
 
 dotenv.config(); // Load environment variables from .env file
@@ -305,6 +306,86 @@ app.get('/system/ai-training-info', (_req, res) => {
 
 // Dashboard stats routes (root-level, no /api prefix)
 app.use('/', dashboardStats);
+// Aliases for admin stats endpoints expected by frontend
+app.get('/admin/stats', async (req, res) => {
+  try {
+    // Reuse dashboardStats logic via internal fetch to /stats path
+    // Directly build minimal stats here to avoid extra request
+    const totalArticles = await News.countDocuments({});
+    return res.json({ ok: true, stats: { totalArticles, timestamp: new Date().toISOString() } });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: 'Failed to load admin stats' });
+  }
+});
+app.get('/api/admin/stats', async (req, res) => {
+  try {
+    const totalArticles = await News.countDocuments({});
+    return res.json({ ok: true, stats: { totalArticles, timestamp: new Date().toISOString() } });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: 'Failed to load admin stats' });
+  }
+});
+
+// Settings load endpoint alias
+app.get('/settings/load', (req, res) => {
+  const founderEmail = (process.env.FOUNDER_EMAIL || '').trim();
+  const uiFlags = {
+    otpEnabled: true,
+    aiHealthPath: '/system/ai-health',
+  };
+  return res.json({ ok: true, settings: { founderEmail: founderEmail || null, uiFlags, timestamp: new Date().toISOString() } });
+});
+
+// Articles listing alias (frontend expects /articles not /api/news)
+app.get('/articles', async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
+    const sortRaw = (req.query.sort || '-date').toString();
+    const sort = {};
+    // support -field for desc
+    sortRaw.split(',').forEach(part => {
+      part = part.trim();
+      if (!part) return;
+      if (part.startsWith('-')) {
+        sort[part.slice(1)] = -1;
+      } else {
+        sort[part] = 1;
+      }
+    });
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      News.find({}).sort(sort).skip(skip).limit(limit).lean(),
+      News.countDocuments({}),
+    ]);
+    return res.json({ ok: true, page, limit, total, items });
+  } catch (e) {
+    console.error('[articles] error', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load articles' });
+  }
+});
+// API alias for articles
+app.get('/api/articles', async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
+    const sortRaw = (req.query.sort || '-date').toString();
+    const sort = {};
+    sortRaw.split(',').forEach(part => {
+      part = part.trim();
+      if (!part) return;
+      if (part.startsWith('-')) sort[part.slice(1)] = -1; else sort[part] = 1;
+    });
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      News.find({}).sort(sort).skip(skip).limit(limit).lean(),
+      News.countDocuments({}),
+    ]);
+    return res.json({ ok: true, page, limit, total, items });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: 'Failed to load articles' });
+  }
+});
 
 // OTP routes: legacy + generalized + admin-scoped
 // Legacy absolute: /auth/otp/* (kept for existing SPA calls)
