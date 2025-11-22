@@ -4,8 +4,9 @@ const bcrypt = require('bcrypt');
 const OtpToken = require('../models/OtpToken');
 const User = require('../models/User');
 const ActivityLog = require('../models/ActivityLog');
-// Stub email sender (development only)
-const { sendEmail } = require('../lib/emailStub');
+// Local SMTP (development) + stub fallback
+const { sendMail, getTransporter } = require('../lib/mailer');
+const { sendEmail: sendEmailStub } = require('../lib/emailStub');
 const router = express.Router();
 
 // OTP rate limiter (in-memory)
@@ -77,20 +78,34 @@ async function handleRequest(req, res) {
     await OtpToken.create({ email: lowerEmail, codeHash, expiresAt, used: false });
     console.log('[OTP_REQUEST][generated]', { emailMasked: masked, expiresAt: expiresAt.toISOString() });
 
-      // Send via stub (always succeeds in development)
+      // Decide sending strategy: prefer SMTP locally if configured, else stub
+      const wantSmtp = (process.env.NODE_ENV || 'development') === 'development';
+      const transporter = wantSmtp ? getTransporter() : null;
       try {
         const subject = 'News Pulse Admin OTP';
         const text = `Your News Pulse Admin OTP is: ${code}. It is valid for 10 minutes.`;
-        await sendEmail({ to: lowerEmail, subject, text });
-        await ActivityLog.create({ type: 'otp_request', email: lowerEmail, meta: { method: 'stub', expiresAt } });
-        console.log('[OTP_REQUEST][success]', { emailMasked: masked, expiresAt: expiresAt.toISOString() });
-        const response = { ok: true, success: true, message: 'OTP (stub) logged for this email.', emailMasked: masked };
+        let method = 'stub';
+        if (transporter) {
+          // Attempt real SMTP send
+          const info = await sendMail({ to: lowerEmail, subject, text, html: `<p>${text}</p>` });
+          const accepted = Array.isArray(info?.accepted) ? info.accepted.map(v => (v || '').toLowerCase()) : [];
+          const acceptedOk = accepted.includes(lowerEmail);
+          if (!acceptedOk) throw new Error('SMTP did not accept recipient');
+          method = 'smtp';
+        } else {
+          // Stub fallback (production or missing SMTP config)
+          await sendEmailStub({ to: lowerEmail, subject, text });
+          method = 'stub';
+        }
+        await ActivityLog.create({ type: 'otp_request', email: lowerEmail, meta: { method, expiresAt } });
+        console.log('[OTP_REQUEST][success]', { emailMasked: masked, expiresAt: expiresAt.toISOString(), method });
+        const response = { ok: true, success: true, message: method === 'smtp' ? 'OTP sent to your email.' : 'OTP (stub) logged for this email.', emailMasked: masked };
         if ((process.env.OTP_DEV_ECHO || '') === '1') response.devCode = code; // dev only
         return res.json(response);
       } catch (sendErr) {
         console.error('[OTP_REQUEST][send-fail]', sendErr?.message || sendErr);
-        await ActivityLog.create({ type: 'otp_request_fail', email: lowerEmail, meta: { error: sendErr?.message || 'stub_failed' } });
-        return res.status(500).json({ ok: false, success: false, message: 'Failed to process OTP email stub.' });
+        await ActivityLog.create({ type: 'otp_request_fail', email: lowerEmail, meta: { error: sendErr?.message || 'send_failed' } });
+        return res.status(500).json({ ok: false, success: false, message: 'Failed to send or log OTP.' });
       }
   } catch (err) {
     console.error('[OTP_ERROR][request-handler]', err?.message || err);
