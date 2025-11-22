@@ -4,7 +4,8 @@ const bcrypt = require('bcrypt');
 const OtpToken = require('../models/OtpToken');
 const User = require('../models/User');
 const ActivityLog = require('../models/ActivityLog');
-const { sendMail } = require('../lib/mailer');
+// Using SendGrid HTTP API for OTP emails (Render blocks outbound SMTP ports).
+const { sendOtpEmail } = require('../lib/sendgridEmail');
 const router = express.Router();
 
 // OTP rate limiter (in-memory)
@@ -66,10 +67,9 @@ async function handleRequest(req, res) {
       return res.json({ ok: true, success: true, message: 'If this email is registered, an OTP has been sent.' });
     }
 
-    // Basic SMTP config presence check BEFORE generating OTP
-    const smtpMissing = !process.env.SMTP_HOST && !process.env.SMTP_SERVICE || !process.env.SMTP_USER || !process.env.SMTP_PASS;
-    if (smtpMissing) {
-      console.error('[OTP_REQUEST][smtp-missing]', { host: !!process.env.SMTP_HOST, service: !!process.env.SMTP_SERVICE, user: !!process.env.SMTP_USER, pass: !!process.env.SMTP_PASS });
+    // SendGrid config presence check BEFORE generating OTP
+    if (!process.env.SENDGRID_API_KEY) {
+      console.error('[OTP_REQUEST][sendgrid-missing] SENDGRID_API_KEY not set');
       return res.status(500).json({ ok: false, success: false, message: 'Email service is not configured.' });
     }
 
@@ -83,28 +83,18 @@ async function handleRequest(req, res) {
     await OtpToken.create({ email: lowerEmail, codeHash, expiresAt, used: false });
     console.log('[OTP_REQUEST][generated]', { emailMasked: masked, expiresAt: expiresAt.toISOString() });
 
-    // Attempt to send email synchronously
+    // Attempt to send email via SendGrid synchronously
     try {
-      const info = await sendMail({
-        to: lowerEmail,
-        subject: 'News Pulse Admin OTP',
-        text: `Your News Pulse verification code is ${code}. It expires in 10 minutes.`,
-      });
-      const accepted = Array.isArray(info?.accepted) ? info.accepted : [];
-      if (!accepted.length) {
-        console.error('[OTP_REQUEST][send-empty-accepted]', { emailMasked: masked, messageId: info?.messageId });
-        await ActivityLog.create({ type: 'otp_request_fail', email: lowerEmail, meta: { error: 'smtp_not_accepted' } });
-        return res.status(500).json({ ok: false, success: false, message: 'Could not send OTP email. Please try again or contact support.' });
-      }
-      await ActivityLog.create({ type: 'otp_request', email: lowerEmail, meta: { method: 'email', expiresAt, messageId: info.messageId } });
-      console.log('[OTP_REQUEST][sent]', { emailMasked: masked, messageId: info.messageId, expiresAt: expiresAt.toISOString(), accepted });
+      await sendOtpEmail(lowerEmail, code);
+      await ActivityLog.create({ type: 'otp_request', email: lowerEmail, meta: { method: 'sendgrid', expiresAt } });
+      console.log('[OTP_REQUEST][success]', { emailMasked: masked, expiresAt: expiresAt.toISOString() });
       const response = { ok: true, success: true, message: 'OTP sent to your email.', emailMasked: masked };
       if ((process.env.OTP_DEV_ECHO || '') === '1') response.devCode = code; // dev only
       return res.json(response);
     } catch (sendErr) {
-      console.error('[OTP_REQUEST][send-error]', sendErr?.message || sendErr);
+      console.error('[OTP_REQUEST][send-fail]', sendErr?.message || sendErr);
       await ActivityLog.create({ type: 'otp_request_fail', email: lowerEmail, meta: { error: sendErr?.message || 'send_failed' } });
-      return res.status(500).json({ ok: false, success: false, message: 'Could not send OTP email. Please try again or contact support.' });
+      return res.status(500).json({ ok: false, success: false, message: 'Failed to send OTP email. Please try again later.' });
     }
   } catch (err) {
     console.error('[OTP_ERROR][request-handler]', err?.message || err);

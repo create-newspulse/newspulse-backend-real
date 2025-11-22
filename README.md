@@ -153,17 +153,43 @@ Render Deployment:
 - Redeploy; use `GET /system/email-test` to confirm transporter status; then `POST /system/email-test/send` to send a probe message.
 
 Deprecated File:
-`lib/emailService.js` is retained for reference but not used; all active email sending flows use `lib/mailer.js`.
+`lib/emailService.js` is retained for reference but not used; legacy SMTP sending lives in `lib/mailer.js`. OTP now uses SendGrid HTTP API (`lib/sendgridEmail.js`).
 
-### OTP Request Response Examples
+### SendGrid (Recommended on Render)
+Render blocks outbound SMTP ports; use SendGrid Web API for reliable delivery.
+
+Required vars:
+| Var | Example | Notes |
+|-----|---------|-------|
+| `SENDGRID_API_KEY` | `SG.xxxxxx` | Create in SendGrid dashboard (Full Access or Restricted Mail) |
+| `SENDGRID_FROM_EMAIL` | `no-reply@newspulse.co.in` | Must be a verified sender/domain |
+
+Fallback: If `SENDGRID_API_KEY` is missing, OTP requests return 500 (`Email service is not configured`).
+
+Minimal OTP send flow (SendGrid):
+1. User hits `POST /auth/otp/request` with `{ email }`.
+2. Backend generates + stores hashed OTP (expires 10 min).
+3. Calls `sendOtpEmail(email, code)` via SendGrid.
+4. Success -> 200 `{ ok:true, success:true, message:"OTP sent to your email.", emailMasked: "ab***@domain" }`.
+5. Failure -> 500 with `{ ok:false, success:false, message:"Failed to send OTP email. Please try again later." }`.
+
+Local test:
+```bash
+export SENDGRID_API_KEY=SG.xxxxx
+export SENDGRID_FROM_EMAIL=no-reply@newspulse.co.in
+curl -X POST http://localhost:10000/auth/otp/request -H 'Content-Type: application/json' -d '{"email":"you@example.com"}'
+```
+Check logs for `[EMAIL][send-success]`.
+
+### OTP Request Response Examples (SMTP legacy vs SendGrid)
 Endpoint: `POST /auth/otp/request` (also mounted at `/request`, `/auth/otp/request-reset`, `/admin-api/auth/otp/request` etc.)
 
-Success:
+Success (SendGrid):
 ```json
 { "ok": true, "success": true, "message": "OTP sent to your email.", "emailMasked": "ne***@domain.com" }
 ```
 
-Failure to send (SMTP rejected / config missing):
+Failure to send (SendGrid API error / missing key):
 ```json
 { "ok": false, "success": false, "message": "Could not send OTP email. Please try again or contact support." }
 ```
@@ -173,12 +199,13 @@ Generic gating response (email not allowed by founder gating):
 { "ok": true, "success": true, "message": "If this email is registered, an OTP has been sent." }
 ```
 
-Logs emitted:
-- `[OTP_REQUEST][start]` when request begins (masked email, IP)
-- `[OTP_REQUEST][generated]` OTP stored (masked email, expiry)
-- `[OTP_REQUEST][sent]` accepted by SMTP (messageId, accepted array)
-- `[OTP_REQUEST][send-error]` on send exception
-- `[OTP_REQUEST][send-empty-accepted]` when SMTP returns no accepted recipients
-- `[MAILER][startup]` if SMTP env missing at boot
+Logs emitted (SendGrid mode):
+- `[OTP_REQUEST][start]` request begins
+- `[OTP_REQUEST][generated]` OTP stored
+- `[EMAIL][send-success]` SendGrid accepted (statusCode)
+- `[EMAIL][send-error]` SendGrid failure details
+- `[OTP_REQUEST][success]` final success response
+- `[OTP_REQUEST][send-fail]` final failure response
+- `[MAILER][startup]` legacy SMTP config status (may be unused for OTP now)
 
 Set `OTP_DEV_ECHO=1` locally ONLY to include `devCode` in the JSON response for quick testing.
