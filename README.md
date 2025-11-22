@@ -152,27 +152,27 @@ Render Deployment:
 - Add each SMTP/OTP variable in the Render dashboard (do NOT commit real secrets).
 - Redeploy; use `GET /system/email-test` to confirm transporter status; then `POST /system/email-test/send` to send a probe message.
 
-Deprecated File:
-`lib/emailService.js` is retained for reference but not used; SMTP sending lives in `lib/mailer.js` and is used by the OTP flow.
+Deprecated Files:
+`lib/emailService.js` and `lib/mailer.js` are retained for reference but the active OTP path now uses a stub sender in `lib/emailStub.js` which only logs the OTP (development/testing only).
 
-### OTP Send Flow (SMTP)
+### OTP Send Flow (Stub Sender)
 1. User hits `POST /auth/otp/request` with `{ email }`.
 2. Backend generates + stores hashed OTP (expires 10 min).
-3. Sends email via SMTP using `lib/mailer.js`.
-4. Success -> 200 `{ ok:true, success:true, message:"OTP sent to your email.", emailMasked: "ab***@domain" }`.
-5. Failure -> 500 with `{ ok:false, success:false, message:"Failed to send OTP email. Please try again later." }`.
+3. Stub `sendEmail({to,subject,text})` logs the OTP to console; no external delivery.
+4. Success -> 200 `{ ok:true, success:true, message:"OTP (stub) logged for this email.", emailMasked: "ab***@domain" }`.
+5. Failure (rare) -> 500 with `{ ok:false, success:false, message:"Failed to process OTP email stub." }`.
 
 ### OTP Request Response Examples
 Endpoint: `POST /auth/otp/request` (also mounted at `/request`, `/auth/otp/request-reset`, `/admin-api/auth/otp/request` etc.)
 
-Success:
+Success (stub):
 ```json
-{ "ok": true, "success": true, "message": "OTP sent to your email.", "emailMasked": "ne***@domain.com" }
+{ "ok": true, "success": true, "message": "OTP (stub) logged for this email.", "emailMasked": "ne***@domain.com" }
 ```
 
-Failure to send:
+Failure (stub exception):
 ```json
-{ "ok": false, "success": false, "message": "Could not send OTP email. Please try again or contact support." }
+{ "ok": false, "success": false, "message": "Failed to process OTP email stub." }
 ```
 
 Generic gating response (email not allowed by founder gating):
@@ -180,13 +180,11 @@ Generic gating response (email not allowed by founder gating):
 { "ok": true, "success": true, "message": "If this email is registered, an OTP has been sent." }
 ```
 
-Logs emitted:
+Logs emitted (stub mode):
 - `[OTP_REQUEST][start]` request begins
 - `[OTP_REQUEST][generated]` OTP stored
-- `[EMAIL][sent]` SMTP accepted (check `accepted` array)
-- `[EMAIL][send-error]` SMTP failure details
+- `[EMAIL][stub-send]` OTP logged (contains extracted 6‑digit code)
 - `[OTP_REQUEST][success]` final success response
-- `[OTP_REQUEST][send-fail]` final failure response
-- `[MAILER][startup]` legacy SMTP config status (may be unused for OTP now)
+- `[OTP_REQUEST][send-fail]` unexpected stub failure
 
 Set `OTP_DEV_ECHO=1` locally ONLY to include `devCode` in the JSON response for quick testing.

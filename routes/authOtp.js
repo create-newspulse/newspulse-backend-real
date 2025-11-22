@@ -4,8 +4,8 @@ const bcrypt = require('bcrypt');
 const OtpToken = require('../models/OtpToken');
 const User = require('../models/User');
 const ActivityLog = require('../models/ActivityLog');
-// Use SMTP mailer for OTP emails
-const { sendMail } = require('../lib/mailer');
+// Stub email sender (development only)
+const { sendEmail } = require('../lib/emailStub');
 const router = express.Router();
 
 // OTP rate limiter (in-memory)
@@ -77,34 +77,21 @@ async function handleRequest(req, res) {
     await OtpToken.create({ email: lowerEmail, codeHash, expiresAt, used: false });
     console.log('[OTP_REQUEST][generated]', { emailMasked: masked, expiresAt: expiresAt.toISOString() });
 
-    // Attempt to send email via SMTP (Nodemailer)
-    try {
-      const subject = 'News Pulse Admin OTP';
-      const text = `Your News Pulse Admin OTP is: ${code}. It is valid for 10 minutes.`;
-      const html = `
-        <div style="font-family: Arial, sans-serif; max-width: 520px; margin:0 auto;">
-          <h2 style="color:#1a1a1a;">News Pulse Admin OTP</h2>
-          <p>Your verification code is:</p>
-          <div style="font-size:32px;font-weight:bold;letter-spacing:6px;padding:12px 20px;background:#f5f7fa;border:1px solid #e2e8f0;border-radius:8px;text-align:center;">${code}</div>
-          <p style="margin-top:20px;">This code expires in <strong>10 minutes</strong>.</p>
-          <p>If you did not request this password reset, you can ignore this email.</p>
-        </div>`;
-      const info = await sendMail({ to: lowerEmail, subject, text, html });
-      const accepted = Array.isArray(info?.accepted) ? info.accepted.map(x => (x || '').toLowerCase()) : [];
-      const acceptedOk = accepted.includes(lowerEmail) || (info?.response || '').toLowerCase().includes('ok');
-      if (!acceptedOk) {
-        throw new Error('SMTP did not accept recipient');
+      // Send via stub (always succeeds in development)
+      try {
+        const subject = 'News Pulse Admin OTP';
+        const text = `Your News Pulse Admin OTP is: ${code}. It is valid for 10 minutes.`;
+        await sendEmail({ to: lowerEmail, subject, text });
+        await ActivityLog.create({ type: 'otp_request', email: lowerEmail, meta: { method: 'stub', expiresAt } });
+        console.log('[OTP_REQUEST][success]', { emailMasked: masked, expiresAt: expiresAt.toISOString() });
+        const response = { ok: true, success: true, message: 'OTP (stub) logged for this email.', emailMasked: masked };
+        if ((process.env.OTP_DEV_ECHO || '') === '1') response.devCode = code; // dev only
+        return res.json(response);
+      } catch (sendErr) {
+        console.error('[OTP_REQUEST][send-fail]', sendErr?.message || sendErr);
+        await ActivityLog.create({ type: 'otp_request_fail', email: lowerEmail, meta: { error: sendErr?.message || 'stub_failed' } });
+        return res.status(500).json({ ok: false, success: false, message: 'Failed to process OTP email stub.' });
       }
-      await ActivityLog.create({ type: 'otp_request', email: lowerEmail, meta: { method: 'smtp', expiresAt } });
-      console.log('[OTP_REQUEST][success]', { emailMasked: masked, expiresAt: expiresAt.toISOString() });
-      const response = { ok: true, success: true, message: 'OTP sent to your email.', emailMasked: masked };
-      if ((process.env.OTP_DEV_ECHO || '') === '1') response.devCode = code; // dev only
-      return res.json(response);
-    } catch (sendErr) {
-      console.error('[OTP_REQUEST][send-fail]', sendErr?.message || sendErr);
-      await ActivityLog.create({ type: 'otp_request_fail', email: lowerEmail, meta: { error: sendErr?.message || 'send_failed' } });
-      return res.status(500).json({ ok: false, success: false, message: 'Failed to send OTP email. Please try again later.' });
-    }
   } catch (err) {
     console.error('[OTP_ERROR][request-handler]', err?.message || err);
     return res.status(500).json({ ok: false, success: false, message: 'Could not process OTP request' });
