@@ -24,6 +24,8 @@ const reportsExport = require('./routes/reports/export');
 const dashboardStats = require('./routes/dashboardStats');
 const News = require('./models/News');
 const authOtp = require('./routes/authOtp');
+const communityRoutes = require('./routes/community');
+const adminCommunityRoutes = require('./routes/adminCommunity');
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -478,6 +480,10 @@ app.use('/api/admin', adminAuth);
 // Non-/api alias so POST /admin/login works (SPA expectation)
 app.use('/admin', adminAuth);
 app.use('/api/reports/export', reportsExport);
+// Community submission public API
+app.use('/api/community', communityRoutes);
+// Admin community management (protected)
+app.use('/api/admin/community', adminCommunityRoutes);
 
 // --- Compatibility alias (non-/api) for local dev code accidentally hitting /admin-auth/session
 // Provides a lightweight session probe identical to /api/admin-auth/session so CORS preflight succeeds.
