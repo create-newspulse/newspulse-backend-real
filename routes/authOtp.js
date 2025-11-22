@@ -33,100 +33,82 @@ function generateOtp() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
+function maskEmail(e) {
+  try {
+    const [user, domain] = e.split('@');
+    if (!user || !domain) return e;
+    const maskedUser = user.length <= 2 ? user[0] + '*' : user.slice(0, 2) + '***';
+    return maskedUser + '@' + domain;
+  } catch (_) { return e; }
+}
+
 async function handleRequest(req, res) {
   try {
     const { email } = req.body || {};
     if (!email) {
-      return res.status(400).json({ ok: false, message: 'Email is required' });
+      return res.status(400).json({ ok: false, success: false, message: 'Email is required' });
     }
-    console.log('[OTP_ROUTE_HIT][request] email=', email);
     const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
     if (otpLimited(ip)) {
-      return res.status(429).json({ ok: false, message: 'Too many OTP requests. Please try later.' });
+      return res.status(429).json({ ok: false, success: false, message: 'Too many OTP requests. Please try later.' });
     }
     otpRegister(ip);
     const lowerEmail = email.toLowerCase();
-    // Gating logic: allow when founder matches OR founder email not set OR OTP_ALLOW_ANY=1.
+    const masked = maskEmail(lowerEmail);
+    console.log('[OTP_REQUEST][start]', { emailMasked: masked, ip });
+
+    // Gating logic
     const founderEmail = (process.env.FOUNDER_EMAIL || '').toLowerCase();
     const allowAny = (process.env.OTP_ALLOW_ANY || '0') === '1';
     const founderMatch = founderEmail && lowerEmail === founderEmail;
     const gatingAllowed = allowAny || founderMatch || !founderEmail;
     if (!gatingAllowed) {
-      return res.json({ ok: true, message: 'If this email is registered, an OTP has been sent.' });
+      return res.json({ ok: true, success: true, message: 'If this email is registered, an OTP has been sent.' });
     }
 
-    // Invalidate any existing unused OTPs for this email
-    await OtpToken.updateMany(
-      { email: email.toLowerCase(), used: false },
-      { $set: { used: true } }
-    );
+    // Basic SMTP config presence check BEFORE generating OTP
+    const smtpMissing = !process.env.SMTP_HOST && !process.env.SMTP_SERVICE || !process.env.SMTP_USER || !process.env.SMTP_PASS;
+    if (smtpMissing) {
+      console.error('[OTP_REQUEST][smtp-missing]', { host: !!process.env.SMTP_HOST, service: !!process.env.SMTP_SERVICE, user: !!process.env.SMTP_USER, pass: !!process.env.SMTP_PASS });
+      return res.status(500).json({ ok: false, success: false, message: 'Email service is not configured.' });
+    }
 
-    // Generate new OTP
+    // Invalidate previous unused OTPs
+    await OtpToken.updateMany({ email: lowerEmail, used: false }, { $set: { used: true } });
+
+    // Generate and store OTP
     const code = generateOtp();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
     const codeHash = await bcrypt.hash(code, 10);
-    await OtpToken.create({
-      email: lowerEmail,
-      codeHash,
-      expiresAt,
-      used: false,
-    });
-    // Fast response strategy: send email in background and respond immediately.
-    const payload = { ok: true, message: 'If this email is registered, an OTP has been sent.' };
-    if ((process.env.OTP_DEV_ECHO || '') === '1') { payload.devCode = code; }
+    await OtpToken.create({ email: lowerEmail, codeHash, expiresAt, used: false });
+    console.log('[OTP_REQUEST][generated]', { emailMasked: masked, expiresAt: expiresAt.toISOString() });
 
-    // Validate minimal SMTP config; if missing, still respond success but log.
-    const missingSmtp = !process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS;
-    if (missingSmtp) {
-      console.warn('[OTP_REQUEST][smtp-missing] SMTP env vars not fully set; email will not be sent.');
-      await ActivityLog.create({ type: 'otp_request_fail', email: lowerEmail, meta: { error: 'smtp_missing' } });
-      return res.json(payload);
-    }
-
-    // Background send with timeout safeguard (does not block response)
-    const EMAIL_TIMEOUT_MS = parseInt(process.env.OTP_EMAIL_TIMEOUT_MS || '5000', 10);
-    const sendPromise = sendMail({
-      to: lowerEmail,
-      subject: 'News Pulse Admin OTP',
-      text: `Your News Pulse verification code is ${code}. It expires in 10 minutes.`,
-    }).then(info => ({ sent: true, info })).catch(err => ({ sent: false, error: err }));
-    // Wrap with timeout; if exceeded, we detach logging but user already has response.
-    Promise.race([
-      sendPromise,
-      new Promise(resolve => setTimeout(() => resolve({ sent: false, timeout: true }), EMAIL_TIMEOUT_MS)),
-    ]).then(async (result) => {
-      try {
-        if (result.sent && result.info) {
-          await ActivityLog.create({ type: 'otp_request', email: lowerEmail, meta: { method: 'email', expiresAt, messageId: result.info.messageId } });
-          console.log('[OTP_REQUEST][sent] email=', lowerEmail, 'messageId=', result.info.messageId, 'expiresAt=', expiresAt.toISOString());
-        } else if (result.sent && result.error) {
-          console.error('[OTP_REQUEST][send-error]', result.error?.message || result.error);
-          await ActivityLog.create({ type: 'otp_request_fail', email: lowerEmail, meta: { error: result.error?.message || 'send_failed', expiresAt } });
-        } else if (result.timeout) {
-          console.warn('[OTP_REQUEST][timeout] email send taking too long (detached). email=', lowerEmail);
-          // Attempt final resolution logging
-          sendPromise.then(async () => {
-            console.log('[OTP_REQUEST][late-success] email=', lowerEmail);
-            await ActivityLog.create({ type: 'otp_request', email: lowerEmail, meta: { method: 'email_late', expiresAt } });
-          }).catch(async (lateErr) => {
-            console.error('[OTP_REQUEST][late-fail]', lateErr?.message || lateErr);
-            await ActivityLog.create({ type: 'otp_request_fail', email: lowerEmail, meta: { error: lateErr?.message || 'late_send_failed' } });
-          });
-        } else {
-          console.error('[OTP_REQUEST][unknown-race-state]');
-        }
-      } catch (bgErr) {
-        console.error('[OTP_REQUEST][bg-log-error]', bgErr?.message || bgErr);
+    // Attempt to send email synchronously
+    try {
+      const info = await sendMail({
+        to: lowerEmail,
+        subject: 'News Pulse Admin OTP',
+        text: `Your News Pulse verification code is ${code}. It expires in 10 minutes.`,
+      });
+      const accepted = Array.isArray(info?.accepted) ? info.accepted : [];
+      if (!accepted.length) {
+        console.error('[OTP_REQUEST][send-empty-accepted]', { emailMasked: masked, messageId: info?.messageId });
+        await ActivityLog.create({ type: 'otp_request_fail', email: lowerEmail, meta: { error: 'smtp_not_accepted' } });
+        return res.status(500).json({ ok: false, success: false, message: 'Could not send OTP email. Please try again or contact support.' });
       }
-    }).catch(err => {
-      console.error('[OTP_REQUEST][race-error]', err?.message || err);
-    });
-
-    return res.json(payload);
+      await ActivityLog.create({ type: 'otp_request', email: lowerEmail, meta: { method: 'email', expiresAt, messageId: info.messageId } });
+      console.log('[OTP_REQUEST][sent]', { emailMasked: masked, messageId: info.messageId, expiresAt: expiresAt.toISOString(), accepted });
+      const response = { ok: true, success: true, message: 'OTP sent to your email.', emailMasked: masked };
+      if ((process.env.OTP_DEV_ECHO || '') === '1') response.devCode = code; // dev only
+      return res.json(response);
+    } catch (sendErr) {
+      console.error('[OTP_REQUEST][send-error]', sendErr?.message || sendErr);
+      await ActivityLog.create({ type: 'otp_request_fail', email: lowerEmail, meta: { error: sendErr?.message || 'send_failed' } });
+      return res.status(500).json({ ok: false, success: false, message: 'Could not send OTP email. Please try again or contact support.' });
+    }
   } catch (err) {
     console.error('[OTP_ERROR][request-handler]', err?.message || err);
-    return res.status(500).json({ ok: false, message: 'Could not process OTP request' });
+    return res.status(500).json({ ok: false, success: false, message: 'Could not process OTP request' });
   }
 }
 // Absolute legacy path

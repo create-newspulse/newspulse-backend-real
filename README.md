@@ -154,3 +154,31 @@ Render Deployment:
 
 Deprecated File:
 `lib/emailService.js` is retained for reference but not used; all active email sending flows use `lib/mailer.js`.
+
+### OTP Request Response Examples
+Endpoint: `POST /auth/otp/request` (also mounted at `/request`, `/auth/otp/request-reset`, `/admin-api/auth/otp/request` etc.)
+
+Success:
+```json
+{ "ok": true, "success": true, "message": "OTP sent to your email.", "emailMasked": "ne***@domain.com" }
+```
+
+Failure to send (SMTP rejected / config missing):
+```json
+{ "ok": false, "success": false, "message": "Could not send OTP email. Please try again or contact support." }
+```
+
+Generic gating response (email not allowed by founder gating):
+```json
+{ "ok": true, "success": true, "message": "If this email is registered, an OTP has been sent." }
+```
+
+Logs emitted:
+- `[OTP_REQUEST][start]` when request begins (masked email, IP)
+- `[OTP_REQUEST][generated]` OTP stored (masked email, expiry)
+- `[OTP_REQUEST][sent]` accepted by SMTP (messageId, accepted array)
+- `[OTP_REQUEST][send-error]` on send exception
+- `[OTP_REQUEST][send-empty-accepted]` when SMTP returns no accepted recipients
+- `[MAILER][startup]` if SMTP env missing at boot
+
+Set `OTP_DEV_ECHO=1` locally ONLY to include `devCode` in the JSON response for quick testing.

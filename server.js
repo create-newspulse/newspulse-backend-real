@@ -31,6 +31,17 @@ const app = express();
 const server = http.createServer(app);
 const startTime = Date.now();
 
+// Initialize mailer early to surface configuration issues in logs at startup.
+try {
+  const { getTransporter } = require('./lib/mailer');
+  const tx = getTransporter();
+  if (!tx) {
+    console.warn('[MAILER][startup] Transporter not initialized (missing SMTP env vars).');
+  }
+} catch (e) {
+  console.error('[MAILER][startup-error]', e?.message || e);
+}
+
 // Optional Redis connection for distributed rate limiting
 let redisClient = null;
 const REDIS_URL = process.env.REDIS_URL || '';
@@ -46,35 +57,44 @@ if (REDIS_URL) {
 }
 
 // Middleware
-// Unified CORS: allow localhost dev ports, production/admin domain, and any Vercel preview/production domains.
-const allowList = new Set([
-  'http://localhost:3000',
+// Centralized CORS configuration (env-driven + sane defaults)
+// Default allowed origins always include localhost dev port 5173 for Vite.
+const defaultOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
-  'https://newspulse-frontend-main.vercel.app',
+  'http://localhost:3000',
   'https://admin.newspulse.co.in',
-]);
+  'https://newspulse-frontend-main.vercel.app',
+];
+// Allow overriding via CORS_ALLOWED_ORIGINS (comma-separated)
+const extraOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+const allowList = new Set([...defaultOrigins, ...extraOrigins]);
 
-// Precompile regex patterns for performance & clarity
+// Preview pattern for Vercel deployments of the admin panel
 const vercelPreviewPattern = /https:\/\/newspulse-admin-panel-real-[a-z0-9]+-[a-z0-9-]+\.vercel\.app$/i;
-const genericVercelPattern = /https:\/\/[a-z0-9-]+\.vercel\.app$/i; // fallback (less strict)
+const genericVercelPattern = /https:\/\/[a-z0-9-]+\.vercel\.app$/i; // fallback (optional)
 
 const dynamicCors = cors({
   origin: (origin, callback) => {
-    if (!origin) return callback(null, true); // non-browser / curl
-    const ok =
-      allowList.has(origin) ||
-      vercelPreviewPattern.test(origin) ||
-      /admin\.newspulse\.co\.in$/i.test(origin) ||
-      /localhost:51\d{2}$/i.test(origin) ||
-      (process.env.CORS_ALLOW_GENERIC_VERCEL === '1' && genericVercelPattern.test(origin));
+    // Non-browser requests (curl/Postman) -> allow
+    if (!origin) return callback(null, true);
+    const explicit = allowList.has(origin);
+    const matchesPreview = vercelPreviewPattern.test(origin);
+    const matchesGeneric = (process.env.CORS_ALLOW_GENERIC_VERCEL === '1') && genericVercelPattern.test(origin);
+    const localhostDev = /http:\/\/localhost:51\d{2}$/i.test(origin);
+    const adminDomain = /admin\.newspulse\.co\.in$/i.test(origin);
+    const ok = explicit || matchesPreview || matchesGeneric || localhostDev || adminDomain;
     if (ok) return callback(null, true);
-    return callback(new Error(`CORS: origin not allowed -> ${origin}`));
+    console.warn('[CORS][block]', origin);
+    return callback(new Error('CORS: Origin not allowed: ' + origin), false);
   },
   credentials: true,
 });
 app.use(dynamicCors);
-// Explicit preflight handling so 404 aliases still return CORS headers
+// Ensure preflight responses include CORS headers
 app.options('*', dynamicCors);
 
 app.use(express.json()); // Parse incoming JSON requests
@@ -200,73 +220,75 @@ function daysToSeconds(d) { return d * 86400; }
 // FINAL FOUNDER LOGIN ENDPOINT:
 // POST /admin/login
 app.post('/admin/login', async (req, res) => {
-  const { email, password } = req.body || {};
-
-  const founderEmail = (process.env.FOUNDER_EMAIL || '').trim().toLowerCase();
-  const founderPassword = process.env.FOUNDER_PASSWORD || '';
-  const candidateEmail = (email || '').trim().toLowerCase();
-  const candidatePassword = password || '';
-
-  // Diagnostic logging (guarded by env flag to avoid leaking secrets unintentionally)
-  if ((process.env.LOG_LOGIN_DEBUG || 'false') === 'true') {
-    console.log('[login-debug] incoming credentials:', {
-      candidateEmail,
-      candidatePasswordLength: candidatePassword.length,
-      founderEmail,
-      founderPasswordLength: founderPassword.length,
-      jwtSecretPresent: Boolean(process.env.JWT_SECRET),
-      nodeEnv: process.env.NODE_ENV,
-    });
-  }
-
-  if (!candidateEmail || !candidatePassword) {
-    return res.status(400).json({ ok: false, success: false, message: 'Email and password are required' });
-  }
-
-  if (candidateEmail !== founderEmail || candidatePassword !== founderPassword) {
-    return res.status(401).json({ ok: false, success: false, message: 'Invalid email or password' });
-  }
-
-  // Optional: issue tokens using existing JWT secret & TTLs.
-  const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
-  const ACCESS_MIN = ACCESS_TOKEN_TTL_MINUTES;
-  const REFRESH_DAYS = REFRESH_TOKEN_TTL_DAYS;
-  const userId = process.env.FOUNDER_ID || 'founder-001';
-  const name = process.env.FOUNDER_NAME || 'Founder';
-
-  let accessToken = null;
-  let refreshToken = null;
   try {
-    const accessPayload = { sub: userId, email: founderEmail, name, role: 'founder', type: 'access' };
-    const refreshPayload = { sub: userId, email: founderEmail, name, role: 'founder', type: 'refresh' };
-    accessToken = jwt.sign(accessPayload, secret, { expiresIn: `${ACCESS_MIN}m` });
-    refreshToken = jwt.sign(refreshPayload, secret, { expiresIn: `${REFRESH_DAYS}d` });
-    const expiresAt = new Date(Date.now() + daysToSeconds(REFRESH_DAYS) * 1000);
-    // Persist refresh token only if model/schema available (defensive try)
-    try {
-      await RefreshToken.create({ user: userId, token: refreshToken, expiresAt });
-    } catch (_) {}
-    const cookieSecure = (process.env.SECURE_COOKIE || 'true') === 'true';
-    res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: cookieSecure, sameSite: 'strict', path: '/admin/refresh', expires: expiresAt });
-  } catch (e) {
-    // If token creation fails, still allow login per spec (omit tokens)
-    console.warn('Founder login token issuance failed (continuing without tokens):', e?.message || e);
-  }
+    const { email, password } = req.body || {};
+    console.log('[ADMIN_LOGIN][attempt]', { emailProvided: !!email, bodyKeys: Object.keys(req.body || {}) });
 
-  return res.json({
-    ok: true,
-    success: true,
-    user: {
-      id: userId,
-      email: process.env.FOUNDER_EMAIL,
-      name,
-      role: 'founder',
-    },
-    accessToken,
-    refreshToken,
-    accessExpiresInMinutes: accessToken ? ACCESS_MIN : undefined,
-    refreshExpiresInDays: refreshToken ? REFRESH_DAYS : undefined,
-  });
+    const founderEmail = (process.env.FOUNDER_EMAIL || '').trim().toLowerCase();
+    const founderPassword = process.env.FOUNDER_PASSWORD || '';
+    const candidateEmail = (email || '').trim().toLowerCase();
+    const candidatePassword = password || '';
+
+    if (!candidateEmail || !candidatePassword) {
+      console.warn('[ADMIN_LOGIN][missing-fields]', { candidateEmail, hasPassword: !!candidatePassword });
+      return res.status(400).json({ ok: false, success: false, message: 'Email and password are required' });
+    }
+
+    if ((process.env.LOG_LOGIN_DEBUG || 'false') === 'true') {
+      console.log('[ADMIN_LOGIN][debug]', {
+        candidateEmail,
+        candidatePasswordLength: candidatePassword.length,
+        founderEmail,
+        founderPasswordLength: (founderPassword || '').length,
+        jwtSecretPresent: Boolean(process.env.JWT_SECRET),
+        nodeEnv: process.env.NODE_ENV,
+      });
+    }
+
+    if (!founderEmail || !founderPassword) {
+      console.error('[ADMIN_LOGIN][env-missing]', { founderEmailPresent: !!founderEmail, founderPasswordPresent: !!founderPassword });
+      return res.status(500).json({ ok: false, success: false, message: 'Admin credentials not configured' });
+    }
+
+    if (candidateEmail !== founderEmail || candidatePassword !== founderPassword) {
+      console.warn('[ADMIN_LOGIN][invalid-creds]', { candidateEmail });
+      return res.status(401).json({ ok: false, success: false, message: 'Invalid email or password' });
+    }
+
+    const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
+    const ACCESS_MIN = ACCESS_TOKEN_TTL_MINUTES;
+    const REFRESH_DAYS = REFRESH_TOKEN_TTL_DAYS;
+    const userId = process.env.FOUNDER_ID || 'founder-001';
+    const name = process.env.FOUNDER_NAME || 'Founder';
+
+    let accessToken = null;
+    let refreshToken = null;
+    try {
+      const accessPayload = { sub: userId, email: founderEmail, name, role: 'founder', type: 'access' };
+      const refreshPayload = { sub: userId, email: founderEmail, name, role: 'founder', type: 'refresh' };
+      accessToken = jwt.sign(accessPayload, secret, { expiresIn: `${ACCESS_MIN}m` });
+      refreshToken = jwt.sign(refreshPayload, secret, { expiresIn: `${REFRESH_DAYS}d` });
+      const expiresAt = new Date(Date.now() + daysToSeconds(REFRESH_DAYS) * 1000);
+      try { await RefreshToken.create({ user: userId, token: refreshToken, expiresAt }); } catch (_) {}
+      const cookieSecure = (process.env.SECURE_COOKIE || 'true') === 'true';
+      res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: cookieSecure, sameSite: 'strict', path: '/admin/refresh', expires: expiresAt });
+    } catch (e) {
+      console.warn('[ADMIN_LOGIN][token-issue]', e?.message || e);
+    }
+
+    return res.json({
+      ok: true,
+      success: true,
+      user: { id: userId, email: process.env.FOUNDER_EMAIL, name, role: 'founder' },
+      accessToken,
+      refreshToken,
+      accessExpiresInMinutes: accessToken ? ACCESS_MIN : undefined,
+      refreshExpiresInDays: refreshToken ? REFRESH_DAYS : undefined,
+    });
+  } catch (err) {
+    console.error('[ADMIN_LOGIN][error]', err?.message || err);
+    return res.status(500).json({ ok: false, success: false, message: 'Internal server error' });
+  }
 });
 
 app.post('/admin/refresh', async (req, res) => {
