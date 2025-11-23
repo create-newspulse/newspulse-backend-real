@@ -30,16 +30,37 @@ function requireAdmin(req, res, next) {
 // GET /threat-stats
 router.get('/threat-stats', requireAdmin, async (req, res) => {
   try {
-    // Mock values; replace with real aggregation logic later.
-    const data = {
-      suspiciousLogins24h: 3,
-      failedLogins24h: 12,
-      blockedIPs: 5,
-      firewallAlerts24h: 0,
-      lastUpdated: new Date().toISOString(),
+    // Unified stub threat intelligence payload (expand later with real metrics)
+    const lastUpdated = new Date().toISOString();
+    const summary = {
+      suspiciousLogins24h: 0,
+      failedLogins24h: 0,
+      blockedIPs: 0,
+      alertsTriggered24h: 0,
     };
-    // Success wrapper expected by frontend fetchJson helper
-    res.json({ ok: true, success: true, status: 200, data });
+    const recentEvents = [];
+    const topRegions = [];
+    const overallRiskScore = 2; // 1–5 scale (low risk stub)
+
+    // Provide both flattened shape AND legacy data wrapper for backward compatibility
+    res.json({
+      ok: true,
+      success: true,
+      status: 200,
+      lastUpdated,
+      overallRiskScore,
+      summary,
+      recentEvents,
+      topRegions,
+      // Legacy field (older admin panel builds looked at data.*)
+      data: {
+        lastUpdated,
+        overallRiskScore,
+        ...summary,
+        recentEvents,
+        topRegions,
+      },
+    });
   } catch (err) {
     console.error('Error in /threat-stats:', err);
     res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load threat stats' });

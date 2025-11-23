@@ -30,7 +30,22 @@ function requireAdmin(req, res, next) {
 
 // GET /api/alerts/settings
 router.get('/settings', requireAdmin, (req, res) => {
-  res.json({ ok: true, success: true, status: 200, data: alertSettings });
+  // Present both new flattened shape and existing data wrapper for compatibility.
+  const payload = {
+    ok: true,
+    success: true,
+    status: 200,
+    channels: {
+      email: alertSettings.emailEnabled,
+      dashboard: alertSettings.dashboardAlertsEnabled,
+    },
+    aiPriorityTagging: alertSettings.aiPriorityTaggingEnabled,
+    escalationEnabled: alertSettings.escalationEnabled,
+    lastUpdated: alertSettings.lastUpdated,
+    // Legacy wrapper
+    data: alertSettings,
+  };
+  res.json(payload);
 });
 
 // PUT /api/alerts/settings
