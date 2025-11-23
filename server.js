@@ -12,7 +12,8 @@ const RefreshToken = require('./models/RefreshToken');
 const ActivityLog = require('./models/ActivityLog');
 const state = require('./lib/state');
 const newsRoutes = require('./routes/news');
-// const alertsRoutes = require('./routes/alerts');
+const alertsRoutes = require('./routes/alerts');
+const securityRoutes = require('./routes/security');
 const aiActivityLog = require('./routes/safezone/aiActivityLog');
 const systemHealth = require('./routes/system/health');
 const aiHealth = require('./routes/system/aiHealth');
@@ -458,7 +459,10 @@ app.get('/admin/metrics', async (req, res) => {
 app.use('/api/news', newsRoutes);
 // Alias for frontend direct /news access (Back to News button)
 app.use('/news', newsRoutes);
-// app.use('/api/alerts', alertsRoutes); // Disabled: alerts route file not present on Render
+// Smart Alerts settings endpoints
+app.use('/api/alerts', alertsRoutes);
+// Security & Lockdown endpoints
+app.use('/api/security', securityRoutes);
 app.use('/api/ai-activity-log', aiActivityLog);
 // Health endpoints (API + compatibility aliases)
 app.use('/api/system/health', systemHealth);
@@ -482,6 +486,9 @@ app.use('/api/admin-auth', adminAuth);
 app.use('/api/admin', adminAuth);
 // Threat dashboard mock stats
 app.use('/api/admin', adminThreatRoutes);
+// Threat stats dashboard aliases so frontend calls to /api/dashboard/threat-stats work
+app.use('/api/dashboard', adminThreatRoutes);
+app.use('/dashboard', adminThreatRoutes);
 // Non-/api alias so POST /admin/login works (SPA expectation)
 app.use('/admin', adminAuth);
 app.use('/api/reports/export', reportsExport);
