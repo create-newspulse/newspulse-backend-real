@@ -560,6 +560,12 @@ io.on('connection', (socket) => {
   });
 });
 
+// Phase 1: Basic community submission endpoint (logs only, no DB persistence yet)
+app.post('/api/community/submissions', (req, res) => {
+  console.log('Community submission received:', req.body);
+  return res.status(201).json({ success: true });
+});
+
 // JSON 404 handler (after all routes)
 app.use((req, res) => {
   res.status(404).json({
