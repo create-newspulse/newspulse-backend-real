@@ -3,6 +3,7 @@
 // Exposes POST /admin/login and GET /admin/health at ROOT paths for the Vercel admin UI.
 
 const express = require('express');
+const jwt = require('jsonwebtoken');
 const router = express.Router();
 
 // In-memory rate limiter state (per-IP)
@@ -50,11 +51,23 @@ router.post('/login', (req, res) => {
 
   if (email.toLowerCase() === founderEmail.toLowerCase() && password === founderPassword) {
     console.info(`ADMIN LOGIN SUCCESS email=${email} ip=${ip}`);
+    // Issue JWT for bearer auth compatibility
+    const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
+    const token = jwt.sign(
+      { sub: founderId, email: founderEmail, name: founderName, role: 'founder' },
+      secret,
+      { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' }
+    );
+
+    // Optional legacy cookie for backward compatibility
+    res.setHeader('Set-Cookie', `np_admin=${encodeURIComponent(founderEmail)}; Path=/; SameSite=Lax`);
+
     return res.json({
       ok: true,
+      token,
       user: {
         id: founderId,
-        email, // echo provided email
+        email: founderEmail,
         name: founderName,
         role: 'founder',
       },

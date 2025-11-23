@@ -6,6 +6,9 @@ const newsRoutes = require('./routes/news');
 const adminRoutes = require('./routes/admin');
 const adminAuthRoutes = require('./routes/adminAuth');
 const aiTrainingInfoRoutes = require('./routes/system/aiTrainingInfo');
+const communityRoutes = require('./routes/community');
+const adminCommunityRoutes = require('./routes/adminCommunity');
+const { requireAdminAuth } = require('../middleware/adminAuth');
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -56,10 +59,24 @@ app.get('/', (req, res) => {
 
 // API Routes
 app.use('/api/news', newsRoutes);
-// Admin routes mounted at ROOT-level paths (no extra /api prefix)
-app.use('/admin', adminRoutes); // POST /admin/login
-app.use('/admin-auth', adminAuthRoutes); // GET /admin-auth/session
+app.use('/api/community', communityRoutes); // POST /api/community/submissions (public)
+// Admin routes mounted at both legacy root and new /api/admin paths where required.
+app.use('/admin', adminRoutes); // legacy POST /admin/login
+app.use('/admin-auth', adminAuthRoutes); // legacy GET /admin-auth/session
 app.use('/system/ai-training-info', aiTrainingInfoRoutes); // GET /system/ai-training-info
+// New admin community reporter + identity endpoints
+app.use('/api/admin/community', adminCommunityRoutes);
+app.get('/api/admin/me', requireAdminAuth, (req, res) => {
+  const a = req.admin || {};
+  return res.json({
+    success: true,
+    admin: {
+      id: a.id || 'unknown',
+      email: a.email || '',
+      role: a.role || 'admin',
+    },
+  });
+});
 
 // Direct health route safeguard (in case router mounting conflicts)
 app.get('/admin/health', (req, res) => {

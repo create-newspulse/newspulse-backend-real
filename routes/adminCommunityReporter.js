@@ -1,49 +1,10 @@
 const express = require('express');
-const jwt = require('jsonwebtoken');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const { requireAdminAuth } = require('../middleware/adminAuth');
 
 const router = express.Router();
 
-// Auth middleware with safe debug logging (no full token output)
-function requireAdmin(req, res, next) {
-  const authHeader = req.headers['authorization'] || '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice('Bearer '.length).trim() : '';
-  const cookieHeader = req.headers.cookie || '';
-  let cookieEmail = '';
-  if (cookieHeader) {
-    cookieHeader.split(';').forEach(c => {
-      const [k, ...v] = c.trim().split('=');
-      if (k === 'np_admin') cookieEmail = decodeURIComponent(v.join('=') || '');
-    });
-  }
-  // Prefer JWT; fall back to admin cookie for legacy session compatibility.
-  if (!token && !cookieEmail) {
-    console.warn('[ADMIN_COMMUNITY_REPORTER][auth] missing bearer token and admin cookie');
-    return res.status(401).json({ success: false, message: 'Unauthorized' });
-  }
-  if (token) {
-    try {
-      const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
-      const payload = jwt.verify(token, secret);
-      if (!payload || (payload.role !== 'founder' && payload.role !== 'admin')) {
-        console.warn('[ADMIN_COMMUNITY_REPORTER][auth] invalid role', { role: payload?.role });
-        return res.status(403).json({ success: false, message: 'Forbidden' });
-      }
-      req.admin = { id: payload.sub, email: payload.email, role: payload.role, name: payload.name };
-      return next();
-    } catch (e) {
-      console.warn('[ADMIN_COMMUNITY_REPORTER][auth] token verify failed', { message: e?.message });
-      // Fall through to cookie if present, else 401
-      if (!cookieEmail) {
-        return res.status(401).json({ success: false, message: 'Unauthorized' });
-      }
-    }
-  }
-  if (cookieEmail) {
-    req.admin = { id: 'cookie-admin', email: cookieEmail, role: 'admin', name: 'Admin' };
-    return next();
-  }
-}
+// Shared auth now handled by requireAdminAuth middleware.
 
 // Optional internal key enforcement (strict only in production)
 function requireInternalAdminKey(req, res, next) {
@@ -80,8 +41,9 @@ function externalStatus(internal) {
   }
 }
 
-router.get('/submissions', requireAdmin, requireInternalAdminKey, async (req, res) => {
+router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req, res) => {
   try {
+    console.log('[ADMIN_COMMUNITY_REPORTER][hit]', { adminId: req.admin?.id, role: req.admin?.role });
     const raw = await CommunitySubmission
       .find({}, '_id name email location category headline status createdAt')
       .sort({ createdAt: -1 })
@@ -96,7 +58,7 @@ router.get('/submissions', requireAdmin, requireInternalAdminKey, async (req, re
       status: externalStatus(r.status),
       createdAt: r.createdAt,
     }));
-    return res.status(200).json({ success: true, items });
+    return res.status(200).json({ submissions: items });
   } catch (e) {
     console.error('[ADMIN_COMMUNITY_REPORTER][list-error]', e?.message || e);
     return res.status(500).json({ success: false, message: 'Failed to load submissions' });
@@ -104,7 +66,7 @@ router.get('/submissions', requireAdmin, requireInternalAdminKey, async (req, re
 });
 
 // PATCH approve
-router.patch('/submissions/:id/approve', requireAdmin, requireInternalAdminKey, async (req, res) => {
+router.patch('/submissions/:id/approve', requireAdminAuth, requireInternalAdminKey, async (req, res) => {
   try {
     const { id } = req.params;
     const submission = await CommunitySubmission.findById(id);
@@ -129,7 +91,7 @@ router.patch('/submissions/:id/approve', requireAdmin, requireInternalAdminKey, 
 });
 
 // PATCH reject
-router.patch('/submissions/:id/reject', requireAdmin, requireInternalAdminKey, async (req, res) => {
+router.patch('/submissions/:id/reject', requireAdminAuth, requireInternalAdminKey, async (req, res) => {
   try {
     const { id } = req.params;
     const submission = await CommunitySubmission.findById(id);
