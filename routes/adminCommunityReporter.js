@@ -45,9 +45,33 @@ function requireAdmin(req, res, next) {
   }
 }
 
+// Optional internal key enforcement (strict only in production)
+function requireInternalAdminKey(req, res, next) {
+  const expected = (process.env.ADMIN_INTERNAL_KEY || '').trim();
+  const provided = (req.headers['x-admin-internal-key'] || '').trim();
+  const isProd = String(process.env.NODE_ENV).toLowerCase() === 'production';
+  if (!expected) {
+    // No key configured: allow but log once in production for visibility
+    if (isProd) console.warn('[ADMIN_COMMUNITY_REPORTER][internal-key] expected key not set (production)');
+    return next();
+  }
+  if (isProd) {
+    if (!provided || provided !== expected) {
+      console.warn('[ADMIN_COMMUNITY_REPORTER][internal-key] invalid or missing key (production)');
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+    return next();
+  }
+  // Non-production: allow if missing, log relaxation
+  if (!provided || provided !== expected) {
+    console.warn('[ADMIN_COMMUNITY_REPORTER][internal-key] relaxed check (non-production)');
+  }
+  return next();
+}
+
 // GET /admin/community-reporter/submissions (mounted at /admin/community-reporter)
 // Also available at /api/admin/community-reporter/submissions
-router.get('/submissions', requireAdmin, async (req, res) => {
+router.get('/submissions', requireAdmin, requireInternalAdminKey, async (req, res) => {
   try {
     const items = await CommunitySubmission
       .find({}, '_id name email location category headline status createdAt')
