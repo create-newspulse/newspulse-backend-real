@@ -71,16 +71,85 @@ function requireInternalAdminKey(req, res, next) {
 
 // GET /admin/community-reporter/submissions (mounted at /admin/community-reporter)
 // Also available at /api/admin/community-reporter/submissions
+function externalStatus(internal) {
+  switch (internal) {
+    case 'NEW': return 'pending';
+    case 'APPROVED': return 'approved';
+    case 'REJECTED': return 'rejected';
+    default: return 'pending';
+  }
+}
+
 router.get('/submissions', requireAdmin, requireInternalAdminKey, async (req, res) => {
   try {
-    const items = await CommunitySubmission
+    const raw = await CommunitySubmission
       .find({}, '_id name email location category headline status createdAt')
       .sort({ createdAt: -1 })
       .lean();
+    const items = raw.map(r => ({
+      id: r._id.toString(),
+      name: r.name,
+      email: r.email,
+      location: r.location,
+      category: r.category,
+      headline: r.headline,
+      status: externalStatus(r.status),
+      createdAt: r.createdAt,
+    }));
     return res.status(200).json({ success: true, items });
   } catch (e) {
     console.error('[ADMIN_COMMUNITY_REPORTER][list-error]', e?.message || e);
     return res.status(500).json({ success: false, message: 'Failed to load submissions' });
+  }
+});
+
+// PATCH approve
+router.patch('/submissions/:id/approve', requireAdmin, requireInternalAdminKey, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const submission = await CommunitySubmission.findById(id);
+    if (!submission) return res.status(404).json({ success: false, message: 'Not found' });
+    submission.status = 'APPROVED';
+    await submission.save();
+    return res.json({ success: true, item: {
+      id: submission._id.toString(),
+      name: submission.name,
+      email: submission.email,
+      location: submission.location,
+      category: submission.category,
+      headline: submission.headline,
+      status: externalStatus(submission.status),
+      createdAt: submission.createdAt,
+      updatedAt: submission.updatedAt,
+    }});
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][approve-error]', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to approve submission' });
+  }
+});
+
+// PATCH reject
+router.patch('/submissions/:id/reject', requireAdmin, requireInternalAdminKey, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const submission = await CommunitySubmission.findById(id);
+    if (!submission) return res.status(404).json({ success: false, message: 'Not found' });
+    submission.status = 'REJECTED';
+    await submission.save();
+    return res.json({ success: true, item: {
+      id: submission._id.toString(),
+      name: submission.name,
+      email: submission.email,
+      location: submission.location,
+      category: submission.category,
+      headline: submission.headline,
+      status: externalStatus(submission.status),
+      createdAt: submission.createdAt,
+      updatedAt: submission.updatedAt,
+    }});
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][reject-error]', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to reject submission' });
   }
 });
 

@@ -27,6 +27,7 @@ const authOtp = require('./routes/authOtp');
 const communityRoutes = require('./routes/community');
 const adminCommunityRoutes = require('./routes/adminCommunity');
 const adminCommunityReporterRoutes = require('./routes/adminCommunityReporter');
+const communityReporterRoutes = require('./routes/communityReporter');
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -483,6 +484,8 @@ app.use('/admin', adminAuth);
 app.use('/api/reports/export', reportsExport);
 // Community submission public API
 app.use('/api/community', communityRoutes);
+// Phase 1 Community Reporter public API
+app.use('/api/community-reporter', communityReporterRoutes);
 // Admin community management (protected)
 app.use('/api/admin/community', adminCommunityRoutes);
 // New Phase 1 Community Reporter admin queue endpoints
