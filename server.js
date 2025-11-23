@@ -20,6 +20,7 @@ const monitorHub = require('./routes/system/monitorHub');
 const aiTrainingInfo = require('./routes/system/aiTrainingInfo');
 const emailTest = require('./routes/system/emailTest');
 const adminAuth = require('./routes/adminAuth');
+const adminThreatRoutes = require('./routes/adminThreatRoutes');
 const reportsExport = require('./routes/reports/export');
 const dashboardStats = require('./routes/dashboardStats');
 const News = require('./models/News');
@@ -479,6 +480,8 @@ app.use('/system/email-test', emailTest);
 app.use('/api/admin-auth', adminAuth);
 // Mount under /api/admin as well so POST /api/admin/login resolves
 app.use('/api/admin', adminAuth);
+// Threat dashboard mock stats
+app.use('/api/admin', adminThreatRoutes);
 // Non-/api alias so POST /admin/login works (SPA expectation)
 app.use('/admin', adminAuth);
 app.use('/api/reports/export', reportsExport);
