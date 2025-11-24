@@ -1,5 +1,6 @@
 const express = require('express');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const { runCommunityAiChecks } = require('../services/communityAi');
 
 const router = express.Router();
 
@@ -35,6 +36,7 @@ router.post('/submissions', async (req, res) => {
       body: story.trim(), // underlying field
       status: 'NEW',
     });
+    await runCommunityAiChecks(submission);
     return res.status(201).json({ success: true, item: {
       id: submission._id.toString(),
       name: submission.name,
@@ -43,6 +45,10 @@ router.post('/submissions', async (req, res) => {
       category: submission.category,
       headline: submission.headline,
       story: submission.body,
+      aiHeadline: submission.aiHeadline,
+      aiBody: submission.aiBody,
+      riskScore: submission.riskScore,
+      flags: submission.flags,
       status: externalStatus(submission.status),
       createdAt: submission.createdAt,
     }});

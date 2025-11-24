@@ -1,5 +1,6 @@
 const express = require('express');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const { runCommunityAiChecks } = require('../services/communityAi');
 const router = express.Router();
 
 // POST /api/community/submissions (simplified public endpoint)
@@ -10,7 +11,7 @@ router.post('/submissions', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
     }
 
-    await CommunitySubmission.create({
+    const submission = await CommunitySubmission.create({
       userName: String(userName).trim(), // virtual maps to name
       email: String(email).trim().toLowerCase(),
       location: location ? String(location).trim() : undefined,
@@ -20,6 +21,9 @@ router.post('/submissions', async (req, res) => {
       mediaLink: mediaLink ? String(mediaLink).trim() : undefined,
       status: 'NEW',
     });
+
+    // Phase 2 AI stub: mirror content + status advance
+    await runCommunityAiChecks(submission);
 
     return res.status(201).json({ success: true });
   } catch (e) {

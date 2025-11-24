@@ -28,7 +28,7 @@ router.get('/submissions', requireAdmin, async (req, res) => {
     const defaultStatuses = ['NEW', 'PENDING_FOUNDER'];
     const statuses = statusFilter && statusFilter.length ? statusFilter : defaultStatuses;
     const query = { status: { $in: statuses } };
-    const submissions = await CommunitySubmission.find(query, '_id name email location category headline status createdAt').sort({ createdAt: -1 }).lean();
+    const submissions = await CommunitySubmission.find(query, '_id name email location category headline status aiHeadline aiBody riskScore flags createdAt').sort({ createdAt: -1 }).lean();
     return res.json({ ok: true, items: submissions });
   } catch (e) {
     console.error('[ADMIN_COMMUNITY][list-error]', e?.message || e);

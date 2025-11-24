@@ -5,7 +5,8 @@ const mongoose = require('mongoose');
 // forward compatibility but expose a virtual "story" field and map
 // simplified statuses via the API layer. (pending -> NEW, approved -> APPROVED, rejected -> REJECTED)
 const allowedCategories = ['regional', 'youth', 'campus', 'civic', 'tip', 'other'];
-const statusValues = ['NEW', 'AI_REVIEWED', 'PENDING_FOUNDER', 'APPROVED', 'REJECTED', 'TIP_ONLY'];
+// Phase 2 status enum tightened (TIP_ONLY removed per new spec)
+const statusValues = ['NEW', 'AI_REVIEWED', 'PENDING_FOUNDER', 'APPROVED', 'REJECTED'];
 const contributorPrefs = ['full_name', 'anonymous', 'group'];
 
 const CommunitySubmissionSchema = new mongoose.Schema({
@@ -19,9 +20,11 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   status: { type: String, enum: statusValues, default: 'NEW' },
   rejectReason: { type: String },
   // Future / Phase 2 fields
-  aiTitle: { type: String },
-  aiBody: { type: String },
-  riskScore: { type: Number },
+  // Phase 2 AI & policy layer stub fields
+  aiHeadline: { type: String }, // mirrors original headline (Phase 2 stub)
+  aiBody: { type: String }, // mirrors original body (Phase 2 stub)
+  aiTitle: { type: String }, // legacy/backward compatibility (will be deprecated)
+  riskScore: { type: Number, default: 0 },
   flags: { type: [String], default: [] },
   contributorPreference: { type: String, enum: contributorPrefs, default: 'anonymous' },
   finalContributorTag: { type: String },

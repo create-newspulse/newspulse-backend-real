@@ -45,7 +45,7 @@ router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req
   try {
     console.log('[ADMIN_COMMUNITY_REPORTER][hit]', { adminId: req.admin?.id, role: req.admin?.role });
     const raw = await CommunitySubmission
-      .find({}, '_id name email location category headline status createdAt')
+      .find({}, '_id name email location category headline status aiHeadline aiBody riskScore flags createdAt')
       .sort({ createdAt: -1 })
       .lean();
     const items = raw.map(r => ({
@@ -55,6 +55,10 @@ router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req
       location: r.location,
       category: r.category,
       headline: r.headline,
+      aiHeadline: r.aiHeadline,
+      aiBody: r.aiBody,
+      riskScore: r.riskScore,
+      flags: Array.isArray(r.flags) ? r.flags : [],
       status: externalStatus(r.status),
       createdAt: r.createdAt,
     }));
@@ -80,6 +84,10 @@ router.patch('/submissions/:id/approve', requireAdminAuth, requireInternalAdminK
       location: submission.location,
       category: submission.category,
       headline: submission.headline,
+      aiHeadline: submission.aiHeadline,
+      aiBody: submission.aiBody,
+      riskScore: submission.riskScore,
+      flags: submission.flags,
       status: externalStatus(submission.status),
       createdAt: submission.createdAt,
       updatedAt: submission.updatedAt,
@@ -105,6 +113,10 @@ router.patch('/submissions/:id/reject', requireAdminAuth, requireInternalAdminKe
       location: submission.location,
       category: submission.category,
       headline: submission.headline,
+      aiHeadline: submission.aiHeadline,
+      aiBody: submission.aiBody,
+      riskScore: submission.riskScore,
+      flags: submission.flags,
       status: externalStatus(submission.status),
       createdAt: submission.createdAt,
       updatedAt: submission.updatedAt,
