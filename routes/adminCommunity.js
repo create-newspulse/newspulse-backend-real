@@ -91,4 +91,27 @@ router.patch('/submissions/:id/status', requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/admin/community/submissions/:id (detail view)
+router.get('/submissions/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id) {
+      return res.status(400).json({ success: false, message: 'Missing submission id' });
+    }
+    // Optional ObjectId shape validation (24 hex chars)
+    const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id);
+    if (!isObjectIdLike) {
+      return res.status(400).json({ success: false, message: 'Invalid submission id format' });
+    }
+    const submission = await CommunitySubmission.findById(id).lean();
+    if (!submission) {
+      return res.status(404).json({ success: false, message: 'Submission not found' });
+    }
+    return res.json({ success: true, submission });
+  } catch (err) {
+    console.error('[Admin] Error loading community submission by id', err?.message || err);
+    return res.status(500).json({ success: false, message: 'Failed to load submission' });
+  }
+});
+
 module.exports = router;
