@@ -1,6 +1,7 @@
 const express = require('express');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const { requireAdminAuth } = require('../middleware/adminAuth');
+const { cleanupOldLowPrioritySubmissions } = require('../services/communityCleanup');
 
 const router = express.Router();
 
@@ -45,7 +46,7 @@ router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req
   try {
     console.log('[ADMIN_COMMUNITY_REPORTER][hit]', { adminId: req.admin?.id, role: req.admin?.role });
     const raw = await CommunitySubmission
-      .find({}, '_id name email location category headline status aiHeadline aiBody riskScore flags createdAt')
+      .find({ isArchived: { $ne: true } }, '_id name email location category headline status aiHeadline aiBody riskScore flags createdAt')
       .sort({ createdAt: -1 })
       .lean();
     const items = raw.map(r => ({
@@ -76,7 +77,7 @@ router.get('/submissions/:id', requireAdminAuth, requireInternalAdminKey, async 
     if (!id) return res.status(400).json({ message: 'Invalid submission id' });
     const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id);
     if (!isObjectIdLike) return res.status(400).json({ message: 'Invalid submission id' });
-    const submission = await CommunitySubmission.findById(id).lean();
+    const submission = await CommunitySubmission.findOne({ _id: id, isArchived: { $ne: true } }).lean();
     if (!submission) return res.status(404).json({ message: 'Submission not found' });
     return res.json({ submission });
   } catch (e) {
@@ -187,7 +188,7 @@ router.post('/submissions/:id/restore', requireAdminAuth, requireInternalAdminKe
     if (!id) return res.status(400).json({ message: 'Invalid submission id' });
     const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id);
     if (!isObjectIdLike) return res.status(400).json({ message: 'Invalid submission id' });
-    const submission = await CommunitySubmission.findById(id);
+    const submission = await CommunitySubmission.findOne({ _id: id, isArchived: { $ne: true } });
     if (!submission) return res.status(404).json({ message: 'Submission not found' });
     if (submission.status !== 'REJECTED') {
       return res.status(400).json({ message: 'Only rejected submissions can be restored' });
@@ -198,6 +199,18 @@ router.post('/submissions/:id/restore', requireAdminAuth, requireInternalAdminKe
   } catch (e) {
     console.error('[ADMIN_COMMUNITY_REPORTER][restore-error]', e?.message || e);
     return res.status(500).json({ message: 'Failed to restore submission' });
+  }
+});
+
+// POST /api/admin/community-reporter/cleanup-low-priority
+router.post('/cleanup-low-priority', requireAdminAuth, requireInternalAdminKey, async (req, res) => {
+  try {
+    const { days, dryRun } = req.body || {};
+    const result = await cleanupOldLowPrioritySubmissions({ days, dryRun });
+    return res.json(result);
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][cleanup-error]', e?.message || e);
+    return res.status(500).json({ message: 'Failed to cleanup low-priority submissions' });
   }
 });
 

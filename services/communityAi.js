@@ -4,6 +4,7 @@
 // If OPENAI_API_KEY missing or any failure occurs, we fallback gracefully.
 
 const openai = require('../lib/openai');
+const { computeCommunityPriority } = require('./communityPriority');
 const MODEL_NAME = process.env.COMMUNITY_AI_MODEL || 'gpt-4.1-mini';
 
 function buildPrompt(submission) {
@@ -51,6 +52,13 @@ async function runCommunityAiChecks(submission) {
   submission.riskScore = Number.isFinite(riskScore) ? Math.min(100, Math.max(0, Math.round(riskScore))) : 50;
   submission.flags = Array.isArray(parsed.flags) ? parsed.flags.filter(f => typeof f === 'string' && f.trim()).map(f => f.trim()) : ['ai_error'];
   submission.status = 'PENDING_FOUNDER';
+  submission.priority = computeCommunityPriority({
+    category: submission.category,
+    body: submission.body,
+    location: submission.location,
+    riskScore: submission.riskScore,
+    flags: submission.flags,
+  });
   await submission.save();
 
   // Safe logging (avoid PII & full content in production)

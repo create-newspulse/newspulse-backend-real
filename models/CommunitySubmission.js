@@ -20,6 +20,8 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   body: { type: String, required: true },
   status: { type: String, enum: statusValues, default: 'NEW' },
   rejectReason: { type: String },
+  isArchived: { type: Boolean, default: false, index: true },
+  archivedAt: { type: Date },
   // Future / Phase 2 fields
   // Phase 2 AI & policy layer stub fields
   aiHeadline: { type: String }, // mirrors original headline (Phase 2 stub)
