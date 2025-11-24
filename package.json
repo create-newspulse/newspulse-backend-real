@@ -18,7 +18,8 @@
     "mongoose": "^7.2.2",
     "nodemailer": "^7.0.10",
     "pdfkit": "^0.15.0",
-    "socket.io": "^4.7.5"
+    "socket.io": "^4.7.5",
+    "openai": "^4.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.10",

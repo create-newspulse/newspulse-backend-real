@@ -22,8 +22,15 @@ router.post('/submissions', async (req, res) => {
       status: 'NEW',
     });
 
-    // Phase 2 AI stub: mirror content + status advance
-    await runCommunityAiChecks(submission);
+    // Phase 2 AI processing (advisory only, never blocks user submission)
+    try {
+      await runCommunityAiChecks(submission);
+    } catch (err) {
+      console.error('[CommunityAI] Failed to process submission', err?.message || err);
+      // Fallback: ensure it still reaches founder queue
+      submission.status = 'PENDING_FOUNDER';
+      try { await submission.save(); } catch (_) {}
+    }
 
     return res.status(201).json({ success: true });
   } catch (e) {

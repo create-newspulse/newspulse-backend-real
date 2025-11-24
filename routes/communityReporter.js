@@ -36,7 +36,13 @@ router.post('/submissions', async (req, res) => {
       body: story.trim(), // underlying field
       status: 'NEW',
     });
-    await runCommunityAiChecks(submission);
+    try {
+      await runCommunityAiChecks(submission);
+    } catch (err) {
+      console.error('[CommunityAI] Failed to process reporter submission', err?.message || err);
+      submission.status = 'PENDING_FOUNDER';
+      try { await submission.save(); } catch (_) {}
+    }
     return res.status(201).json({ success: true, item: {
       id: submission._id.toString(),
       name: submission.name,
