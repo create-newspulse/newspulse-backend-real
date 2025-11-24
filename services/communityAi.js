@@ -4,6 +4,7 @@
 // If OPENAI_API_KEY missing or any failure occurs, we fallback gracefully.
 
 const openai = require('../lib/openai');
+const MODEL_NAME = process.env.COMMUNITY_AI_MODEL || 'gpt-4.1-mini';
 
 function buildPrompt(submission) {
   return `You are an AI assistant for News Pulse performing an ethics & policy pass on a community submitted news tip. \n\nGuidelines (PTI-style ethics):\n- No hate speech or communal incitement.\n- No graphic self-harm / gore detail.\n- Protect minors & sensitive victims (avoid identifying details).\n- Avoid unverified accusations / defamation.\n- Flag potentially unverified political or legal claims.\n- If content is extremely short, you may lightly clarify wording but do not invent facts.\n\nReturn ONLY strict JSON with this shape (no markdown, no extra commentary):\n{\n  "aiHeadline": "string",\n  "aiBody": "string",\n  "riskScore": 0,\n  "flags": ["string", "..."]\n}\n\nInputs:\nHeadline: ${submission.headline}\nBody: ${submission.body}\nLocation: ${submission.location || 'N/A'}\nCategory: ${submission.category || 'N/A'}\n\nProvide improved clarity while preserving factual claims; do not add new facts. Risk score: 0 (very safe) to 100 (very risky). Flags: machine readable tokens like: mentions_minor, possible_defamation, graphic_violence, political_claim_unverified, needs_verification.`;
@@ -22,13 +23,14 @@ async function runCommunityAiChecks(submission) {
     if (!openai) throw new Error('OpenAI client not initialized');
     const prompt = buildPrompt(submission);
     const response = await openai.chat.completions.create({
-      model: 'gpt-4.1-mini',
+      model: MODEL_NAME,
       messages: [
         { role: 'system', content: 'You analyze and rewrite community submissions, respond ONLY with valid JSON.' },
         { role: 'user', content: prompt },
       ],
       temperature: 0.3,
       max_tokens: 800,
+      response_format: { type: 'json_object' },
     });
     const raw = response?.choices?.[0]?.message?.content || '';
     try {
@@ -47,7 +49,7 @@ async function runCommunityAiChecks(submission) {
   submission.aiBody = typeof parsed.aiBody === 'string' && parsed.aiBody.trim() ? parsed.aiBody.trim() : submission.body;
   const riskScore = Number(parsed.riskScore);
   submission.riskScore = Number.isFinite(riskScore) ? Math.min(100, Math.max(0, Math.round(riskScore))) : 50;
-  submission.flags = Array.isArray(parsed.flags) ? parsed.flags.filter(f => typeof f === 'string' && f.trim()).map(f => f.trim()) : [];
+  submission.flags = Array.isArray(parsed.flags) ? parsed.flags.filter(f => typeof f === 'string' && f.trim()).map(f => f.trim()) : ['ai_error'];
   submission.status = 'PENDING_FOUNDER';
   await submission.save();
 
