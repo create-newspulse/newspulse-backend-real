@@ -37,19 +37,41 @@ router.get('/submissions', requireAdmin, async (req, res) => {
 });
 
 // GET /api/admin/community/submissions/:id
-router.get('/submissions/:id', requireAdmin, async (req, res) => {
+router.get('/submissions', requireAdmin, async (req, res) => {
   try {
-    const { id } = req.params;
-    const submission = await CommunitySubmission.findById(id).lean();
-    if (!submission) return res.status(404).json({ ok: false, message: 'Not found' });
-    return res.json({ ok: true, submission });
+    const { status } = req.query || {};
+    // Waiting review statuses
+    const waitingStatuses = ['NEW', 'AI_REVIEWED', 'PENDING_FOUNDER'];
+    let filter = {};
+    if (status === 'approved') {
+      filter = { status: 'APPROVED' };
+    } else if (status === 'rejected') {
+      filter = { status: 'REJECTED' };
+    } else if (status === 'all') {
+      // no filter
+    } else if (typeof status === 'string' && status.includes(',')) {
+      // comma separated explicit statuses (defensive normalization)
+      const parts = status.split(',').map(s => s.trim()).filter(Boolean);
+      if (parts.length) filter = { status: { $in: parts } };
+      else filter = { status: { $in: waitingStatuses } };
+    } else if (status) {
+      // single explicit status
+      filter = { status };
+    } else {
+      filter = { status: { $in: waitingStatuses } };
+    }
+
+    const submissions = await CommunitySubmission
+      .find(filter, '_id name email location category headline status aiHeadline aiBody riskScore flags createdAt updatedAt')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.json({ success: true, submissions });
   } catch (e) {
-    console.error('[ADMIN_COMMUNITY][get-error]', e?.message || e);
-    return res.status(500).json({ ok: false, message: 'Failed to load submission' });
+    console.error('[Admin] Failed to load community submissions', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Failed to load community submissions' });
   }
 });
-
-// PATCH /api/admin/community/submissions/:id/status
 router.patch('/submissions/:id/status', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
