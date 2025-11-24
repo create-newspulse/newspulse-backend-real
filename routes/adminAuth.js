@@ -1,4 +1,5 @@
 const express = require('express');
+const { requireAdminAuth } = require('../middleware/adminAuth');
 const router = express.Router();
 
 function parseCookies(req) {
@@ -102,6 +103,16 @@ router.post('/login', (req, res) => {
     console.error('admin login error:', err?.message || err);
     return res.status(500).json({ ok: false, error: 'LOGIN_FAILED', message: 'Login failed' });
   }
+});
+
+// Authenticated admin identity endpoint
+// Mounted at /api/admin/me (also /admin/me and /api/admin-auth/me via existing mounts)
+router.get('/me', requireAdminAuth, (req, res) => {
+  const a = req.admin || {};
+  return res.json({
+    ok: true,
+    user: { id: a.id, name: a.name, email: a.email, role: a.role }
+  });
 });
 
 module.exports = router;
