@@ -69,6 +69,22 @@ router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req
   }
 });
 
+// GET /api/admin/community-reporter/submissions/:id (detail)
+router.get('/submissions/:id', requireAdminAuth, requireInternalAdminKey, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id) return res.status(400).json({ message: 'Invalid submission id' });
+    const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id);
+    if (!isObjectIdLike) return res.status(400).json({ message: 'Invalid submission id' });
+    const submission = await CommunitySubmission.findById(id).lean();
+    if (!submission) return res.status(404).json({ message: 'Submission not found' });
+    return res.json({ submission });
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][detail-error]', e?.message || e);
+    return res.status(500).json({ message: 'Failed to load submission' });
+  }
+});
+
 // PATCH approve
 router.patch('/submissions/:id/approve', requireAdminAuth, requireInternalAdminKey, async (req, res) => {
   try {
@@ -131,27 +147,34 @@ router.patch('/submissions/:id/reject', requireAdminAuth, requireInternalAdminKe
 router.post('/submissions/:id/decision', requireAdminAuth, requireInternalAdminKey, async (req, res) => {
   try {
     const { id } = req.params;
-    const { action } = req.body || {};
-    if (!id) return res.status(400).json({ ok: false, message: 'Missing id' });
-    if (!action || !['approve', 'reject'].includes(action)) {
-      return res.status(400).json({ ok: false, message: 'Invalid action' });
-    }
+    let { decision, action } = req.body || {};
+    // normalize decision (support previous 'action')
+    decision = decision || action;
+    if (!id) return res.status(400).json({ message: 'Invalid submission id' });
+    const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id);
+    if (!isObjectIdLike) return res.status(400).json({ message: 'Invalid submission id' });
+    if (!decision) return res.status(400).json({ message: 'Invalid decision' });
+    const normalized = String(decision).trim().toUpperCase();
+    const approveSet = new Set(['APPROVE', 'APPROVED']);
+    const rejectSet = new Set(['REJECT', 'REJECTED']);
+    let mappedStatus = null;
+    if (approveSet.has(normalized)) mappedStatus = 'APPROVED';
+    else if (rejectSet.has(normalized)) mappedStatus = 'REJECTED';
+    else return res.status(400).json({ message: 'Invalid decision' });
+
     const submission = await CommunitySubmission.findById(id);
-    if (!submission) return res.status(404).json({ ok: false, message: 'Submission not found' });
-
-    if (action === 'approve') {
-      submission.status = 'APPROVED';
+    if (!submission) return res.status(404).json({ message: 'Submission not found' });
+    submission.status = mappedStatus;
+    if (mappedStatus === 'APPROVED') {
       submission.rejectReason = undefined;
-    } else {
-      submission.status = 'REJECTED';
-      if (!submission.rejectReason) submission.rejectReason = 'Rejected';
+    } else if (mappedStatus === 'REJECTED' && !submission.rejectReason) {
+      submission.rejectReason = 'Rejected';
     }
-
     await submission.save();
-    return res.json({ ok: true, submission });
+    return res.json({ submission });
   } catch (e) {
     console.error('[ADMIN_COMMUNITY_REPORTER][decision-error]', e?.message || e);
-    return res.status(500).json({ ok: false, message: 'Server error updating submission' });
+    return res.status(500).json({ message: 'Server error updating submission' });
   }
 });
 
