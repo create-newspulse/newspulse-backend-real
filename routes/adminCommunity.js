@@ -21,44 +21,29 @@ function requireAdmin(req, res, next) {
   }
 }
 
-// GET /api/admin/community/submissions
+// GET /api/admin/community/submissions (admin queue listing)
 router.get('/submissions', requireAdmin, async (req, res) => {
   try {
-    const statusFilter = req.query.status ? req.query.status.split(',').map(s => s.trim()).filter(Boolean) : null;
-    const defaultStatuses = ['NEW', 'PENDING_FOUNDER'];
-    const statuses = statusFilter && statusFilter.length ? statusFilter : defaultStatuses;
-    const query = { status: { $in: statuses } };
-    const submissions = await CommunitySubmission.find(query, '_id name email location category headline status aiHeadline aiBody riskScore flags createdAt').sort({ createdAt: -1 }).lean();
-    return res.json({ ok: true, items: submissions });
-  } catch (e) {
-    console.error('[ADMIN_COMMUNITY][list-error]', e?.message || e);
-    return res.status(500).json({ ok: false, message: 'Failed to load submissions' });
-  }
-});
-
-// GET /api/admin/community/submissions/:id
-router.get('/submissions', requireAdmin, async (req, res) => {
-  try {
-    const { status } = req.query || {};
-    // Waiting review statuses
+    const { status, category } = req.query || {};
     const waitingStatuses = ['NEW', 'AI_REVIEWED', 'PENDING_FOUNDER'];
-    let filter = {};
-    if (status === 'approved') {
-      filter = { status: 'APPROVED' };
-    } else if (status === 'rejected') {
-      filter = { status: 'REJECTED' };
-    } else if (status === 'all') {
-      // no filter
+    const filter = {};
+
+    if (status === 'approved') filter.status = 'APPROVED';
+    else if (status === 'rejected') filter.status = 'REJECTED';
+    else if (status === 'all') {
+      // no status filter
     } else if (typeof status === 'string' && status.includes(',')) {
-      // comma separated explicit statuses (defensive normalization)
       const parts = status.split(',').map(s => s.trim()).filter(Boolean);
-      if (parts.length) filter = { status: { $in: parts } };
-      else filter = { status: { $in: waitingStatuses } };
+      if (parts.length) filter.status = { $in: parts };
+      else filter.status = { $in: waitingStatuses };
     } else if (status) {
-      // single explicit status
-      filter = { status };
-    } else {
-      filter = { status: { $in: waitingStatuses } };
+      filter.status = status;
+    } else if (status !== 'all') {
+      filter.status = { $in: waitingStatuses };
+    }
+
+    if (category && category !== 'all') {
+      filter.category = String(category).trim();
     }
 
     const submissions = await CommunitySubmission
