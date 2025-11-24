@@ -178,4 +178,27 @@ router.post('/submissions/:id/decision', requireAdminAuth, requireInternalAdminK
   }
 });
 
+// POST /api/admin/community-reporter/submissions/:id/restore
+// Soft restore: only allowed when current internal status is REJECTED (external 'rejected').
+// Restores by setting status back to NEW (external 'pending').
+router.post('/submissions/:id/restore', requireAdminAuth, requireInternalAdminKey, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id) return res.status(400).json({ message: 'Invalid submission id' });
+    const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id);
+    if (!isObjectIdLike) return res.status(400).json({ message: 'Invalid submission id' });
+    const submission = await CommunitySubmission.findById(id);
+    if (!submission) return res.status(404).json({ message: 'Submission not found' });
+    if (submission.status !== 'REJECTED') {
+      return res.status(400).json({ message: 'Only rejected submissions can be restored' });
+    }
+    submission.status = 'NEW';
+    await submission.save();
+    return res.json({ ok: true, submission });
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][restore-error]', e?.message || e);
+    return res.status(500).json({ message: 'Failed to restore submission' });
+  }
+});
+
 module.exports = router;
