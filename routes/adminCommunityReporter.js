@@ -2,6 +2,7 @@ const express = require('express');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const { cleanupOldLowPrioritySubmissions } = require('../services/communityCleanup');
+const { createDraftArticleFromSubmission } = require('../services/communityDraftFromSubmission');
 
 const router = express.Router();
 
@@ -92,23 +93,24 @@ router.patch('/submissions/:id/approve', requireAdminAuth, requireInternalAdminK
     const { id } = req.params;
     const submission = await CommunitySubmission.findById(id);
     if (!submission) return res.status(404).json({ success: false, message: 'Not found' });
+
     submission.status = 'APPROVED';
     await submission.save();
-    return res.json({ success: true, item: {
-      id: submission._id.toString(),
-      name: submission.name,
-      email: submission.email,
-      location: submission.location,
-      category: submission.category,
-      headline: submission.headline,
-      aiHeadline: submission.aiHeadline,
-      aiBody: submission.aiBody,
-      riskScore: submission.riskScore,
-      flags: submission.flags,
-      status: externalStatus(submission.status),
-      createdAt: submission.createdAt,
-      updatedAt: submission.updatedAt,
-    }});
+
+    let draftArticle = null;
+    try {
+      const result = await createDraftArticleFromSubmission(submission._id.toString());
+      draftArticle = result.article;
+    } catch (draftErr) {
+      console.error('[ADMIN_COMMUNITY_REPORTER][approve-draft-error]', draftErr?.message || draftErr);
+      return res.status(500).json({ ok: false, message: 'Failed to create draft article from submission' });
+    }
+
+    return res.json({
+      ok: true,
+      submission,
+      draftArticle,
+    });
   } catch (e) {
     console.error('[ADMIN_COMMUNITY_REPORTER][approve-error]', e?.message || e);
     return res.status(500).json({ success: false, message: 'Failed to approve submission' });

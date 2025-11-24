@@ -34,6 +34,7 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   finalContributorTag: { type: String },
   finalSection: { type: String },
   articleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Article' },
+  linkedArticleId: { type: mongoose.Schema.Types.ObjectId, ref: 'News', default: null, index: true },
 }, { timestamps: true });
 
 // Virtual alias so Phase 1 routes can use "story" seamlessly
