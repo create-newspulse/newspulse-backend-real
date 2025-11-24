@@ -127,4 +127,49 @@ router.patch('/submissions/:id/reject', requireAdminAuth, requireInternalAdminKe
   }
 });
 
+// POST /admin/community-reporter/submissions/:id/decision { action: 'approve' | 'reject' }
+router.post('/submissions/:id/decision', requireAdminAuth, requireInternalAdminKey, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { action } = req.body || {};
+    if (!id) {
+      return res.status(400).json({ ok: false, message: 'Missing id' });
+    }
+    if (!action || !['approve', 'reject'].includes(action)) {
+      return res.status(400).json({ ok: false, message: 'Invalid action; use approve or reject' });
+    }
+    const submission = await CommunitySubmission.findById(id);
+    if (!submission) {
+      return res.status(404).json({ ok: false, message: 'Submission not found' });
+    }
+    if (action === 'approve') {
+      submission.status = 'APPROVED';
+      submission.rejectReason = undefined;
+    } else {
+      submission.status = 'REJECTED';
+      if (!submission.rejectReason) submission.rejectReason = 'Rejected';
+    }
+    await submission.save();
+    return res.json({ ok: true, item: {
+      id: submission._id.toString(),
+      name: submission.name,
+      email: submission.email,
+      location: submission.location,
+      category: submission.category,
+      headline: submission.headline,
+      aiHeadline: submission.aiHeadline,
+      aiBody: submission.aiBody,
+      riskScore: submission.riskScore,
+      flags: submission.flags,
+      status: externalStatus(submission.status),
+      rejectReason: submission.rejectReason,
+      createdAt: submission.createdAt,
+      updatedAt: submission.updatedAt,
+    }});
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][decision-error]', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to apply decision' });
+  }
+});
+
 module.exports = router;
