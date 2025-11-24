@@ -7,6 +7,7 @@ const mongoose = require('mongoose');
 const allowedCategories = ['regional', 'youth', 'campus', 'civic', 'tip', 'other'];
 // Phase 2 status enum tightened (TIP_ONLY removed per new spec)
 const statusValues = ['NEW', 'AI_REVIEWED', 'PENDING_FOUNDER', 'APPROVED', 'REJECTED'];
+const priorityValues = ['FOUNDER_REVIEW', 'EDITOR_REVIEW', 'LOW_PRIORITY'];
 const contributorPrefs = ['full_name', 'anonymous', 'group'];
 
 const CommunitySubmissionSchema = new mongoose.Schema({
@@ -19,6 +20,8 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   body: { type: String, required: true },
   status: { type: String, enum: statusValues, default: 'NEW' },
   rejectReason: { type: String },
+  isArchived: { type: Boolean, default: false, index: true },
+  archivedAt: { type: Date },
   // Future / Phase 2 fields
   // Phase 2 AI & policy layer stub fields
   aiHeadline: { type: String }, // mirrors original headline (Phase 2 stub)
@@ -26,6 +29,7 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   aiTitle: { type: String }, // legacy/backward compatibility (will be deprecated)
   riskScore: { type: Number, default: 0 },
   flags: { type: [String], default: [] },
+  priority: { type: String, enum: priorityValues, default: 'EDITOR_REVIEW', index: true },
   contributorPreference: { type: String, enum: contributorPrefs, default: 'anonymous' },
   finalContributorTag: { type: String },
   finalSection: { type: String },

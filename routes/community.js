@@ -1,6 +1,7 @@
 const express = require('express');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const { runCommunityAiChecks } = require('../services/communityAi');
+const { computeCommunityPriority } = require('../services/communityPriority');
 const router = express.Router();
 
 // POST /api/community/submissions (public form - hardened)
@@ -36,6 +37,14 @@ router.post('/submissions', async (req, res) => {
     let flags = [];
     let status = 'NEW';
 
+    const priority = computeCommunityPriority({
+      category: finalCategory,
+      body: finalBody,
+      location: finalLocation,
+      riskScore,
+      flags,
+    });
+
     // Create initial submission (NEW)
     const submission = await CommunitySubmission.create({
       userName: finalName,
@@ -50,6 +59,7 @@ router.post('/submissions', async (req, res) => {
       riskScore,
       flags,
       status,
+      priority,
     });
 
     // AI processing - never throw outward
