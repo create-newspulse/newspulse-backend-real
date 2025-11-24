@@ -21,6 +21,8 @@ const allowedOrigins = [
   'http://localhost:5173',
   'https://newspulse-frontend-main.vercel.app',
   'https://admin.newspulse.co.in',
+  'https://newspulse.co.in',
+  'https://www.newspulse.co.in',
 ];
 const corsOptions = {
   origin: (origin, callback) => {

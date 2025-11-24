@@ -71,6 +71,8 @@ const defaultOrigins = [
   'http://localhost:3000',
   'https://admin.newspulse.co.in',
   'https://newspulse-frontend-main.vercel.app',
+  'https://newspulse.co.in',
+  'https://www.newspulse.co.in',
 ];
 // Allow overriding via CORS_ALLOWED_ORIGINS (comma-separated)
 const extraOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
