@@ -202,15 +202,25 @@ router.post('/submissions/:id/restore', requireAdminAuth, requireInternalAdminKe
   }
 });
 
-// POST /api/admin/community-reporter/cleanup-low-priority
-router.post('/cleanup-low-priority', requireAdminAuth, requireInternalAdminKey, async (req, res) => {
+// POST /api/admin/community-reporter/cleanup
+router.post('/cleanup', requireAdminAuth, requireInternalAdminKey, async (req, res) => {
   try {
-    const { days, dryRun } = req.body || {};
-    const result = await cleanupOldLowPrioritySubmissions({ days, dryRun });
-    return res.json(result);
+    let { olderThanDays } = req.body || {};
+    olderThanDays = Number.isFinite(Number(olderThanDays)) && Number(olderThanDays) > 0
+      ? Number(olderThanDays)
+      : 30;
+
+    const { deletedCount, cutoffDate } = await cleanupOldLowPrioritySubmissions({ olderThanDays });
+
+    return res.json({
+      ok: true,
+      olderThanDays,
+      deletedCount,
+      cutoffDate,
+    });
   } catch (e) {
     console.error('[ADMIN_COMMUNITY_REPORTER][cleanup-error]', e?.message || e);
-    return res.status(500).json({ message: 'Failed to cleanup low-priority submissions' });
+    return res.status(500).json({ ok: false, error: 'CLEANUP_FAILED' });
   }
 });
 
