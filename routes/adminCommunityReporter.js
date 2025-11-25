@@ -109,7 +109,9 @@ router.patch('/submissions/:id/approve', requireAdminAuth, requireInternalAdminK
     return res.json({
       ok: true,
       submission,
-      draftArticle,
+      article: draftArticle || null,
+      // keep backward compatibility for any callers expecting this name
+      draftArticle: draftArticle || null,
     });
   } catch (e) {
     console.error('[ADMIN_COMMUNITY_REPORTER][approve-error]', e?.message || e);
