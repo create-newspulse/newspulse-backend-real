@@ -30,6 +30,7 @@ const communityRoutes = require('./routes/community');
 const adminCommunityRoutes = require('./routes/adminCommunity');
 const adminCommunityReporterRoutes = require('./routes/adminCommunityReporter');
 const communityReporterRoutes = require('./routes/communityReporter');
+const adminArticlesRouter = require('./routes/adminArticles');
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -518,6 +519,8 @@ app.use('/api/admin/community', adminCommunityRoutes);
 app.use('/api/admin/community-reporter', adminCommunityReporterRoutes);
 // Non-/api alias consumed by admin panel: /admin/community-reporter/submissions
 app.use('/admin/community-reporter', adminCommunityReporterRoutes);
+// Admin Articles management endpoints (create + list)
+app.use('/api/admin/articles', adminArticlesRouter);
 
 // --- Compatibility alias (non-/api) for local dev code accidentally hitting /admin-auth/session
 // Provides a lightweight session probe identical to /api/admin-auth/session so CORS preflight succeeds.
