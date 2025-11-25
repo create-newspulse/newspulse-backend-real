@@ -89,6 +89,7 @@ router.post('/', requireAdminAuth, async (req, res) => {
     const allowedStatuses = new Set(['draft','scheduled','published','archived','deleted']);
     let {
       title,
+      summary,
       description,
       content,
       tags,
@@ -99,12 +100,12 @@ router.post('/', requireAdminAuth, async (req, res) => {
       imageURL,
     } = body;
 
-    if (!title || !description) {
-      return res.status(400).json({ ok: false, message: 'Title and description are required' });
+    if (!title) {
+      return res.status(400).json({ ok: false, message: 'Title is required' });
     }
 
     if (status && !allowedStatuses.has(status)) {
-      status = undefined; // fall back to schema default
+      status = 'draft'; // fall back to schema default
     }
 
     if (scheduledAt) {
@@ -114,12 +115,12 @@ router.post('/', requireAdminAuth, async (req, res) => {
 
     const article = new News({
       title,
-      description,
+      description: description ?? summary ?? '',
       content,
       tags: Array.isArray(tags) ? tags : (tags ? String(tags).split(',').map(t => t.trim()).filter(Boolean) : []),
       category,
-      status,
-      language,
+      status: status || 'draft',
+      language: language || 'en',
       scheduledAt,
       imageURL,
     });
