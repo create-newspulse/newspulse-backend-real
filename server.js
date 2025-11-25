@@ -520,7 +520,8 @@ app.use('/api/admin/community-reporter', adminCommunityReporterRoutes);
 // Non-/api alias consumed by admin panel: /admin/community-reporter/submissions
 app.use('/admin/community-reporter', adminCommunityReporterRoutes);
 // Admin Articles management endpoints (create + list)
-app.use('/api/admin/articles', adminArticlesRouter);
+// Mount admin articles under /api/admin so routes inside router use /articles
+app.use('/api/admin', adminArticlesRouter);
 
 // --- Compatibility alias (non-/api) for local dev code accidentally hitting /admin-auth/session
 // Provides a lightweight session probe identical to /api/admin-auth/session so CORS preflight succeeds.

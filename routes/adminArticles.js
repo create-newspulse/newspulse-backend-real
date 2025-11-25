@@ -54,7 +54,8 @@ function buildFilter(query) {
 }
 
 // GET /api/admin/articles
-router.get('/', requireAdminAuth, async (req, res) => {
+// NOTE: mounted under /api/admin so path becomes /api/admin/articles
+router.get('/articles', requireAdminAuth, async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || req.query.limit || '20', 10), 1), 100);
@@ -75,15 +76,15 @@ router.get('/', requireAdminAuth, async (req, res) => {
       News.countDocuments(filter),
     ]);
 
-    return res.json({ ok: true, items, total, page, pageSize });
+    return res.json({ ok: true, success: true, items, total, page, pageSize });
   } catch (e) {
     console.error('[ADMIN_ARTICLES][list-error]', e?.message || e);
-    return res.status(500).json({ ok: false, message: 'Failed to load articles' });
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to load articles' });
   }
 });
 
 // POST /api/admin/articles
-router.post('/', requireAdminAuth, async (req, res) => {
+router.post('/articles', requireAdminAuth, async (req, res) => {
   try {
     const body = req.body || {};
     const allowedStatuses = new Set(['draft','scheduled','published','archived','deleted']);
@@ -101,7 +102,7 @@ router.post('/', requireAdminAuth, async (req, res) => {
     } = body;
 
     if (!title) {
-      return res.status(400).json({ ok: false, message: 'Title is required' });
+      return res.status(400).json({ ok: false, success: false, message: 'Title is required' });
     }
 
     if (status && !allowedStatuses.has(status)) {
@@ -127,10 +128,10 @@ router.post('/', requireAdminAuth, async (req, res) => {
 
     await article.save();
 
-    return res.status(201).json({ ok: true, article });
+    return res.status(201).json({ ok: true, success: true, article });
   } catch (e) {
     console.error('[ADMIN_ARTICLES][create-error]', e?.message || e);
-    return res.status(500).json({ ok: false, message: 'Failed to create article' });
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to create article' });
   }
 });
 

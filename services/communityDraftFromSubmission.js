@@ -45,6 +45,8 @@ async function createDraftArticleFromSubmission(submissionId, opts = {}) {
     content: submission.body || '',
     tags: [],
     category: submission.category || undefined,
+    status: 'draft', // ensure draft status on creation
+    language: submission.language || 'en',
   });
 
   if (session) {
