@@ -8,6 +8,7 @@ const router = express.Router();
 router.get('/', (_req, res) => {
   res.setHeader('content-type', 'application/json; charset=utf-8');
   const payload = {
+    ok: true,
     success: true,
     activeUsers: state.activeUsers || 0,
     mobilePercent: 72,
