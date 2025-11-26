@@ -7,9 +7,22 @@ const openai = require('../lib/openai');
 const ActivityLog = require('../models/ActivityLog');
 const { computeCommunityPriority } = require('./communityPriority');
 const MODEL_NAME = process.env.COMMUNITY_AI_MODEL || 'gpt-4.1-mini';
+// lightweight module state for health reporting
+let lastInvoke = { ok: false, at: null, message: 'never-invoked', riskScore: null, flags: null };
 
 function buildPrompt(submission) {
   return `You are an AI assistant for News Pulse performing an ethics & policy pass on a community submitted news tip. \n\nGuidelines (PTI-style ethics):\n- No hate speech or communal incitement.\n- No graphic self-harm / gore detail.\n- Protect minors & sensitive victims (avoid identifying details).\n- Avoid unverified accusations / defamation.\n- Flag potentially unverified political or legal claims.\n- If content is extremely short, you may lightly clarify wording but do not invent facts.\n\nReturn ONLY strict JSON with this shape (no markdown, no extra commentary):\n{\n  "aiHeadline": "string",\n  "aiBody": "string",\n  "riskScore": 0,\n  "flags": ["string", "..."]\n}\n\nInputs:\nHeadline: ${submission.headline}\nBody: ${submission.body}\nLocation: ${submission.location || 'N/A'}\nCategory: ${submission.category || 'N/A'}\n\nProvide improved clarity while preserving factual claims; do not add new facts. Risk score: 0 (very safe) to 100 (very risky). Flags: machine readable tokens like: mentions_minor, possible_defamation, graphic_violence, political_claim_unverified, needs_verification.`;
+}
+
+// Config validation for CommunityAI integration (non-fatal)
+const COMMUNITY_AI_URL = process.env.COMMUNITY_AI_URL || '';
+const COMMUNITY_AI_API_KEY = process.env.COMMUNITY_AI_API_KEY || '';
+const HAS_COMMUNITY_AI_CFG = Boolean(COMMUNITY_AI_URL) && Boolean(COMMUNITY_AI_API_KEY);
+if (!HAS_COMMUNITY_AI_CFG) {
+  console.info('[CommunityAI][config]', {
+    hasUrl: Boolean(COMMUNITY_AI_URL),
+    hasKey: Boolean(COMMUNITY_AI_API_KEY),
+  });
 }
 
 async function runCommunityAiChecks(submission) {
@@ -38,17 +51,25 @@ async function runCommunityAiChecks(submission) {
     try {
       parsed = JSON.parse(raw);
     } catch (jsonErr) {
-      console.warn('[CommunityAI][json-parse-failed]', jsonErr?.message || jsonErr);
+      console.warn('[CommunityAI][parse][json-parse-failed]', { message: jsonErr?.message || String(jsonErr) });
       parsed = fallback();
     }
+    lastInvoke = { ok: true, at: new Date().toISOString(), message: 'success', riskScore: parsed.riskScore ?? null, flags: parsed.flags ?? null };
   } catch (e) {
     // Log with more context (submission id + stack when available)
     try {
-      console.error('[CommunityAI][invoke-failed]', { id: submission._id?.toString(), message: e?.message || e, stack: e?.stack });
+      console.error('[CommunityAI][invoke-failed]', {
+        id: submission._id?.toString(),
+        message: e?.message || e,
+        stack: e?.stack,
+        url: COMMUNITY_AI_URL || 'openai-sdk',
+        hasKey: Boolean(COMMUNITY_AI_API_KEY || process.env.OPENAI_API_KEY),
+      });
       // non-blocking activity log record for observability
       try { ActivityLog.create({ type: 'community_ai_fail', meta: { submissionId: submission._id?.toString(), error: e?.message || String(e) } }); } catch (_) {}
     } catch (_) {}
     parsed = fallback();
+    lastInvoke = { ok: false, at: new Date().toISOString(), message: e?.message || String(e), riskScore: parsed.riskScore, flags: parsed.flags };
   }
 
   // Defensive assignments
@@ -56,7 +77,7 @@ async function runCommunityAiChecks(submission) {
   submission.aiBody = typeof parsed.aiBody === 'string' && parsed.aiBody.trim() ? parsed.aiBody.trim() : submission.body;
   const riskScore = Number(parsed.riskScore);
   submission.riskScore = Number.isFinite(riskScore) ? Math.min(100, Math.max(0, Math.round(riskScore))) : 50;
-  submission.flags = Array.isArray(parsed.flags) ? parsed.flags.filter(f => typeof f === 'string' && f.trim()).map(f => f.trim()) : ['ai_error'];
+  submission.flags = Array.isArray(parsed.flags) ? parsed.flags.filter(f => typeof f === 'string' && f.trim()).map(f => f.trim()) : ['ai_parse_error'];
   submission.status = 'PENDING_FOUNDER';
   submission.priority = computeCommunityPriority({
     category: submission.category,
@@ -81,5 +102,15 @@ async function runCommunityAiChecks(submission) {
   }
   return submission;
 }
+function getCommunityAiHealth() {
+  return {
+    config: {
+      hasUrl: Boolean(COMMUNITY_AI_URL),
+      hasKey: Boolean(COMMUNITY_AI_API_KEY || process.env.OPENAI_API_KEY),
+      model: MODEL_NAME,
+    },
+    lastInvoke,
+  };
+}
 
-module.exports = { runCommunityAiChecks };
+module.exports = { runCommunityAiChecks, getCommunityAiHealth };

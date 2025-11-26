@@ -101,6 +101,11 @@ router.patch('/submissions/:id/approve', requireAdminAuth, requireInternalAdminK
     try {
       const result = await createDraftArticleFromSubmission(submission._id.toString());
       draftArticle = result.article;
+      console.log('[ADMIN_COMMUNITY_REPORTER][approve->draft]', {
+        submissionId: submission._id.toString(),
+        articleId: draftArticle?._id?.toString() || null,
+        status: draftArticle?.status,
+      });
     } catch (draftErr) {
       console.error('[ADMIN_COMMUNITY_REPORTER][approve-draft-error]', draftErr?.message || draftErr);
       return res.status(500).json({ ok: false, message: 'Failed to create draft article from submission' });
@@ -176,7 +181,23 @@ router.post('/submissions/:id/decision', requireAdminAuth, requireInternalAdminK
       submission.rejectReason = 'Rejected';
     }
     await submission.save();
-    return res.json({ submission });
+
+    let draftArticle = null;
+    if (mappedStatus === 'APPROVED') {
+      try {
+        const result = await createDraftArticleFromSubmission(submission._id.toString());
+        draftArticle = result.article;
+        console.log('[ADMIN_COMMUNITY_REPORTER][decision-approve->draft]', {
+          submissionId: submission._id.toString(),
+          articleId: draftArticle?._id?.toString() || null,
+          status: draftArticle?.status,
+        });
+      } catch (draftErr) {
+        console.error('[ADMIN_COMMUNITY_REPORTER][decision-approve-draft-error]', draftErr?.message || draftErr);
+        return res.status(500).json({ ok: false, message: 'Failed to create draft article from submission' });
+      }
+    }
+    return res.json({ submission, draftArticle });
   } catch (e) {
     console.error('[ADMIN_COMMUNITY_REPORTER][decision-error]', e?.message || e);
     return res.status(500).json({ message: 'Server error updating submission' });

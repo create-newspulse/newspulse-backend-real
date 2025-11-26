@@ -41,7 +41,11 @@ function requireAdminAuth(req, res, next) {
       req.admin = { id: payload.sub, email: payload.email, role, name: payload.name };
       return next();
     } catch (e) {
-      console.warn('[ADMIN_AUTH][token-verify-failed]', { message: e?.message });
+      if (e && e.message === 'jwt expired') {
+        console.info('[ADMIN_AUTH][token] expired', { reason: 'access token expired' });
+      } else {
+        console.warn('[ADMIN_AUTH][token-verify-failed]', { message: e?.message });
+      }
       if (!legacyEmail) {
         return res.status(401).json({ ok: false, message: 'Unauthorized' });
       }

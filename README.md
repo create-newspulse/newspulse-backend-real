@@ -1,3 +1,13 @@
+## CommunityAI Configuration
+
+- `COMMUNITY_AI_URL`: Base URL for CommunityAI service (optional; info-only for logs/health).
+- `COMMUNITY_AI_API_KEY`: API key for CommunityAI service (optional; info-only for logs/health).
+- `OPENAI_API_KEY`: Required for OpenAI policy checks. If missing, the system logs a notice and gracefully falls back.
+
+Behavior:
+- Network errors or missing keys do not block submissions. We use a safe fallback (`ai_parse_error` flag, `status: PENDING_FOUNDER`).
+- Health endpoint: `/api/system/community-ai-health` reports readiness (env presence) and last invoke status.
+
 # NewsPulse Backend (Root)
 
 This is the consolidated production backend. The older nested directory `newspulse-backend-real-main/` remains for reference but should not be used for deployment.

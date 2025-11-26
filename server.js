@@ -17,6 +17,7 @@ const securityRoutes = require('./routes/security');
 const aiActivityLog = require('./routes/safezone/aiActivityLog');
 const systemHealth = require('./routes/system/health');
 const aiHealth = require('./routes/system/aiHealth');
+const communityAiHealth = require('./routes/system/communityAiHealth');
 const monitorHub = require('./routes/system/monitorHub');
 const aiTrainingInfo = require('./routes/system/aiTrainingInfo');
 const emailTest = require('./routes/system/emailTest');
@@ -491,6 +492,8 @@ app.use('/system/health', systemHealth); // supports rewrite from /admin-api/sys
 // AI health endpoints (API + non-/api alias)
 app.use('/api/system/ai-health', aiHealth);
 app.use('/system/ai-health', aiHealth);
+app.use('/api/system/community-ai-health', communityAiHealth);
+app.use('/system/community-ai-health', communityAiHealth);
 app.use('/api/system/monitor-hub', monitorHub);
 // Non-/api alias for monitor hub stats (frontend direct call compatibility)
 app.use('/system/monitor-hub', monitorHub);

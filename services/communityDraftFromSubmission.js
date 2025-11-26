@@ -47,6 +47,8 @@ async function createDraftArticleFromSubmission(submissionId, opts = {}) {
     category: submission.category || undefined,
     status: 'draft', // ensure draft status on creation
     language: submission.language || 'en',
+    source: 'community',
+    communityReportId: submission._id,
   });
 
   if (session) {

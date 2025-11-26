@@ -13,6 +13,9 @@ const newsSchema = new mongoose.Schema({
   status: { type: String, enum: ['draft','scheduled','published','archived','deleted'], default: 'draft', index: true },
   language: { type: String, default: 'en', index: true },
   scheduledAt: { type: Date },
+  // Provenance (optional)
+  source: { type: String, index: true }, // e.g. 'community', 'editor'
+  communityReportId: { type: mongoose.Schema.Types.ObjectId, ref: 'CommunitySubmission', index: true },
 });
 
 module.exports = mongoose.model('News', newsSchema);

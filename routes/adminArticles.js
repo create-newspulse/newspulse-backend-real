@@ -10,6 +10,7 @@ function buildFilter(query) {
     status,
     category,
     language,
+    source,
     search,
     from,
     to,
@@ -27,6 +28,9 @@ function buildFilter(query) {
   }
   if (language && language !== 'all') {
     filter.language = String(language).trim();
+  }
+  if (source && source !== 'all') {
+    filter.source = String(source).trim();
   }
   // date range filters apply to `date` field (creation/publish date in existing schema)
   const fromDate = from ? new Date(from) : null;
