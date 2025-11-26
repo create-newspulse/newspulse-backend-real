@@ -83,19 +83,28 @@ async function handleRequest(req, res) {
       try {
         const subject = 'News Pulse Admin OTP';
         const text = `Your News Pulse Admin OTP is: ${code}. It is valid for 10 minutes.`;
-        let method;
-        if (stubMode) {
-          await sendEmailStub({ to: lowerEmail, subject, text });
-          method = 'stub';
-        } else {
-          const transporter = getTransporter();
-          if (!transporter) throw new Error('Email transporter not configured');
-          const info = await sendMail({ to: lowerEmail, subject, text, html: `<p>${text}</p>` });
-          const accepted = Array.isArray(info?.accepted) ? info.accepted.map(v => (v || '').toLowerCase()) : [];
-          const acceptedOk = accepted.includes(lowerEmail);
-          if (!acceptedOk) throw new Error('SMTP did not accept recipient');
-          method = 'email';
-        }
+          let method;
+          if (stubMode) {
+            // In production, using stub is a misconfiguration - treat as error
+            if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
+              console.error('[EMAIL][stub-in-production] EMAIL_MODE=stub is enabled in production - aborting send');
+              throw new Error('Email stub mode enabled in production');
+            }
+            await sendEmailStub({ to: lowerEmail, subject, text });
+            method = 'stub';
+          } else {
+            // getTransporter will throw if configuration is invalid
+            const transporter = getTransporter();
+            if (!transporter) throw new Error('Email transporter not configured');
+            const info = await sendMail({ to: lowerEmail, subject, text, html: `<p>${text}</p>` });
+            const accepted = Array.isArray(info?.accepted) ? info.accepted.map(v => (v || '').toLowerCase()) : [];
+            const acceptedOk = accepted.includes(lowerEmail);
+            if (!acceptedOk) {
+              console.error('[EMAIL][send-not-accepted]', { to: lowerEmail, info });
+              throw new Error('SMTP did not accept recipient');
+            }
+            method = 'email';
+          }
         await ActivityLog.create({ type: 'otp_request', email: lowerEmail, meta: { method, expiresAt } });
         console.log('[EMAIL][send-ok]', { emailMasked: masked, expiresAt: expiresAt.toISOString(), method });
         const response = { ok: true, success: true, message: method === 'email' ? 'OTP sent to your email.' : 'OTP (stub) logged for this email.', emailMasked: masked };

@@ -4,6 +4,7 @@
 // If OPENAI_API_KEY missing or any failure occurs, we fallback gracefully.
 
 const openai = require('../lib/openai');
+const ActivityLog = require('../models/ActivityLog');
 const { computeCommunityPriority } = require('./communityPriority');
 const MODEL_NAME = process.env.COMMUNITY_AI_MODEL || 'gpt-4.1-mini';
 
@@ -41,7 +42,12 @@ async function runCommunityAiChecks(submission) {
       parsed = fallback();
     }
   } catch (e) {
-    console.warn('[CommunityAI][invoke-failed]', e?.message || e);
+    // Log with more context (submission id + stack when available)
+    try {
+      console.error('[CommunityAI][invoke-failed]', { id: submission._id?.toString(), message: e?.message || e, stack: e?.stack });
+      // non-blocking activity log record for observability
+      try { ActivityLog.create({ type: 'community_ai_fail', meta: { submissionId: submission._id?.toString(), error: e?.message || String(e) } }); } catch (_) {}
+    } catch (_) {}
     parsed = fallback();
   }
 
