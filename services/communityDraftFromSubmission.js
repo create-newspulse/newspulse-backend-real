@@ -38,6 +38,8 @@ async function createDraftArticleFromSubmission(submissionId, opts = {}) {
 
   const title = submission.headline || 'Community Report';
   const description = (submission.body || '').slice(0, 200) || 'Community Reporter story';
+  const language = submission.language || submission.lang || 'en';
+  const date = submission.createdAt || new Date();
 
   const article = new News({
     title,
@@ -46,7 +48,8 @@ async function createDraftArticleFromSubmission(submissionId, opts = {}) {
     tags: [],
     category: submission.category || undefined,
     status: 'draft', // ensure draft status on creation
-    language: submission.language || 'en',
+    language,
+    date,
     source: 'community',
     communityReportId: submission._id,
   });

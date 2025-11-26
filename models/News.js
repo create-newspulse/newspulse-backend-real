@@ -16,6 +16,14 @@ const newsSchema = new mongoose.Schema({
   // Provenance (optional)
   source: { type: String, index: true }, // e.g. 'community', 'editor'
   communityReportId: { type: mongoose.Schema.Types.ObjectId, ref: 'CommunitySubmission', index: true },
-});
+}, { timestamps: true });
+
+// Virtual alias so UI can use `body` consistently
+newsSchema.virtual('body')
+  .get(function() { return this.content; })
+  .set(function(v) { this.content = v; });
+
+newsSchema.set('toJSON', { virtuals: true });
+newsSchema.set('toObject', { virtuals: true });
 
 module.exports = mongoose.model('News', newsSchema);

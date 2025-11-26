@@ -140,3 +140,28 @@ router.post('/articles', requireAdminAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+// GET /api/admin/articles/:id -> returns article details, and if source=community with link, also includes communityReport
+router.get('/articles/:id', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id) return res.status(400).json({ ok: false, message: 'Invalid article id' });
+    const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id);
+    if (!isObjectIdLike) return res.status(400).json({ ok: false, message: 'Invalid article id' });
+    const article = await News.findById(id).lean();
+    if (!article) return res.status(404).json({ ok: false, message: 'Article not found' });
+
+    let communityReport = null;
+    if (article.source === 'community' && article.communityReportId) {
+      try {
+        const CommunitySubmission = require('../models/CommunitySubmission');
+        communityReport = await CommunitySubmission.findById(article.communityReportId).lean();
+      } catch (_) {}
+    }
+
+    return res.json({ ok: true, success: true, article, communityReport });
+  } catch (e) {
+    console.error('[ADMIN_ARTICLES][detail-error]', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load article details' });
+  }
+});
