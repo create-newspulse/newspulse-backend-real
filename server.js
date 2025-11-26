@@ -32,6 +32,7 @@ const adminCommunityRoutes = require('./routes/adminCommunity');
 const adminCommunityReporterRoutes = require('./routes/adminCommunityReporter');
 const communityReporterRoutes = require('./routes/communityReporter');
 const adminArticlesRouter = require('./routes/adminArticles');
+const adminAssistRouter = require('./routes/adminAssist');
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -528,6 +529,8 @@ app.use('/admin/community-reporter', adminCommunityReporterRoutes);
 // Mount under both /api/admin and /admin-api so SPA aliases work
 app.use('/api/admin', adminArticlesRouter);
 app.use('/admin-api', adminArticlesRouter);
+// Admin Assist AI suggestions for editorial workflow
+app.use('/admin-api/assist', adminAssistRouter);
 
 // --- Compatibility alias (non-/api) for local dev code accidentally hitting /admin-auth/session
 // Provides a lightweight session probe identical to /api/admin-auth/session so CORS preflight succeeds.
