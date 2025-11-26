@@ -33,6 +33,12 @@ const adminCommunityReporterRoutes = require('./routes/adminCommunityReporter');
 const communityReporterRoutes = require('./routes/communityReporter');
 const adminArticlesRouter = require('./routes/adminArticles');
 const adminAssistRouter = require('./routes/adminAssist');
+// New public routers for Admin Panel compatibility
+const articlesCrudRoutes = require('./routes/articles.routes');
+const systemStubRoutes = require('./routes/system.routes');
+// Public API routers for articles and assist suggestions
+const articlesRoutes = require('./routes/articles');
+const assistRoutes = require('./routes/assist');
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -419,7 +425,7 @@ app.get('/api/articles', async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
-    const sortRaw = (req.query.sort || '-date').toString();
+    const sortRaw = (req.query.sort || '-createdAt').toString();
     const sort = {};
     sortRaw.split(',').forEach(part => {
       part = part.trim();
@@ -431,9 +437,9 @@ app.get('/api/articles', async (req, res) => {
       News.find({}).sort(sort).skip(skip).limit(limit).lean(),
       News.countDocuments({}),
     ]);
-    return res.json({ ok: true, page, limit, total, items });
+    return res.json({ ok: true, success: true, items, total, page, limit });
   } catch (e) {
-    return res.status(500).json({ ok: false, message: 'Failed to load articles' });
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to load articles' });
   }
 });
 
@@ -526,11 +532,40 @@ app.use('/api/admin/community-reporter', adminCommunityReporterRoutes);
 // Non-/api alias consumed by admin panel: /admin/community-reporter/submissions
 app.use('/admin/community-reporter', adminCommunityReporterRoutes);
 // Admin Articles management endpoints (create + list + detail)
-// Mount under both /api/admin and /admin-api so SPA aliases work
+// Mount under /api (Vite proxy maps /admin-api/* -> /api/*), also keep /admin-api for direct calls
+app.use('/api', adminArticlesRouter);
 app.use('/api/admin', adminArticlesRouter);
 app.use('/admin-api', adminArticlesRouter);
-// Admin Assist AI suggestions for editorial workflow
+// Admin Assist AI endpoints (mounted under /api and /admin-api for compatibility)
+// Keep explicit /admin-api/assist mount for admin panel compatibility
 app.use('/admin-api/assist', adminAssistRouter);
+
+// Simple Assist suggestion stub (compatibility) — returns minimal shape
+app.post('/api/assist/suggest/v2', (req, res) => {
+  const { title = '', slug = '', summary = '' } = req.body || {};
+  return res.json({ ok: true, success: true, suggestions: { title, slug, summary } });
+});
+
+// Monitor Hub health alias with required shape
+app.get('/api/system/monitor-hub', (req, res, next) => {
+  // If another handler already sent response, skip
+  if (res.headersSent) return next();
+  return res.json({ ok: true, success: true, status: 'healthy', service: 'api', timestamp: new Date().toISOString() });
+});
+// Handle accidental double /api prefix from frontend: /api/api/system/monitor-hub
+app.get('/api/api/system/monitor-hub', (req, res) => {
+  return res.json({ ok: true, success: true, status: 'healthy', service: 'api', timestamp: new Date().toISOString(), alias: true });
+});
+// Public-facing Articles API (unprotected) expected by admin panel proxy
+// Ensure CRUD routes are available for Admin Panel
+app.use('/api', articlesCrudRoutes);
+// Keep legacy articles router as well for compatibility
+app.use('/api', articlesRoutes);
+
+// Public Assist suggestions API (stub) and Monitor Hub alias
+app.use('/api', systemStubRoutes);
+// Keep existing assist routes for compatibility
+app.use('/api', assistRoutes);
 
 // --- Compatibility alias (non-/api) for local dev code accidentally hitting /admin-auth/session
 // Provides a lightweight session probe identical to /api/admin-auth/session so CORS preflight succeeds.
