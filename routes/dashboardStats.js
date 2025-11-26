@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const News = require('../models/News');
 const User = require('../models/User');
 const ActivityLog = require('../models/ActivityLog');
@@ -11,6 +12,16 @@ const router = express.Router();
 
 async function buildStats() {
   try {
+    // If DB is not connected (e.g., local dev with MONGO_URI=skip), return zeros fast
+    if (!(mongoose.connection && mongoose.connection.readyState === 1)) {
+      return {
+        totalArticles: 0,
+        totalUsers: 0,
+        totalViews: 0,
+        recentActivity: [],
+        timestamp: new Date().toISOString(),
+      };
+    }
     const [totalArticles, totalUsers, viewsAgg, recentActivity] = await Promise.all([
       News.countDocuments({}),
       User.countDocuments({}),

@@ -350,8 +350,10 @@ app.get('/system/ai-training-info', (_req, res) => {
   res.json({ success: true, status: 'online', lastUpdated: new Date().toISOString() });
 });
 
-// Dashboard stats routes (root-level, no /api prefix)
+// Dashboard stats routes
+// Mount at root AND /api so frontend dev proxy /admin-api -> /api works in all envs
 app.use('/', dashboardStats);
+app.use('/api', dashboardStats);
 // Aliases for admin stats endpoints expected by frontend
 app.get('/admin/stats', async (req, res) => {
   try {
