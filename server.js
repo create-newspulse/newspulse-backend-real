@@ -36,9 +36,6 @@ const adminAssistRouter = require('./routes/adminAssist');
 // New public routers for Admin Panel compatibility
 const articlesCrudRoutes = require('./routes/articles.routes');
 const systemStubRoutes = require('./routes/system.routes');
-// Public API routers for articles and assist suggestions
-const articlesRoutes = require('./routes/articles');
-const assistRoutes = require('./routes/assist');
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -540,12 +537,6 @@ app.use('/admin-api', adminArticlesRouter);
 // Keep explicit /admin-api/assist mount for admin panel compatibility
 app.use('/admin-api/assist', adminAssistRouter);
 
-// Simple Assist suggestion stub (compatibility) — returns minimal shape
-app.post('/api/assist/suggest/v2', (req, res) => {
-  const { title = '', slug = '', summary = '' } = req.body || {};
-  return res.json({ ok: true, success: true, suggestions: { title, slug, summary } });
-});
-
 // Monitor Hub health alias with required shape
 app.get('/api/system/monitor-hub', (req, res, next) => {
   // If another handler already sent response, skip
@@ -559,13 +550,9 @@ app.get('/api/api/system/monitor-hub', (req, res) => {
 // Public-facing Articles API (unprotected) expected by admin panel proxy
 // Ensure CRUD routes are available for Admin Panel
 app.use('/api', articlesCrudRoutes);
-// Keep legacy articles router as well for compatibility
-app.use('/api', articlesRoutes);
 
 // Public Assist suggestions API (stub) and Monitor Hub alias
 app.use('/api', systemStubRoutes);
-// Keep existing assist routes for compatibility
-app.use('/api', assistRoutes);
 
 // --- Compatibility alias (non-/api) for local dev code accidentally hitting /admin-auth/session
 // Provides a lightweight session probe identical to /api/admin-auth/session so CORS preflight succeeds.
