@@ -148,8 +148,9 @@ router.get('/articles/:id', requireAdminAuth, async (req, res) => {
     if (!id) return res.status(400).json({ ok: false, message: 'Invalid article id' });
     const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id);
     if (!isObjectIdLike) return res.status(400).json({ ok: false, message: 'Invalid article id' });
-    const article = await News.findById(id).lean();
-    if (!article) return res.status(404).json({ ok: false, message: 'Article not found' });
+    const doc = await News.findById(id);
+    if (!doc) return res.status(404).json({ ok: false, message: 'Article not found' });
+    const article = doc.toJSON(); // include virtuals (e.g. body)
 
     let communityReport = null;
     if (article.source === 'community' && article.communityReportId) {
@@ -158,6 +159,16 @@ router.get('/articles/:id', requireAdminAuth, async (req, res) => {
         communityReport = await CommunitySubmission.findById(article.communityReportId).lean();
       } catch (_) {}
     }
+
+    try {
+      console.log('[ADMIN][ARTICLE_EDIT] Returning article', {
+        id: article._id?.toString?.() || article._id,
+        hasBody: !!article.body,
+        hasContent: !!article.content,
+        language: article.language,
+        source: article.source,
+      });
+    } catch (_) {}
 
     return res.json({ ok: true, success: true, article, communityReport });
   } catch (e) {
