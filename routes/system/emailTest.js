@@ -19,7 +19,17 @@ router.get('/', (req, res) => {
     pass: !!SMTP_PASS,
     from: !!(EMAIL_FROM || SMTP_FROM || SMTP_USER),
   };
-  res.json({ ok: true, config, transporterReady: !!getTransporter() });
+  // getTransporter may throw if configuration is missing (intentional)
+  let transporterReady = false;
+  let transporterError = null;
+  try {
+    const t = getTransporter();
+    transporterReady = !!t;
+  } catch (err) {
+    transporterReady = false;
+    transporterError = err?.message || String(err);
+  }
+  res.json({ ok: true, config, transporterReady, transporterError });
 });
 
 // POST /system/email-test/send { to?, subject?, text?, html? }
