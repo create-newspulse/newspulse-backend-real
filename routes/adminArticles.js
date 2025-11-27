@@ -32,16 +32,16 @@ function buildFilter(query) {
   if (source && source !== 'all') {
     filter.source = String(source).trim();
   }
-  // date range filters apply to `date` field (creation/publish date in existing schema)
+  // createdAt range filters per requirement
   const fromDate = from ? new Date(from) : null;
   const toDate = to ? new Date(to) : null;
   if (fromDate && !isNaN(fromDate)) {
-    filter.date = filter.date || {};
-    filter.date.$gte = fromDate;
+    filter.createdAt = filter.createdAt || {};
+    filter.createdAt.$gte = fromDate;
   }
   if (toDate && !isNaN(toDate)) {
-    filter.date = filter.date || {};
-    filter.date.$lte = toDate;
+    filter.createdAt = filter.createdAt || {};
+    filter.createdAt.$lte = toDate;
   }
   if (search) {
     const term = String(search).trim();
@@ -67,7 +67,7 @@ router.get('/articles', requireAdminAuth, async (req, res) => {
 
     const filter = buildFilter(req.query);
 
-    const sortRaw = (req.query.sort || '-date').toString();
+    const sortRaw = (req.query.sort || '-createdAt').toString();
     const sort = {};
     sortRaw.split(',').forEach(part => {
       part = part.trim();
@@ -134,8 +134,9 @@ router.post('/articles', requireAdminAuth, async (req, res) => {
 
     return res.status(201).json({ ok: true, success: true, article });
   } catch (e) {
-    console.error('[ADMIN_ARTICLES][create-error]', e?.message || e);
-    return res.status(500).json({ ok: false, success: false, message: 'Failed to create article' });
+    const message = e?.message || 'Failed to create article';
+    console.error('[ADMIN_ARTICLES][create-error]', message);
+    return res.status(400).json({ ok: false, success: false, message });
   }
 });
 
