@@ -19,74 +19,32 @@ router.post('/submissions', async (req, res) => {
       mediaLink,
     } = req.body || {};
 
-    const finalName = (name || userName || '').trim();
-    const finalBody = (story || body || '').trim();
-    const finalHeadline = (headline || '').trim();
-    const finalEmail = (email || '').trim().toLowerCase();
-    const finalCategory = category ? String(category).trim() : undefined;
-    const finalLocation = location ? String(location).trim() : undefined;
+      router.post('/submissions', async (req, res) => {
+        try {
+          const { name, email, city, category, headline, story, mediaUrl } = req.body || {};
 
-    if (!finalName || !finalEmail || !finalHeadline || !finalBody || !finalCategory) {
-      return res.status(400).json({ success: false, message: 'Missing required fields' });
-    }
+          if (!name || !email || !headline || !story) {
+            return res.status(400).json({ ok: false, success: false, message: 'Missing required fields' });
+          }
 
-    // Pre-AI defaults
-    let aiHeadline = finalHeadline;
-    let aiBody = finalBody;
-    let riskScore = 0;
-    let flags = [];
-    let status = 'NEW';
+          const submission = await CommunitySubmission.create({
+            name: String(name).trim(),
+            email: String(email).trim().toLowerCase(),
+            // map city -> location in existing schema
+            location: city ? String(city).trim() : undefined,
+            category: category ? String(category).trim() : undefined,
+            headline: String(headline).trim(),
+            body: String(story).trim(),
+            mediaUrl: mediaUrl ? String(mediaUrl).trim() : undefined,
+            status: 'NEW',
+          });
 
-    const priority = computeCommunityPriority({
-      category: finalCategory,
-      body: finalBody,
-      location: finalLocation,
-      riskScore,
-      flags,
-    });
+          return res.status(201).json({ ok: true, success: true, id: submission._id });
+        } catch (err) {
+          console.error('Error creating community submission', err?.message || err);
+          return res.status(500).json({ ok: false, success: false, message: 'Internal server error' });
+        }
+      });
 
-    // Create initial submission (NEW)
-    const submission = await CommunitySubmission.create({
+      module.exports = router;
       userName: finalName,
-      email: finalEmail,
-      location: finalLocation,
-      category: finalCategory,
-      headline: finalHeadline,
-      body: finalBody,
-      mediaLink: mediaLink ? String(mediaLink).trim() : undefined,
-      aiHeadline,
-      aiBody,
-      riskScore,
-      flags,
-      status,
-      priority,
-    });
-    // AI processing - never throw outward
-    try {
-      // Only attempt if API key exists
-      const hasKey = process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY_NEWS_PULSE;
-      if (hasKey && runCommunityAiChecks) {
-        await runCommunityAiChecks(submission);
-      } else {
-        // No key -> manual review path
-        submission.status = 'PENDING_FOUNDER';
-        await submission.save();
-      }
-    } catch (err) {
-      console.error('[CommunityReporter] AI pipeline failed, fallback engaged:', err?.message || err);
-      submission.aiHeadline = finalHeadline;
-      submission.aiBody = finalBody;
-      submission.riskScore = 0;
-      submission.flags = [];
-      submission.status = 'PENDING_FOUNDER';
-      try { await submission.save(); } catch (_) {}
-    }
-
-    return res.status(201).json({ success: true, submission });
-  } catch (e) {
-    console.error('[CommunityReporter] Failed to create submission', e?.message || e);
-    return res.status(500).json({ success: false, message: 'Server error creating submission' });
-  }
-});
-
-module.exports = router;
