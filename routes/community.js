@@ -27,6 +27,13 @@ router.post('/submissions', async (req, res) => {
             return res.status(400).json({ ok: false, success: false, message: 'Missing required fields' });
           }
 
+          // Graceful handling when MongoDB is unavailable
+          const isDbConnected = require('mongoose').connection?.readyState === 1;
+          if (!isDbConnected) {
+            console.warn('[Community] DB unavailable; accepting submission without persistence');
+            return res.status(503).json({ ok: false, success: false, message: 'Service temporarily unavailable. Please try again later.' });
+          }
+
           const submission = await CommunitySubmission.create({
             name: String(name).trim(),
             email: String(email).trim().toLowerCase(),
