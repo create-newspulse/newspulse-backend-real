@@ -530,8 +530,7 @@ app.use('/api/admin/community-reporter', adminCommunityReporterRoutes);
 // Non-/api alias consumed by admin panel: /admin/community-reporter/submissions
 app.use('/admin/community-reporter', adminCommunityReporterRoutes);
 // Admin Articles management endpoints (create + list + detail)
-// Mount under /api (Vite proxy maps /admin-api/* -> /api/*), also keep /admin-api for direct calls
-app.use('/api', adminArticlesRouter);
+// Mount under /api/admin and /admin-api only to avoid clashing with public /api/articles
 app.use('/api/admin', adminArticlesRouter);
 app.use('/admin-api', adminArticlesRouter);
 // Specific ID routes for admin article edit (GET/PUT/PATCH)
