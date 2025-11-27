@@ -55,7 +55,15 @@ router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req
     if (status && status !== 'all') {
       const normalizedStatus = String(status).trim().toLowerCase();
       if (allowedStatuses.has(normalizedStatus)) {
-        filter.status = normalizedStatus;
+        // Map external status to internal storage values
+        if (normalizedStatus === 'pending') filter.status = 'NEW';
+        else if (normalizedStatus === 'approved') filter.status = 'APPROVED';
+        else if (normalizedStatus === 'rejected') filter.status = 'REJECTED';
+        else if (normalizedStatus === 'trash') {
+          // Use archived flag for trash view
+          delete filter.isArchived;
+          filter.isArchived = true;
+        }
       }
     }
 
@@ -87,8 +95,11 @@ router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req
     const total = await CommunitySubmission.countDocuments(filter);
 
     // Query with projection
-    const raw = await CommunitySubmission
-      .find(filter, '_id name email location category headline body status priority linkedArticleId aiHeadline aiBody riskScore flags createdAt updatedAt')
+      const raw = await CommunitySubmission
+        .find(
+          filter,
+          '_id name email city location category headline body status priority linkedArticleId aiHeadline aiBody riskScore flags createdAt updatedAt'
+        )
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limitNum)
@@ -104,7 +115,12 @@ router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req
       category: r.category,
       headline: r.headline,
       body: r.body,
-      status: r.status,
+      status: (function mapStatus(s){
+        if (s === 'NEW') return 'pending';
+        if (s === 'APPROVED') return 'approved';
+        if (s === 'REJECTED') return 'rejected';
+        return s;
+      })(r.status),
       priority: r.priority,
       linkedArticleId: r.linkedArticleId || null,
       aiHeadline: r.aiHeadline,
@@ -119,6 +135,8 @@ router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req
       ok: true,
       success: true,
       items,
+      submissions: items, // legacy key expected by some clients
+      data: items, // extra alias for older callers
       page: pageNum,
       limit: limitNum,
       total,
