@@ -45,29 +45,87 @@ function externalStatus(internal) {
 
 router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req, res) => {
   try {
-    console.log('[ADMIN_COMMUNITY_REPORTER][hit]', { adminId: req.admin?.id, role: req.admin?.role });
+    const { status, priority, search, page, limit } = req.query || {};
+
+    // Base filter (exclude archived unless explicitly trash)
+    const filter = { isArchived: { $ne: true } };
+
+    // Status filter: if provided and not 'all'
+    const allowedStatuses = new Set(['pending', 'approved', 'rejected', 'trash']);
+    if (status && status !== 'all') {
+      const normalizedStatus = String(status).trim().toLowerCase();
+      if (allowedStatuses.has(normalizedStatus)) {
+        filter.status = normalizedStatus;
+      }
+    }
+
+    // Priority filter
+    if (priority && priority !== 'all') {
+      const normalizedPriority = String(priority).trim().toUpperCase();
+      const allowedPriorities = new Set(['FOUNDER_REVIEW', 'EDITOR_REVIEW', 'LOW_PRIORITY']);
+      if (allowedPriorities.has(normalizedPriority)) {
+        filter.priority = normalizedPriority;
+      }
+    }
+
+    // Search filter (headline/body case-insensitive regex)
+    if (search && String(search).trim()) {
+      const term = String(search).trim();
+      const regex = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [
+        { headline: regex },
+        { body: regex },
+      ];
+    }
+
+    // Pagination
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const skip = (pageNum - 1) * limitNum;
+
+    // Total count (without pagination)
+    const total = await CommunitySubmission.countDocuments(filter);
+
+    // Query with projection
     const raw = await CommunitySubmission
-      .find({ isArchived: { $ne: true } }, '_id name email location category headline status aiHeadline aiBody riskScore flags createdAt')
+      .find(filter, '_id name email location category headline body status priority linkedArticleId aiHeadline aiBody riskScore flags createdAt updatedAt')
       .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum)
       .lean();
+
     const items = raw.map(r => ({
       id: r._id.toString(),
+      _id: r._id,
       name: r.name,
+      userName: r.name, // alias for UI expectations
       email: r.email,
       location: r.location,
       category: r.category,
       headline: r.headline,
+      body: r.body,
+      status: r.status,
+      priority: r.priority,
+      linkedArticleId: r.linkedArticleId || null,
       aiHeadline: r.aiHeadline,
       aiBody: r.aiBody,
       riskScore: r.riskScore,
       flags: Array.isArray(r.flags) ? r.flags : [],
-      status: externalStatus(r.status),
       createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
     }));
-    return res.status(200).json({ submissions: items });
+
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      items,
+      page: pageNum,
+      limit: limitNum,
+      total,
+    });
   } catch (e) {
     console.error('[ADMIN_COMMUNITY_REPORTER][list-error]', e?.message || e);
-    return res.status(500).json({ success: false, message: 'Failed to load submissions' });
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to load submissions' });
   }
 });
 

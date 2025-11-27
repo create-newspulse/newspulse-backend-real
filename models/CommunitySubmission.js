@@ -5,8 +5,9 @@ const mongoose = require('mongoose');
 // forward compatibility but expose a virtual "story" field and map
 // simplified statuses via the API layer. (pending -> NEW, approved -> APPROVED, rejected -> REJECTED)
 const allowedCategories = ['regional', 'youth', 'campus', 'civic', 'tip', 'other'];
-// Phase 2 status enum tightened (TIP_ONLY removed per new spec)
-const statusValues = ['NEW', 'AI_REVIEWED', 'PENDING_FOUNDER', 'APPROVED', 'REJECTED'];
+// Simplified Phase 2 non-AI workflow statuses
+// Documents with legacy values (NEW, APPROVED, REJECTED, etc.) will be normalized at the API layer.
+const statusValues = ['pending', 'approved', 'rejected', 'trash'];
 const priorityValues = ['FOUNDER_REVIEW', 'EDITOR_REVIEW', 'LOW_PRIORITY'];
 const contributorPrefs = ['full_name', 'anonymous', 'group'];
 
@@ -18,7 +19,7 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   headline: { type: String, required: true },
   // Underlying body field (Phase 1 "story" maps here). Length restriction relaxed for Phase 1.
   body: { type: String, required: true },
-  status: { type: String, enum: statusValues, default: 'NEW' },
+  status: { type: String, enum: statusValues, default: 'pending', index: true },
   rejectReason: { type: String },
   isArchived: { type: Boolean, default: false, index: true },
   archivedAt: { type: Date },
@@ -26,7 +27,7 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   // Phase 2 AI & policy layer stub fields
   aiHeadline: { type: String }, // mirrors original headline (Phase 2 stub)
   aiBody: { type: String }, // mirrors original body (Phase 2 stub)
-  aiTitle: { type: String }, // legacy/backward compatibility (will be deprecated)
+  aiTitle: { type: String }, // explicit AI title field per Phase 2
   riskScore: { type: Number, default: 0 },
   flags: { type: [String], default: [] },
   priority: { type: String, enum: priorityValues, default: 'EDITOR_REVIEW', index: true },

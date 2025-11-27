@@ -61,7 +61,6 @@ router.post('/submissions', async (req, res) => {
       status,
       priority,
     });
-
     // AI processing - never throw outward
     try {
       // Only attempt if API key exists
