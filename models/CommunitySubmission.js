@@ -5,21 +5,22 @@ const mongoose = require('mongoose');
 // forward compatibility but expose a virtual "story" field and map
 // simplified statuses via the API layer. (pending -> NEW, approved -> APPROVED, rejected -> REJECTED)
 const allowedCategories = ['regional', 'youth', 'campus', 'civic', 'tip', 'other'];
-// Simplified Phase 2 non-AI workflow statuses
-// Documents with legacy values (NEW, APPROVED, REJECTED, etc.) will be normalized at the API layer.
-const statusValues = ['pending', 'approved', 'rejected', 'trash'];
+// Phase-1 minimal workflow statuses used by public community reporter form
+const statusValues = ['NEW', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'];
 const priorityValues = ['FOUNDER_REVIEW', 'EDITOR_REVIEW', 'LOW_PRIORITY'];
 const contributorPrefs = ['full_name', 'anonymous', 'group'];
 
 const CommunitySubmissionSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   email: { type: String, required: true, trim: true, lowercase: true },
+  // Keep both city and location for backward compatibility with prior form versions
+  city: { type: String, trim: true },
   location: { type: String, trim: true },
   category: { type: String, enum: allowedCategories },
   headline: { type: String, required: true },
   // Underlying body field (Phase 1 "story" maps here). Length restriction relaxed for Phase 1.
   body: { type: String, required: true },
-  status: { type: String, enum: statusValues, default: 'pending', index: true },
+  status: { type: String, enum: statusValues, default: 'NEW', index: true },
   rejectReason: { type: String },
   mediaUrl: { type: String, trim: true },
   isArchived: { type: Boolean, default: false, index: true },
