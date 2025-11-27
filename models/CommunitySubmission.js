@@ -15,12 +15,13 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   email: { type: String, required: true, trim: true, lowercase: true },
   location: { type: String, trim: true },
-  category: { type: String, required: true, enum: allowedCategories },
+  category: { type: String, enum: allowedCategories },
   headline: { type: String, required: true },
   // Underlying body field (Phase 1 "story" maps here). Length restriction relaxed for Phase 1.
   body: { type: String, required: true },
   status: { type: String, enum: statusValues, default: 'pending', index: true },
   rejectReason: { type: String },
+  mediaUrl: { type: String, trim: true },
   isArchived: { type: Boolean, default: false, index: true },
   archivedAt: { type: Date },
   // Future / Phase 2 fields
