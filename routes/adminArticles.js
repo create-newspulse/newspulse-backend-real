@@ -177,3 +177,87 @@ router.get('/articles/:id', requireAdminAuth, async (req, res) => {
     return res.status(500).json({ ok: false, message: 'Failed to load article details' });
   }
 });
+
+// PUT /api/admin/articles/:id -> update article
+router.put('/articles/:id', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id) return res.status(400).json({ ok: false, success: false, message: 'Invalid article id' });
+    const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id);
+    if (!isObjectIdLike) return res.status(400).json({ ok: false, success: false, message: 'Invalid article id' });
+
+    const body = req.body || {};
+    const allowedStatuses = new Set(['draft','scheduled','published','archived','deleted']);
+
+    const update = {};
+    if (body.title !== undefined) update.title = body.title;
+    if (body.description !== undefined || body.summary !== undefined) update.description = body.description ?? body.summary ?? '';
+    if (body.content !== undefined || body.body !== undefined) update.content = body.content ?? body.body ?? '';
+    if (body.category !== undefined) update.category = body.category;
+    if (body.language !== undefined) update.language = body.language || 'en';
+    if (body.tags !== undefined) {
+      const tags = Array.isArray(body.tags) ? body.tags : (body.tags ? String(body.tags).split(',').map(t => t.trim()).filter(Boolean) : []);
+      update.tags = tags;
+    }
+    if (body.status !== undefined) update.status = allowedStatuses.has(body.status) ? body.status : 'draft';
+    if (body.scheduledAt !== undefined) {
+      const dt = new Date(body.scheduledAt);
+      update.scheduledAt = isNaN(dt) ? undefined : dt;
+    }
+    if (body.publishAt !== undefined) {
+      const dt = new Date(body.publishAt);
+      update.publishAt = isNaN(dt) ? undefined : dt;
+    }
+    if (body.slug !== undefined) update.slug = body.slug;
+    if (body.imageURL !== undefined) update.imageURL = body.imageURL;
+
+    const doc = await News.findByIdAndUpdate(id, update, { new: true });
+    if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
+    return res.json({ ok: true, success: true, article: doc });
+  } catch (e) {
+    console.error('[ADMIN_ARTICLES][update-error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to update article' });
+  }
+});
+
+// PATCH /api/admin/articles/:id -> partial update (alias to PUT logic)
+router.patch('/articles/:id', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id) return res.status(400).json({ ok: false, success: false, message: 'Invalid article id' });
+    const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id);
+    if (!isObjectIdLike) return res.status(400).json({ ok: false, success: false, message: 'Invalid article id' });
+
+    const body = req.body || {};
+    const allowedStatuses = new Set(['draft','scheduled','published','archived','deleted']);
+
+    const update = {};
+    if (body.title !== undefined) update.title = body.title;
+    if (body.description !== undefined || body.summary !== undefined) update.description = body.description ?? body.summary ?? '';
+    if (body.content !== undefined || body.body !== undefined) update.content = body.content ?? body.body ?? '';
+    if (body.category !== undefined) update.category = body.category;
+    if (body.language !== undefined) update.language = body.language || 'en';
+    if (body.tags !== undefined) {
+      const tags = Array.isArray(body.tags) ? body.tags : (body.tags ? String(body.tags).split(',').map(t => t.trim()).filter(Boolean) : []);
+      update.tags = tags;
+    }
+    if (body.status !== undefined) update.status = allowedStatuses.has(body.status) ? body.status : 'draft';
+    if (body.scheduledAt !== undefined) {
+      const dt = new Date(body.scheduledAt);
+      update.scheduledAt = isNaN(dt) ? undefined : dt;
+    }
+    if (body.publishAt !== undefined) {
+      const dt = new Date(body.publishAt);
+      update.publishAt = isNaN(dt) ? undefined : dt;
+    }
+    if (body.slug !== undefined) update.slug = body.slug;
+    if (body.imageURL !== undefined) update.imageURL = body.imageURL;
+
+    const doc = await News.findByIdAndUpdate(id, update, { new: true });
+    if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
+    return res.json({ ok: true, success: true, article: doc });
+  } catch (e) {
+    console.error('[ADMIN_ARTICLES][patch-error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to update article' });
+  }
+});
