@@ -32,6 +32,7 @@ const adminCommunityRoutes = require('./routes/adminCommunity');
 const adminCommunityReporterRoutes = require('./routes/adminCommunityReporter');
 const communityReporterRoutes = require('./routes/communityReporter');
 const adminArticlesRouter = require('./routes/adminArticles');
+const adminArticleIdRouter = require('./routes/admin/articles');
 const adminAssistRouter = require('./routes/adminAssist');
 // New public routers for Admin Panel compatibility
 const articlesCrudRoutes = require('./routes/articles.routes');
@@ -533,6 +534,9 @@ app.use('/admin/community-reporter', adminCommunityReporterRoutes);
 app.use('/api', adminArticlesRouter);
 app.use('/api/admin', adminArticlesRouter);
 app.use('/admin-api', adminArticlesRouter);
+// Specific ID routes for admin article edit (GET/PUT/PATCH)
+app.use('/api/admin/articles', adminArticleIdRouter);
+app.use('/admin-api/articles', adminArticleIdRouter);
 // Admin Assist AI endpoints (mounted under /api and /admin-api for compatibility)
 // Keep explicit /admin-api/assist mount for admin panel compatibility
 app.use('/admin-api/assist', adminAssistRouter);
