@@ -6,7 +6,7 @@ const mongoose = require('mongoose');
 // simplified statuses via the API layer. (pending -> NEW, approved -> APPROVED, rejected -> REJECTED)
 const allowedCategories = ['regional', 'youth', 'campus', 'civic', 'tip', 'other'];
 // Phase-1 minimal workflow statuses used by public community reporter form
-const statusValues = ['NEW', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'];
+const statusValues = ['pending', 'new', 'NEW', 'AI_REVIEWED', 'PENDING_FOUNDER', 'APPROVED', 'REJECTED'];
 const priorityValues = ['FOUNDER_REVIEW', 'EDITOR_REVIEW', 'LOW_PRIORITY'];
 const contributorPrefs = ['full_name', 'anonymous', 'group'];
 
@@ -19,6 +19,9 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   reporterLocation: { type: String, required: true, trim: true },
   reporterAgeGroup: { type: String, required: true, enum: ['Under 18', '18–24', '25–40', '41+'] },
   acceptedPolicy: { type: Boolean, default: false },
+  // Public form fields (non-critical optional)
+  ageGroup: { type: String, trim: true },
+  acceptTerms: { type: Boolean, default: false },
   // Keep both city and location for backward compatibility with prior form versions
   city: { type: String, trim: true },
   location: { type: String, trim: true },
@@ -26,7 +29,7 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   headline: { type: String, required: true },
   // Underlying body field (Phase 1 "story" maps here). Length restriction relaxed for Phase 1.
   body: { type: String, required: true },
-  status: { type: String, enum: statusValues, default: 'NEW', index: true },
+  status: { type: String, enum: statusValues, default: 'pending', index: true },
   rejectReason: { type: String },
   mediaUrl: { type: String, trim: true },
   isArchived: { type: Boolean, default: false, index: true },
