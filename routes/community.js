@@ -1,67 +1,123 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const { runCommunityAiReview } = require('../services/communityAiReview');
 const router = express.Router();
 
-// Phase-1 minimal public submission endpoint (POST /api/community/submissions)
+// Phase-1 public submission endpoint (POST /api/community/submissions)
 router.post('/submissions', async (req, res) => {
-  console.log('[CommunitySubmission] incoming body:', req.body);
   try {
     const b = req.body || {};
-    const reporterName = (b.reporterName || b.name || '').toString().trim();
-    const reporterEmail = (b.reporterEmail || b.email || '').toString().trim().toLowerCase();
-    const storyText = (b.story || b.storyText || b.content || b.body || '').toString().trim();
-    const category = (b.category || '').toString().trim();
+    const userName = (b.userName || b.reporterName || b.name || '').toString().trim();
+    const email = (b.email || b.reporterEmail || '').toString().trim().toLowerCase();
     const headline = (b.headline || '').toString().trim();
+    const body = (b.body || b.story || b.storyText || b.content || '').toString().trim();
+    const category = (b.category || '').toString().trim();
 
-    // Basic pre-validation to return clearer 400 before Mongoose
-    const missing = [];
-    if (!reporterName) missing.push('reporterName');
-    if (!reporterEmail) missing.push('reporterEmail');
-    if (!category) missing.push('category');
-    if (!headline) missing.push('headline');
-    if (!storyText) missing.push('story');
-    if (missing.length) {
-      return res.status(400).json({ ok: false, error: 'validation_error', details: { missing } });
+    const city = (b.city || b.location || b.reporterLocation || '').toString().trim();
+    const state = (b.state || '').toString().trim();
+    const country = (b.country || '').toString().trim();
+    const ageGroup = (b.ageGroup || b.reporterAgeGroup || '').toString().trim();
+    const mediaLink = (b.mediaLink || b.mediaUrl || '').toString().trim();
+
+    // Basic validation
+    const errors = [];
+    if (!userName) errors.push('userName is required');
+    if (!email) errors.push('email is required');
+    if (!headline) errors.push('headline is required');
+    if (!body) errors.push('body is required');
+    if (!category) errors.push('category is required');
+
+    if (headline && headline.length > 200) errors.push('headline must be <= 200 chars');
+    if (body && body.length > 10000) errors.push('body must be <= 10000 chars');
+
+    if (errors.length) {
+      return res.status(400).json({ success: false, ok: false, message: 'Validation failed', errors });
     }
 
-    // Optional fields
-    const ageGroup = (b.ageGroup || b.reporterAgeGroup || '').toString().trim() || undefined;
-    const location = (b.location || b.city || b.reporterLocation || '').toString().trim() || undefined;
-    const media = (b.mediaUrl || b.mediaLink || '').toString().trim() || undefined;
+    const ipAddress = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || req.connection?.remoteAddress || '';
+    const userAgent = req.get('user-agent') || '';
 
     const saved = await CommunitySubmission.create({
-      reporterName,
-      reporterEmail,
+      // Names/emails stored in multiple fields for compatibility
+      userName,
+      reporterName: userName,
+      name: userName,
+      email,
+      reporterEmail: email,
       headline,
-      body: storyText,
+      body,
       category,
-      ageGroup,
-      reporterAgeGroup: ageGroup,
-      location,
-      reporterLocation: location,
-      mediaUrl: media,
-      mediaLink: media,
-      acceptTerms: b.acceptTerms === true,
-      acceptedPolicy: b.acceptTerms === true,
-      status: 'under_review'
+      ageGroup: ageGroup || undefined,
+      reporterAgeGroup: ageGroup || undefined,
+      city: city || undefined,
+      state: state || undefined,
+      country: country || undefined,
+      location: city || undefined,
+      reporterLocation: city || undefined,
+      mediaLink: mediaLink || undefined,
+      mediaUrl: mediaLink || undefined,
+      status: 'NEW',
+      ipAddress,
+      userAgent,
     });
 
+    // Phase 2: AI review step (non-blocking of initial save)
+    try {
+      const ai = await runCommunityAiReview({
+        userName,
+        city,
+        category,
+        headline,
+        body,
+        ageGroup,
+      });
+      saved.aiTitle = ai.aiTitle;
+      saved.aiBody = ai.aiBody;
+      saved.riskScore = ai.riskScore;
+      saved.flags = ai.flags;
+      saved.policyNotes = ai.policyNotes;
+      saved.aiSuggestedCategory = ai.aiSuggestedCategory;
+      saved.aiSuggestedTags = ai.aiSuggestedTags;
+      saved.aiTipOnlySuggested = ai.aiTipOnlySuggested;
+      saved.status = 'PENDING_FOUNDER';
+      await saved.save();
+    } catch (aiErr) {
+      console.error('[CommunitySubmission][AI-review-failed]', aiErr?.message || aiErr);
+      // Keep status as NEW so founder knows AI failed; do not throw
+    }
+
     return res.status(201).json({
+      success: true,
       ok: true,
-      id: saved._id.toString(),
-      status: saved.status || 'under_review'
+      item: {
+        id: saved._id.toString(),
+        userName: saved.userName || saved.reporterName || saved.name,
+        email: saved.email || saved.reporterEmail,
+        city: saved.city || saved.location,
+        state: saved.state || null,
+        country: saved.country || null,
+        ageGroup: saved.ageGroup || saved.reporterAgeGroup || null,
+        headline: saved.headline,
+        body: saved.body,
+        category: saved.category,
+        mediaLink: saved.mediaLink || null,
+        status: saved.status,
+        aiTitle: saved.aiTitle || null,
+        aiBody: saved.aiBody || null,
+        riskScore: saved.riskScore || 0,
+        flags: Array.isArray(saved.flags) ? saved.flags : [],
+        policyNotes: saved.policyNotes || null,
+        createdAt: saved.createdAt,
+        updatedAt: saved.updatedAt,
+      }
     });
   } catch (err) {
     console.error('[CommunitySubmission] error while saving:', err);
     if (err && err.name === 'ValidationError') {
-      return res.status(400).json({
-        ok: false,
-        error: 'validation_error',
-        details: err.errors
-      });
+      return res.status(400).json({ success: false, ok: false, message: 'Validation error', details: err.errors });
     }
-    return res.status(500).json({ ok: false, error: 'internal_error' });
+    return res.status(500).json({ success: false, ok: false, message: 'Internal server error' });
   }
 });
 

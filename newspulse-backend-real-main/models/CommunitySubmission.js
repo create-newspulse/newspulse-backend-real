@@ -1,30 +1,73 @@
-const mongoose = require('mongoose');
+// models/CommunitySubmission.js
+const mongoose = require("mongoose");
 
-// Minimal Phase 1 Community Reporter schema
-// Mirrors style of existing News model export pattern.
-// Relaxed duplicate schema (aligns with primary): minimal required fields, no enums.
-const communitySubmissionSchema = new mongoose.Schema({
-  reporterName: { type: String, required: true, trim: true },
-  reporterEmail: { type: String, required: true, trim: true, lowercase: true },
-  userName: { type: String, required: false, trim: true },
-  email: { type: String, required: false, trim: true, lowercase: true },
-  ageGroup: { type: String, required: false, trim: true },
-  reporterAgeGroup: { type: String, required: false, trim: true },
-  location: { type: String, required: false, trim: true },
-  reporterLocation: { type: String, required: false, trim: true },
-  category: { type: String, required: true, trim: true },
-  headline: { type: String, required: true, trim: true, maxlength: 200 },
-  body: { type: String, required: true, trim: true },
-  mediaLink: { type: String, required: false, trim: true },
-  acceptTerms: { type: Boolean, required: false, default: false },
-  acceptedPolicy: { type: Boolean, required: false, default: false },
-  status: { type: String, required: false, trim: true, default: 'under_review' },
-  aiHeadline: { type: String, required: false },
-  aiBody: { type: String, required: false },
-  riskScore: { type: Number, required: false, default: 0 },
-  flags: { type: [String], required: false, default: [] },
-  rejectReason: { type: String, required: false, trim: true },
-  createdAt: { type: Date, default: Date.now },
-}, { timestamps: true });
+const CommunitySubmissionSchema = new mongoose.Schema(
+  {
+    // Phase 1 – basic reporter info
+    userName: { type: String, required: true },
+    email: { type: String, required: true },
+    city: { type: String, required: true },
+    state: { type: String },
+    country: { type: String },
 
-module.exports = mongoose.model('CommunitySubmission', communitySubmissionSchema);
+    // Age band is safer than exact age (future use)
+    ageGroup: {
+      type: String,
+      enum: ["UNDER_18", "18_24", "25_34", "35_44", "45_PLUS"],
+    },
+
+    // Story
+    headline: { type: String, required: true },
+    body: { type: String, required: true },
+    category: { type: String, required: true },
+    mediaLink: { type: String },
+
+    // Status
+    status: {
+      type: String,
+      enum: ["NEW", "UNDER_REVIEW", "AI_REVIEWED", "PENDING_FOUNDER", "APPROVED", "REJECTED", "TIP_ONLY"],
+      default: "NEW",
+    },
+
+    // AI & policy (future use)
+    aiTitle: { type: String },
+    aiBody: { type: String },
+    riskScore: { type: Number },
+    flags: [{ type: String }],
+    policyNotes: { type: String },
+
+    // Contributor / credit (future use)
+    contributorPreference: {
+      type: String,
+      enum: ["FULL_NAME", "ANONYMOUS", "GROUP_TAG"],
+    },
+    preferredGroupTag: { type: String },
+    finalTag: { type: String },
+
+    // Publication link (future use)
+    articleId: { type: String },
+    articleSlug: { type: String },
+
+    // Decision meta (future use)
+    decisionBy: { type: String },
+    rejectReasonCode: {
+      type: String,
+      enum: ["NOT_ENOUGH_EVIDENCE", "VIOLATES_POLICY", "NOT_NEWS_FORMAT", "OTHER"],
+    },
+    rejectReasonNote: { type: String },
+
+    // Extra meta (future use)
+    reporterUserId: { type: String },
+    ipAddress: { type: String },
+    userAgent: { type: String },
+  },
+  {
+    timestamps: true, // createdAt & updatedAt automatically
+  }
+);
+
+// IMPORTANT: no virtual('userName') here → no conflict
+module.exports =
+  mongoose.models.CommunitySubmission ||
+  mongoose.model("CommunitySubmission", CommunitySubmissionSchema);
+

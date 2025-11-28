@@ -153,3 +153,34 @@ router.put('/articles/:id', async (req, res, next) => {
 });
 
 module.exports = router;
+// DELETE /api/articles/:id → soft delete (status: 'deleted')
+router.delete('/articles/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    let doc = null;
+    try {
+      doc = await News.findByIdAndUpdate(
+        id,
+        { $set: { status: 'deleted' } },
+        { new: true }
+      );
+    } catch (_) {
+      // invalid ObjectId or other cast error -> treat as not found below
+    }
+
+    if (!doc) {
+      return res
+        .status(404)
+        .json({ ok: false, success: false, status: 404, message: 'Article not found' });
+    }
+
+    return res
+      .status(200)
+      .json({ ok: true, success: true, status: 200, data: doc });
+  } catch (err) {
+    console.error('[articles.delete] error:', err?.message || err);
+    return res
+      .status(500)
+      .json({ ok: false, success: false, status: 500, message: 'Internal server error' });
+  }
+});

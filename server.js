@@ -1,6 +1,6 @@
+require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
-const dotenv = require('dotenv');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -31,14 +31,13 @@ const communityRoutes = require('./routes/community');
 const adminCommunityRoutes = require('./routes/adminCommunity');
 const adminCommunityReporterRoutes = require('./routes/adminCommunityReporter');
 const communityReporterRoutes = require('./routes/communityReporter');
+const communityAdminCommunityRoutes = require('./routes/communityAdminCommunity');
 const adminArticlesRouter = require('./routes/adminArticles');
 const adminArticleIdRouter = require('./routes/admin/articles');
 const adminAssistRouter = require('./routes/adminAssist');
 // New public routers for Admin Panel compatibility
 const articlesCrudRoutes = require('./routes/articles.routes');
 const systemStubRoutes = require('./routes/system.routes');
-
-dotenv.config(); // Load environment variables from .env file
 
 const app = express();
 const server = http.createServer(app);
@@ -115,35 +114,21 @@ app.options('*', dynamicCors);
 app.use(express.json()); // Parse incoming JSON requests
 app.use(cookieParser());
 
-// MongoDB Connection (resilient: don't crash app if DB is temporarily unreachable)
-const rawMongoUri = (process.env.MONGO_URI || '').trim();
-const connectWithRetry = async (delayMs = 30000) => {
-  const uri = (process.env.MONGO_URI || '').trim();
-  if (!uri) {
-    console.warn('⚠️  MONGO_URI not set. API will run with limited functionality.');
-    return;
-  }
-  // Allow skipping DB in local/dev with MONGO_URI=skip|none|disabled
-  if (/^(skip|none|disable|disabled)$/i.test(uri)) {
-    console.warn('⏭️  MongoDB connection disabled by MONGO_URI flag. Running without DB.');
-    return;
-  }
-  if (!/^mongodb(\+srv)?:\/\//i.test(uri)) {
-    const preview = uri.length > 12 ? uri.slice(0, 12) + '…' : uri;
-    console.error(`❌ Invalid MONGO_URI scheme: "${preview}". Expected it to start with "mongodb://" or "mongodb+srv://". Will retry.`);
-    setTimeout(() => connectWithRetry(delayMs), delayMs);
-    return;
-  }
-  try {
-    await mongoose.connect(uri);
-    console.log('✅ MongoDB connected');
-  } catch (err) {
-    console.error('❌ MongoDB connection error (will retry):', err?.message || err);
-    setTimeout(() => connectWithRetry(delayMs), delayMs);
-  }
-};
+// MongoDB Connection (strictly use MONGO_URI from environment)
 if (process.env.NODE_ENV !== 'test') {
-  connectWithRetry();
+  const MONGO_URI = process.env.MONGO_URI;
+  if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
+    console.error('❌ MONGO_URI is not set correctly in .env (or still placeholder).');
+    process.exit(1);
+  }
+  mongoose
+    .connect(MONGO_URI)
+    .then(() => {
+      console.log('✅ MongoDB connected');
+    })
+    .catch((err) => {
+      console.error('❌ MongoDB connection error:', err?.message || err);
+    });
 }
 
 // Simple homepage route
@@ -521,6 +506,8 @@ app.use('/admin', adminAuth);
 app.use('/api/reports/export', reportsExport);
 // Community submission public API
 app.use('/api/community', communityRoutes);
+// Community admin endpoints for Phase 1
+app.use('/api/community/admin/community', communityAdminCommunityRoutes);
 // Phase 1 Community Reporter public API
 app.use('/api/community-reporter', communityReporterRoutes);
 // Admin community management (protected)

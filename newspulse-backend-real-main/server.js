@@ -39,19 +39,17 @@ app.use(cors(corsOptions));
 
 app.use(express.json()); // Parse incoming JSON requests
 
-// MongoDB Connection
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/newsdb';
-
+// MongoDB Connection (require explicit MONGO_URI, no localhost fallback)
+const MONGO_URI = process.env.MONGO_URI;
+if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
+  console.error('❌ MONGO_URI is not set correctly in .env (or still placeholder).');
+  process.exit(1);
+}
 mongoose
-  .connect(MONGO_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => console.log(`✅ MongoDB connected to ${MONGO_URI}`))
+  .connect(MONGO_URI)
+  .then(() => console.log('✅ MongoDB connected'))
   .catch((err) => {
     console.error('❌ MongoDB connection error:', err.message);
-    console.error('⚠️  Server running without database. Update MONGO_URI in .env or start local MongoDB.');
-    console.error('   Tip: docker run --name newspulse-mongo -p 27017:27017 -d mongo:6');
   });
 
 // Simple homepage route
