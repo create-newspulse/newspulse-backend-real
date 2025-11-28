@@ -135,3 +135,26 @@ router.patch('/:id', requireAdminAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+// DELETE /api/admin/articles/:id (soft delete)
+router.delete('/:id', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'invalid id' });
+    }
+    const doc = await ArticleModel.findById(id);
+    if (!doc) {
+      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+    }
+    doc.status = 'deleted';
+    if ('deletedAt' in doc) {
+      doc.deletedAt = new Date();
+    }
+    await doc.save();
+    return res.status(200).json({ ok: true, success: true, status: 200, data: toJSON(doc) });
+  } catch (err) {
+    console.error('[ADMIN_ARTICLES][delete-error]', err?.message || err);
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to delete article' });
+  }
+});
