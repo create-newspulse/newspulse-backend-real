@@ -5,79 +5,63 @@ const router = express.Router();
 
 // Phase-1 minimal public submission endpoint (POST /api/community/submissions)
 router.post('/submissions', async (req, res) => {
+  console.log('[CommunitySubmission] incoming body:', req.body);
   try {
-    const {
-      name,
-      email,
-      city,
-      location,
-      category,
+    const b = req.body || {};
+    const reporterName = (b.reporterName || b.name || '').toString().trim();
+    const reporterEmail = (b.reporterEmail || b.email || '').toString().trim().toLowerCase();
+    const storyText = (b.story || b.storyText || b.content || b.body || '').toString().trim();
+    const category = (b.category || '').toString().trim();
+    const headline = (b.headline || '').toString().trim();
+
+    // Basic pre-validation to return clearer 400 before Mongoose
+    const missing = [];
+    if (!reporterName) missing.push('reporterName');
+    if (!reporterEmail) missing.push('reporterEmail');
+    if (!category) missing.push('category');
+    if (!headline) missing.push('headline');
+    if (!storyText) missing.push('story');
+    if (missing.length) {
+      return res.status(400).json({ ok: false, error: 'validation_error', details: { missing } });
+    }
+
+    // Optional fields
+    const ageGroup = (b.ageGroup || b.reporterAgeGroup || '').toString().trim() || undefined;
+    const location = (b.location || b.city || b.reporterLocation || '').toString().trim() || undefined;
+    const media = (b.mediaUrl || b.mediaLink || '').toString().trim() || undefined;
+
+    const saved = await CommunitySubmission.create({
+      reporterName,
+      reporterEmail,
       headline,
-      story,
-      storyText,
-      content,
-      body,
-      mediaLink,
-      mediaUrl,
-      age,
+      body: storyText,
+      category,
       ageGroup,
-      acceptTerms,
-    } = req.body || {};
-
-    const bodyText = (story || storyText || content || body || '').toString().trim();
-    const errors = [];
-    if (!name || !String(name).trim()) errors.push('name required');
-    if (!email || !String(email).trim()) errors.push('email required');
-    if (!category || !String(category).trim()) errors.push('category required');
-    if (!headline || !String(headline).trim()) errors.push('headline required');
-    if (!bodyText) errors.push('story required');
-    if (acceptTerms !== true) errors.push('acceptTerms must be true');
-
-    if (errors.length) {
-      return res.status(400).json({ error: 'invalid_payload', details: errors });
-    }
-
-    // Ensure MongoDB is connected (avoid generic 500 when DB down)
-    if (mongoose.connection?.readyState !== 1) {
-      console.warn('[community] DB not connected; rejecting submission');
-      return res.status(503).json({ error: 'server_unavailable' });
-    }
-
-    const loc = location ? String(location).trim() : (city ? String(city).trim() : undefined);
-    const normalizedAgeGroup = (ageGroup || age || '').toString().trim();
-    const media = mediaLink || mediaUrl;
-
-    const submission = await CommunitySubmission.create({
-      // Canonical submitter fields
-      name: String(name).trim(),
-      email: String(email).trim().toLowerCase(),
-      city: city ? String(city).trim() : undefined,
-      location: loc,
-      category: String(category).trim(),
-      headline: String(headline).trim(),
-      body: bodyText,
-      mediaUrl: media ? String(media).trim() : undefined,
-      // Public form optional fields
-      ageGroup: normalizedAgeGroup || undefined,
-      acceptTerms: true,
-      // Reporter mirror fields (required in schema)
-      reporterName: String(name).trim(),
-      reporterEmail: String(email).trim().toLowerCase(),
-      reporterLocation: loc || '',
-      reporterAgeGroup: (function mapAge(v){
-        const s = (v || '').toString().trim();
-        const allowed = new Set(['Under 18','18–24','25–40','41+']);
-        if (allowed.has(s)) return s;
-        return '25–40';
-      })(normalizedAgeGroup),
-      acceptedPolicy: true,
-      status: 'pending',
+      reporterAgeGroup: ageGroup,
+      location,
+      reporterLocation: location,
+      mediaUrl: media,
+      mediaLink: media,
+      acceptTerms: b.acceptTerms === true,
+      acceptedPolicy: b.acceptTerms === true,
+      status: 'under_review'
     });
 
-    return res.status(201).json({ ok: true, submissionId: submission._id.toString() });
+    return res.status(201).json({
+      ok: true,
+      id: saved._id.toString(),
+      status: saved.status || 'under_review'
+    });
   } catch (err) {
-    console.error('[community] createSubmission error', err);
-    return res.status(500).json({ error: 'server_error' });
+    console.error('[CommunitySubmission] error while saving:', err);
+    if (err && err.name === 'ValidationError') {
+      return res.status(400).json({
+        ok: false,
+        error: 'validation_error',
+        details: err.errors
+      });
+    }
+    return res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
 
