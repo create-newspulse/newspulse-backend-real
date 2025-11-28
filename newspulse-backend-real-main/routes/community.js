@@ -25,12 +25,17 @@ router.post('/submissions', async (req, res) => {
     const normalizedAgeGroup = (ageGroup || age || '').toString().trim();
     const media = mediaLink || mediaUrl;
 
+    // Category normalization for consistency with primary schema (safe even if not enum)
+    const allowedCategories = new Set(['regional','youth','campus','civic','tip','other']);
+    const catRaw = String(category || '').trim().toLowerCase();
+    const catFinal = allowedCategories.has(catRaw) ? catRaw : 'other';
+
     const doc = await CommunitySubmission.create({
       userName: finalName,
       name: finalName,
       email: String(email).trim().toLowerCase(),
       location: loc,
-      category: String(category).trim(),
+      category: catFinal,
       headline: String(headline).trim(),
       body: bodyText,
       mediaLink: media ? String(media).trim() : undefined,
@@ -52,6 +57,10 @@ router.post('/submissions', async (req, res) => {
 
     return res.status(201).json({ ok: true, submissionId: doc._id.toString() });
   } catch (e) {
+    if (e && e.name === 'ValidationError') {
+      const fields = Object.keys(e.errors || {});
+      return res.status(400).json({ error: 'invalid_payload', details: fields.length ? fields : ['validation_error'] });
+    }
     console.error('[community] createSubmission error', e);
     return res.status(500).json({ error: 'server_error' });
   }
