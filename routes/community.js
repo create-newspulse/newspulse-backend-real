@@ -14,11 +14,20 @@ router.post('/submissions', async (req, res) => {
     const body = (b.body || b.story || b.storyText || b.content || '').toString().trim();
     const category = (b.category || '').toString().trim();
 
-    const city = (b.city || b.location || b.reporterLocation || '').toString().trim();
-    const state = (b.state || '').toString().trim();
-    const country = (b.country || '').toString().trim();
+    const city = (b.city || b.location?.city || b.location || b.reporterLocation || '').toString().trim();
+    const state = (b.state || b.location?.state || '').toString().trim();
+    const country = (b.country || b.location?.country || '').toString().trim();
+    const district = (b.district || b.location?.district || '').toString().trim();
     const ageGroup = (b.ageGroup || b.reporterAgeGroup || '').toString().trim();
     const mediaLink = (b.mediaLink || b.mediaUrl || '').toString().trim();
+    const contact = {
+      name: (b.contact?.name || b.contactName || userName).toString().trim() || undefined,
+      email: (b.contact?.email || b.contactEmail || email).toString().trim() || undefined,
+      phone: (b.contact?.phone || b.contactPhone || '').toString().trim() || undefined,
+      preferredContact: (b.contact?.preferredContact || b.preferredContact || 'no_preference').toString().trim() || 'no_preference',
+      canContactForThisStory: Boolean(b.contact?.canContactForThisStory ?? b.canContactForThisStory ?? false),
+      canContactForFutureStories: Boolean(b.contact?.canContactForFutureStories ?? b.canContactForFutureStories ?? false),
+    };
 
     // Basic validation
     const errors = [];
@@ -55,6 +64,8 @@ router.post('/submissions', async (req, res) => {
       country: country || undefined,
       location: city || undefined,
       reporterLocation: city || undefined,
+      locationDetail: { city: city || undefined, state: state || undefined, country: country || undefined, district: district || undefined },
+      contact,
       mediaLink: mediaLink || undefined,
       mediaUrl: mediaLink || undefined,
       status: 'NEW',

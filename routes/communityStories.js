@@ -83,14 +83,21 @@ router.get('/stories/my', requireAdminAuth, async (req, res) => {
         updatedAt: a.updatedAt,
         language: a.language,
         category: a.category,
-        location: sub?.city || sub?.location || null,
-        city: sub?.city || null,
+        location: sub?.locationDetail?.city || sub?.city || sub?.location || null,
+        city: sub?.locationDetail?.city || sub?.city || null,
+        locationDetail: sub?.locationDetail || null,
         source: a.source || null,
         submittedBy: (sub?.reporterEmail || sub?.email || null),
+        contact: sub?.contact ? {
+          name: sub.contact.name || null,
+          email: sub.contact.email || null,
+          phone: sub.contact.phone || null,
+          preferredContact: sub.contact.preferredContact || 'no_preference',
+        } : null,
       };
     });
 
-    return res.json({ ok: true, items, total: owned.length });
+    return res.json({ ok: true, items, total: owned.length, page, limit });
   } catch (e) {
     console.error('[COMMUNITY_STORIES][my-error]', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to load stories' });
@@ -126,6 +133,10 @@ router.post('/stories/:id/withdraw', requireAdminAuth, async (req, res) => {
     }
     doc.status = 'archived'; // Using archived as withdrawn marker (schema enum safe)
     await doc.save();
+    try {
+      const ActivityLog = require('../models/ActivityLog');
+      await ActivityLog.create({ type: 'community_withdraw', email: req.admin?.email || 'admin', meta: { articleId: doc._id.toString() } });
+    } catch (_) {}
     return res.json({ ok: true, article: doc });
   } catch (e) {
     console.error('[COMMUNITY_STORIES][withdraw-error]', e?.message || e);

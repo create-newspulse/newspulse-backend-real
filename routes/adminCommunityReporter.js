@@ -112,6 +112,7 @@ router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req
       userName: r.name, // alias for UI expectations
       email: r.email,
       location: r.location,
+      locationDetail: r.locationDetail || null,
       category: r.category,
       headline: r.headline,
       body: r.body,
@@ -129,6 +130,12 @@ router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req
       flags: Array.isArray(r.flags) ? r.flags : [],
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
+      contact: r.contact ? {
+        name: r.contact.name || null,
+        email: r.contact.email || null,
+        phone: r.contact.phone || null,
+        preferredContact: r.contact.preferredContact || 'no_preference',
+      } : null,
     }));
 
     return res.status(200).json({
@@ -173,6 +180,11 @@ router.patch('/submissions/:id/approve', requireAdminAuth, requireInternalAdminK
     submission.status = 'APPROVED';
     await submission.save();
 
+    try {
+      const ActivityLog = require('../models/ActivityLog');
+      await ActivityLog.create({ type: 'community_approve', email: req.admin?.email || 'admin', meta: { submissionId: submission._id.toString() } });
+    } catch (_) {}
+
     let draftArticle = null;
     try {
       const result = await createDraftArticleFromSubmission(submission._id.toString());
@@ -208,6 +220,10 @@ router.patch('/submissions/:id/reject', requireAdminAuth, requireInternalAdminKe
     if (!submission) return res.status(404).json({ success: false, message: 'Not found' });
     submission.status = 'REJECTED';
     await submission.save();
+    try {
+      const ActivityLog = require('../models/ActivityLog');
+      await ActivityLog.create({ type: 'community_reject', email: req.admin?.email || 'admin', meta: { submissionId: submission._id.toString() } });
+    } catch (_) {}
     return res.json({ success: true, item: {
       id: submission._id.toString(),
       name: submission.name,

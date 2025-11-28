@@ -59,6 +59,22 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   // Request context
   ipAddress: { type: String, required: false, trim: true },
   userAgent: { type: String, required: false, trim: true },
+  // Reporter contact (private; editorial-only)
+  contact: {
+    name: { type: String, trim: true },
+    email: { type: String, trim: true },
+    phone: { type: String, trim: true },
+    preferredContact: { type: String, enum: ['email','phone','whatsapp','no_preference'], default: 'no_preference' },
+    canContactForThisStory: { type: Boolean, default: false },
+    canContactForFutureStories: { type: Boolean, default: false },
+  },
+  // Report location
+  locationDetail: {
+    city: { type: String, trim: true },
+    state: { type: String, trim: true },
+    country: { type: String, trim: true },
+    district: { type: String, trim: true },
+  },
 }, { timestamps: true });
 
 // Virtual alias so Phase 1 routes can use "story" seamlessly
