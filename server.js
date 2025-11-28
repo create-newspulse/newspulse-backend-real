@@ -31,6 +31,7 @@ const communityRoutes = require('./routes/community');
 const adminCommunityRoutes = require('./routes/adminCommunity');
 const adminCommunityReporterRoutes = require('./routes/adminCommunityReporter');
 const communityReporterRoutes = require('./routes/communityReporter');
+const communityStoriesRoutes = require('./routes/communityStories');
 const communityAdminCommunityRoutes = require('./routes/communityAdminCommunity');
 const adminArticlesRouter = require('./routes/adminArticles');
 const adminArticleIdRouter = require('./routes/admin/articles');
@@ -512,6 +513,8 @@ app.use('/api/community/admin/community', communityAdminCommunityRoutes);
 app.use('/api/community-reporter', communityReporterRoutes);
 // Admin community management (protected)
 app.use('/api/admin/community', adminCommunityRoutes);
+// Community stories (My Community Stories page)
+app.use('/api/community', communityStoriesRoutes);
 // New Phase 1 Community Reporter admin queue endpoints
 app.use('/api/admin/community-reporter', adminCommunityReporterRoutes);
 // Non-/api alias consumed by admin panel: /admin/community-reporter/submissions
