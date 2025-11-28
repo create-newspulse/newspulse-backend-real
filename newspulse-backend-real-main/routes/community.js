@@ -23,7 +23,7 @@ router.post('/submissions', async (req, res) => {
       headline: String(headline).trim(),
       body: String(body).trim(),
       mediaLink: mediaLink ? String(mediaLink).trim() : undefined,
-      status: 'NEW',
+      status: 'pending',
       createdAt: new Date(),
     });
 

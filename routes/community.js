@@ -38,7 +38,7 @@ router.post('/submissions', async (req, res) => {
       headline: String(headline).trim(),
       body: bodyText,
       mediaUrl: mediaUrl ? String(mediaUrl).trim() : undefined,
-      status: 'NEW',
+      status: 'pending',
     });
 
     return res.status(201).json({ ok: true, success: true, id: submission._id });

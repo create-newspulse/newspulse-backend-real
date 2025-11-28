@@ -55,8 +55,8 @@ router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req
     if (status && status !== 'all') {
       const normalizedStatus = String(status).trim().toLowerCase();
       if (allowedStatuses.has(normalizedStatus)) {
-        // Map external status to internal storage values
-        if (normalizedStatus === 'pending') filter.status = 'NEW';
+        // Pending Review should include multiple internal statuses (migration-safe)
+        if (normalizedStatus === 'pending') filter.status = { $in: ['pending', 'new', 'AI_REVIEWED', 'PENDING_FOUNDER'] };
         else if (normalizedStatus === 'approved') filter.status = 'APPROVED';
         else if (normalizedStatus === 'rejected') filter.status = 'REJECTED';
         else if (normalizedStatus === 'trash') {
@@ -116,7 +116,7 @@ router.get('/submissions', requireAdminAuth, requireInternalAdminKey, async (req
       headline: r.headline,
       body: r.body,
       status: (function mapStatus(s){
-        if (s === 'NEW') return 'pending';
+        if (s === 'NEW' || s === 'pending' || s === 'new' || s === 'AI_REVIEWED' || s === 'PENDING_FOUNDER') return 'pending';
         if (s === 'APPROVED') return 'approved';
         if (s === 'REJECTED') return 'rejected';
         return s;
