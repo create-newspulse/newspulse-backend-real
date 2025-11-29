@@ -82,25 +82,40 @@ router.get('/', requireAdminAuth, async (req, res) => {
           contactWhatsapp: '$contact.whatsappNumber',
           contactTelegram: '$contact.telegramId',
           contactInstagram: '$contact.instagramHandle',
+          statusNorm: { $toUpper: { $ifNull: ['$status', ''] } },
         },
       },
       // Ensure groupEmail exists after normalization
-      { $match: { groupEmail: { $exists: true, $ne: '' } } },
+      { $addFields: { groupPhone: '$contact.phone' } },
+      { $addFields: { groupId: { $ifNull: ['$groupEmail', { $ifNull: ['$groupPhone', { $toString: '$_id' }] }] } } },
+      { $match: { groupId: { $exists: true, $ne: '' } } },
       {
         $group: {
-          _id: '$groupEmail',
+          _id: '$groupId',
+          id: { $first: '$groupId' },
           email: { $first: '$groupEmail' },
           latestName: { $last: '$groupName' },
           latestCity: { $last: '$locCity' },
             latestState: { $last: '$locState' },
           latestCountry: { $last: '$locCountry' },
-          latestPhone: { $last: '$contactPhone' },
+          latestPhone: { $last: '$groupPhone' },
           latestWhatsapp: { $last: '$contactWhatsapp' },
           latestTelegram: { $last: '$contactTelegram' },
           latestInstagram: { $last: '$contactInstagram' },
           lastStatus: { $last: '$status' },
           lastStoryAt: { $max: '$createdAt' },
           totalStories: { $sum: 1 },
+          pendingStories: { $sum: { $cond: [ { $or: [
+            { $eq: ['$statusNorm', 'PENDING'] },
+            { $eq: ['$statusNorm', 'UNDER_REVIEW'] },
+            { $eq: ['$statusNorm', 'NEW'] },
+            { $eq: ['$statusNorm', 'AI_REVIEWED'] },
+            { $eq: ['$statusNorm', 'PENDING_FOUNDER'] },
+          ] }, 1, 0 ] } },
+          approvedStories: { $sum: { $cond: [ { $or: [
+            { $eq: ['$statusNorm', 'APPROVED'] },
+            { $eq: ['$statusNorm', 'PUBLISHED'] },
+          ] }, 1, 0 ] } },
         },
       },
       { $sort: { lastStoryAt: -1 } },
@@ -125,7 +140,8 @@ router.get('/', requireAdminAuth, async (req, res) => {
       ok: true,
       success: true,
       items: results.map(r => ({
-        reporterEmail: r.email,
+        id: r.id,
+        reporterEmail: r.email || null,
         reporterName: r.latestName || null,
         city: r.latestCity || null,
         state: r.latestState || null,
@@ -137,6 +153,8 @@ router.get('/', requireAdminAuth, async (req, res) => {
         lastStatus: r.lastStatus || null,
         lastStoryAt: r.lastStoryAt || null,
         totalStories: r.totalStories || 0,
+        pendingStories: r.pendingStories || 0,
+        approvedStories: r.approvedStories || 0,
       })),
       total,
       page,
@@ -149,3 +167,11 @@ router.get('/', requireAdminAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+// Alias route path: GET /admin/community/reporter-contacts (admin-only)
+// Mounting this router under /admin/community will make this path available.
+router.get('/reporter-contacts', requireAdminAuth, async (req, res, next) => {
+  // Delegate to root handler by rewriting URL to '/'
+  req.url = '/';
+  return router.handle(req, res, next);
+});
