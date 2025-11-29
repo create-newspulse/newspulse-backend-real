@@ -15,6 +15,9 @@ const router = express.Router();
 // Primary path: /reporter-contacts (mounted under /api/admin/community)
 router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
   try {
+    try {
+      console.log('[ADMIN_REPORTER_CONTACTS][alias] admin', req.admin && { id: req.admin.id, role: req.admin.role });
+    } catch (_) {}
     const { q, city, state, country } = req.query || {};
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limitRaw = Math.max(parseInt(req.query.limit || '20', 10), 1);

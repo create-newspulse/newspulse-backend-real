@@ -101,6 +101,9 @@ module.exports = router;
 // GET /api/admin/community/reporter-contacts
 router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
   try {
+    try {
+      console.log('[ADMIN_REPORTER_CONTACTS] admin', req.admin && { id: req.admin.id, role: req.admin.role });
+    } catch (_) {}
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
     const docs = await CommunitySubmission.find({}).lean({ virtuals: true });
