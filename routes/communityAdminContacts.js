@@ -12,7 +12,8 @@ const router = express.Router();
 //   country?: string
 //   page?: number (default 1)
 //   limit?: number (default 20)
-router.get('/', requireAdminAuth, async (req, res) => {
+// Primary path: /reporter-contacts (mounted under /api/admin/community)
+router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
   try {
     const { q, city, state, country } = req.query || {};
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
@@ -166,12 +167,11 @@ router.get('/', requireAdminAuth, async (req, res) => {
   }
 });
 
-module.exports = router;
-
-// Alias route path: GET /admin/community/reporter-contacts (admin-only)
-// Mounting this router under /admin/community will make this path available.
-router.get('/reporter-contacts', requireAdminAuth, async (req, res, next) => {
-  // Delegate to root handler by rewriting URL to '/'
-  req.url = '/';
+// Legacy alias: allow root path to serve same response when mounted at /api/community/admin/contacts
+router.get('/', requireAdminAuth, async (req, res, next) => {
+  // Forward to reporter-contacts handler
+  req.url = '/reporter-contacts';
   return router.handle(req, res, next);
 });
+
+module.exports = router;
