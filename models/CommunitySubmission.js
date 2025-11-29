@@ -67,6 +67,10 @@ const CommunitySubmissionSchema = new mongoose.Schema({
     preferredContact: { type: String, enum: ['email','phone','whatsapp','no_preference'], default: 'no_preference' },
     canContactForThisStory: { type: Boolean, default: false },
     canContactForFutureStories: { type: Boolean, default: false },
+    // Extended social / messaging handles (optional)
+    whatsappNumber: { type: String, trim: true },
+    telegramId: { type: String, trim: true },
+    instagramHandle: { type: String, trim: true },
   },
   // Report location
   locationDetail: {

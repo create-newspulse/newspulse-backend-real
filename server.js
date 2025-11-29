@@ -33,6 +33,7 @@ const adminCommunityReporterRoutes = require('./routes/adminCommunityReporter');
 const communityReporterRoutes = require('./routes/communityReporter');
 const communityStoriesRoutes = require('./routes/communityStories');
 const communityAdminCommunityRoutes = require('./routes/communityAdminCommunity');
+const communityAdminContactsRoutes = require('./routes/communityAdminContacts');
 const adminArticlesRouter = require('./routes/adminArticles');
 const adminArticleIdRouter = require('./routes/admin/articles');
 const adminAssistRouter = require('./routes/adminAssist');
@@ -509,6 +510,8 @@ app.use('/api/reports/export', reportsExport);
 app.use('/api/community', communityRoutes);
 // Community admin endpoints for Phase 1
 app.use('/api/community/admin/community', communityAdminCommunityRoutes);
+// Community reporter contact directory (admin-only)
+app.use('/api/community/admin/contacts', communityAdminContactsRoutes);
 // Phase 1 Community Reporter public API
 app.use('/api/community-reporter', communityReporterRoutes);
 // Admin community management (protected)
