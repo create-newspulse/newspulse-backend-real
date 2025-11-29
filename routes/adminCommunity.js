@@ -1,28 +1,10 @@
 const express = require('express');
-const jwt = require('jsonwebtoken');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const { requireAdminAuth } = require('../middleware/adminAuth');
 const router = express.Router();
 
-// Lightweight admin auth middleware (Founder/Admin only)
-function requireAdmin(req, res, next) {
-  try {
-    const auth = req.headers['authorization'] || '';
-    const token = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length).trim() : '';
-    if (!token) return res.status(401).json({ ok: false, message: 'Missing auth token' });
-    const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
-    const payload = jwt.verify(token, secret);
-    if (!payload || (payload.role !== 'founder' && payload.role !== 'admin')) {
-      return res.status(403).json({ ok: false, message: 'Forbidden' });
-    }
-    req.admin = { id: payload.sub, email: payload.email, role: payload.role, name: payload.name };
-    next();
-  } catch (e) {
-    return res.status(401).json({ ok: false, message: 'Unauthorized' });
-  }
-}
-
 // GET /api/admin/community/submissions (admin queue listing)
-router.get('/submissions', requireAdmin, async (req, res) => {
+router.get('/submissions', requireAdminAuth, async (req, res) => {
   try {
     const { status, category } = req.query || {};
     const waitingStatuses = ['NEW', 'AI_REVIEWED', 'PENDING_FOUNDER'];
@@ -57,7 +39,7 @@ router.get('/submissions', requireAdmin, async (req, res) => {
     return res.status(500).json({ success: false, message: 'Failed to load community submissions' });
   }
 });
-router.patch('/submissions/:id/status', requireAdmin, async (req, res) => {
+router.patch('/submissions/:id/status', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, rejectReason } = req.body || {};
@@ -92,7 +74,7 @@ router.patch('/submissions/:id/status', requireAdmin, async (req, res) => {
 });
 
 // GET /api/admin/community/submissions/:id (detail view)
-router.get('/submissions/:id', requireAdmin, async (req, res) => {
+router.get('/submissions/:id', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params || {};
     if (!id) {
@@ -117,7 +99,7 @@ router.get('/submissions/:id', requireAdmin, async (req, res) => {
 module.exports = router;
 
 // GET /api/admin/community/reporter-contacts
-router.get('/reporter-contacts', requireAdmin, async (req, res) => {
+router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
