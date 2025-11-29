@@ -518,12 +518,16 @@ app.use('/api/community/admin/community', communityAdminCommunityRoutes);
 app.use('/api/community/admin/contacts', communityAdminContactsRoutes);
 // Mount under /api/admin/community so Vite proxy path resolves: /api/admin/community/reporter-contacts
 app.use('/api/admin/community', communityAdminContactsRoutes);
+// Admin API proxy alias to ensure Authorization header is forwarded by frontend
+app.use('/admin-api/admin/community', communityAdminContactsRoutes);
 // Non-/api admin alias: GET /admin/community/reporter-contacts
 app.use('/admin/community', communityAdminContactsRoutes);
 // Phase 1 Community Reporter public API
 app.use('/api/community-reporter', communityReporterRoutes);
 // Admin community management (protected)
 app.use('/api/admin/community', adminCommunityRoutes);
+// Admin API proxy alias so requests under /admin-api include Bearer token
+app.use('/admin-api/admin/community', adminCommunityRoutes);
 // Community stories (My Community Stories page)
 app.use('/api/community', communityStoriesRoutes);
 // New Phase 1 Community Reporter admin queue endpoints
