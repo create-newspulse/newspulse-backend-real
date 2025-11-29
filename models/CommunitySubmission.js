@@ -86,10 +86,8 @@ CommunitySubmissionSchema.virtual('story')
   .get(function() { return this.body; })
   .set(function(v) { this.body = v; });
 
-// Virtual alias for userName expected by simplified API layer
-CommunitySubmissionSchema.virtual('userName')
-  .get(function() { return this.userName || this.reporterName || this.name; })
-  .set(function(v) { this.userName = v; this.reporterName = v; this.name = v; });
+// NOTE: Do not define a virtual named 'userName' because it conflicts with the real path.
+// If a display alias is needed elsewhere, use 'reporterDisplayName' via application-level mapping.
 
 // Ensure virtuals are included when converting to JSON (for future direct usage)
 CommunitySubmissionSchema.set('toJSON', { virtuals: true });
