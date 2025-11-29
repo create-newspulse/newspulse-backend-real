@@ -115,3 +115,53 @@ router.get('/submissions/:id', requireAdmin, async (req, res) => {
 });
 
 module.exports = router;
+
+// GET /api/admin/community/reporter-contacts
+router.get('/reporter-contacts', requireAdmin, async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
+    const docs = await CommunitySubmission.find({}).lean();
+
+    const map = new Map();
+    for (const d of docs) {
+      const name = d.contact?.name || d.userName || d.reporterName || d.name || 'Unknown reporter';
+      const email = d.contact?.email || d.reporterEmail || d.email || null;
+      const phone = d.contact?.phone || null;
+      const city = d.locationDetail?.city || d.city || null;
+      const state = d.locationDetail?.state || d.state || null;
+      const country = d.locationDetail?.country || d.country || null;
+      const key = (email || phone || (d._id && d._id.toString()) || 'unknown').toString();
+      const createdAt = d.createdAt ? new Date(d.createdAt) : null;
+      const entry = map.get(key) || { id: key, name, email, phone, city, state, country, totalStories: 0, lastStoryAt: null };
+      entry.totalStories += 1;
+      if (!entry.lastStoryAt || (createdAt && createdAt > entry.lastStoryAt)) {
+        entry.lastStoryAt = createdAt;
+      }
+      // Prefer most recent non-null values for name and location
+      entry.name = name || entry.name;
+      entry.email = email || entry.email;
+      entry.phone = phone || entry.phone;
+      entry.city = city || entry.city;
+      entry.state = state || entry.state;
+      entry.country = country || entry.country;
+      map.set(key, entry);
+    }
+
+    const allItems = Array.from(map.values()).sort((a, b) => {
+      const ta = a.lastStoryAt ? a.lastStoryAt.getTime() : 0;
+      const tb = b.lastStoryAt ? b.lastStoryAt.getTime() : 0;
+      return tb - ta;
+    });
+
+    const start = (page - 1) * limit;
+    const pagedItems = allItems.slice(start, start + limit);
+    const total = allItems.length;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+
+    return res.json({ ok: true, items: pagedItems, page, totalPages, total });
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY][contacts-error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load reporter contacts' });
+  }
+});
