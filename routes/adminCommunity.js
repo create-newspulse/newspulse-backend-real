@@ -103,11 +103,11 @@ router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
-    const docs = await CommunitySubmission.find({}).lean();
+    const docs = await CommunitySubmission.find({}).lean({ virtuals: true });
 
     const map = new Map();
     for (const d of docs) {
-      const name = d.contact?.name || d.userName || d.reporterName || d.name || 'Unknown reporter';
+      const reporterDisplayName = d.reporterDisplayName || d.contact?.name || d.userName || d.reporterName || d.name || 'Unknown reporter';
       const email = d.contact?.email || d.reporterEmail || d.email || null;
       const phone = d.contact?.phone || null;
       const city = d.locationDetail?.city || d.city || null;
@@ -115,13 +115,13 @@ router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
       const country = d.locationDetail?.country || d.country || null;
       const key = (email || phone || (d._id && d._id.toString()) || 'unknown').toString();
       const createdAt = d.createdAt ? new Date(d.createdAt) : null;
-      const entry = map.get(key) || { id: key, name, email, phone, city, state, country, totalStories: 0, lastStoryAt: null };
+      const entry = map.get(key) || { id: key, reporterDisplayName, email, phone, city, state, country, totalStories: 0, lastStoryAt: null };
       entry.totalStories += 1;
       if (!entry.lastStoryAt || (createdAt && createdAt > entry.lastStoryAt)) {
         entry.lastStoryAt = createdAt;
       }
       // Prefer most recent non-null values for name and location
-      entry.name = name || entry.name;
+      entry.reporterDisplayName = reporterDisplayName || entry.reporterDisplayName;
       entry.email = email || entry.email;
       entry.phone = phone || entry.phone;
       entry.city = city || entry.city;

@@ -215,7 +215,7 @@ router.get('/community/reporter-contacts', requireAdminAuth, async (req, res) =>
       ok: true,
       items: items.map(i => ({
         id: i.id,
-        name: i.name || null,
+        reporterDisplayName: i.name || null,
         email: i.email || null,
         phone: i.phone || null,
         city: i.city || null,

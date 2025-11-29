@@ -88,6 +88,10 @@ CommunitySubmissionSchema.virtual('story')
 
 // NOTE: Do not define a virtual named 'userName' because it conflicts with the real path.
 // If a display alias is needed elsewhere, use 'reporterDisplayName' via application-level mapping.
+// Safe display virtual preferring contact.name, then userName fallbacks.
+CommunitySubmissionSchema.virtual('reporterDisplayName').get(function() {
+  return (this.contact && this.contact.name) || this.userName || this.reporterName || this.name || 'Unknown reporter';
+});
 
 // Ensure virtuals are included when converting to JSON (for future direct usage)
 CommunitySubmissionSchema.set('toJSON', { virtuals: true });

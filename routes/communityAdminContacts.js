@@ -143,7 +143,7 @@ router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
       items: results.map(r => ({
         id: r.id,
         reporterEmail: r.email || null,
-        reporterName: r.latestName || null,
+        reporterDisplayName: r.latestName || null,
         city: r.latestCity || null,
         state: r.latestState || null,
         country: r.latestCountry || null,
