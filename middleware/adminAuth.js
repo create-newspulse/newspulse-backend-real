@@ -7,6 +7,7 @@
 // Designed to align with other working admin endpoints expecting Authorization Bearer access tokens.
 
 const jwt = require('jsonwebtoken');
+const { shouldLog } = require('../lib/logThrottle');
 
 function parseCookies(header) {
   const cookies = {};
@@ -22,10 +23,13 @@ function requireAdminAuth(req, res, next) {
   const authHeader = String(req.headers['authorization'] || '');
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice('Bearer '.length).trim() : '';
   const cookies = parseCookies(req.headers.cookie || '');
-  const legacyEmail = cookies['np_admin'] || '';
+  // Accept multiple legacy cookie keys for backward compatibility with older admin panel builds
+  const legacyEmail = cookies['np_admin'] || cookies['np_admin_email'] || '';
+  // Optional explicit access cookie (contains email value). Not considered privileged beyond email identification.
+  const accessEmail = cookies['np_admin_access'] || '';
 
-  if (!token && !legacyEmail) {
-    console.warn('[ADMIN_AUTH][401][missing] no bearer token or np_admin cookie');
+  if (!token && !legacyEmail && !accessEmail) {
+    console.warn('[ADMIN_AUTH][401][missing] no bearer token or recognized admin cookie');
     return res.status(401).json({ ok: false, message: 'Unauthorized' });
   }
 
@@ -42,18 +46,24 @@ function requireAdminAuth(req, res, next) {
       return next();
     } catch (e) {
       if (e && e.message === 'jwt expired') {
-        console.info('[ADMIN_AUTH][token] expired', { reason: 'access token expired' });
+        // Throttle noisy expired token logs (once per 60s per route key)
+        const key = `adminAuth.expired:${req.method}:${req.originalUrl.split('?')[0]}`;
+        if (shouldLog(key, 60_000)) {
+          console.info('[ADMIN_AUTH][token] expired', { reason: 'access token expired' });
+        }
       } else {
         console.warn('[ADMIN_AUTH][token-verify-failed]', { message: e?.message });
       }
       if (!legacyEmail) {
-        return res.status(401).json({ ok: false, message: 'Unauthorized' });
+        // Provide a machine-readable code to help clients trigger refresh.
+        return res.status(401).json({ ok: false, code: 'TOKEN_EXPIRED_OR_INVALID', message: 'Unauthorized' });
       }
     }
   }
 
-  if (legacyEmail) {
-    req.admin = { id: 'legacy-admin', email: legacyEmail, role: 'admin', name: 'Admin' };
+  if (legacyEmail || accessEmail) {
+    const emailVal = (legacyEmail || accessEmail);
+    req.admin = { id: 'legacy-admin', email: emailVal, role: 'admin', name: 'Admin' };
     return next();
   }
 

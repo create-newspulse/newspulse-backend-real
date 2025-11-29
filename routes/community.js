@@ -62,7 +62,9 @@ router.post('/submissions', async (req, res) => {
       city: city || undefined,
       state: state || undefined,
       country: country || undefined,
-      location: city || undefined,
+      // normalized nested location for consistency
+      location: { city: city || null, state: state || null, country: country || null },
+      // keep legacy string fields for back-compat
       reporterLocation: city || undefined,
       locationDetail: { city: city || undefined, state: state || undefined, country: country || undefined, district: district || undefined },
       contact,

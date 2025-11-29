@@ -4,6 +4,32 @@ const { requireAdminAuth } = require('../middleware/adminAuth');
 
 const router = express.Router();
 
+// Helper: build normalized reporter key expression used by contacts and stories
+function buildReporterKeyExpression() {
+  // Prefer lowercased contact.email; else contact.phone; else fallback to string _id
+  return {
+    $let: {
+      vars: {
+        emailRaw: { $ifNull: ['$contact.email', { $ifNull: ['$reporterEmail', '$email'] }] },
+        phoneRaw: '$contact.phone',
+      },
+      in: {
+        $cond: [
+          { $and: [ { $ne: ['$$emailRaw', null] }, { $ne: ['$$emailRaw', ''] } ] },
+          { $toLower: '$$emailRaw' },
+          {
+            $cond: [
+              { $and: [ { $ne: ['$$phoneRaw', null] }, { $ne: ['$$phoneRaw', ''] } ] },
+              '$$phoneRaw',
+              { $toString: '$_id' },
+            ],
+          },
+        ],
+      },
+    },
+  };
+}
+
 // GET /api/community/admin/contacts
 // Query params:
 //   q?: string (search by name/email/city/state/country)
@@ -77,11 +103,12 @@ router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
       // Normalize group email field
       {
         $addFields: {
-          groupEmail: { $ifNull: ['$reporterEmail', '$email'] },
-          groupName: { $ifNull: ['$reporterName', '$userName'] },
-          locCity: { $ifNull: ['$city', '$locationDetail.city'] },
-          locState: { $ifNull: ['$state', '$locationDetail.state'] },
-          locCountry: { $ifNull: ['$country', '$locationDetail.country'] },
+          reporterKey: buildReporterKeyExpression(),
+          groupEmail: { $ifNull: ['$contact.email', { $ifNull: ['$reporterEmail', '$email'] }] },
+          groupName: { $ifNull: ['$contact.name', { $ifNull: ['$reporterName', '$userName'] }] },
+          locCity: { $ifNull: ['$location.city', { $ifNull: ['$city', '$locationDetail.city'] }] },
+          locState: { $ifNull: ['$location.state', { $ifNull: ['$state', '$locationDetail.state'] }] },
+          locCountry: { $ifNull: ['$location.country', { $ifNull: ['$country', '$locationDetail.country'] }] },
           contactPhone: '$contact.phone',
           contactWhatsapp: '$contact.whatsappNumber',
           contactTelegram: '$contact.telegramId',
@@ -97,10 +124,10 @@ router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
         $group: {
           _id: '$groupId',
           id: { $first: '$groupId' },
-          email: { $first: '$groupEmail' },
+          email: { $last: '$groupEmail' },
           latestName: { $last: '$groupName' },
           latestCity: { $last: '$locCity' },
-            latestState: { $last: '$locState' },
+          latestState: { $last: '$locState' },
           latestCountry: { $last: '$locCountry' },
           latestPhone: { $last: '$groupPhone' },
           latestWhatsapp: { $last: '$contactWhatsapp' },
@@ -145,20 +172,16 @@ router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
       success: true,
       items: results.map(r => ({
         id: r.id,
-        reporterEmail: r.email || null,
-        reporterDisplayName: r.latestName || null,
+        name: r.latestName || null,
+        email: r.email || null,
+        phone: r.latestPhone || null,
         city: r.latestCity || null,
         state: r.latestState || null,
         country: r.latestCountry || null,
-        phone: r.latestPhone || null,
-        whatsappNumber: r.latestWhatsapp || null,
-        telegramId: r.latestTelegram || null,
-        instagramHandle: r.latestInstagram || null,
-        lastStatus: r.lastStatus || null,
-        lastStoryAt: r.lastStoryAt || null,
         totalStories: r.totalStories || 0,
         pendingStories: r.pendingStories || 0,
         approvedStories: r.approvedStories || 0,
+        lastStoryAt: r.lastStoryAt || null,
       })),
       total,
       page,
@@ -175,6 +198,52 @@ router.get('/', requireAdminAuth, async (req, res, next) => {
   // Forward to reporter-contacts handler
   req.url = '/reporter-contacts';
   return router.handle(req, res, next);
+});
+
+// GET /admin/community/reporter-stories?reporterKey=<email>&sortBy=createdAt&sortDir=desc
+// Returns all submissions for a specific reporter key (prefer contact.email)
+router.get('/reporter-stories', requireAdminAuth, async (req, res) => {
+  try {
+    const rawKey = String(req.query.reporterKey || '').trim();
+    if (!rawKey) {
+      return res.status(400).json({ ok: false, message: 'Missing reporterKey' });
+    }
+    const reporterKey = rawKey.toLowerCase();
+
+    const match = {
+      $or: [
+        { 'contact.email': reporterKey },
+        { reporterEmail: reporterKey },
+        { email: reporterKey },
+      ],
+    };
+
+    const sortField = String(req.query.sortBy || 'createdAt');
+    const sortDir = String(req.query.sortDir || 'desc').toLowerCase() === 'asc' ? 1 : -1;
+
+    const docs = await CommunitySubmission.find(match)
+      .sort({ [sortField]: sortDir })
+      .lean();
+
+    const items = docs.map(d => ({
+      id: String(d._id),
+      title: d.headline || '',
+      summary: d.body ? d.body.slice(0, 280) : null,
+      status: d.status || '',
+      language: d.language || null, // optional if present elsewhere
+      category: d.category || null,
+      city: (d.location && d.location.city) || d.city || (d.locationDetail && d.locationDetail.city) || null,
+      createdAt: d.createdAt,
+      updatedAt: d.updatedAt,
+      aiRisk: d.policyNotes || null, // prefer policyNotes as risk label if any
+      priority: d.priority || null,
+    }));
+
+    return res.json({ ok: true, items, total: items.length });
+  } catch (err) {
+    console.error('admin reporter-stories error', err?.message || err);
+    return res.status(500).json({ ok: false, message: 'Internal server error' });
+  }
 });
 
 module.exports = router;

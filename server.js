@@ -45,6 +45,7 @@ const { requireAdminAuth } = require('./middleware/adminAuth');
 // Community reporter submissions model used for contacts aggregation
 const CommunitySubmission = require('./models/CommunitySubmission');
 
+const { shouldLog } = require('./lib/logThrottle');
 const app = express();
 const server = http.createServer(app);
 const startTime = Date.now();
@@ -229,6 +230,17 @@ app.post('/admin/login', async (req, res) => {
   try {
     const { email, password } = req.body || {};
     console.log('[ADMIN_LOGIN][attempt]', { emailProvided: !!email, bodyKeys: Object.keys(req.body || {}) });
+    // Basic IP-based rate limiting for brute-force protection
+    try {
+      const ip = req.ip || req.headers['x-forwarded-for'] || req.connection?.remoteAddress || 'unknown';
+      if (await isRateLimited(String(ip))) {
+        if (shouldLog(`admin.login.ratelimit:${ip}`, 60_000)) {
+          console.warn('[ADMIN_LOGIN][rate-limited]', { ip: String(ip) });
+        }
+        return res.status(429).json({ ok: false, success: false, message: 'Too many attempts. Please try again later.' });
+      }
+    } catch (_) {}
+
 
     const founderEmail = (process.env.FOUNDER_EMAIL || '').trim().toLowerCase();
     const founderPassword = process.env.FOUNDER_PASSWORD || '';
@@ -257,7 +269,11 @@ app.post('/admin/login', async (req, res) => {
     }
 
     if (candidateEmail !== founderEmail || candidatePassword !== founderPassword) {
-      console.warn('[ADMIN_LOGIN][invalid-creds]', { candidateEmail });
+      const ip = req.ip || req.headers['x-forwarded-for'] || req.connection?.remoteAddress || 'unknown';
+      if (shouldLog(`admin.login.invalid:${ip}`, 10_000)) {
+        console.warn('[ADMIN_LOGIN][invalid-creds]', { candidateEmail });
+      }
+      try { await registerAttempt(String(ip)); } catch (_) {}
       return res.status(401).json({ ok: false, success: false, message: 'Invalid email or password' });
     }
 
@@ -522,6 +538,12 @@ app.use('/api/admin/community', communityAdminContactsRoutes);
 app.use('/admin-api/admin/community', communityAdminContactsRoutes);
 // Non-/api admin alias: GET /admin/community/reporter-contacts
 app.use('/admin/community', communityAdminContactsRoutes);
+// Direct alias for reporter-stories (stub) to avoid 404 if router mount order changes
+app.get('/admin/community/reporter-stories', requireAdminAuth, async (req, res) => {
+  const reporterKey = String(req.query.reporterKey || '').trim().toLowerCase();
+  // Even if reporterKey missing, return empty list (frontend expects shape)
+  return res.json({ ok: true, items: [], total: 0 });
+});
 // Phase 1 Community Reporter public API
 app.use('/api/community-reporter', communityReporterRoutes);
 // Admin community management (protected)
@@ -633,6 +655,45 @@ app.use((err, req, res, next) => {
 // Start the server with port fallback logic
 const BASE_PORT = parseInt(process.env.PORT, 10) || 10000;
 const MAX_PORT_SEARCH = 5; // will try BASE_PORT..BASE_PORT+4
+
+// --- Debug / Introspection utilities (non-production optional) ---
+function collectRoutePaths(app) {
+  const paths = [];
+  app._router && app._router.stack && app._router.stack.forEach(layer => {
+    if (layer.route && layer.route.path) {
+      Object.keys(layer.route.methods || {}).forEach(m => {
+        if (layer.route.methods[m]) paths.push(`${m.toUpperCase()} ${layer.route.path}`);
+      });
+    } else if (layer.name === 'router' && layer.handle && layer.handle.stack) {
+      const prefix = layer.regexp && layer.regexp.source ? extractPrefix(layer.regexp) : '';
+      layer.handle.stack.forEach(rLayer => {
+        if (rLayer.route && rLayer.route.path) {
+          Object.keys(rLayer.route.methods || {}).forEach(m => {
+            if (rLayer.route.methods[m]) paths.push(`${m.toUpperCase()} ${prefix}${rLayer.route.path}`);
+          });
+        }
+      });
+    }
+  });
+  return paths.sort();
+}
+function extractPrefix(regexp) {
+  try {
+    // Safely parse the first path segment from router regexp
+    const src = String(regexp && regexp.source || '');
+    // Examples of src:
+    // ^(?:\/)?admin\/community\/?(?=\/|$)
+    // ^(?:\/)?api\/admin\/community\/?(?=\/|$)
+    // We capture the first segment after optional leading \/
+    const m = src.match(/\^\(\?:\\\/?\)?([a-zA-Z0-9_-]+)(?:\\\/|\\\/?\(\?=|\$)/);
+    if (m && m[1]) return `/${m[1]}`;
+  } catch (_) {}
+  return '';
+}
+// Debug route to list mounted reporter paths quickly
+app.get('/_debug/routes', (req, res) => {
+  return res.json({ ok: true, total: collectRoutePaths(app).length, routes: collectRoutePaths(app).filter(p => p.includes('reporter')) });
+});
 
 function tryListen(port, attempt = 1) {
   server.listen(port, () => {

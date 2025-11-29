@@ -8,6 +8,9 @@ const adminAuthRoutes = require('./routes/adminAuth');
 const aiTrainingInfoRoutes = require('./routes/system/aiTrainingInfo');
 const communityRoutes = require('./routes/community');
 const adminCommunityRoutes = require('./routes/adminCommunity');
+const communityAdminContactsRoutes = require('./routes/communityAdminContacts');
+const CommunitySubmission = require('./models/CommunitySubmission');
+const { requireAdminAuth } = require('../middleware/adminAuth');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
 dotenv.config(); // Load environment variables from .env file
@@ -66,6 +69,65 @@ app.use('/admin-auth', adminAuthRoutes); // legacy GET /admin-auth/session
 app.use('/system/ai-training-info', aiTrainingInfoRoutes); // GET /system/ai-training-info
 // New admin community reporter + identity endpoints
 app.use('/api/admin/community', adminCommunityRoutes);
+// Mount reporter contacts + stories under same path for Admin Panel compatibility
+app.use('/api/admin/community', communityAdminContactsRoutes);
+// Admin API proxy alias (frontend often proxies /admin-api/* with auth header)
+app.use('/admin-api/admin/community', communityAdminContactsRoutes);
+// Non-/api alias (Admin Panel calls /admin/community/* directly)
+app.use('/admin/community', communityAdminContactsRoutes);
+
+// Fallback direct handlers (defensive) in case router mounting order changes upstream
+app.get('/admin/community/reporter-contacts', requireAdminAuth, async (req, res, next) => {
+  if (res.headersSent) return next();
+  // Delegate to router if it has the path
+  if (communityAdminContactsRoutes) return next();
+  return res.json({ ok: true, items: [], total: 0 });
+});
+
+app.get('/admin/community/reporter-stories', requireAdminAuth, async (req, res) => {
+  try {
+    const reporterKeyRaw = (req.query.reporterKey || '').toString().trim();
+    if (!reporterKeyRaw) return res.status(400).json({ ok: false, message: 'Missing reporterKey' });
+    const reporterKey = reporterKeyRaw.toLowerCase();
+    const pageNum = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limitNum = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
+    const skip = (pageNum - 1) * limitNum;
+    const status = (req.query.status || '').toString().trim();
+
+    const baseFilter = {
+      $or: [
+        { reporterEmail: reporterKey },
+        { 'contact.email': reporterKey },
+        { email: reporterKey },
+      ],
+    };
+    if (status && status !== 'all') {
+      baseFilter.$and = (baseFilter.$and || []).concat([{ status }]);
+    }
+
+    const [docs, total] = await Promise.all([
+      CommunitySubmission.find(baseFilter).sort({ createdAt: -1 }).skip(skip).limit(limitNum).lean(),
+      CommunitySubmission.countDocuments(baseFilter),
+    ]);
+    const items = docs.map(d => ({
+      id: d._id.toString(),
+      title: d.headline || '',
+      summary: null,
+      status: d.status || 'draft',
+      language: d.language || 'en',
+      category: d.category || null,
+      city: (d.location?.city || d.city || d.locationDetail?.city || null),
+      createdAt: d.createdAt ? d.createdAt.toISOString() : null,
+      updatedAt: d.updatedAt ? d.updatedAt.toISOString() : null,
+      aiRisk: typeof d.riskScore === 'number' ? String(d.riskScore) : null,
+      priority: d.priority || null,
+    }));
+    return res.json({ ok: true, items, total, page: pageNum, limit: limitNum });
+  } catch (e) {
+    console.error('[ADMIN][reporter-stories] error', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load reporter stories' });
+  }
+});
 app.get('/api/admin/me', requireAdminAuth, (req, res) => {
   const a = req.admin || {};
   return res.json({
@@ -118,4 +180,53 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
+  try {
+    // Light debug log of reporter-related routes on startup
+    const reporterRoutes = [];
+    app._router && app._router.stack && app._router.stack.forEach(layer => {
+      if (layer.route && layer.route.path && layer.route.path.includes('reporter')) {
+        reporterRoutes.push(layer.route.path);
+      } else if (layer.name === 'router' && layer.handle && layer.handle.stack) {
+        const prefix = layer.regexp && layer.regexp.fast_slash ? '' : extractPrefix(layer.regexp);
+        layer.handle.stack.forEach(rLayer => {
+          if (rLayer.route && rLayer.route.path && rLayer.route.path.includes('reporter')) {
+            reporterRoutes.push(prefix + rLayer.route.path);
+          }
+        });
+      }
+    });
+    console.log('[startup][reporter-routes]', reporterRoutes);
+  } catch (e) {
+    console.warn('[startup][reporter-routes] failed', e?.message || e);
+  }
+});
+
+function extractPrefix(regexp) {
+  try {
+    const src = regexp && regexp.source || '';
+    // Match something like ^\/(admin|api)[^*]*?
+    const m = src.match(/\\\/(admin[^\\^]+|api[^\\^]+|system[^\\^]+)\\/i);
+    if (m && m[1]) return '/' + m[1];
+  } catch (_) {}
+  return '';
+}
+
+// Debug endpoint to verify reporter routes present (nested instance)
+app.get('/_debug/routes', (req, res) => {
+  const list = [];
+  try {
+    app._router && app._router.stack && app._router.stack.forEach(layer => {
+      if (layer.route && layer.route.path) {
+        list.push(layer.route.path);
+      } else if (layer.name === 'router' && layer.handle && layer.handle.stack) {
+        const prefix = layer.regexp && layer.regexp.fast_slash ? '' : extractPrefix(layer.regexp);
+        layer.handle.stack.forEach(rLayer => {
+          if (rLayer.route && rLayer.route.path) list.push(prefix + rLayer.route.path);
+        });
+      }
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: 'Introspection failed', error: e?.message || e });
+  }
+  return res.json({ ok: true, total: list.length, reporter: list.filter(r => r.includes('reporter')), all: list });
 });

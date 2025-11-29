@@ -61,9 +61,9 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   userAgent: { type: String, required: false, trim: true },
   // Reporter contact (private; editorial-only)
   contact: {
-    name: { type: String, trim: true },
-    email: { type: String, trim: true },
-    phone: { type: String, trim: true },
+    name: { type: String, trim: true, default: null },
+    email: { type: String, trim: true, lowercase: true, default: null, index: true },
+    phone: { type: String, trim: true, default: null, index: true },
     preferredContact: { type: String, enum: ['email','phone','whatsapp','no_preference'], default: 'no_preference' },
     canContactForThisStory: { type: Boolean, default: false },
     canContactForFutureStories: { type: Boolean, default: false },
@@ -71,6 +71,12 @@ const CommunitySubmissionSchema = new mongoose.Schema({
     whatsappNumber: { type: String, trim: true },
     telegramId: { type: String, trim: true },
     instagramHandle: { type: String, trim: true },
+  },
+  // Normalized location (admin directory prefers this)
+  location: {
+    city: { type: String, trim: true, default: null },
+    state: { type: String, trim: true, default: null },
+    country: { type: String, trim: true, default: null },
   },
   // Report location
   locationDetail: {

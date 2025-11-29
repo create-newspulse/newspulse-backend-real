@@ -3,6 +3,7 @@ const CommunitySubmission = require('../models/CommunitySubmission');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const { cleanupOldLowPrioritySubmissions } = require('../services/communityCleanup');
 const { createDraftArticleFromSubmission } = require('../services/communityDraftFromSubmission');
+const { shouldLog } = require('../lib/logThrottle');
 
 const router = express.Router();
 
@@ -14,13 +15,17 @@ function requireInternalAdminKey(req, res, next) {
   const provided = (req.headers['x-admin-internal-key'] || '').trim();
   const isProd = String(process.env.NODE_ENV).toLowerCase() === 'production';
   if (!expected) {
-    // No key configured: allow but log once in production for visibility
-    if (isProd) console.warn('[ADMIN_COMMUNITY_REPORTER][internal-key] expected key not set (production)');
+    // No key configured: allow but log occasionally in production for visibility
+    if (isProd && shouldLog('admin.communityReporter.internalKey.missing', 60_000)) {
+      console.warn('[ADMIN_COMMUNITY_REPORTER][internal-key] expected key not set (production)');
+    }
     return next();
   }
   if (isProd) {
     if (!provided || provided !== expected) {
-      console.warn('[ADMIN_COMMUNITY_REPORTER][internal-key] invalid or missing key (production)');
+      if (shouldLog('admin.communityReporter.internalKey.invalid', 60_000)) {
+        console.warn('[ADMIN_COMMUNITY_REPORTER][internal-key] invalid or missing key (production)');
+      }
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
     return next();
