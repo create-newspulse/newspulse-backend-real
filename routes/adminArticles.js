@@ -140,6 +140,102 @@ router.post('/articles', requireAdminAuth, async (req, res) => {
   }
 });
 
+// NOTE (final admin base): Mounted at /api/admin in server.js
+// GET /api/admin/community/reporter-contacts
+router.get('/community/reporter-contacts', requireAdminAuth, async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
+    const skip = (page - 1) * limit;
+
+    const CommunitySubmission = require('../models/CommunitySubmission');
+
+    const pipeline = [
+      {
+        $addFields: {
+          groupEmail: { $ifNull: ['$reporterEmail', '$email'] },
+          groupPhone: '$contact.phone',
+          groupName: { $ifNull: ['$reporterName', '$userName'] },
+          locCity: { $ifNull: ['$city', '$locationDetail.city'] },
+          locState: { $ifNull: ['$state', '$locationDetail.state'] },
+          locCountry: { $ifNull: ['$country', '$locationDetail.country'] },
+          statusNorm: { $toUpper: { $ifNull: ['$status', ''] } },
+        },
+      },
+      {
+        $addFields: {
+          groupId: { $ifNull: ['$groupEmail', { $ifNull: ['$groupPhone', { $toString: '$_id' }] }] },
+        },
+      },
+      { $match: { groupId: { $exists: true, $ne: '' } } },
+      {
+        $group: {
+          _id: '$groupId',
+          id: { $first: '$groupId' },
+          name: { $last: '$groupName' },
+          email: { $last: '$groupEmail' },
+          phone: { $last: '$groupPhone' },
+          city: { $last: '$locCity' },
+          state: { $last: '$locState' },
+          country: { $last: '$locCountry' },
+          totalStories: { $sum: 1 },
+          pendingStories: { $sum: { $cond: [ { $or: [
+            { $eq: ['$statusNorm', 'PENDING'] },
+            { $eq: ['$statusNorm', 'UNDER_REVIEW'] },
+            { $eq: ['$statusNorm', 'NEW'] },
+            { $eq: ['$statusNorm', 'AI_REVIEWED'] },
+            { $eq: ['$statusNorm', 'PENDING_FOUNDER'] },
+          ] }, 1, 0 ] } },
+          approvedStories: { $sum: { $cond: [ { $or: [
+            { $eq: ['$statusNorm', 'APPROVED'] },
+            { $eq: ['$statusNorm', 'PUBLISHED'] },
+          ] }, 1, 0 ] } },
+          lastStoryAt: { $max: '$createdAt' },
+        },
+      },
+      { $sort: { lastStoryAt: -1 } },
+      { $skip: skip },
+      { $limit: limit },
+    ];
+
+    const [items, countAgg] = await Promise.all([
+      CommunitySubmission.aggregate(pipeline),
+      CommunitySubmission.aggregate([
+        { $addFields: { groupEmail: { $ifNull: ['$reporterEmail', '$email'] }, groupPhone: '$contact.phone' } },
+        { $addFields: { groupId: { $ifNull: ['$groupEmail', { $ifNull: ['$groupPhone', { $toString: '$_id' }] }] } } },
+        { $match: { groupId: { $exists: true, $ne: '' } } },
+        { $group: { _id: '$groupId' } },
+        { $count: 'count' },
+      ]),
+    ]);
+
+    const total = countAgg[0]?.count || 0;
+
+    return res.json({
+      ok: true,
+      items: items.map(i => ({
+        id: i.id,
+        name: i.name || null,
+        email: i.email || null,
+        phone: i.phone || null,
+        city: i.city || null,
+        state: i.state || null,
+        country: i.country || null,
+        totalStories: i.totalStories || 0,
+        pendingStories: i.pendingStories || 0,
+        approvedStories: i.approvedStories || 0,
+        lastStoryAt: i.lastStoryAt || null,
+      })),
+      total,
+      page,
+      limit,
+    });
+  } catch (e) {
+    console.error('[ADMIN_CONTACTS][error]', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load reporter contacts' });
+  }
+});
+
 module.exports = router;
 
 // GET /api/admin/articles/:id -> returns article details, and if source=community with link, also includes communityReport
