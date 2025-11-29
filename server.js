@@ -40,6 +40,10 @@ const adminAssistRouter = require('./routes/adminAssist');
 // New public routers for Admin Panel compatibility
 const articlesCrudRoutes = require('./routes/articles.routes');
 const systemStubRoutes = require('./routes/system.routes');
+// Admin auth middleware for direct app-level protected routes
+const { requireAdminAuth } = require('./middleware/adminAuth');
+// Community reporter submissions model used for contacts aggregation
+const CommunitySubmission = require('./models/CommunitySubmission');
 
 const app = express();
 const server = http.createServer(app);
@@ -553,6 +557,100 @@ app.use('/api', articlesCrudRoutes);
 
 // Public Assist suggestions API (stub) and Monitor Hub alias
 app.use('/api', systemStubRoutes);
+
+// Canonical admin contact directory route mounted directly on app for guaranteed wiring
+// final admin base: /api/admin
+// GET /api/admin/community/reporter-contacts
+app.get('/api/admin/community/reporter-contacts', requireAdminAuth, async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
+    const skip = (page - 1) * limit;
+
+    const pipeline = [
+      {
+        $addFields: {
+          groupEmail: { $ifNull: ['$reporterEmail', '$email'] },
+          groupPhone: '$contact.phone',
+          groupName: { $ifNull: ['$reporterName', '$userName'] },
+          locCity: { $ifNull: ['$city', '$locationDetail.city'] },
+          locState: { $ifNull: ['$state', '$locationDetail.state'] },
+          locCountry: { $ifNull: ['$country', '$locationDetail.country'] },
+          statusNorm: { $toUpper: { $ifNull: ['$status', ''] } },
+        },
+      },
+      {
+        $addFields: {
+          groupId: { $ifNull: ['$groupEmail', { $ifNull: ['$groupPhone', { $toString: '$_id' }] }] },
+        },
+      },
+      { $match: { groupId: { $exists: true, $ne: '' } } },
+      {
+        $group: {
+          _id: '$groupId',
+          id: { $first: '$groupId' },
+          name: { $last: '$groupName' },
+          email: { $last: '$groupEmail' },
+          phone: { $last: '$groupPhone' },
+          city: { $last: '$locCity' },
+          state: { $last: '$locState' },
+          country: { $last: '$locCountry' },
+          totalStories: { $sum: 1 },
+          pendingStories: { $sum: { $cond: [ { $or: [
+            { $eq: ['$statusNorm', 'PENDING'] },
+            { $eq: ['$statusNorm', 'UNDER_REVIEW'] },
+            { $eq: ['$statusNorm', 'NEW'] },
+            { $eq: ['$statusNorm', 'AI_REVIEWED'] },
+            { $eq: ['$statusNorm', 'PENDING_FOUNDER'] },
+          ] }, 1, 0 ] } },
+          approvedStories: { $sum: { $cond: [ { $or: [
+            { $eq: ['$statusNorm', 'APPROVED'] },
+            { $eq: ['$statusNorm', 'PUBLISHED'] },
+          ] }, 1, 0 ] } },
+          lastStoryAt: { $max: '$createdAt' },
+        },
+      },
+      { $sort: { lastStoryAt: -1 } },
+      { $skip: skip },
+      { $limit: limit },
+    ];
+
+    const [rows, countAgg] = await Promise.all([
+      CommunitySubmission.aggregate(pipeline),
+      CommunitySubmission.aggregate([
+        { $addFields: { groupEmail: { $ifNull: ['$reporterEmail', '$email'] }, groupPhone: '$contact.phone' } },
+        { $addFields: { groupId: { $ifNull: ['$groupEmail', { $ifNull: ['$groupPhone', { $toString: '$_id' }] }] } } },
+        { $match: { groupId: { $exists: true, $ne: '' } } },
+        { $group: { _id: '$groupId' } },
+        { $count: 'count' },
+      ]),
+    ]);
+
+    const total = countAgg[0]?.count || 0;
+    return res.json({
+      ok: true,
+      items: rows.map(r => ({
+        id: r.id,
+        name: r.name || null,
+        email: r.email || null,
+        phone: r.phone || null,
+        city: r.city || null,
+        state: r.state || null,
+        country: r.country || null,
+        totalStories: r.totalStories || 0,
+        pendingStories: r.pendingStories || 0,
+        approvedStories: r.approvedStories || 0,
+        lastStoryAt: r.lastStoryAt || null,
+      })),
+      total,
+      page,
+      limit,
+    });
+  } catch (e) {
+    console.error('[ADMIN_CONTACTS][app-route-error]', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load reporter contacts' });
+  }
+});
 
 // --- Compatibility alias (non-/api) for local dev code accidentally hitting /admin-auth/session
 // Provides a lightweight session probe identical to /api/admin-auth/session so CORS preflight succeeds.
