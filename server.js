@@ -512,7 +512,9 @@ app.use('/api/community', communityRoutes);
 app.use('/api/community/admin/community', communityAdminCommunityRoutes);
 // Community reporter contact directory (admin-only)
 app.use('/api/community/admin/contacts', communityAdminContactsRoutes);
-// Non-/api admin alias as requested: GET /admin/community/reporter-contacts
+// Mount under /api/admin/community so Vite proxy path resolves: /api/admin/community/reporter-contacts
+app.use('/api/admin/community', communityAdminContactsRoutes);
+// Non-/api admin alias: GET /admin/community/reporter-contacts
 app.use('/admin/community', communityAdminContactsRoutes);
 // Phase 1 Community Reporter public API
 app.use('/api/community-reporter', communityReporterRoutes);
