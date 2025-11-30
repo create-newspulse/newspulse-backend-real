@@ -153,17 +153,26 @@ router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
       { $sort: { lastStoryAt: -1 } },
     ];
 
+    const augmentedPipeline = [
+      ...pipeline,
+      // Join with ReporterContact to enrich with verification + journalist fields
+      { $lookup: { from: 'reportercontacts', localField: 'email', foreignField: 'email', as: 'contactDoc' } },
+      { $addFields: { contactDoc: { $first: '$contactDoc' } } },
+    ];
+
+    const countPipeline = [
+      ...pipeline.slice(0, pipeline.length - 2),
+      { $group: { _id: '$_id' } },
+      { $count: 'count' },
+    ];
+
     const [results, totalAgg] = await Promise.all([
       CommunitySubmission.aggregate([
-        ...pipeline,
+        ...augmentedPipeline,
         { $skip: skip },
         { $limit: limit },
       ]),
-      CommunitySubmission.aggregate([
-        ...pipeline.slice(0, pipeline.length - 2), // exclude sort for counting unique groups
-        { $group: { _id: '$_id' } }, // After previous $group, _id is email; regroup to count unique
-        { $count: 'count' },
-      ]),
+      CommunitySubmission.aggregate(countPipeline),
     ]);
 
     const total = totalAgg[0]?.count || 0;
@@ -183,6 +192,19 @@ router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
         pendingStories: r.pendingStories || 0,
         approvedStories: r.approvedStories || 0,
         lastStoryAt: r.lastStoryAt || null,
+        // New journalist / verification enrichment (may be null if no ReporterContact yet)
+        reporterType: r.contactDoc ? r.contactDoc.reporterType : 'community',
+        verificationLevel: r.contactDoc ? r.contactDoc.verificationLevel : 'unverified',
+        organisationName: r.contactDoc ? r.contactDoc.organisationName : null,
+        organisationType: r.contactDoc ? r.contactDoc.organisationType : null,
+        positionTitle: r.contactDoc ? r.contactDoc.positionTitle : null,
+        beatsProfessional: r.contactDoc ? (r.contactDoc.beatsProfessional || []) : [],
+        yearsExperience: r.contactDoc ? r.contactDoc.yearsExperience : null,
+        languages: r.contactDoc ? (r.contactDoc.languages || []) : [],
+        websiteOrPortfolio: r.contactDoc ? r.contactDoc.websiteOrPortfolio : null,
+        socialLinks: r.contactDoc ? (r.contactDoc.socialLinks || {}) : {},
+        verifiedBy: r.contactDoc ? r.contactDoc.verifiedBy : null,
+        verifiedAt: r.contactDoc ? r.contactDoc.verifiedAt : null,
       })),
       total,
       page,
@@ -323,3 +345,69 @@ router.get('/reporter-stories', requireAdminAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+// --- Admin alias: Journalist Applications listing under /admin/community ---
+// The admin panel calls GET /admin/community/journalist-applications
+// Provide the handler here using the same logic as journalist listing.
+async function handleJournalistApplications(req, res) {
+  try {
+    const { status = 'all' } = req.query || {};
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limitRaw = Math.max(parseInt(req.query.limit || '20', 10), 1);
+    const limit = Math.min(limitRaw, 100);
+    const skip = (page - 1) * limit;
+
+    const filter = { reporterType: 'journalist' };
+    if (status === 'pending') filter.verificationLevel = 'pending';
+    else if (status === 'verified') filter.verificationLevel = 'verified';
+    else filter.verificationLevel = { $in: ['pending', 'verified'] };
+
+    const [items, total] = await Promise.all([
+      ReporterContact.find(filter).sort({ verifiedAt: -1, createdAt: -1 }).skip(skip).limit(limit).lean(),
+      ReporterContact.countDocuments(filter),
+    ]);
+
+    // storyCount enrichment (optional)
+    const CommunitySubmission = require('../models/CommunitySubmission');
+    const enriched = await Promise.all(items.map(async (c) => {
+      let storyCount = 0;
+      try { storyCount = await CommunitySubmission.countDocuments({ reporterId: c._id }); } catch (_) {}
+      return {
+        _id: c._id,
+        id: String(c._id),
+        name: c.fullName || null,
+        email: c.email || null,
+        phone: c.phoneFull || null,
+        city: c.cityTownVillage || null,
+        state: c.stateName || null,
+        country: c.country || null,
+        reporterType: c.reporterType,
+        verificationLevel: c.verificationLevel,
+        organisationName: c.organisationName || null,
+        organisationType: c.organisationType || null,
+        positionTitle: c.positionTitle || null,
+        beatsProfessional: c.beatsProfessional || [],
+        yearsExperience: c.yearsExperience || null,
+        languages: c.languages || [],
+        websiteOrPortfolio: c.websiteOrPortfolio || null,
+        socialLinks: c.socialLinks || {},
+        verifiedBy: c.verifiedBy || null,
+        verifiedAt: c.verifiedAt || null,
+        storyCount,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+      };
+    }));
+
+    return res.json({ ok: true, items: enriched, page, limit, total });
+  } catch (err) {
+    console.error('[ADMIN_COMMUNITY][journalist-applications] error', err?.message || err);
+    return res.status(500).json({ ok: false, message: 'Failed to load journalist applications' });
+  }
+}
+
+// Primary path expected by admin panel
+router.get('/journalist-applications', requireAdminAuth, handleJournalistApplications);
+// Common variants (pluralization and nested path)
+router.get('/journalists-applications', requireAdminAuth, handleJournalistApplications);
+router.get('/journalists/applications', requireAdminAuth, handleJournalistApplications);

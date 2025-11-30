@@ -17,15 +17,34 @@ function externalStatus(internal) {
 // POST /api/community-reporter/submissions (public, no auth)
 router.post('/submissions', async (req, res) => {
   try {
-    const { name, email, location, category, headline, story } = req.body || {};
+    const body = req.body || {};
+    const { name, email, location, category, headline, story } = body;
     const errors = [];
-    if (!name || !name.trim()) errors.push('name required');
-    if (!email || !email.trim()) errors.push('email required');
-    if (!location || !location.trim()) errors.push('location required');
-    if (!category || !category.trim()) errors.push('category required');
-    if (!headline || !headline.trim()) errors.push('headline required');
-    if (!story || !story.trim()) errors.push('story required');
+    if (!name || !String(name).trim()) errors.push('name required');
+    if (!email || !String(email).trim()) errors.push('email required');
+    if (!location || !String(location).trim()) errors.push('location required');
+    if (!category || !String(category).trim()) errors.push('category required');
+    if (!headline || !String(headline).trim()) errors.push('headline required');
+    if (!story || !String(story).trim()) errors.push('story required');
     if (errors.length) return res.status(400).json({ success: false, message: 'Validation failed', errors });
+
+    // Upsert reporter contact (community type)
+    const { upsertReporterContactFromSubmission } = require('../services/reporterContactService');
+    let reporterContact = null;
+    try {
+      reporterContact = await upsertReporterContactFromSubmission({
+        name: name.trim(),
+        email: email.trim().toLowerCase(),
+        city: location.trim(), // map free-form location to cityTownVillage
+        country: undefined, // not provided in Phase 1 form
+        state: undefined,
+        phone: body.phone,
+        reporterType: 'community',
+      });
+    } catch (err) {
+      console.error('[COMMUNITY_REPORTER][contact-upsert-failed]', err?.message || err);
+      // Continue without reporterContact (fallback legacy behavior)
+    }
 
     const submission = await CommunitySubmission.create({
       name: name.trim(),
@@ -35,6 +54,9 @@ router.post('/submissions', async (req, res) => {
       headline: headline.trim(),
       body: story.trim(), // underlying field
       status: 'NEW',
+      reporterId: reporterContact ? reporterContact._id : undefined,
+      sourceType: reporterContact ? reporterContact.reporterType : 'community',
+      reporterVerificationLevel: reporterContact ? reporterContact.verificationLevel : 'unverified',
     });
     try {
       await runCommunityAiChecks(submission);
@@ -56,6 +78,9 @@ router.post('/submissions', async (req, res) => {
       riskScore: submission.riskScore,
       flags: submission.flags,
       status: externalStatus(submission.status),
+      reporterId: submission.reporterId || null,
+      sourceType: submission.sourceType,
+      reporterVerificationLevel: submission.reporterVerificationLevel,
       createdAt: submission.createdAt,
     }});
   } catch (e) {

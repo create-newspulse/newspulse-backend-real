@@ -67,6 +67,26 @@ const ReporterContactSchema = new mongoose.Schema({
   stats: { type: StatsSchema, default: () => ({}) },
 
   notes: { type: String, trim: true },
+
+  // --- Verified Journalist / Media Partner fields ---
+  reporterType: { type: String, enum: ['community', 'journalist'], default: 'community', index: true },
+  verificationLevel: { type: String, enum: ['unverified', 'pending', 'verified'], default: 'unverified', index: true },
+
+  organisationName: { type: String, trim: true },
+  organisationType: { type: String, enum: ['print', 'tv', 'radio', 'digital', 'freelance', 'other'] },
+  positionTitle: { type: String, trim: true },
+
+  // Separate professional beats list (distinct from existing beats enum list)
+  beatsProfessional: [{ type: String, trim: true }],
+  yearsExperience: { type: Number },
+  languages: [{ type: String, trim: true }],
+  websiteOrPortfolio: { type: String, trim: true },
+  socialLinks: {
+    linkedin: { type: String, trim: true },
+    twitter: { type: String, trim: true },
+  },
+  verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'AdminUser' },
+  verifiedAt: { type: Date },
 }, { timestamps: true });
 
 // Indexes
@@ -74,5 +94,7 @@ ReporterContactSchema.index({ email: 1 }, { unique: true });
 ReporterContactSchema.index({ phoneFull: 1 });
 ReporterContactSchema.index({ stateName: 1, districtName: 1, talukaName: 1, areaType: 1 });
 ReporterContactSchema.index({ fullName: 'text', cityTownVillage: 'text', districtName: 'text' });
+// Optimized index for journalist application queries
+ReporterContactSchema.index({ reporterType: 1, verificationLevel: 1 });
 
 module.exports = mongoose.model('ReporterContact', ReporterContactSchema);

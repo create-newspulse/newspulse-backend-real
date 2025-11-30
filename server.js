@@ -34,6 +34,7 @@ const communityReporterRoutes = require('./routes/communityReporter');
 const communityStoriesRoutes = require('./routes/communityStories');
 const communityAdminCommunityRoutes = require('./routes/communityAdminCommunity');
 const communityAdminContactsRoutes = require('./routes/communityAdminContacts');
+const journalistsRoutes = require('./routes/journalists');
 const adminArticlesRouter = require('./routes/adminArticles');
 const adminArticleIdRouter = require('./routes/admin/articles');
 const adminAssistRouter = require('./routes/adminAssist');
@@ -536,16 +537,12 @@ app.use('/api/community/admin/contacts', communityAdminContactsRoutes);
 app.use('/api/admin/community', communityAdminContactsRoutes);
 // Admin API proxy alias to ensure Authorization header is forwarded by frontend
 app.use('/admin-api/admin/community', communityAdminContactsRoutes);
-// Non-/api admin alias: GET /admin/community/reporter-contacts
+// Non-/api admin alias: GET /admin/community/reporter-contacts and /reporter-stories
 app.use('/admin/community', communityAdminContactsRoutes);
-// Direct alias for reporter-stories (stub) to avoid 404 if router mount order changes
-app.get('/admin/community/reporter-stories', requireAdminAuth, async (req, res) => {
-  const reporterKey = String(req.query.reporterKey || '').trim().toLowerCase();
-  // Even if reporterKey missing, return empty list (frontend expects shape)
-  return res.json({ ok: true, items: [], total: 0 });
-});
 // Phase 1 Community Reporter public API
 app.use('/api/community-reporter', communityReporterRoutes);
+// Verified Journalist public & admin routes
+app.use('/api/journalists', journalistsRoutes);
 // Admin community management (protected)
 app.use('/api/admin/community', adminCommunityRoutes);
 // Admin API proxy alias so requests under /admin-api include Bearer token

@@ -72,6 +72,12 @@ const CommunitySubmissionSchema = new mongoose.Schema({
     telegramId: { type: String, trim: true },
     instagramHandle: { type: String, trim: true },
   },
+  // Link to normalized reporter contact directory entry (new Verified Journalist system)
+  reporterId: { type: mongoose.Schema.Types.ObjectId, ref: 'ReporterContact', index: true },
+  // Snapshot of reporter source type at submission time
+  sourceType: { type: String, enum: ['community', 'journalist'], default: 'community', index: true },
+  // Snapshot of reporter verification level at submission time
+  reporterVerificationLevel: { type: String, enum: ['unverified', 'pending', 'verified'], default: 'unverified', index: true },
   // Normalized location (admin directory prefers this)
   location: {
     city: { type: String, trim: true, default: null },
