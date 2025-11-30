@@ -82,13 +82,26 @@ router.post('/submissions', async (req, res) => {
       // Continue without reporterContact (fallback legacy behavior)
     }
 
+    const cityNorm = (city || location || '').trim();
+    const stateNorm = (state || '').trim();
+    const countryNorm = (country || '').trim();
     const submission = await CommunitySubmission.create({
-      name: name.trim(),
-      email: email.trim().toLowerCase(),
-      location: location.trim(),
-      category: category.trim(),
-      headline: headline.trim(),
-      body: story.trim(), // underlying field
+      // Required duplicates for model
+      reporterName: (fullName || name || '').trim(),
+      reporterEmail: (email || '').trim().toLowerCase(),
+      // Legacy/alias fields for compatibility
+      name: (name || '').trim(),
+      email: (email || '').trim().toLowerCase(),
+      category: (category || '').trim(),
+      headline: (headline || '').trim(),
+      body: (story || '').trim(), // underlying field
+      // Normalized location object expected by schema
+      location: { city: cityNorm || null, state: stateNorm || null, country: countryNorm || null },
+      reporterLocation: cityNorm || undefined,
+      city: cityNorm || undefined,
+      state: stateNorm || undefined,
+      country: countryNorm || undefined,
+      // Defaults
       status: 'PENDING_FOUNDER',
       reporterId: reporterResult ? reporterResult.contactId : undefined,
       sourceType: reporterResult ? (reporterResult.contact.reporterType === 'journalist' ? 'journalist' : 'community') : (isProfessionalJournalist ? 'journalist' : 'community'),
