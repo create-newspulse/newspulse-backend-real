@@ -89,10 +89,16 @@ router.post('/submissions', async (req, res) => {
       category: category.trim(),
       headline: headline.trim(),
       body: story.trim(), // underlying field
-      status: 'NEW',
+      status: 'PENDING_FOUNDER',
       reporterId: reporterResult ? reporterResult.contactId : undefined,
-      sourceType: reporterResult ? reporterResult.contact.reporterType : (isProfessionalJournalist ? 'journalist' : 'community'),
-      reporterVerificationLevel: reporterResult ? reporterResult.contact.verificationLevel : 'community_default',
+      sourceType: reporterResult ? (reporterResult.contact.reporterType === 'journalist' ? 'journalist' : 'community') : (isProfessionalJournalist ? 'journalist' : 'community'),
+      reporterVerificationLevel: (function () {
+        if (!reporterResult || !reporterResult.contact || !reporterResult.contact.verificationLevel) return 'unverified';
+        const v = reporterResult.contact.verificationLevel;
+        if (v === 'verified') return 'journalist_verified';
+        if (v === 'pending') return 'journalist_pending';
+        return 'unverified';
+      })(),
     });
     if (process.env.NODE_ENV !== 'test') {
       try {

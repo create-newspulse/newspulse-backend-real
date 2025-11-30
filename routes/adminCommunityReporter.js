@@ -12,7 +12,72 @@ router.get('/submissions', requireAdminAuth, async (req, res) => {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limitRaw = Math.max(parseInt(req.query.limit || '20', 10), 1);
     const limit = Math.min(limitRaw, 100);
-    return res.json({ ok: true, items: [], total: 0, page, limit });
+    const skip = (page - 1) * limit;
+    const { source, status = 'pending', q } = req.query || {};
+
+    // Base filter: exclude soft-deleted if your schema uses such flags.
+    // Note: current schema has no deleted flags; keep placeholder for future.
+    const filter = {};
+
+    // Backwards compatibility: submissions without sourceType are treated as community reporters.
+    // (Submissions created before reporter directory integration lacked sourceType.)
+    if (!source || source === 'all') {
+      // no sourceType restriction applied here
+    }
+    if (source === 'community') {
+      filter.$or = [
+        { sourceType: 'community' },
+        { sourceType: { $exists: false } },
+        { sourceType: null },
+      ];
+    } else if (source === 'journalist' || source === 'journalists' || source === 'verified_journalists') {
+      filter.sourceType = 'journalist';
+    } // else source=all -> no sourceType restriction
+
+    // Status mapping: support legacy lowercase and new uppercase/workflow statuses
+    // Pending Review tab → all "not-final" submissions
+    if (status === 'pending') {
+      filter.status = { $in: ['pending', 'PENDING_FOUNDER', 'under_review'] };
+    } else if (status === 'rejected') {
+      filter.status = { $in: ['rejected', 'REJECTED'] };
+    } else if (status === 'approved') {
+      filter.status = { $in: ['approved', 'APPROVED'] };
+    } // else 'all' or anything else → no status filter
+
+    // Optional simple text search on headline or location
+    if (q && String(q).trim()) {
+      const regex = new RegExp(String(q).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = (filter.$or || []).concat([
+        { headline: regex },
+        { location: regex },
+      ]);
+    }
+
+    const query = CommunitySubmission.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit);
+    const [items, total] = await Promise.all([
+      query.lean(),
+      CommunitySubmission.countDocuments(filter),
+    ]);
+
+    const mapped = items.map(s => ({
+      id: s._id.toString(),
+      headline: s.headline,
+      story: s.body,
+      category: s.category,
+      location: s.location || (s.locationDetail && s.locationDetail.city) || null,
+      status: s.status,
+      sourceType: s.sourceType || 'community', // compatibility default
+      reporterVerificationLevel: s.reporterVerificationLevel || 'community_default',
+      reporterId: s.reporterId || null,
+      reporterName: s.reporterName || s.name || (s.contact && s.contact.name) || null,
+      reporterEmail: s.reporterEmail || s.email || (s.contact && s.contact.email) || null,
+      riskScore: s.riskScore || 0,
+      flags: s.flags || [],
+      createdAt: s.createdAt,
+    }));
+
+    // Response shape expected by admin UI
+    return res.json({ success: true, submissions: mapped, total, page, limit });
   } catch (err) {
     console.error('[ADMIN_COMMUNITY_REPORTER][submissions] error', err?.message || err);
     return res.status(500).json({ ok: false, message: 'Failed to load submissions' });

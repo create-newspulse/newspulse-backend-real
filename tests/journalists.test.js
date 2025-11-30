@@ -110,5 +110,5 @@ test('Community submission includes reporterId and verification fields', async (
   assert.strictEqual(res.statusCode, 201);
   assert.ok(res.body.item.reporterId === null || typeof res.body.item.reporterId === 'string');
   assert.ok(['community', 'journalist'].includes(res.body.item.sourceType));
-  assert.ok(['community_default', 'pending', 'verified', 'limited', 'revoked'].includes(res.body.item.reporterVerificationLevel));
+  assert.ok(['unverified', 'journalist_pending', 'journalist_verified'].includes(res.body.item.reporterVerificationLevel));
 });

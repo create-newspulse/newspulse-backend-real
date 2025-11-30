@@ -15,8 +15,7 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   userName: { type: String, required: false, trim: true },
   ageGroup: { type: String, required: false, trim: true },
   reporterAgeGroup: { type: String, required: false, trim: true },
-  // Location fields
-  location: { type: String, required: false, trim: true },
+  // Location fields (string legacy fields remain optional for back-compat)
   reporterLocation: { type: String, required: false, trim: true },
   city: { type: String, required: false, trim: true },
   state: { type: String, required: false, trim: true },
@@ -75,9 +74,9 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   // Link to normalized reporter contact directory entry (new Verified Journalist system)
   reporterId: { type: mongoose.Schema.Types.ObjectId, ref: 'ReporterContact', index: true },
   // Snapshot of reporter source type at submission time
-  sourceType: { type: String, enum: ['community', 'journalist', 'other'], default: 'community', index: true },
+  sourceType: { type: String, enum: ['community', 'journalist'], default: 'community', index: true },
   // Snapshot of reporter verification level at submission time
-  reporterVerificationLevel: { type: String, default: 'community_default', index: true },
+  reporterVerificationLevel: { type: String, enum: ['unverified', 'journalist_pending', 'journalist_verified'], default: 'unverified', index: true },
   // Normalized location (admin directory prefers this)
   location: {
     city: { type: String, trim: true, default: null },

@@ -47,8 +47,8 @@ router.post('/submissions', async (req, res) => {
     const ipAddress = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || req.connection?.remoteAddress || '';
     const userAgent = req.get('user-agent') || '';
 
-    const saved = await CommunitySubmission.create({
-      // Names/emails stored in multiple fields for compatibility
+    // Build submissionData with safe defaults
+    const submissionData = {
       userName,
       reporterName: userName,
       name: userName,
@@ -62,20 +62,38 @@ router.post('/submissions', async (req, res) => {
       city: city || undefined,
       state: state || undefined,
       country: country || undefined,
-      // normalized nested location for consistency
       location: { city: city || null, state: state || null, country: country || null },
-      // keep legacy string fields for back-compat
       reporterLocation: city || undefined,
       locationDetail: { city: city || undefined, state: state || undefined, country: country || undefined, district: district || undefined },
       contact,
       mediaLink: mediaLink || undefined,
       mediaUrl: mediaLink || undefined,
-      status: 'NEW',
+      // Defaults requested
+      status: b.status || 'PENDING_FOUNDER',
+      sourceType: b.sourceType || 'community',
+      reporterVerificationLevel: b.reporterVerificationLevel || 'unverified',
       ipAddress,
       userAgent,
-    });
+    };
 
-    // Phase 2: AI review step (non-blocking of initial save)
+    const saved = await CommunitySubmission.create(submissionData);
+
+    // Fire-and-forget reporter contact upsert (non-blocking)
+    try {
+      const { upsertReporterContactFromPayload } = require('../services/reporterContactService');
+      await upsertReporterContactFromPayload({
+        name: saved.reporterName || saved.name,
+        email: saved.reporterEmail || saved.email,
+        city: saved.city || saved.location?.city,
+        state: saved.state,
+        country: saved.country,
+        reporterType: 'community',
+      });
+    } catch (err) {
+      console.error('[COMMUNITY_SUBMISSION][contact-upsert] failed', err?.message || err);
+    }
+
+    // Optional AI review step (non-blocking)
     try {
       const ai = await runCommunityAiReview({
         userName,
@@ -93,11 +111,10 @@ router.post('/submissions', async (req, res) => {
       saved.aiSuggestedCategory = ai.aiSuggestedCategory;
       saved.aiSuggestedTags = ai.aiSuggestedTags;
       saved.aiTipOnlySuggested = ai.aiTipOnlySuggested;
-      saved.status = 'PENDING_FOUNDER';
       await saved.save();
     } catch (aiErr) {
-      console.error('[CommunitySubmission][AI-review-failed]', aiErr?.message || aiErr);
-      // Keep status as NEW so founder knows AI failed; do not throw
+      console.error('[COMMUNITY_SUBMISSION][ai-review] failed', aiErr?.message || aiErr);
+      // Do not fail request
     }
 
     return res.status(201).json({
@@ -107,7 +124,7 @@ router.post('/submissions', async (req, res) => {
         id: saved._id.toString(),
         userName: saved.userName || saved.reporterName || saved.name,
         email: saved.email || saved.reporterEmail,
-        city: saved.city || saved.location,
+        city: saved.city || (saved.location && saved.location.city) || null,
         state: saved.state || null,
         country: saved.country || null,
         ageGroup: saved.ageGroup || saved.reporterAgeGroup || null,
@@ -126,11 +143,11 @@ router.post('/submissions', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('[CommunitySubmission] error while saving:', err);
+    console.error('[COMMUNITY_SUBMISSION][create] error', err);
     if (err && err.name === 'ValidationError') {
       return res.status(400).json({ success: false, ok: false, message: 'Validation error', details: err.errors });
     }
-    return res.status(500).json({ success: false, ok: false, message: 'Internal server error' });
+    return res.status(500).json({ success: false, ok: false, message: 'Failed to submit community story' });
   }
 });
 
