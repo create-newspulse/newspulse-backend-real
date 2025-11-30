@@ -28,10 +28,10 @@ const AREA_TYPE_ENUM = [
 ];
 
 const STATUS_ENUM = [
-  'ACTIVE',
-  'ON_LEAVE',
-  'INACTIVE',
-  'BLACKLISTED',
+  'active',
+  'watchlist',
+  'suspended',
+  'banned',
 ];
 
 const StatsSchema = new mongoose.Schema({
@@ -60,7 +60,7 @@ const ReporterContactSchema = new mongoose.Schema({
 
   beats: [{ type: String, enum: BEAT_ENUM }],
 
-  status: { type: String, enum: STATUS_ENUM, default: 'ACTIVE', index: true },
+  status: { type: String, enum: STATUS_ENUM, default: 'active', index: true },
 
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
 
@@ -70,7 +70,7 @@ const ReporterContactSchema = new mongoose.Schema({
 
   // --- Verified Journalist / Media Partner fields ---
   reporterType: { type: String, enum: ['community', 'journalist'], default: 'community', index: true },
-  verificationLevel: { type: String, enum: ['unverified', 'pending', 'verified'], default: 'unverified', index: true },
+  verificationLevel: { type: String, enum: ['community_default', 'pending', 'verified', 'limited', 'revoked'], default: 'community_default', index: true },
 
   organisationName: { type: String, trim: true },
   organisationType: { type: String, enum: ['print', 'tv', 'radio', 'digital', 'freelance', 'other'] },
@@ -80,6 +80,16 @@ const ReporterContactSchema = new mongoose.Schema({
   beatsProfessional: [{ type: String, trim: true }],
   yearsExperience: { type: Number },
   languages: [{ type: String, trim: true }],
+  interests: [{ type: String, trim: true }],
+  heardAbout: { type: String, trim: true },
+  journalistCharterAccepted: { type: Boolean, default: false },
+  charterAcceptedAt: { type: Date },
+  ethicsStrikes: { type: Number, default: 0 },
+  behaviourNotes: [{
+    note: { type: String, trim: true },
+    createdAt: { type: Date, default: Date.now },
+    createdBy: { type: String, trim: true },
+  }],
   websiteOrPortfolio: { type: String, trim: true },
   socialLinks: {
     linkedin: { type: String, trim: true },

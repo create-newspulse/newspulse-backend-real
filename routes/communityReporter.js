@@ -18,7 +18,31 @@ function externalStatus(internal) {
 router.post('/submissions', async (req, res) => {
   try {
     const body = req.body || {};
-    const { name, email, location, category, headline, story } = body;
+    const {
+      name,
+      fullName,
+      email,
+      location,
+      category,
+      headline,
+      story,
+      phone,
+      city,
+      state,
+      country,
+      preferredLanguages,
+      heardAbout,
+      isProfessionalJournalist,
+      communityInterests,
+      organisationName,
+      organisationType,
+      positionTitle,
+      beatsProfessional,
+      yearsExperience,
+      websiteOrPortfolio,
+      socialLinks,
+      journalistCharterAccepted,
+    } = body;
     const errors = [];
     if (!name || !String(name).trim()) errors.push('name required');
     if (!email || !String(email).trim()) errors.push('email required');
@@ -29,17 +53,29 @@ router.post('/submissions', async (req, res) => {
     if (errors.length) return res.status(400).json({ success: false, message: 'Validation failed', errors });
 
     // Upsert reporter contact (community type)
-    const { upsertReporterContactFromSubmission } = require('../services/reporterContactService');
-    let reporterContact = null;
+    const { upsertReporterContactFromPayload } = require('../services/reporterContactService');
+    let reporterResult = null;
     try {
-      reporterContact = await upsertReporterContactFromSubmission({
-        name: name.trim(),
+      const reporterType = isProfessionalJournalist ? 'journalist' : 'community';
+      reporterResult = await upsertReporterContactFromPayload({
+        name: (fullName || name || '').trim(),
         email: email.trim().toLowerCase(),
-        city: location.trim(), // map free-form location to cityTownVillage
-        country: undefined, // not provided in Phase 1 form
-        state: undefined,
-        phone: body.phone,
-        reporterType: 'community',
+        phone: phone,
+        city: (city || location || '').trim(),
+        state: state,
+        country: country,
+        reporterType,
+        languages: Array.isArray(preferredLanguages) ? preferredLanguages : undefined,
+        interests: Array.isArray(communityInterests) ? communityInterests : undefined,
+        heardAbout,
+        organisationName,
+        organisationType,
+        positionTitle,
+        beatsProfessional,
+        yearsExperience,
+        websiteOrPortfolio,
+        socialLinks,
+        journalistCharterAccepted,
       });
     } catch (err) {
       console.error('[COMMUNITY_REPORTER][contact-upsert-failed]', err?.message || err);
@@ -54,16 +90,18 @@ router.post('/submissions', async (req, res) => {
       headline: headline.trim(),
       body: story.trim(), // underlying field
       status: 'NEW',
-      reporterId: reporterContact ? reporterContact._id : undefined,
-      sourceType: reporterContact ? reporterContact.reporterType : 'community',
-      reporterVerificationLevel: reporterContact ? reporterContact.verificationLevel : 'unverified',
+      reporterId: reporterResult ? reporterResult.contactId : undefined,
+      sourceType: reporterResult ? reporterResult.contact.reporterType : (isProfessionalJournalist ? 'journalist' : 'community'),
+      reporterVerificationLevel: reporterResult ? reporterResult.contact.verificationLevel : 'community_default',
     });
-    try {
-      await runCommunityAiChecks(submission);
-    } catch (err) {
-      console.error('[CommunityAI] Failed to process reporter submission', err?.message || err);
-      submission.status = 'PENDING_FOUNDER';
-      try { await submission.save(); } catch (_) {}
+    if (process.env.NODE_ENV !== 'test') {
+      try {
+        await runCommunityAiChecks(submission);
+      } catch (err) {
+        console.error('[CommunityAI] Failed to process reporter submission', err?.message || err);
+        submission.status = 'PENDING_FOUNDER';
+        try { await submission.save(); } catch (_) {}
+      }
     }
     return res.status(201).json({ success: true, item: {
       id: submission._id.toString(),

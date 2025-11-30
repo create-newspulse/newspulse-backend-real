@@ -1,5 +1,5 @@
 const express = require('express');
-const { upsertReporterContactFromSubmission } = require('../services/reporterContactService');
+const { upsertReporterContactFromPayload } = require('../services/reporterContactService');
 const ReporterContact = require('../models/ReporterContact');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const { requireAdminAuth } = require('../middleware/adminAuth');
@@ -41,7 +41,7 @@ router.post('/apply', async (req, res) => {
     if (!Array.isArray(beats) || !beats.length) errors.push('beats required');
     if (errors.length) return res.status(400).json({ ok: false, success: false, message: 'Validation failed', errors });
 
-    let contact = await upsertReporterContactFromSubmission({
+    const { contact, contactId } = await upsertReporterContactFromPayload({
       name,
       email,
       phone,
@@ -57,20 +57,19 @@ router.post('/apply', async (req, res) => {
       languages,
       websiteOrPortfolio,
       socialLinks,
+      journalistCharterAccepted: body.journalistCharterAccepted === true,
     });
 
-    if (contact.verificationLevel === 'unverified') {
+    // Ensure new journalists default to pending (service already sets pending)
+    if (contact.verificationLevel !== 'verified' && contact.verificationLevel !== 'pending') {
       contact.verificationLevel = 'pending';
       await contact.save();
     }
 
     return res.status(200).json({
       ok: true,
-      success: true,
-      status: contact.verificationLevel,
-      reporterType: contact.reporterType,
-      message: 'Application received. We will verify your details soon.',
-      contactId: contact._id.toString(),
+      reporterId: contactId.toString(),
+      message: 'Application received',
     });
   } catch (e) {
     console.error('[JOURNALISTS][apply-error]', e?.message || e);

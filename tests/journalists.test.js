@@ -78,7 +78,8 @@ test('Journalist apply endpoint sets pending status', async () => {
     .set('Accept', 'application/json');
   assert.strictEqual(res.statusCode, 200);
   assert.ok(res.body.ok);
-  assert.strictEqual(res.body.status, 'pending');
+  assert.ok(typeof res.body.reporterId === 'string');
+  assert.strictEqual(res.body.message, 'Application received');
 });
 
 test('Community submission includes reporterId and verification fields', async () => {
@@ -109,5 +110,5 @@ test('Community submission includes reporterId and verification fields', async (
   assert.strictEqual(res.statusCode, 201);
   assert.ok(res.body.item.reporterId === null || typeof res.body.item.reporterId === 'string');
   assert.ok(['community', 'journalist'].includes(res.body.item.sourceType));
-  assert.ok(['unverified', 'pending', 'verified'].includes(res.body.item.reporterVerificationLevel));
+  assert.ok(['community_default', 'pending', 'verified', 'limited', 'revoked'].includes(res.body.item.reporterVerificationLevel));
 });

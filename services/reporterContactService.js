@@ -15,7 +15,7 @@ function applyIfPresent(target, key, value) {
  * @param {Object} payload
  * @returns {Promise<import('mongoose').Document>}
  */
-async function upsertReporterContactFromSubmission(payload) {
+async function upsertReporterContactFromPayload(payload) {
   const {
     name,
     email,
@@ -24,14 +24,17 @@ async function upsertReporterContactFromSubmission(payload) {
     state,
     country,
     reporterType,
+    languages,
+    interests,
+    heardAbout,
     organisationName,
     organisationType,
     positionTitle,
     beatsProfessional,
     yearsExperience,
-    languages,
     websiteOrPortfolio,
     socialLinks,
+    journalistCharterAccepted,
   } = payload || {};
 
   if (!email || !String(email).trim()) {
@@ -47,8 +50,8 @@ async function upsertReporterContactFromSubmission(payload) {
     contact = new ReporterContact({
       fullName: name || 'Unknown',
       email: emailNorm,
-      reporterType: reporterType || 'community',
-      // verificationLevel stays default 'unverified' – journalist flow may elevate to pending later
+      reporterType: reporterType === 'journalist' ? 'journalist' : 'community',
+      verificationLevel: reporterType === 'journalist' ? 'pending' : 'community_default',
     });
     applyIfPresent(contact, 'phoneFull', phone);
     applyIfPresent(contact, 'cityTownVillage', city);
@@ -61,8 +64,15 @@ async function upsertReporterContactFromSubmission(payload) {
     applyIfPresent(contact, 'cityTownVillage', city);
     applyIfPresent(contact, 'stateName', state);
     applyIfPresent(contact, 'country', country);
-    if (reporterType && (contact.reporterType !== reporterType)) {
-      contact.reporterType = reporterType;
+    if (reporterType) {
+      const desiredType = reporterType === 'journalist' ? 'journalist' : 'community';
+      // Never downgrade verified journalist to community/pending automatically
+      if (contact.reporterType !== desiredType) {
+        contact.reporterType = desiredType;
+        if (desiredType === 'journalist' && contact.verificationLevel !== 'verified') {
+          contact.verificationLevel = 'pending';
+        }
+      }
     }
   }
 
@@ -79,6 +89,10 @@ async function upsertReporterContactFromSubmission(payload) {
   if (Array.isArray(languages) && languages.length) {
     contact.languages = languages;
   }
+  if (Array.isArray(interests) && interests.length) {
+    contact.interests = interests;
+  }
+  applyIfPresent(contact, 'heardAbout', heardAbout);
   applyIfPresent(contact, 'websiteOrPortfolio', websiteOrPortfolio);
   if (socialLinks && typeof socialLinks === 'object') {
     // Only copy provided subkeys
@@ -87,8 +101,19 @@ async function upsertReporterContactFromSubmission(payload) {
     applyIfPresent(contact.socialLinks, 'twitter', socialLinks.twitter);
   }
 
+  // Charter acceptance tracking: set true and timestamp only on transition
+  if (journalistCharterAccepted === true && contact.journalistCharterAccepted !== true) {
+    contact.journalistCharterAccepted = true;
+    contact.charterAcceptedAt = new Date();
+  }
+
+  // Ensure verificationLevel defaults are consistent with reporterType for new/updated community reporters
+  if (contact.reporterType === 'community' && !['verified','limited','revoked'].includes(contact.verificationLevel)) {
+    contact.verificationLevel = 'community_default';
+  }
+
   await contact.save();
-  return contact;
+  return { contact, contactId: contact._id };
 }
 
-module.exports = { upsertReporterContactFromSubmission };
+module.exports = { upsertReporterContactFromPayload };

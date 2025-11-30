@@ -542,13 +542,23 @@ app.use('/admin/community', communityAdminContactsRoutes);
 // Explicit compatibility alias: ensure GET /admin/community/journalist-applications resolves
 app.get('/admin/community/journalist-applications', requireAdminAuth, (req, res, next) => {
   try {
-    // Delegate to the router's handler by rewriting the URL
     req.url = '/journalist-applications';
-    return communityAdminContactsRoutes(req, res, next);
+    return adminCommunityReporterRoutes(req, res, next);
   } catch (e) {
     console.error('[ALIAS][journalist-applications] delegate failed', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to load journalist applications' });
   }
+});
+// Aliases for verify/reject actions under /admin/community
+app.post('/admin/community/journalist-applications/:id/verify', requireAdminAuth, (req, res, next) => {
+  try { req.url = `/journalist-applications/${req.params.id}/verify`; return adminCommunityReporterRoutes(req, res, next); } catch (e) { return res.status(500).json({ ok: false, message: 'Verify failed' }); }
+});
+app.post('/admin/community/journalist-applications/:id/reject', requireAdminAuth, (req, res, next) => {
+  try { req.url = `/journalist-applications/${req.params.id}/reject`; return adminCommunityReporterRoutes(req, res, next); } catch (e) { return res.status(500).json({ ok: false, message: 'Reject failed' }); }
+});
+// Alias for status management
+app.post('/admin/community/reporters/:id/status', requireAdminAuth, (req, res, next) => {
+  try { req.url = `/reporters/${req.params.id}/status`; return adminCommunityReporterRoutes(req, res, next); } catch (e) { return res.status(500).json({ ok: false, message: 'Status update failed' }); }
 });
 // Phase 1 Community Reporter public API
 app.use('/api/community-reporter', communityReporterRoutes);
