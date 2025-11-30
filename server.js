@@ -556,6 +556,16 @@ app.post('/admin/community/journalist-applications/:id/verify', requireAdminAuth
 app.post('/admin/community/journalist-applications/:id/reject', requireAdminAuth, (req, res, next) => {
   try { req.url = `/journalist-applications/${req.params.id}/reject`; return adminCommunityReporterRoutes(req, res, next); } catch (e) { return res.status(500).json({ ok: false, message: 'Reject failed' }); }
 });
+// Alias for submissions list under /admin/community
+app.get('/admin/community/submissions', requireAdminAuth, (req, res, next) => {
+  try {
+    req.url = '/submissions' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
+    return adminCommunityReporterRoutes(req, res, next);
+  } catch (e) {
+    console.error('[ALIAS][community-submissions] delegate failed', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load submissions' });
+  }
+});
 // Alias for status management
 app.post('/admin/community/reporters/:id/status', requireAdminAuth, (req, res, next) => {
   try { req.url = `/reporters/${req.params.id}/status`; return adminCommunityReporterRoutes(req, res, next); } catch (e) { return res.status(500).json({ ok: false, message: 'Status update failed' }); }
