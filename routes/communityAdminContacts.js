@@ -1,5 +1,6 @@
 const express = require('express');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const ReporterContact = require('../models/ReporterContact');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
 const router = express.Router();
@@ -193,6 +194,84 @@ router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
   }
 });
 
+// GET /api/admin/community/reporter-directory
+// Query params supported:
+// search, state, district, taluka, areaType, beat, status, page, limit
+router.get('/reporter-directory', requireAdminAuth, async (req, res) => {
+  try {
+    const {
+      search = '',
+      state = '',
+      district = '',
+      taluka = '',
+      areaType = '',
+      beat = '',
+      status = '',
+    } = req.query || {};
+
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limitRaw = Math.max(parseInt(req.query.limit || '50', 10), 1);
+    const limit = Math.min(limitRaw, 200);
+    const skip = (page - 1) * limit;
+
+    const q = {};
+
+    // Free text search: fullName, email, phoneFull, cityTownVillage
+    if (search && String(search).trim() !== '') {
+      const rx = new RegExp(String(search).trim(), 'i');
+      q.$or = [
+        { fullName: rx },
+        { email: rx },
+        { phoneFull: rx },
+        { cityTownVillage: rx },
+      ];
+    }
+
+    if (state && String(state).trim() !== '') {
+      const rx = new RegExp(String(state).trim(), 'i');
+      q.$or = (q.$or || []).concat([
+        { stateName: rx },
+        { stateCode: rx },
+      ]);
+    }
+
+    if (district && String(district).trim() !== '') {
+      q.districtName = new RegExp(String(district).trim(), 'i');
+    }
+
+    if (taluka && String(taluka).trim() !== '') {
+      q.talukaName = new RegExp(String(taluka).trim(), 'i');
+    }
+
+    if (areaType && String(areaType).trim() !== '') {
+      q.areaType = String(areaType).trim().toUpperCase();
+    }
+
+    if (beat && String(beat).trim() !== '') {
+      // beats is an array of enum strings
+      q.beats = String(beat).trim().toUpperCase();
+    }
+
+    if (status && String(status).trim() !== '') {
+      q.status = String(status).trim().toUpperCase();
+    }
+
+    const sort = { 'stats.lastStoryAt': -1, fullName: 1 };
+
+    const [items, total] = await Promise.all([
+      ReporterContact.find(q).sort(sort).skip(skip).limit(limit).lean(),
+      ReporterContact.countDocuments(q),
+    ]);
+
+    const pages = Math.max(1, Math.ceil(total / limit));
+
+    return res.json({ ok: true, items, total, page, pages });
+  } catch (err) {
+    console.error('[ReporterDirectory] error', err?.message || err);
+    return res.status(500).json({ ok: false, message: 'Failed to load reporter directory' });
+  }
+});
+
 // Legacy alias: allow root path to serve same response when mounted at /api/community/admin/contacts
 router.get('/', requireAdminAuth, async (req, res, next) => {
   // Forward to reporter-contacts handler
@@ -206,7 +285,7 @@ router.get('/reporter-stories', requireAdminAuth, async (req, res) => {
   try {
     const rawKey = String(req.query.reporterKey || '').trim();
     if (!rawKey) {
-      return res.status(400).json({ ok: false, message: 'Missing reporterKey' });
+      return res.json({ ok: true, items: [], total: 0 });
     }
     const reporterKey = rawKey.toLowerCase();
 
@@ -218,11 +297,8 @@ router.get('/reporter-stories', requireAdminAuth, async (req, res) => {
       ],
     };
 
-    const sortField = String(req.query.sortBy || 'createdAt');
-    const sortDir = String(req.query.sortDir || 'desc').toLowerCase() === 'asc' ? 1 : -1;
-
     const docs = await CommunitySubmission.find(match)
-      .sort({ [sortField]: sortDir })
+      .sort({ createdAt: -1 })
       .lean();
 
     const items = docs.map(d => ({
@@ -230,19 +306,19 @@ router.get('/reporter-stories', requireAdminAuth, async (req, res) => {
       title: d.headline || '',
       summary: d.body ? d.body.slice(0, 280) : null,
       status: d.status || '',
-      language: d.language || null, // optional if present elsewhere
+      language: d.language || 'en',
       category: d.category || null,
       city: (d.location && d.location.city) || d.city || (d.locationDetail && d.locationDetail.city) || null,
       createdAt: d.createdAt,
       updatedAt: d.updatedAt,
-      aiRisk: d.policyNotes || null, // prefer policyNotes as risk label if any
+      aiRisk: d.policyNotes || null,
       priority: d.priority || null,
     }));
 
     return res.json({ ok: true, items, total: items.length });
   } catch (err) {
-    console.error('admin reporter-stories error', err?.message || err);
-    return res.status(500).json({ ok: false, message: 'Internal server error' });
+    console.error('[ADMIN_REPORTER_STORIES]', err?.message || err);
+    return res.status(500).json({ ok: false, message: 'Failed to load reporter stories' });
   }
 });
 
