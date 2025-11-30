@@ -539,6 +539,17 @@ app.use('/api/admin/community', communityAdminContactsRoutes);
 app.use('/admin-api/admin/community', communityAdminContactsRoutes);
 // Non-/api admin alias: GET /admin/community/reporter-contacts and /reporter-stories
 app.use('/admin/community', communityAdminContactsRoutes);
+// Explicit compatibility alias: ensure GET /admin/community/journalist-applications resolves
+app.get('/admin/community/journalist-applications', requireAdminAuth, (req, res, next) => {
+  try {
+    // Delegate to the router's handler by rewriting the URL
+    req.url = '/journalist-applications';
+    return communityAdminContactsRoutes(req, res, next);
+  } catch (e) {
+    console.error('[ALIAS][journalist-applications] delegate failed', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load journalist applications' });
+  }
+});
 // Phase 1 Community Reporter public API
 app.use('/api/community-reporter', communityReporterRoutes);
 // Verified Journalist public & admin routes

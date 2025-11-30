@@ -76,6 +76,17 @@ app.use('/admin-api/admin/community', communityAdminContactsRoutes);
 // Non-/api alias (Admin Panel calls /admin/community/* directly)
 app.use('/admin/community', communityAdminContactsRoutes);
 
+// Explicit compatibility alias: ensure GET /admin/community/journalist-applications resolves even if router order changes
+app.get('/admin/community/journalist-applications', requireAdminAuth, (req, res, next) => {
+  try {
+    req.url = '/journalist-applications';
+    return communityAdminContactsRoutes(req, res, next);
+  } catch (e) {
+    console.error('[nested][ALIAS][journalist-applications] delegate failed', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load journalist applications' });
+  }
+});
+
 // Fallback direct handlers (defensive) in case router mounting order changes upstream
 app.get('/admin/community/reporter-contacts', requireAdminAuth, async (req, res, next) => {
   if (res.headersSent) return next();
