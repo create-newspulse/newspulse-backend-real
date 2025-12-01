@@ -223,9 +223,10 @@ test('POST /api/admin/community-reporter/submissions/:id/decision approve sets A
   const originalFindById = CommunitySubmission.findById;
   const testId = '507f1f77bcf86cd799439022';
   let savedStatus = null; let savedRejectReason = null;
+  let savedDecisionBy = null; let savedDecisionAt = null;
   CommunitySubmission.findById = (id) => ({
     async lean() { return null; },
-    async save() { savedStatus = this.status; savedRejectReason = this.rejectReason; },
+    async save() { savedStatus = this.status; savedRejectReason = this.rejectReason; savedDecisionBy = this.decisionBy; savedDecisionAt = this.decisionAt; },
     _id: testId,
     status: 'PENDING_FOUNDER',
     headline: 'Approve Me',
@@ -233,6 +234,8 @@ test('POST /api/admin/community-reporter/submissions/:id/decision approve sets A
     location: 'Delhi',
     createdAt: new Date(),
     updatedAt: new Date(),
+    decisionBy: null,
+    decisionAt: null,
   });
   const res = await request(app)
     .post(`/api/admin/community-reporter/submissions/${testId}/decision`)
@@ -242,6 +245,8 @@ test('POST /api/admin/community-reporter/submissions/:id/decision approve sets A
   assert.ok(res.body.success);
   assert.strictEqual(savedStatus, 'APPROVED');
   assert.strictEqual(savedRejectReason, undefined);
+  assert.ok(savedDecisionBy);
+  assert.ok(savedDecisionAt instanceof Date || typeof savedDecisionAt === 'object');
   CommunitySubmission.findById = originalFindById;
 });
 
@@ -250,9 +255,10 @@ test('POST /api/admin/community-reporter/submissions/:id/decision reject sets RE
   const originalFindById = CommunitySubmission.findById;
   const testId = '507f1f77bcf86cd799439023';
   let savedStatus = null; let savedRejectReason = null;
+  let savedDecisionBy = null; let savedDecisionAt = null;
   CommunitySubmission.findById = (id) => ({
     async lean() { return null; },
-    async save() { savedStatus = this.status; savedRejectReason = this.rejectReason; },
+    async save() { savedStatus = this.status; savedRejectReason = this.rejectReason; savedDecisionBy = this.decisionBy; savedDecisionAt = this.decisionAt; },
     _id: testId,
     status: 'under_review',
     headline: 'Reject Me',
@@ -260,6 +266,8 @@ test('POST /api/admin/community-reporter/submissions/:id/decision reject sets RE
     location: 'Mumbai',
     createdAt: new Date(),
     updatedAt: new Date(),
+    decisionBy: null,
+    decisionAt: null,
   });
   const res = await request(app)
     .post(`/api/admin/community-reporter/submissions/${testId}/decision`)
@@ -269,6 +277,8 @@ test('POST /api/admin/community-reporter/submissions/:id/decision reject sets RE
   assert.ok(res.body.success);
   assert.strictEqual(savedStatus, 'REJECTED');
   assert.strictEqual(savedRejectReason, 'Low quality');
+  assert.ok(savedDecisionBy);
+  assert.ok(savedDecisionAt instanceof Date || typeof savedDecisionAt === 'object');
   CommunitySubmission.findById = originalFindById;
 });
 

@@ -274,13 +274,19 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Submission not found' });
     }
 
-    const decisionRaw = String((req.body && req.body.decision) || '').trim().toLowerCase();
+    // Support multiple input keys: decision, status, action
+    const decisionInput = (req.body && (req.body.decision || req.body.status || req.body.action)) || '';
+    const decisionRaw = String(decisionInput).trim().toLowerCase();
     const rejectReason = (req.body && (req.body.rejectReason || req.body.reason)) || undefined;
 
-    if (decisionRaw === 'approve') {
+    // Extended synonym lists
+    const approveSet = new Set(['approve','approved','publish','published','ok']);
+    const rejectSet = new Set(['reject','rejected','deny','denied','trash']);
+
+    if (approveSet.has(decisionRaw)) {
       submission.status = 'APPROVED';
       submission.rejectReason = undefined;
-    } else if (decisionRaw === 'reject') {
+    } else if (rejectSet.has(decisionRaw)) {
       submission.status = 'REJECTED';
       submission.rejectReason = rejectReason || 'Not specified';
     } else {
@@ -292,13 +298,21 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
       if ('decisionBy' in submission) {
         submission.decisionBy = (req.admin && (req.admin.email || req.admin.id)) || 'system';
       }
+      if ('decisionAt' in submission) {
+        submission.decisionAt = new Date();
+      }
       if ('updatedAt' in submission) {
         submission.updatedAt = new Date();
       }
     } catch (_) {}
 
-    if (typeof submission.save === 'function') {
-      await submission.save();
+    try {
+      if (typeof submission.save === 'function') {
+        await submission.save();
+      }
+    } catch (saveErr) {
+      console.error('[community decision][save-error]', saveErr?.message || saveErr);
+      return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to apply decision' });
     }
 
     return res.json({ ok: true, success: true, submission });
