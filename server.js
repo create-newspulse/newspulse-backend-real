@@ -592,6 +592,31 @@ app.post('/api/admin/community/submissions/:id/reject', requireAdminAuth, (req, 
   try { req.url = `/submissions/${req.params.id}/reject`; return adminCommunityReporterRoutes(req, res, next); }
   catch (e) { console.error('[ALIAS][api-community-reject] delegate failed', e?.message || e); return res.status(500).json({ ok: false, message: 'Reject failed' }); }
 });
+// Aliases for restore & delete actions
+app.post('/admin/community/submissions/:id/restore', requireAdminAuth, (req, res, next) => {
+  try { req.url = `/submissions/${req.params.id}/restore`; return adminCommunityReporterRoutes(req, res, next); }
+  catch (e) { console.error('[ALIAS][community-restore] delegate failed', e?.message || e); return res.status(500).json({ ok: false, message: 'Restore failed' }); }
+});
+app.post('/api/admin/community/submissions/:id/restore', requireAdminAuth, (req, res, next) => {
+  try { req.url = `/submissions/${req.params.id}/restore`; return adminCommunityReporterRoutes(req, res, next); }
+  catch (e) { console.error('[ALIAS][api-community-restore] delegate failed', e?.message || e); return res.status(500).json({ ok: false, message: 'Restore failed' }); }
+});
+app.post('/admin/community/submissions/:id/delete', requireAdminAuth, (req, res, next) => {
+  try { req.url = `/submissions/${req.params.id}/delete`; return adminCommunityReporterRoutes(req, res, next); }
+  catch (e) { console.error('[ALIAS][community-delete] delegate failed', e?.message || e); return res.status(500).json({ ok: false, message: 'Delete failed' }); }
+});
+app.post('/api/admin/community/submissions/:id/delete', requireAdminAuth, (req, res, next) => {
+  try { req.url = `/submissions/${req.params.id}/delete`; return adminCommunityReporterRoutes(req, res, next); }
+  catch (e) { console.error('[ALIAS][api-community-delete] delegate failed', e?.message || e); return res.status(500).json({ ok: false, message: 'Delete failed' }); }
+});
+app.post('/admin/community/submissions/:id/hard-delete', requireAdminAuth, (req, res, next) => {
+  try { req.url = `/submissions/${req.params.id}/hard-delete`; return adminCommunityReporterRoutes(req, res, next); }
+  catch (e) { console.error('[ALIAS][community-hard-delete] delegate failed', e?.message || e); return res.status(500).json({ ok: false, message: 'Hard delete failed' }); }
+});
+app.post('/api/admin/community/submissions/:id/hard-delete', requireAdminAuth, (req, res, next) => {
+  try { req.url = `/submissions/${req.params.id}/hard-delete`; return adminCommunityReporterRoutes(req, res, next); }
+  catch (e) { console.error('[ALIAS][api-community-hard-delete] delegate failed', e?.message || e); return res.status(500).json({ ok: false, message: 'Hard delete failed' }); }
+});
 // Alias for status management
 app.post('/admin/community/reporters/:id/status', requireAdminAuth, (req, res, next) => {
   try { req.url = `/reporters/${req.params.id}/status`; return adminCommunityReporterRoutes(req, res, next); } catch (e) { return res.status(500).json({ ok: false, message: 'Status update failed' }); }

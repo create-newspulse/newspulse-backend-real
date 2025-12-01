@@ -456,6 +456,72 @@ router.post('/submissions/:id/reject', requireAdminAuth, async (req, res) => {
   }
 });
 
+// Restore a rejected submission back to pending review
+// POST /api/admin/community-reporter/submissions/:id/restore
+router.post('/submissions/:id/restore', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id || !/^[a-fA-F0-9]{24}$/.test(id)) {
+      return res.status(400).json({ ok: false, message: 'Invalid submission id' });
+    }
+    const submission = await CommunitySubmission.findById(id);
+    if (!submission) return res.status(404).json({ ok: false, message: 'Submission not found' });
+    submission.status = 'under_review';
+    submission.rejectReason = undefined;
+    try {
+      if ('updatedAt' in submission) submission.updatedAt = new Date();
+      await submission.save();
+      return res.json({ ok: true, success: true, submission });
+    } catch (e) {
+      // fallback
+      try {
+        const setObj = { status: 'under_review', rejectReason: undefined };
+        if ('updatedAt' in submission) setObj.updatedAt = new Date();
+        const upd = await CommunitySubmission.updateOne({ _id: submission._id }, { $set: setObj });
+        console.log('[ADMIN_COMMUNITY][restore][fallback-update]', upd);
+        const fresh = await CommunitySubmission.findById(submission._id).lean();
+        return res.json({ ok: true, success: true, submission: fresh });
+      } catch (ue) {
+        console.error('[ADMIN_COMMUNITY][restore][fallback-error]', ue?.message || ue);
+        return res.status(500).json({ ok: false, success: false, message: 'Restore failed', error: ue?.message || String(ue) });
+      }
+    }
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY][restore][error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Restore failed' });
+  }
+});
+
+// Permanent delete of a submission (from Rejected/Trash view)
+// POST /api/admin/community-reporter/submissions/:id/delete
+// Also support /hard-delete as alias
+router.post('/submissions/:id/delete', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id || !/^[a-fA-F0-9]{24}$/.test(id)) {
+      return res.status(400).json({ ok: false, message: 'Invalid submission id' });
+    }
+    const del = await CommunitySubmission.deleteOne({ _id: id });
+    return res.json({ ok: true, success: true, deleted: del?.deletedCount === 1, submissionId: id });
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY][delete][error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Delete failed' });
+  }
+});
+router.post('/submissions/:id/hard-delete', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id || !/^[a-fA-F0-9]{24}$/.test(id)) {
+      return res.status(400).json({ ok: false, message: 'Invalid submission id' });
+    }
+    const del = await CommunitySubmission.deleteOne({ _id: id });
+    return res.json({ ok: true, success: true, deleted: del?.deletedCount === 1, submissionId: id });
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY][hard-delete][error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Hard delete failed' });
+  }
+});
+
 // Debug route to inspect raw document quickly (admin only)
 router.get('/submissions/:id/debug', requireAdminAuth, async (req, res) => {
   try {
