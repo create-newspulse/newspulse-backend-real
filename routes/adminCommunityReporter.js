@@ -233,3 +233,26 @@ router.post('/reporters/:id/status', requireAdminAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+// Detail view alias: GET /api/admin/community-reporter/submissions/:id
+// Reuse the same response shape as legacy admin route
+router.get('/submissions/:id', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id) {
+      return res.status(400).json({ success: false, message: 'Missing submission id' });
+    }
+    const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id);
+    if (!isObjectIdLike) {
+      return res.status(400).json({ success: false, message: 'Invalid submission id format' });
+    }
+    const submission = await CommunitySubmission.findById(id).lean();
+    if (!submission) {
+      return res.status(404).json({ success: false, message: 'Submission not found' });
+    }
+    return res.json({ success: true, submission });
+  } catch (err) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][submission-detail] error', err?.message || err);
+    return res.status(500).json({ success: false, message: 'Failed to load submission' });
+  }
+});

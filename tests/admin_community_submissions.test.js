@@ -137,6 +137,42 @@ test('Admin community submissions status=rejected returns only rejected set', as
   CommunitySubmission.find = originalFind;
 });
 
+// Detail route alias should return same shape for community-reporter path
+test('GET /api/admin/community-reporter/submissions/:id returns submission detail', async () => {
+  const originalFindById = CommunitySubmission.findById;
+  const testId = '507f1f77bcf86cd799439011';
+  CommunitySubmission.findById = (id) => {
+    return {
+      async lean() {
+        if (id === testId) {
+          return {
+            _id: testId,
+            name: 'Abhi',
+            email: 'abhi@example.com',
+            location: 'Delhi',
+            category: 'local',
+            headline: 'Road repair needed',
+            status: 'PENDING_FOUNDER',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+        }
+        return null;
+      },
+    };
+  };
+  // supertest path
+  const res = await request(app)
+    .get(`/api/admin/community-reporter/submissions/${testId}`)
+    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .send();
+  assert.strictEqual(res.statusCode, 200);
+  assert.ok(res.body.success);
+  assert.ok(res.body.submission);
+  assert.strictEqual(res.body.submission.headline, 'Road repair needed');
+  CommunitySubmission.findById = originalFindById;
+});
+
 // Validate approved filter supports legacy + uppercase values
 test('Admin community submissions status=approved returns approved variants', async () => {
   const originalFind = CommunitySubmission.find;
