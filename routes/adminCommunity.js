@@ -6,22 +6,27 @@ const router = express.Router();
 // GET /api/admin/community/submissions (admin queue listing)
 router.get('/submissions', requireAdminAuth, async (req, res) => {
   try {
-    const { status, category } = req.query || {};
-    const waitingStatuses = ['NEW', 'AI_REVIEWED', 'PENDING_FOUNDER'];
+    const { category } = req.query || {};
+    // Map external status values to internal stored statuses; default to pending group.
+    const rawStatus = (req.query.status || 'pending').toString().toLowerCase();
+    let statusFilter;
+    if (rawStatus === 'pending') {
+      statusFilter = { $in: ['pending', 'PENDING_FOUNDER', 'under_review'] };
+    } else if (rawStatus === 'rejected') {
+      statusFilter = { $in: ['rejected', 'REJECTED'] };
+    } else if (rawStatus === 'approved') {
+      statusFilter = { $in: ['approved', 'APPROVED'] };
+    } else if (rawStatus === 'all') {
+      statusFilter = undefined; // leave unfiltered
+    } else if (typeof rawStatus === 'string' && rawStatus.includes(',')) {
+      const parts = rawStatus.split(',').map(s => s.trim()).filter(Boolean);
+      statusFilter = parts.length ? { $in: parts } : { $in: ['pending', 'PENDING_FOUNDER', 'under_review'] };
+    } else {
+      statusFilter = rawStatus; // direct equality fallback
+    }
     const filter = {};
-
-    if (status === 'approved') filter.status = 'APPROVED';
-    else if (status === 'rejected') filter.status = 'REJECTED';
-    else if (status === 'all') {
-      // no status filter
-    } else if (typeof status === 'string' && status.includes(',')) {
-      const parts = status.split(',').map(s => s.trim()).filter(Boolean);
-      if (parts.length) filter.status = { $in: parts };
-      else filter.status = { $in: waitingStatuses };
-    } else if (status) {
-      filter.status = status;
-    } else if (status !== 'all') {
-      filter.status = { $in: waitingStatuses };
+    if (statusFilter !== undefined) {
+      filter.status = statusFilter;
     }
 
     if (category && category !== 'all') {
@@ -32,7 +37,7 @@ router.get('/submissions', requireAdminAuth, async (req, res) => {
       .find(filter, '_id name email location category headline status aiHeadline aiBody riskScore flags createdAt updatedAt')
       .sort({ createdAt: -1 })
       .lean();
-
+    console.log('[ADMIN_COMMUNITY_API][list] rawStatus=%s applied=%j count=%d', rawStatus, statusFilter, submissions.length);
     return res.json({ success: true, submissions });
   } catch (e) {
     console.error('[Admin] Failed to load community submissions', e?.message || e);
