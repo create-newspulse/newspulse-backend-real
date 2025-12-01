@@ -345,6 +345,65 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
   }
 });
 
+// Explicit action endpoints used by some admin UI builds
+router.post('/submissions/:id/approve', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id || !/^[a-fA-F0-9]{24}$/.test(id)) {
+      return res.status(400).json({ ok: false, message: 'Invalid submission id' });
+    }
+    const submission = await CommunitySubmission.findById(id);
+    if (!submission) return res.status(404).json({ ok: false, message: 'Submission not found' });
+    submission.status = 'APPROVED';
+    submission.rejectReason = undefined;
+    try {
+      if ('decisionBy' in submission) submission.decisionBy = (req.admin && (req.admin.email || req.admin.id)) || 'system';
+      if ('decisionAt' in submission) submission.decisionAt = new Date();
+      if ('updatedAt' in submission) submission.updatedAt = new Date();
+    } catch (_) {}
+    await submission.save();
+    return res.json({ ok: true, success: true, submission });
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY][approve][error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Approve failed' });
+  }
+});
+
+router.post('/submissions/:id/reject', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    const rejectReason = (req.body && (req.body.rejectReason || req.body.reason)) || 'Not specified';
+    const hardDelete = Boolean(req.query.hard === '1' || req.query.hard === 'true' || req.body?.hard === true || req.body?.hardDelete === true);
+    if (!id || !/^[a-fA-F0-9]{24}$/.test(id)) {
+      return res.status(400).json({ ok: false, message: 'Invalid submission id' });
+    }
+    if (hardDelete) {
+      try {
+        const del = await CommunitySubmission.deleteOne({ _id: id });
+        console.log('[ADMIN_COMMUNITY][reject][hard-delete]', { id, del });
+        return res.json({ ok: true, success: true, deleted: true, submissionId: id });
+      } catch (delErr) {
+        console.error('[ADMIN_COMMUNITY][reject][hard-delete][error]', delErr?.message || delErr);
+        return res.status(500).json({ ok: false, success: false, message: 'Failed to hard delete' });
+      }
+    }
+    const submission = await CommunitySubmission.findById(id);
+    if (!submission) return res.status(404).json({ ok: false, message: 'Submission not found' });
+    submission.status = 'REJECTED';
+    submission.rejectReason = rejectReason;
+    try {
+      if ('decisionBy' in submission) submission.decisionBy = (req.admin && (req.admin.email || req.admin.id)) || 'system';
+      if ('decisionAt' in submission) submission.decisionAt = new Date();
+      if ('updatedAt' in submission) submission.updatedAt = new Date();
+    } catch (_) {}
+    await submission.save();
+    return res.json({ ok: true, success: true, submission });
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY][reject][error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Reject failed' });
+  }
+});
+
 // Debug route to inspect raw document quickly (admin only)
 router.get('/submissions/:id/debug', requireAdminAuth, async (req, res) => {
   try {
