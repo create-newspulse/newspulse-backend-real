@@ -278,15 +278,30 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
     const decisionInput = (req.body && (req.body.decision || req.body.status || req.body.action)) || '';
     const decisionRaw = String(decisionInput).trim().toLowerCase();
     const rejectReason = (req.body && (req.body.rejectReason || req.body.reason)) || undefined;
+    const hardDelete = Boolean(req.query.hard === '1' || req.query.hard === 'true' || req.body?.hard === true || req.body?.hardDelete === true);
+
+    try {
+      console.log('[ADMIN_COMMUNITY][decision] id=%s body=%j hard=%s by=%s', id, req.body || {}, hardDelete, (req.admin && (req.admin.email || req.admin.id)) || 'system');
+    } catch (_) {}
 
     // Extended synonym lists
     const approveSet = new Set(['approve','approved','publish','published','ok']);
-    const rejectSet = new Set(['reject','rejected','deny','denied','trash']);
+    const rejectSet = new Set(['reject','rejected','deny','denied','trash','delete','deleted','remove','discard']);
 
     if (approveSet.has(decisionRaw)) {
       submission.status = 'APPROVED';
       submission.rejectReason = undefined;
     } else if (rejectSet.has(decisionRaw)) {
+      if (hardDelete === true) {
+        try {
+          const del = await CommunitySubmission.deleteOne({ _id: id });
+          console.log('[ADMIN_COMMUNITY][decision][hard-delete] id=%s deleted=%j', id, del);
+          return res.json({ ok: true, success: true, deleted: true, submissionId: id });
+        } catch (delErr) {
+          console.error('[ADMIN_COMMUNITY][decision][hard-delete][error]', delErr?.message || delErr);
+          return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to hard delete submission' });
+        }
+      }
       submission.status = 'REJECTED';
       submission.rejectReason = rejectReason || 'Not specified';
     } else {
@@ -312,12 +327,12 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
       }
     } catch (saveErr) {
       console.error('[community decision][save-error]', saveErr?.message || saveErr);
-      return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to apply decision' });
+      return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to apply decision', error: saveErr?.message || String(saveErr) });
     }
 
     return res.json({ ok: true, success: true, submission });
   } catch (err) {
     console.error('[community decision]', err?.message || err);
-    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to apply decision' });
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to apply decision', error: err?.message || String(err) });
   }
 });

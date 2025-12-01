@@ -566,6 +566,15 @@ app.get('/admin/community/submissions', requireAdminAuth, (req, res, next) => {
     return res.status(500).json({ ok: false, message: 'Failed to load submissions' });
   }
 });
+// Aliases for decision action under legacy /admin/community paths (compat)
+app.post('/admin/community/submissions/:id/decision', requireAdminAuth, (req, res, next) => {
+  try { req.url = `/submissions/${req.params.id}/decision`; return adminCommunityReporterRoutes(req, res, next); }
+  catch (e) { console.error('[ALIAS][community-decision] delegate failed', e?.message || e); return res.status(500).json({ ok: false, message: 'Decision failed' }); }
+});
+app.post('/api/admin/community/submissions/:id/decision', requireAdminAuth, (req, res, next) => {
+  try { req.url = `/submissions/${req.params.id}/decision`; return adminCommunityReporterRoutes(req, res, next); }
+  catch (e) { console.error('[ALIAS][api-community-decision] delegate failed', e?.message || e); return res.status(500).json({ ok: false, message: 'Decision failed' }); }
+});
 // Alias for status management
 app.post('/admin/community/reporters/:id/status', requireAdminAuth, (req, res, next) => {
   try { req.url = `/reporters/${req.params.id}/status`; return adminCommunityReporterRoutes(req, res, next); } catch (e) { return res.status(500).json({ ok: false, message: 'Status update failed' }); }
