@@ -158,3 +158,27 @@ router.delete('/:id', requireAdminAuth, async (req, res) => {
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to delete article' });
   }
 });
+
+// DELETE /api/admin/articles/:id/hard-delete (permanent delete)
+router.delete('/:id/hard-delete', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'invalid id' });
+    }
+    const doc = await ArticleModel.findById(id);
+    if (!doc) {
+      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+    }
+    const currentStatus = String(doc.status || '').toLowerCase();
+    if (currentStatus !== 'deleted') {
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Only deleted articles can be permanently removed.' });
+    }
+    await ArticleModel.deleteOne({ _id: id });
+    // TODO: Consider cascading cleanup (comments, activity logs, search index) in future.
+    return res.status(200).json({ ok: true, success: true, status: 200, message: 'Article permanently deleted.' });
+  } catch (err) {
+    console.error('[ADMIN_ARTICLES][hard-delete-error]', err?.message || err);
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to permanently delete article' });
+  }
+});
