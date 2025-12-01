@@ -357,3 +357,63 @@ router.patch('/articles/:id', requireAdminAuth, async (req, res) => {
     return res.status(500).json({ ok: false, success: false, message: 'Failed to update article' });
   }
 });
+
+// DELETE /api/admin/articles/:id -> soft delete by default; supports hard delete via query param
+router.delete('/articles/:id', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    const hard = String(req.query.hard || '').toLowerCase() === 'true' || req.query.hard === true || req.query.hard === 1 || req.query.hard === '1';
+
+    const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id || '');
+    if (!isObjectIdLike) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid article id' });
+    }
+
+    if (hard) {
+      const doc = await News.findByIdAndDelete(id);
+      if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
+      return res.status(200).json({ ok: true, success: true });
+    }
+
+    const doc = await News.findByIdAndUpdate(id, { $set: { status: 'deleted' } }, { new: true });
+    if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
+    return res.status(200).json({ ok: true, success: true, article: doc });
+  } catch (e) {
+    console.error('[ADMIN_ARTICLES][delete-error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to delete article' });
+  }
+});
+
+// DELETE /api/admin/articles/:id/hard -> always hard delete
+router.delete('/articles/:id/hard', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id || '');
+    if (!isObjectIdLike) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid article id' });
+    }
+    const doc = await News.findByIdAndDelete(id);
+    if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
+    return res.status(200).json({ ok: true, success: true });
+  } catch (e) {
+    console.error('[ADMIN_ARTICLES][delete-hard-error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to hard delete article' });
+  }
+});
+
+// DELETE /api/admin/articles/:id/hard-delete -> alias for hard delete for compatibility
+router.delete('/articles/:id/hard-delete', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id || '');
+    if (!isObjectIdLike) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid article id' });
+    }
+    const doc = await News.findByIdAndDelete(id);
+    if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
+    return res.status(200).json({ ok: true, success: true });
+  } catch (e) {
+    console.error('[ADMIN_ARTICLES][delete-hard-alias-error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to hard delete article' });
+  }
+});
