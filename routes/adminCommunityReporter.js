@@ -269,7 +269,13 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
     if (!isObjectIdLike) {
       return res.status(400).json({ ok: false, success: false, status: 400, message: 'Invalid submission id format' });
     }
-    const submission = await CommunitySubmission.findById(id);
+    let submission;
+    try {
+      submission = await CommunitySubmission.findById(id);
+    } catch (findErr) {
+      console.error('[ADMIN_COMMUNITY][decision][find-error]', findErr?.message || findErr);
+      return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load submission for decision', error: findErr?.message || String(findErr) });
+    }
     if (!submission) {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Submission not found' });
     }
@@ -322,9 +328,11 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
     } catch (_) {}
 
     try {
+      console.log('[ADMIN_COMMUNITY][decision][pre-save]', { id: submission._id.toString(), status: submission.status, rejectReason: submission.rejectReason });
       if (typeof submission.save === 'function') {
         await submission.save();
       }
+      console.log('[ADMIN_COMMUNITY][decision][post-save]', { id: submission._id.toString(), status: submission.status });
     } catch (saveErr) {
       console.error('[community decision][save-error]', saveErr?.message || saveErr);
       return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to apply decision', error: saveErr?.message || String(saveErr) });
@@ -332,7 +340,27 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
 
     return res.json({ ok: true, success: true, submission });
   } catch (err) {
-    console.error('[community decision]', err?.message || err);
+    console.error('[community decision][unhandled]', err?.message || err);
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to apply decision', error: err?.message || String(err) });
+  }
+});
+
+// Debug route to inspect raw document quickly (admin only)
+router.get('/submissions/:id/debug', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id || !/^[a-fA-F0-9]{24}$/.test(id)) {
+      return res.status(400).json({ ok: false, message: 'Invalid id' });
+    }
+    let doc;
+    try { doc = await CommunitySubmission.findById(id).lean({ virtuals: true }); } catch (e) {
+      console.error('[ADMIN_COMMUNITY][debug][find-error]', e?.message || e);
+      return res.status(500).json({ ok: false, message: 'Find error', error: e?.message || String(e) });
+    }
+    if (!doc) return res.status(404).json({ ok: false, message: 'Not found' });
+    return res.json({ ok: true, doc });
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY][debug][unhandled]', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Unhandled', error: e?.message || String(e) });
   }
 });
