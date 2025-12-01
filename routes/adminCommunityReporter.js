@@ -262,48 +262,48 @@ router.get('/submissions/:id', requireAdminAuth, async (req, res) => {
 router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params || {};
-    if (!id) return res.status(400).json({ ok: false, success: false, message: 'Missing submission id' });
+    if (!id) {
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Missing submission id' });
+    }
     const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id);
-    if (!isObjectIdLike) return res.status(400).json({ ok: false, success: false, message: 'Invalid submission id format' });
+    if (!isObjectIdLike) {
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Invalid submission id format' });
+    }
     const submission = await CommunitySubmission.findById(id);
-    if (!submission) return res.status(404).json({ ok: false, success: false, message: 'Submission not found' });
+    if (!submission) {
+      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Submission not found' });
+    }
 
-    const { decision, rejectReason, reason, status } = req.body || {};
-    let final = (decision || status || '').toString().toLowerCase();
-    if (['approve','approved','publish','published'].includes(final)) {
+    const decisionRaw = String((req.body && req.body.decision) || '').trim().toLowerCase();
+    const rejectReason = (req.body && (req.body.rejectReason || req.body.reason)) || undefined;
+
+    if (decisionRaw === 'approve') {
       submission.status = 'APPROVED';
       submission.rejectReason = undefined;
-    } else if (['reject','rejected','deny','denied'].includes(final)) {
+    } else if (decisionRaw === 'reject') {
       submission.status = 'REJECTED';
-      submission.rejectReason = rejectReason || reason || 'Not specified';
+      submission.rejectReason = rejectReason || 'Not specified';
     } else {
-      // Fallback: if explicit status matches APPROVED/REJECTED uppercase, apply; else 400
-      if (status === 'APPROVED') {
-        submission.status = 'APPROVED';
-        submission.rejectReason = undefined;
-      } else if (status === 'REJECTED') {
-        submission.status = 'REJECTED';
-        submission.rejectReason = rejectReason || reason || 'Not specified';
-      } else {
-        return res.status(400).json({ ok: false, success: false, message: 'Invalid decision value' });
-      }
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Invalid decision' });
     }
+
+    // Audit metadata if fields exist
+    try {
+      if ('decisionBy' in submission) {
+        submission.decisionBy = (req.admin && (req.admin.email || req.admin.id)) || 'system';
+      }
+      if ('updatedAt' in submission) {
+        submission.updatedAt = new Date();
+      }
+    } catch (_) {}
+
     if (typeof submission.save === 'function') {
       await submission.save();
     }
-    return res.json({ ok: true, success: true, submission: {
-      _id: submission._id,
-      id: submission._id.toString(),
-      status: submission.status,
-      rejectReason: submission.rejectReason,
-      headline: submission.headline,
-      category: submission.category,
-      location: submission.location,
-      createdAt: submission.createdAt,
-      updatedAt: submission.updatedAt,
-    }});
+
+    return res.json({ ok: true, success: true, submission });
   } catch (err) {
-    console.error('[ADMIN_COMMUNITY_REPORTER][decision-error]', err?.message || err);
-    return res.status(500).json({ ok: false, success: false, message: 'Failed to apply decision' });
+    console.error('[community decision]', err?.message || err);
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to apply decision' });
   }
 });

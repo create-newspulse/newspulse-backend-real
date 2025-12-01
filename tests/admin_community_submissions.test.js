@@ -271,3 +271,27 @@ test('POST /api/admin/community-reporter/submissions/:id/decision reject sets RE
   assert.strictEqual(savedRejectReason, 'Low quality');
   CommunitySubmission.findById = originalFindById;
 });
+
+// Invalid decision returns 400
+test('POST /api/admin/community-reporter/submissions/:id/decision invalid returns 400', async () => {
+  const originalFindById = CommunitySubmission.findById;
+  const testId = '507f1f77bcf86cd799439024';
+  CommunitySubmission.findById = (id) => ({
+    async lean() { return null; },
+    async save() {},
+    _id: testId,
+    status: 'under_review',
+    headline: 'Bad Decision',
+    category: 'local',
+    location: 'Kolkata',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+  const res = await request(app)
+    .post(`/api/admin/community-reporter/submissions/${testId}/decision`)
+    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .send({ decision: 'not-valid' });
+  assert.strictEqual(res.statusCode, 400);
+  assert.ok(res.body && res.body.message && /invalid decision/i.test(res.body.message));
+  CommunitySubmission.findById = originalFindById;
+});
