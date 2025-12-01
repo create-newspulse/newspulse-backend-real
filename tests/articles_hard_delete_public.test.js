@@ -33,3 +33,31 @@ test('DELETE /api/articles/:id/hard-delete returns 400 if not deleted', async ()
   assert.ok(!called);
   News.findById = originals.findById; News.deleteOne = originals.deleteOne;
 });
+
+// POST alias hard-delete
+test('POST /api/articles/:id/hard-delete permanently deletes when status=deleted', async () => {
+  const id = '74b7f2f2f2f2f2f2f2f2f2f4';
+  const originals = { findById: News.findById, deleteOne: News.deleteOne };
+  News.findById = async (_id) => (_id === id ? { _id: id, status: 'deleted' } : null);
+  let called = false;
+  News.deleteOne = async (cond) => { if (String(cond._id) === id) called = true; return { acknowledged: true, deletedCount: 1 }; };
+  const res = await request(app).post(`/api/articles/${id}/hard-delete`).send();
+  assert.strictEqual(res.statusCode, 200);
+  assert.strictEqual(res.body.message, 'Article permanently deleted.');
+  assert.ok(called);
+  News.findById = originals.findById; News.deleteOne = originals.deleteOne;
+});
+
+// POST alias /hard
+test('POST /api/articles/:id/hard permanently deletes when status=deleted', async () => {
+  const id = '74b7f2f2f2f2f2f2f2f2f2f5';
+  const originals = { findById: News.findById, deleteOne: News.deleteOne };
+  News.findById = async (_id) => (_id === id ? { _id: id, status: 'deleted' } : null);
+  let called = false;
+  News.deleteOne = async (cond) => { if (String(cond._id) === id) called = true; return { acknowledged: true, deletedCount: 1 }; };
+  const res = await request(app).post(`/api/articles/${id}/hard`).send();
+  assert.strictEqual(res.statusCode, 200);
+  assert.strictEqual(res.body.message, 'Article permanently deleted.');
+  assert.ok(called);
+  News.findById = originals.findById; News.deleteOne = originals.deleteOne;
+});

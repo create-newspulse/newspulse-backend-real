@@ -217,3 +217,57 @@ test('Admin community submissions unknown status falls back to equality', async 
   assert.ok(res.body.success);
   assert.deepStrictEqual(res.body.submissions, []);
 });
+
+// Decision route approve
+test('POST /api/admin/community-reporter/submissions/:id/decision approve sets APPROVED', async () => {
+  const originalFindById = CommunitySubmission.findById;
+  const testId = '507f1f77bcf86cd799439022';
+  let savedStatus = null; let savedRejectReason = null;
+  CommunitySubmission.findById = (id) => ({
+    async lean() { return null; },
+    async save() { savedStatus = this.status; savedRejectReason = this.rejectReason; },
+    _id: testId,
+    status: 'PENDING_FOUNDER',
+    headline: 'Approve Me',
+    category: 'local',
+    location: 'Delhi',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+  const res = await request(app)
+    .post(`/api/admin/community-reporter/submissions/${testId}/decision`)
+    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .send({ decision: 'approve' });
+  assert.strictEqual(res.statusCode, 200);
+  assert.ok(res.body.success);
+  assert.strictEqual(savedStatus, 'APPROVED');
+  assert.strictEqual(savedRejectReason, undefined);
+  CommunitySubmission.findById = originalFindById;
+});
+
+// Decision route reject
+test('POST /api/admin/community-reporter/submissions/:id/decision reject sets REJECTED + reason', async () => {
+  const originalFindById = CommunitySubmission.findById;
+  const testId = '507f1f77bcf86cd799439023';
+  let savedStatus = null; let savedRejectReason = null;
+  CommunitySubmission.findById = (id) => ({
+    async lean() { return null; },
+    async save() { savedStatus = this.status; savedRejectReason = this.rejectReason; },
+    _id: testId,
+    status: 'under_review',
+    headline: 'Reject Me',
+    category: 'local',
+    location: 'Mumbai',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+  const res = await request(app)
+    .post(`/api/admin/community-reporter/submissions/${testId}/decision`)
+    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .send({ decision: 'reject', rejectReason: 'Low quality' });
+  assert.strictEqual(res.statusCode, 200);
+  assert.ok(res.body.success);
+  assert.strictEqual(savedStatus, 'REJECTED');
+  assert.strictEqual(savedRejectReason, 'Low quality');
+  CommunitySubmission.findById = originalFindById;
+});

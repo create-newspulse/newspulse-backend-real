@@ -256,3 +256,54 @@ router.get('/submissions/:id', requireAdminAuth, async (req, res) => {
     return res.status(500).json({ success: false, message: 'Failed to load submission' });
   }
 });
+
+// POST /api/admin/community-reporter/submissions/:id/decision
+// Accepts body { decision: 'approve'|'reject', rejectReason?, status? } and maps to internal status
+router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id) return res.status(400).json({ ok: false, success: false, message: 'Missing submission id' });
+    const isObjectIdLike = /^[a-fA-F0-9]{24}$/.test(id);
+    if (!isObjectIdLike) return res.status(400).json({ ok: false, success: false, message: 'Invalid submission id format' });
+    const submission = await CommunitySubmission.findById(id);
+    if (!submission) return res.status(404).json({ ok: false, success: false, message: 'Submission not found' });
+
+    const { decision, rejectReason, reason, status } = req.body || {};
+    let final = (decision || status || '').toString().toLowerCase();
+    if (['approve','approved','publish','published'].includes(final)) {
+      submission.status = 'APPROVED';
+      submission.rejectReason = undefined;
+    } else if (['reject','rejected','deny','denied'].includes(final)) {
+      submission.status = 'REJECTED';
+      submission.rejectReason = rejectReason || reason || 'Not specified';
+    } else {
+      // Fallback: if explicit status matches APPROVED/REJECTED uppercase, apply; else 400
+      if (status === 'APPROVED') {
+        submission.status = 'APPROVED';
+        submission.rejectReason = undefined;
+      } else if (status === 'REJECTED') {
+        submission.status = 'REJECTED';
+        submission.rejectReason = rejectReason || reason || 'Not specified';
+      } else {
+        return res.status(400).json({ ok: false, success: false, message: 'Invalid decision value' });
+      }
+    }
+    if (typeof submission.save === 'function') {
+      await submission.save();
+    }
+    return res.json({ ok: true, success: true, submission: {
+      _id: submission._id,
+      id: submission._id.toString(),
+      status: submission.status,
+      rejectReason: submission.rejectReason,
+      headline: submission.headline,
+      category: submission.category,
+      location: submission.location,
+      createdAt: submission.createdAt,
+      updatedAt: submission.updatedAt,
+    }});
+  } catch (err) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][decision-error]', err?.message || err);
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to apply decision' });
+  }
+});
