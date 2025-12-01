@@ -63,8 +63,12 @@ CommunitySubmission.find = (filter) => {
         // simulate community-specific filter: include those with sourceType community OR missing
         results = seeded.filter(s => s.sourceType === 'community' || s.sourceType === undefined);
       }
-      if (filter && filter.status && filter.status.$in) {
-        results = results.filter(s => filter.status.$in.includes(s.status));
+      if (filter && filter.status) {
+        if (filter.status.$in) {
+          results = results.filter(s => filter.status.$in.includes(s.status));
+        } else if (typeof filter.status === 'string') {
+          results = results.filter(s => s.status === filter.status);
+        }
       }
       return results;
     },
@@ -110,8 +114,12 @@ test('Admin community submissions status=rejected returns only rejected set', as
       async lean() {
         let results = seeded.slice();
         results.push({ _id: { toString: () => 'sub-3' }, headline: 'Rejected Upper', body: 'x', category: 'civic', location: 'Pune', status: 'REJECTED' });
-        if (filter && filter.status && filter.status.$in) {
-          results = results.filter(s => filter.status.$in.includes(s.status));
+        if (filter && filter.status) {
+          if (filter.status.$in) {
+            results = results.filter(s => filter.status.$in.includes(s.status));
+          } else if (typeof filter.status === 'string') {
+            results = results.filter(s => s.status === filter.status);
+          }
         }
         return results;
       },
@@ -127,4 +135,49 @@ test('Admin community submissions status=rejected returns only rejected set', as
   const ids = res.body.submissions.map(i => i.id).sort();
   assert.deepStrictEqual(ids, ['sub-3']);
   CommunitySubmission.find = originalFind;
+});
+
+// Validate approved filter supports legacy + uppercase values
+test('Admin community submissions status=approved returns approved variants', async () => {
+  const originalFind = CommunitySubmission.find;
+  CommunitySubmission.find = (filter) => {
+    const api = {
+      sort() { return this; }, skip() { return this; }, limit() { return this; },
+      async lean() {
+        let results = seeded.slice();
+        // Inject approved variants
+        results.push({ _id: { toString: () => 'sub-4' }, headline: 'Approved Lower', body: 'y', category: 'local', location: 'Delhi', status: 'approved' });
+        results.push({ _id: { toString: () => 'sub-5' }, headline: 'Approved Upper', body: 'z', category: 'local', location: 'Mumbai', status: 'APPROVED' });
+        if (filter && filter.status) {
+          if (filter.status.$in) {
+            results = results.filter(s => filter.status.$in.includes(s.status));
+          } else if (typeof filter.status === 'string') {
+            results = results.filter(s => s.status === filter.status);
+          }
+        }
+        return results;
+      },
+    };
+    return api;
+  };
+  const res = await request(app)
+    .get('/admin/community-reporter/submissions?status=approved')
+    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .send();
+  assert.strictEqual(res.statusCode, 200);
+  assert.ok(res.body.success);
+  const ids = res.body.submissions.map(i => i.id).sort();
+  assert.deepStrictEqual(ids, ['sub-4', 'sub-5']);
+  CommunitySubmission.find = originalFind;
+});
+
+// Unknown status should fall back to direct equality (returns empty when none match)
+test('Admin community submissions unknown status falls back to equality', async () => {
+  const res = await request(app)
+    .get('/admin/community-reporter/submissions?status=foobar')
+    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .send();
+  assert.strictEqual(res.statusCode, 200);
+  assert.ok(res.body.success);
+  assert.deepStrictEqual(res.body.submissions, []);
 });

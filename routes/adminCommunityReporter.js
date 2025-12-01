@@ -15,18 +15,21 @@ router.get('/submissions', requireAdminAuth, async (req, res) => {
     const skip = (page - 1) * limit;
     const { source, q } = req.query || {};
 
-    const statusParam = (req.query.status || 'pending').toString().toLowerCase();
-    let statusValues;
-    if (statusParam === 'pending') {
-      statusValues = ['pending', 'PENDING_FOUNDER', 'under_review', 'PENDING_EDITOR'];
-    } else if (statusParam === 'rejected') {
-      statusValues = ['rejected', 'REJECTED'];
-    } else if (statusParam === 'approved') {
-      statusValues = ['approved', 'APPROVED'];
-    } else if (statusParam === 'all') {
-      statusValues = undefined; // no filter
+    // Map external status query to internal statuses. Default missing to "pending" grouping.
+    const rawStatus = (req.query.status || 'pending').toString().toLowerCase();
+    let statusFilter; // either {$in: [...]} or direct equality string or undefined
+    if (rawStatus === 'pending') {
+      statusFilter = { $in: ['pending', 'PENDING_FOUNDER', 'under_review'] };
+    } else if (rawStatus === 'rejected') {
+      statusFilter = { $in: ['rejected', 'REJECTED'] };
+    } else if (rawStatus === 'approved') {
+      statusFilter = { $in: ['approved', 'APPROVED'] };
+    } else if (rawStatus === 'all') {
+      // No status restriction (future list views). Safer current default is to leave unfiltered.
+      statusFilter = undefined;
     } else {
-      statusValues = ['pending', 'PENDING_FOUNDER', 'under_review', 'PENDING_EDITOR'];
+      // Fallback: treat as direct equality to allow future explicit statuses.
+      statusFilter = rawStatus;
     }
 
     // Base filter: exclude soft-deleted if your schema uses such flags.
@@ -49,8 +52,8 @@ router.get('/submissions', requireAdminAuth, async (req, res) => {
     } // else source=all -> no sourceType restriction
 
     // Apply status filter if provided
-    if (statusValues && statusValues.length > 0) {
-      filter.status = { $in: statusValues };
+    if (statusFilter !== undefined) {
+      filter.status = statusFilter;
     }
 
     // Optional simple text search on headline or location
@@ -85,7 +88,7 @@ router.get('/submissions', requireAdminAuth, async (req, res) => {
       createdAt: s.createdAt,
     }));
 
-    console.log('[ADMIN_COMMUNITY][list] statusParam=%s, statusValues=%j, count=%d', statusParam, statusValues, mapped.length);
+    console.log('[ADMIN_COMMUNITY][list] rawStatus=%s, appliedStatusFilter=%j, count=%d', rawStatus, statusFilter, mapped.length);
 
     // Response shape expected by admin UI
     return res.json({ success: true, submissions: mapped, total, page, limit });
