@@ -184,3 +184,28 @@ router.delete('/articles/:id', async (req, res) => {
       .json({ ok: false, success: false, status: 500, message: 'Internal server error' });
   }
 });
+
+// DELETE /api/articles/:id/hard-delete → permanent delete (only if already deleted)
+router.delete('/articles/:id/hard-delete', async (req, res) => {
+  try {
+    const { id } = req.params;
+    let doc = null;
+    try {
+      doc = await News.findById(id);
+    } catch (_) {
+      // invalid ObjectId
+    }
+    if (!doc) {
+      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+    }
+    const isDeleted = String(doc.status || '').toLowerCase() === 'deleted' || doc.isDeleted === true;
+    if (!isDeleted) {
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Only deleted articles can be permanently removed.' });
+    }
+    await News.deleteOne({ _id: id });
+    return res.status(200).json({ ok: true, success: true, status: 200, message: 'Article permanently deleted.' });
+  } catch (err) {
+    console.error('[articles.hard-delete] error:', err?.message || err);
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal server error' });
+  }
+});
