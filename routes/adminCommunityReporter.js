@@ -2,8 +2,72 @@ const express = require('express');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const ReporterContact = require('../models/ReporterContact');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const News = require('../models/News');
+const mongoose = require('mongoose');
 
 const router = express.Router();
+
+// Helper: create or update a draft News article from a submission
+async function upsertDraftFromSubmission(submission) {
+  if (!submission) return null;
+  // Skip in test mode or when DB not connected to avoid hanging tests
+  if (process.env.NODE_ENV === 'test' || mongoose.connection?.readyState !== 1) {
+    return null;
+  }
+  const safe = (v) => (v == null ? '' : String(v));
+  const title = safe(submission.headline) || 'Untitled';
+  const body = safe(submission.body || submission.story);
+  const category = submission.category || undefined;
+  const tags = Array.isArray(submission.aiSuggestedTags) ? submission.aiSuggestedTags : [];
+
+  const deriveDescription = () => {
+    const src = body || title;
+    const plain = src.replace(/\s+/g, ' ').trim();
+    return plain.length > 220 ? plain.slice(0, 217) + '...' : plain;
+  };
+
+  let article = null;
+  try {
+    if (submission.linkedArticleId) {
+      try {
+        article = await News.findById(submission.linkedArticleId);
+      } catch (_) {}
+    }
+    if (!article) {
+      article = await News.findOne({ communityReportId: submission._id });
+    }
+
+    if (article) {
+      article.title = title;
+      article.description = deriveDescription();
+      article.content = body;
+      if (category !== undefined) article.category = category;
+      article.status = 'draft';
+      article.language = article.language || 'en';
+      article.source = 'community';
+      article.communityReportId = submission._id;
+      if (tags && tags.length) article.tags = tags;
+      await article.save();
+    } else {
+      article = new News({
+        title,
+        description: deriveDescription(),
+        content: body,
+        category,
+        tags,
+        status: 'draft',
+        language: 'en',
+        source: 'community',
+        communityReportId: submission._id,
+      });
+      await article.save();
+    }
+  } catch (e) {
+    console.error('[COMMUNITY][DRAFT_UPSERT][error]', e?.message || e);
+    return null;
+  }
+  return article;
+}
 
 // Placeholder admin community-reporter routes to ensure server boots.
 // Keep responses minimal; real implementations can extend these.
@@ -297,6 +361,12 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
     if (approveSet.has(decisionRaw)) {
       submission.status = 'APPROVED';
       submission.rejectReason = undefined;
+      // Create or update a draft News article linked to this submission
+      let article = await upsertDraftFromSubmission(submission);
+      if (article && article._id) {
+        submission.linkedArticleId = article._id;
+        try { submission.articleId = article._id; } catch (_) {}
+      }
     } else if (rejectSet.has(decisionRaw)) {
       if (hardDelete === true) {
         try {
@@ -332,7 +402,7 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
       if (typeof submission.save === 'function') {
         await submission.save();
       }
-      console.log('[ADMIN_COMMUNITY][decision][post-save]', { id: submission._id.toString(), status: submission.status });
+      console.log('[ADMIN_COMMUNITY][decision][post-save]', { id: submission._id.toString(), status: submission.status, linkedArticleId: submission.linkedArticleId?.toString?.() });
     } catch (saveErr) {
       console.error('[community decision][save-error]', saveErr?.message || saveErr);
       // Fallback for legacy docs failing validation: perform direct update without full validation
@@ -346,17 +416,18 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
         if ('decisionBy' in submission) setObj.decisionBy = (req.admin && (req.admin.email || req.admin.id)) || 'system';
         if ('decisionAt' in submission) setObj.decisionAt = new Date();
         if ('updatedAt' in submission) setObj.updatedAt = new Date();
+        if (submission.linkedArticleId) setObj.linkedArticleId = submission.linkedArticleId;
         const upd = await CommunitySubmission.updateOne({ _id: submission._id }, { $set: setObj });
         console.log('[community decision][fallback-update]', upd);
         const fresh = await CommunitySubmission.findById(submission._id).lean();
-        return res.json({ ok: true, success: true, submission: fresh });
+        return res.json({ ok: true, success: true, submission: fresh, articleId: submission.linkedArticleId || null });
       } catch (updErr) {
         console.error('[community decision][fallback-update-error]', updErr?.message || updErr);
         return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to apply decision', error: updErr?.message || String(updErr) });
       }
     }
 
-    return res.json({ ok: true, success: true, submission });
+    return res.json({ ok: true, success: true, submission, articleId: submission.linkedArticleId || null });
   } catch (err) {
     console.error('[community decision][unhandled]', err?.message || err);
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to apply decision', error: err?.message || String(err) });
@@ -374,6 +445,12 @@ router.post('/submissions/:id/approve', requireAdminAuth, async (req, res) => {
     if (!submission) return res.status(404).json({ ok: false, message: 'Submission not found' });
     submission.status = 'APPROVED';
     submission.rejectReason = undefined;
+    // Ensure a draft article exists/updated for this submission
+    let article = await upsertDraftFromSubmission(submission);
+    if (article && article._id) {
+      submission.linkedArticleId = article._id;
+      try { submission.articleId = article._id; } catch (_) {}
+    }
     try {
       if ('decisionBy' in submission) submission.decisionBy = (req.admin && (req.admin.email || req.admin.id)) || 'system';
       if ('decisionAt' in submission) submission.decisionAt = new Date();
@@ -381,7 +458,7 @@ router.post('/submissions/:id/approve', requireAdminAuth, async (req, res) => {
     } catch (_) {}
     try {
       await submission.save();
-      return res.json({ ok: true, success: true, submission });
+      return res.json({ ok: true, success: true, submission, articleId: submission.linkedArticleId || null });
     } catch (e) {
       // Fallback update without validation
       try {
@@ -389,10 +466,11 @@ router.post('/submissions/:id/approve', requireAdminAuth, async (req, res) => {
         if ('decisionBy' in submission) setObj.decisionBy = (req.admin && (req.admin.email || req.admin.id)) || 'system';
         if ('decisionAt' in submission) setObj.decisionAt = new Date();
         if ('updatedAt' in submission) setObj.updatedAt = new Date();
+        if (submission.linkedArticleId) setObj.linkedArticleId = submission.linkedArticleId;
         const upd = await CommunitySubmission.updateOne({ _id: submission._id }, { $set: setObj });
         console.log('[ADMIN_COMMUNITY][approve][fallback-update]', upd);
         const fresh = await CommunitySubmission.findById(submission._id).lean();
-        return res.json({ ok: true, success: true, submission: fresh });
+        return res.json({ ok: true, success: true, submission: fresh, articleId: submission.linkedArticleId || null });
       } catch (ue) {
         console.error('[ADMIN_COMMUNITY][approve][fallback-error]', ue?.message || ue);
         return res.status(500).json({ ok: false, success: false, message: 'Approve failed', error: ue?.message || String(ue) });
