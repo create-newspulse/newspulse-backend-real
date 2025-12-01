@@ -335,7 +335,25 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
       console.log('[ADMIN_COMMUNITY][decision][post-save]', { id: submission._id.toString(), status: submission.status });
     } catch (saveErr) {
       console.error('[community decision][save-error]', saveErr?.message || saveErr);
-      return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to apply decision', error: saveErr?.message || String(saveErr) });
+      // Fallback for legacy docs failing validation: perform direct update without full validation
+      try {
+        const setObj = { status: submission.status };
+        if (submission.status === 'REJECTED') {
+          setObj.rejectReason = submission.rejectReason || 'Not specified';
+        } else {
+          setObj.rejectReason = undefined;
+        }
+        if ('decisionBy' in submission) setObj.decisionBy = (req.admin && (req.admin.email || req.admin.id)) || 'system';
+        if ('decisionAt' in submission) setObj.decisionAt = new Date();
+        if ('updatedAt' in submission) setObj.updatedAt = new Date();
+        const upd = await CommunitySubmission.updateOne({ _id: submission._id }, { $set: setObj });
+        console.log('[community decision][fallback-update]', upd);
+        const fresh = await CommunitySubmission.findById(submission._id).lean();
+        return res.json({ ok: true, success: true, submission: fresh });
+      } catch (updErr) {
+        console.error('[community decision][fallback-update-error]', updErr?.message || updErr);
+        return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to apply decision', error: updErr?.message || String(updErr) });
+      }
     }
 
     return res.json({ ok: true, success: true, submission });
@@ -361,8 +379,25 @@ router.post('/submissions/:id/approve', requireAdminAuth, async (req, res) => {
       if ('decisionAt' in submission) submission.decisionAt = new Date();
       if ('updatedAt' in submission) submission.updatedAt = new Date();
     } catch (_) {}
-    await submission.save();
-    return res.json({ ok: true, success: true, submission });
+    try {
+      await submission.save();
+      return res.json({ ok: true, success: true, submission });
+    } catch (e) {
+      // Fallback update without validation
+      try {
+        const setObj = { status: 'APPROVED', rejectReason: undefined };
+        if ('decisionBy' in submission) setObj.decisionBy = (req.admin && (req.admin.email || req.admin.id)) || 'system';
+        if ('decisionAt' in submission) setObj.decisionAt = new Date();
+        if ('updatedAt' in submission) setObj.updatedAt = new Date();
+        const upd = await CommunitySubmission.updateOne({ _id: submission._id }, { $set: setObj });
+        console.log('[ADMIN_COMMUNITY][approve][fallback-update]', upd);
+        const fresh = await CommunitySubmission.findById(submission._id).lean();
+        return res.json({ ok: true, success: true, submission: fresh });
+      } catch (ue) {
+        console.error('[ADMIN_COMMUNITY][approve][fallback-error]', ue?.message || ue);
+        return res.status(500).json({ ok: false, success: false, message: 'Approve failed', error: ue?.message || String(ue) });
+      }
+    }
   } catch (e) {
     console.error('[ADMIN_COMMUNITY][approve][error]', e?.message || e);
     return res.status(500).json({ ok: false, success: false, message: 'Approve failed' });
@@ -396,8 +431,25 @@ router.post('/submissions/:id/reject', requireAdminAuth, async (req, res) => {
       if ('decisionAt' in submission) submission.decisionAt = new Date();
       if ('updatedAt' in submission) submission.updatedAt = new Date();
     } catch (_) {}
-    await submission.save();
-    return res.json({ ok: true, success: true, submission });
+    try {
+      await submission.save();
+      return res.json({ ok: true, success: true, submission });
+    } catch (e) {
+      // Fallback update without validation
+      try {
+        const setObj = { status: 'REJECTED', rejectReason };
+        if ('decisionBy' in submission) setObj.decisionBy = (req.admin && (req.admin.email || req.admin.id)) || 'system';
+        if ('decisionAt' in submission) setObj.decisionAt = new Date();
+        if ('updatedAt' in submission) setObj.updatedAt = new Date();
+        const upd = await CommunitySubmission.updateOne({ _id: submission._id }, { $set: setObj });
+        console.log('[ADMIN_COMMUNITY][reject][fallback-update]', upd);
+        const fresh = await CommunitySubmission.findById(submission._id).lean();
+        return res.json({ ok: true, success: true, submission: fresh });
+      } catch (ue) {
+        console.error('[ADMIN_COMMUNITY][reject][fallback-error]', ue?.message || ue);
+        return res.status(500).json({ ok: false, success: false, message: 'Reject failed', error: ue?.message || String(ue) });
+      }
+    }
   } catch (e) {
     console.error('[ADMIN_COMMUNITY][reject][error]', e?.message || e);
     return res.status(500).json({ ok: false, success: false, message: 'Reject failed' });
