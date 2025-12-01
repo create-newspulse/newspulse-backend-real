@@ -38,6 +38,7 @@ const journalistsRoutes = require('./routes/journalists');
 const adminArticlesRouter = require('./routes/adminArticles');
 const adminArticleIdRouter = require('./routes/admin/articles');
 const adminAssistRouter = require('./routes/adminAssist');
+const adminDraftsRouter = require('./routes/adminDrafts');
 // New public routers for Admin Panel compatibility
 const articlesCrudRoutes = require('./routes/articles.routes');
 const systemStubRoutes = require('./routes/system.routes');
@@ -639,6 +640,9 @@ app.use('/admin/community-reporter', adminCommunityReporterRoutes);
 // Mount under /api/admin and /admin-api only to avoid clashing with public /api/articles
 app.use('/api/admin', adminArticlesRouter);
 app.use('/admin-api', adminArticlesRouter);
+// Draft Desk endpoints
+app.use('/api/admin', adminDraftsRouter);
+app.use('/admin-api', adminDraftsRouter);
 // Specific ID routes for admin article edit (GET/PUT/PATCH)
 app.use('/api/admin/articles', adminArticleIdRouter);
 app.use('/admin-api/articles', adminArticleIdRouter);

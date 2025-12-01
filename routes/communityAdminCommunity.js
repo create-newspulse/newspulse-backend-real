@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const { createDraftArticleFromSubmission } = require('../services/communityDraftFromSubmission');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
 const router = express.Router();
@@ -92,17 +93,29 @@ router.post('/:id/decision', requireAdminAuth, async (req, res) => {
 
     await doc.save();
 
-    return res.json({ success: true, item: {
+    // On approve, upsert/create a draft for Draft Desk
+    let article = null;
+    if (doc.status === 'APPROVED') {
+      try {
+        const result = await createDraftArticleFromSubmission(doc._id.toString());
+        article = result.article || null;
+      } catch (e) {
+        console.error('[COMMUNITY_ADMIN][decision-approve-draft-error]', e?.message || e);
+      }
+    }
+
+    return res.json({ success: true, ok: true, item: {
       id: doc._id.toString(),
       status: doc.status,
       decisionBy: doc.decisionBy || null,
       rejectReasonCode: doc.rejectReasonCode || null,
       rejectReasonNote: doc.rejectReasonNote || null,
       updatedAt: doc.updatedAt,
+      draftArticleId: article ? article._id.toString() : (doc.linkedArticleId ? doc.linkedArticleId.toString() : null),
     }});
   } catch (e) {
     console.error('[COMMUNITY_ADMIN][decision-error]', e?.message || e);
-    return res.status(500).json({ success: false, message: 'Failed to update decision' });
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to update decision' });
   }
 });
 
