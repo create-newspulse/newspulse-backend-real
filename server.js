@@ -108,12 +108,33 @@ const dynamicCors = cors({
   origin: (origin, callback) => {
     // Non-browser requests (curl/Postman) -> allow
     if (!origin) return callback(null, true);
+
+    // Exact allow-list match (env + defaults)
     const explicit = allowList.has(origin);
+
+    // Vercel previews and optional generic *.vercel.app
     const matchesPreview = vercelPreviewPattern.test(origin);
     const matchesGeneric = (process.env.CORS_ALLOW_GENERIC_VERCEL === '1') && genericVercelPattern.test(origin);
-    const localhostDev = /http:\/\/localhost:51\d{2}$/i.test(origin);
+
+    // Dev: localhost any port (Expo web 8081, Vite 5173, Next 3000, etc.)
+    const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:?\d+)?$/i.test(origin);
+
+    // Dev: local network IPs (Expo on LAN: 10.x / 172.16-31.x / 192.168.x)
+    const isLan = /^https?:\/\/(?:10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:?\d+)?$/i.test(origin);
+
+    // Toggle for allowing local/LAN origins when developing against Render
+    const allowLocal = (process.env.CORS_ALLOW_LOCAL || '1') === '1';
+
+    // Admin subdomain convenience
     const adminDomain = /admin\.newspulse\.co\.in$/i.test(origin);
-    const ok = explicit || matchesPreview || matchesGeneric || localhostDev || adminDomain;
+
+    const ok =
+      explicit ||
+      matchesPreview ||
+      matchesGeneric ||
+      adminDomain ||
+      (allowLocal && (isLocalhost || isLan));
+
     if (ok) return callback(null, true);
     console.warn('[CORS][block]', origin);
     return callback(new Error('CORS: Origin not allowed: ' + origin), false);
