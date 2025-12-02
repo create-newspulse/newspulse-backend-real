@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 const cors = require('cors');
+
 const newsRoutes = require('./routes/news');
 const adminRoutes = require('./routes/admin');
 const adminAuthRoutes = require('./routes/adminAuth');
@@ -10,37 +11,67 @@ const communityRoutes = require('./routes/community');
 const adminCommunityRoutes = require('./routes/adminCommunity');
 const communityAdminContactsRoutes = require('./routes/communityAdminContacts');
 const CommunitySubmission = require('./models/CommunitySubmission');
-const { requireAdminAuth } = require('../middleware/adminAuth');
-const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireAdminAuth } = require('./middleware/adminAuth'); // ✅ fixed path + removed duplicate
 
 dotenv.config(); // Load environment variables from .env file
 
 const app = express();
 
-// Middleware
-// CORS: allow local dev, production admin UI, and Vercel previews
-const allowedOrigins = [
-  'http://localhost:3000',
-  'http://localhost:5173',
-  'https://newspulse-frontend-main.vercel.app',
-  'https://admin.newspulse.co.in',
+/**
+ * CORS SETUP
+ * ----------
+ * - Allow localhost / 127.0.0.1 (any port) for dev (Expo, web, etc.)
+ * - Allow your production domains
+ * - Allow Vercel previews (*.vercel.app)
+ */
+
+const baseAllowedOrigins = [
   'https://newspulse.co.in',
   'https://www.newspulse.co.in',
+  'https://admin.newspulse.co.in',
+  'https://newspulse-frontend-main.vercel.app',
 ];
+
+// Optional extra origins via env
+const envOrigins =
+  (process.env.CORS_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map(o => o.trim())
+    .filter(Boolean);
+
+const allowedOrigins = [...new Set([...baseAllowedOrigins, ...envOrigins])];
+
+const isLocalOrigin = (origin = '') => {
+  // http://localhost:8081, http://127.0.0.1:19006, etc.
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+};
+
 const corsOptions = {
-  origin: (origin, callback) => {
+  origin(origin, callback) {
+    // Non-browser / server-side requests
     if (!origin) return callback(null, true);
-    const isAllowed =
+
+    const ok =
       allowedOrigins.includes(origin) ||
+      isLocalOrigin(origin) ||
       origin.toLowerCase().endsWith('.vercel.app');
-    if (isAllowed) return callback(null, true);
-    return callback(new Error('Not allowed by CORS'));
+
+    if (ok) {
+      // console.log('[CORS][allow]', origin);
+      return callback(null, true);
+    }
+
+    console.error('[CORS][block]', origin);
+    return callback(new Error(`Not allowed by CORS: ${origin}`));
   },
   credentials: true,
 };
-app.use(cors(corsOptions));
 
-app.use(express.json()); // Parse incoming JSON requests
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // handle preflight
+
+// Parse incoming JSON requests
+app.use(express.json());
 
 // MongoDB Connection (require explicit MONGO_URI, no localhost fallback)
 const MONGO_URI = process.env.MONGO_URI;
@@ -139,6 +170,7 @@ app.get('/admin/community/reporter-stories', requireAdminAuth, async (req, res) 
     return res.status(500).json({ ok: false, message: 'Failed to load reporter stories' });
   }
 });
+
 app.get('/api/admin/me', requireAdminAuth, (req, res) => {
   const a = req.admin || {};
   return res.json({
@@ -214,7 +246,7 @@ app.listen(PORT, () => {
 
 function extractPrefix(regexp) {
   try {
-    const src = regexp && regexp.source || '';
+    const src = (regexp && regexp.source) || '';
     // Match something like ^\/(admin|api)[^*]*?
     const m = src.match(/\\\/(admin[^\\^]+|api[^\\^]+|system[^\\^]+)\\/i);
     if (m && m[1]) return '/' + m[1];
