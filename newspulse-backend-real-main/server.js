@@ -42,8 +42,12 @@ const envOrigins =
 const allowedOrigins = [...new Set([...baseAllowedOrigins, ...envOrigins])];
 
 const isLocalOrigin = (origin = '') => {
-  // http://localhost:8081, http://127.0.0.1:19006, etc.
-  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+  const o = String(origin || '').trim().toLowerCase().replace(/\/$/, '');
+  // localhost or 127.0.0.1 any port (Vite/Next/Expo web)
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(o)) return true;
+  // LAN IPs for Expo on device
+  if (/^https?:\/\/(?:10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.[0-9]+\.[0-9]+)(:\d+)?$/i.test(o)) return true;
+  return false;
 };
 
 const corsOptions = {
@@ -61,8 +65,8 @@ const corsOptions = {
       return callback(null, true);
     }
 
-    console.error('[CORS][block]', origin);
-    return callback(new Error(`Not allowed by CORS: ${origin}`));
+    console.error('[CORS][block]', { origin, note: 'nested server.js' });
+    return callback(new Error(`CORS: Origin not allowed: ${origin}`));
   },
   credentials: true,
 };

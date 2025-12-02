@@ -105,16 +105,22 @@ const vercelPreviewPattern = /https:\/\/newspulse-admin-panel-real-[a-z0-9]+-[a-
 const genericVercelPattern = /https:\/\/[a-z0-9-]+\.vercel\.app$/i; // fallback (optional)
 
 function evaluateCorsOrigin(origin) {
-  const o = String(origin || '').trim();
-  const explicit = allowList.has(o);
-  const matchesPreview = vercelPreviewPattern.test(o);
-  const matchesGeneric = (process.env.CORS_ALLOW_GENERIC_VERCEL === '1') && genericVercelPattern.test(o);
-  const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:?\d+)?$/i.test(o);
-  const isLan = /^https?:\/\/(?:10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:?\d+)?$/i.test(o);
+  let o = String(origin || '').trim();
+  // Normalise by stripping any trailing slash and lowercasing
+  const oLower = o.toLowerCase();
+  const oNoSlash = oLower.endsWith('/') ? oLower.slice(0, -1) : oLower;
+
+  const inAllowList = (val) => allowList.has(val) || allowList.has(val.replace(/^https:/, 'http:')) || allowList.has(val.replace(/^http:/, 'https:'));
+
+  const explicit = inAllowList(o) || inAllowList(oLower) || inAllowList(oNoSlash);
+  const matchesPreview = vercelPreviewPattern.test(oNoSlash);
+  const matchesGeneric = (process.env.CORS_ALLOW_GENERIC_VERCEL === '1') && genericVercelPattern.test(oNoSlash);
+  const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:?\d+)?$/i.test(oNoSlash);
+  const isLan = /^https?:\/\/(?:10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.[0-9]+\.[0-9]+)(:?\d+)?$/i.test(oNoSlash);
   const allowLocal = (process.env.CORS_ALLOW_LOCAL || '1') === '1';
-  const adminDomain = /admin\.newspulse\.co\.in$/i.test(o);
-  const ok = explicit || matchesPreview || matchesGeneric || adminDomain || (allowLocal && (isLocalhost || isLan));
-  return { origin: o, explicit, matchesPreview, matchesGeneric, isLocalhost, isLan, adminDomain, allowLocal, ok };
+  const adminDomain = /admin\.newspulse\.co\.in$/i.test(oNoSlash);
+  const ok = explicit || matchesPreview || matchesGeneric || adminDomain || (isLocalhost || isLan) && allowLocal;
+  return { origin: o, originNorm: oNoSlash, explicit, matchesPreview, matchesGeneric, isLocalhost, isLan, adminDomain, allowLocal, ok };
 }
 
 const dynamicCors = cors({
@@ -126,6 +132,7 @@ const dynamicCors = cors({
     return callback(new Error('CORS: Origin not allowed: ' + evald.origin), false);
   },
   credentials: true,
+  optionsSuccessStatus: 204,
 });
 app.use(dynamicCors);
 // Ensure preflight responses include CORS headers
