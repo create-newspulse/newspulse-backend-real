@@ -110,6 +110,7 @@ function evaluateCorsOrigin(origin) {
   const oLower = o.toLowerCase();
   const oNoSlash = oLower.endsWith('/') ? oLower.slice(0, -1) : oLower;
 
+  const allowAll = (process.env.CORS_ALLOW_ALL || '0') === '1';
   const inAllowList = (val) => allowList.has(val) || allowList.has(val.replace(/^https:/, 'http:')) || allowList.has(val.replace(/^http:/, 'https:'));
 
   const explicit = inAllowList(o) || inAllowList(oLower) || inAllowList(oNoSlash);
@@ -119,8 +120,8 @@ function evaluateCorsOrigin(origin) {
   const isLan = /^https?:\/\/(?:10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.[0-9]+\.[0-9]+)(:?\d+)?$/i.test(oNoSlash);
   const allowLocal = (process.env.CORS_ALLOW_LOCAL || '1') === '1';
   const adminDomain = /admin\.newspulse\.co\.in$/i.test(oNoSlash);
-  const ok = explicit || matchesPreview || matchesGeneric || adminDomain || (isLocalhost || isLan) && allowLocal;
-  return { origin: o, originNorm: oNoSlash, explicit, matchesPreview, matchesGeneric, isLocalhost, isLan, adminDomain, allowLocal, ok };
+  const ok = allowAll || explicit || matchesPreview || matchesGeneric || adminDomain || (isLocalhost || isLan) && allowLocal;
+  return { origin: o, originNorm: oNoSlash, explicit, matchesPreview, matchesGeneric, isLocalhost, isLan, adminDomain, allowLocal, allowAll, ok };
 }
 
 const dynamicCors = cors({
@@ -715,16 +716,20 @@ app.get('/admin-auth/session', (req, res) => {
 const io = new Server(server, {
   path: '/socket.io',
   transports: ['websocket', 'polling'],
-  cors: {
-    origin: [
-      'http://localhost:3000',
-      'http://localhost:8081',
-      'http://localhost:19006',
-      'https://newspulse-frontend-main.vercel.app',
-      'https://admin.newspulse.co.in',
-    ],
-    credentials: true,
-  },
+  cors: (() => {
+    const allowAll = (process.env.CORS_ALLOW_ALL || '0') === '1';
+    if (allowAll) return { origin: true, credentials: true };
+    return {
+      origin: [
+        'http://localhost:3000',
+        'http://localhost:8081',
+        'http://localhost:19006',
+        'https://newspulse-frontend-main.vercel.app',
+        'https://admin.newspulse.co.in',
+      ],
+      credentials: true,
+    };
+  })(),
 });
 
 io.on('connection', (socket) => {

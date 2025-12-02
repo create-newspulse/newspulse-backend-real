@@ -65,6 +65,11 @@ const corsOptions = {
       return callback(null, true);
     }
 
+    // Allow-all override for debugging / dev deployments
+    if (process.env.CORS_ALLOW_ALL === '1') {
+      return callback(null, true);
+    }
+
     console.error('[CORS][block]', { origin, note: 'nested server.js' });
     return callback(new Error(`CORS: Origin not allowed: ${origin}`));
   },
