@@ -42,6 +42,8 @@ const adminDraftsRouter = require('./routes/adminDrafts');
 // New public routers for Admin Panel compatibility
 const articlesCrudRoutes = require('./routes/articles.routes');
 const systemStubRoutes = require('./routes/system.routes');
+const aiRoutes = require('./routes/ai');
+const feedRoutes = require('./routes/feed');
 // Admin auth middleware for direct app-level protected routes
 const { requireAdminAuth } = require('./middleware/adminAuth');
 // Community reporter submissions model used for contacts aggregation
@@ -685,6 +687,9 @@ app.use('/api', articlesCrudRoutes);
 
 // Public Assist suggestions API (stub) and Monitor Hub alias
 app.use('/api', systemStubRoutes);
+// KiranOS demo AI and personalized feed
+app.use('/api/ai', aiRoutes);
+app.use('/api/feed', feedRoutes);
 
 // CORS debug: quickly see why an origin is allowed/blocked in production
 app.get('/_debug/cors', (req, res) => {
