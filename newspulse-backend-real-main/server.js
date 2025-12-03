@@ -12,6 +12,8 @@ const adminCommunityRoutes = require('./routes/adminCommunity');
 const communityAdminContactsRoutes = require('./routes/communityAdminContacts');
 const CommunitySubmission = require('./models/CommunitySubmission');
 const { requireAdminAuth } = require('./middleware/adminAuth'); // ✅ fixed path + removed duplicate
+const aiRoutes = require('./routes/ai');      // 👈 NEW
+const feedRoutes = require('./routes/feed'); // 👈 NEW (for /api/feed/for-you etc.)
 
 dotenv.config(); // Load environment variables from .env file
 
