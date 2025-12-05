@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
-const cors = require('cors');
+// Note: Avoiding external 'cors' package per request
 const http = require('http');
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
@@ -51,6 +51,41 @@ const CommunitySubmission = require('./models/CommunitySubmission');
 
 const { shouldLog } = require('./lib/logThrottle');
 const app = express();
+
+// --- Simple global CORS middleware for dev + prod ---
+
+const allowedOrigins = [
+  'http://localhost:3000',
+  'https://newspulse.co.in',
+  'https://www.newspulse.co.in',
+];
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin && String(req.headers.origin);
+
+  if (origin && allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Vary', 'Origin');
+  }
+
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header(
+    'Access-Control-Allow-Methods',
+    'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+  );
+  res.header(
+    'Access-Control-Allow-Headers',
+    'Origin, X-Requested-With, Content-Type, Accept, Authorization',
+  );
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
+
+// --- END CORS middleware ---
 const server = http.createServer(app);
 const startTime = Date.now();
 
@@ -80,66 +115,6 @@ if (REDIS_URL) {
 }
 
 // Middleware
-// Centralized CORS configuration (env-driven + sane defaults)
-// Default allowed origins always include localhost dev port 5173 for Vite.
-const defaultOrigins = [
-  'http://localhost:5173',
-  'http://localhost:5174',
-  'http://localhost:3000',
-  'http://localhost:8081',
-  'http://localhost:19006',
-  'http://127.0.0.1:8081',
-  'http://127.0.0.1:19006',
-  'https://admin.newspulse.co.in',
-  'https://newspulse-frontend-main.vercel.app',
-  'https://newspulse.co.in',
-  'https://www.newspulse.co.in',
-];
-// Allow overriding via CORS_ALLOWED_ORIGINS (comma-separated)
-const extraOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(o => o.trim())
-  .filter(Boolean);
-const allowList = new Set([...defaultOrigins, ...extraOrigins]);
-
-// Preview pattern for Vercel deployments of the admin panel
-const vercelPreviewPattern = /https:\/\/newspulse-admin-panel-real-[a-z0-9]+-[a-z0-9-]+\.vercel\.app$/i;
-const genericVercelPattern = /https:\/\/[a-z0-9-]+\.vercel\.app$/i; // fallback (optional)
-
-function evaluateCorsOrigin(origin) {
-  let o = String(origin || '').trim();
-  // Normalise by stripping any trailing slash and lowercasing
-  const oLower = o.toLowerCase();
-  const oNoSlash = oLower.endsWith('/') ? oLower.slice(0, -1) : oLower;
-
-  const allowAll = (process.env.CORS_ALLOW_ALL || '0') === '1';
-  const inAllowList = (val) => allowList.has(val) || allowList.has(val.replace(/^https:/, 'http:')) || allowList.has(val.replace(/^http:/, 'https:'));
-
-  const explicit = inAllowList(o) || inAllowList(oLower) || inAllowList(oNoSlash);
-  const matchesPreview = vercelPreviewPattern.test(oNoSlash);
-  const matchesGeneric = (process.env.CORS_ALLOW_GENERIC_VERCEL === '1') && genericVercelPattern.test(oNoSlash);
-  const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:?\d+)?$/i.test(oNoSlash);
-  const isLan = /^https?:\/\/(?:10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.[0-9]+\.[0-9]+)(:?\d+)?$/i.test(oNoSlash);
-  const allowLocal = (process.env.CORS_ALLOW_LOCAL || '1') === '1';
-  const adminDomain = /admin\.newspulse\.co\.in$/i.test(oNoSlash);
-  const ok = allowAll || explicit || matchesPreview || matchesGeneric || adminDomain || (isLocalhost || isLan) && allowLocal;
-  return { origin: o, originNorm: oNoSlash, explicit, matchesPreview, matchesGeneric, isLocalhost, isLan, adminDomain, allowLocal, allowAll, ok };
-}
-
-const dynamicCors = cors({
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
-    const evald = evaluateCorsOrigin(origin);
-    if (evald.ok) return callback(null, true);
-    console.warn('[CORS][block]', evald);
-    return callback(new Error('CORS: Origin not allowed: ' + evald.origin), false);
-  },
-  credentials: true,
-  optionsSuccessStatus: 204,
-});
-app.use(dynamicCors);
-// Ensure preflight responses include CORS headers
-app.options('*', dynamicCors);
 
 app.use(express.json()); // Parse incoming JSON requests
 app.use(cookieParser());

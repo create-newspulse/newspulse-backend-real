@@ -1,6 +1,7 @@
 const express = require('express');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const { runCommunityAiChecks } = require('../services/communityAi');
+const { submitCommunityReport, listMyCommunityReports } = require('../controllers/communityReporterController');
 
 const router = express.Router();
 
@@ -145,5 +146,9 @@ router.post('/submissions', async (req, res) => {
     return res.status(500).json({ success: false, message: 'Server error creating submission' });
   }
 });
+
+// Phase 1 endpoints (public): submit + list by email
+router.post('/submit', submitCommunityReport);
+router.get('/my-stories', listMyCommunityReports);
 
 module.exports = router;

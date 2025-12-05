@@ -1,7 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
-const cors = require('cors');
+// Note: Avoiding external 'cors' package per request
 
 const newsRoutes = require('./routes/news');
 const adminRoutes = require('./routes/admin');
@@ -10,6 +10,7 @@ const aiTrainingInfoRoutes = require('./routes/system/aiTrainingInfo');
 const communityRoutes = require('./routes/community');
 const adminCommunityRoutes = require('./routes/adminCommunity');
 const communityAdminContactsRoutes = require('./routes/communityAdminContacts');
+const communityReporterRoutes = require('./routes/communityReporterRoutes');
 const CommunitySubmission = require('./models/CommunitySubmission');
 const { requireAdminAuth } = require('./middleware/adminAuth'); // ✅ fixed path + removed duplicate
 const aiRoutes = require('./routes/ai');      // 👈 NEW
@@ -19,6 +20,41 @@ dotenv.config(); // Load environment variables from .env file
 
 const app = express();
 
+// --- Simple global CORS middleware for dev + prod ---
+
+const allowedOrigins = [
+  'http://localhost:3000',
+  'https://newspulse.co.in',
+  'https://www.newspulse.co.in',
+];
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin && String(req.headers.origin);
+
+  if (origin && allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Vary', 'Origin');
+  }
+
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header(
+    'Access-Control-Allow-Methods',
+    'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+  );
+  res.header(
+    'Access-Control-Allow-Headers',
+    'Origin, X-Requested-With, Content-Type, Accept, Authorization',
+  );
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
+
+// --- END CORS middleware ---
+
 /**
  * CORS SETUP
  * ----------
@@ -27,59 +63,9 @@ const app = express();
  * - Allow Vercel previews (*.vercel.app)
  */
 
-const baseAllowedOrigins = [
-  'https://newspulse.co.in',
-  'https://www.newspulse.co.in',
-  'https://admin.newspulse.co.in',
-  'https://newspulse-frontend-main.vercel.app',
-];
+// (Removed dynamic CORS config in favor of simple explicit middleware)
 
-// Optional extra origins via env
-const envOrigins =
-  (process.env.CORS_ALLOWED_ORIGINS || '')
-    .split(',')
-    .map(o => o.trim())
-    .filter(Boolean);
-
-const allowedOrigins = [...new Set([...baseAllowedOrigins, ...envOrigins])];
-
-const isLocalOrigin = (origin = '') => {
-  const o = String(origin || '').trim().toLowerCase().replace(/\/$/, '');
-  // localhost or 127.0.0.1 any port (Vite/Next/Expo web)
-  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(o)) return true;
-  // LAN IPs for Expo on device
-  if (/^https?:\/\/(?:10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.[0-9]+\.[0-9]+)(:\d+)?$/i.test(o)) return true;
-  return false;
-};
-
-const corsOptions = {
-  origin(origin, callback) {
-    // Non-browser / server-side requests
-    if (!origin) return callback(null, true);
-
-    const ok =
-      allowedOrigins.includes(origin) ||
-      isLocalOrigin(origin) ||
-      origin.toLowerCase().endsWith('.vercel.app');
-
-    if (ok) {
-      // console.log('[CORS][allow]', origin);
-      return callback(null, true);
-    }
-
-    // Allow-all override for debugging / dev deployments
-    if (process.env.CORS_ALLOW_ALL === '1') {
-      return callback(null, true);
-    }
-
-    console.error('[CORS][block]', { origin, note: 'nested server.js' });
-    return callback(new Error(`CORS: Origin not allowed: ${origin}`));
-  },
-  credentials: true,
-};
-
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // handle preflight
+// Global CORS handled above without external package
 
 // Parse incoming JSON requests
 app.use(express.json());
@@ -105,6 +91,8 @@ app.get('/', (req, res) => {
 // API Routes
 app.use('/api/news', newsRoutes);
 app.use('/api/community', communityRoutes); // POST /api/community/submissions (public)
+// Community Reporter public endpoints (submit, my-stories)
+app.use('/api/community-reporter', communityReporterRoutes);
 // Admin routes mounted at both legacy root and new /api/admin paths where required.
 app.use('/admin', adminRoutes); // legacy POST /admin/login
 app.use('/admin-auth', adminAuthRoutes); // legacy GET /admin-auth/session
