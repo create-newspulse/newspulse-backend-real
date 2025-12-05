@@ -12,10 +12,14 @@ logs
 *.seed
 *.pid.lock
 
-# Env
+# Env (never commit real secrets)
 .env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 .env.*
-!.env.example
+!.env.example   # keep only the sample env file in git
 
 # Editor
 .vscode/
