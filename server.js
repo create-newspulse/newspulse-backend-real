@@ -55,21 +55,31 @@ const app = express();
 // --- Global CORS (placed before any other middleware/routes) ---
 const allowedOrigins = [
   'http://localhost:5173',
-  'http://localhost:5000',
-  'https://newspulse.co.in',
+  'http://localhost:3000',
   'https://admin.newspulse.co.in',
+  'https://newspulse.co.in',
 ];
 
-function corsOrigin(origin, callback) {
-  if (!origin) return callback(null, true);
-  if (allowedOrigins.includes(origin)) return callback(null, true);
-  if (typeof origin === 'string' && origin.endsWith('.vercel.app')) return callback(null, true);
-  // Do not throw; return false to avoid crashing the app
-  return callback(null, false);
-}
-
-app.use(cors({ origin: corsOrigin, credentials: true }));
-app.options('*', cors({ origin: corsOrigin, credentials: true }));
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+}));
+app.options('*', cors({
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+}));
 // --- END Global CORS ---
 const server = http.createServer(app);
 const startTime = Date.now();
@@ -733,7 +743,7 @@ app.use((err, req, res, next) => {
 });
 
 // Start the server with port fallback logic
-const BASE_PORT = parseInt(process.env.PORT, 10) || 10000;
+const BASE_PORT = parseInt(process.env.PORT, 10) || 5000;
 const MAX_PORT_SEARCH = 5; // will try BASE_PORT..BASE_PORT+4
 
 // --- Debug / Introspection utilities (non-production optional) ---

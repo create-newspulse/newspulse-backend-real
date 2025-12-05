@@ -8,6 +8,7 @@ const newsRoutes = require('./routes/news');
 const adminRoutes = require('./routes/admin');
 const adminAuthRoutes = require('./routes/adminAuth');
 const aiTrainingInfoRoutes = require('./routes/system/aiTrainingInfo');
+const systemHealthRoutes = require('./routes/system/health');
 const communityRoutes = require('./routes/community');
 const adminCommunityRoutes = require('./routes/adminCommunity');
 const communityAdminContactsRoutes = require('./routes/communityAdminContacts');
@@ -24,20 +25,31 @@ const app = express();
 // --- Global CORS (placed before any other middleware/routes) ---
 const allowedOrigins = [
   'http://localhost:5173',
-  'http://localhost:5000',
-  'https://newspulse.co.in',
+  'http://localhost:3000',
   'https://admin.newspulse.co.in',
+  'https://newspulse.co.in',
 ];
 
-function corsOrigin(origin, callback) {
-  if (!origin) return callback(null, true);
-  if (allowedOrigins.includes(origin)) return callback(null, true);
-  if (typeof origin === 'string' && origin.endsWith('.vercel.app')) return callback(null, true);
-  return callback(null, false);
-}
-
-app.use(cors({ origin: corsOrigin, credentials: true }));
-app.options('*', cors({ origin: corsOrigin, credentials: true }));
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+}));
+app.options('*', cors({
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+}));
 // --- END Global CORS ---
 
 /**
@@ -80,6 +92,10 @@ app.use('/api/community-reporter', communityReporterRoutes);
 app.use('/admin', adminRoutes); // legacy POST /admin/login
 app.use('/admin-auth', adminAuthRoutes); // legacy GET /admin-auth/session
 app.use('/system/ai-training-info', aiTrainingInfoRoutes); // GET /system/ai-training-info
+app.use('/api/system/ai-training-info', aiTrainingInfoRoutes); // GET /api/system/ai-training-info
+// Health endpoints (API + compatibility alias)
+app.use('/api/system/health', systemHealthRoutes);
+app.use('/system/health', systemHealthRoutes);
 // New admin community reporter + identity endpoints
 app.use('/api/admin/community', adminCommunityRoutes);
 // Mount reporter contacts + stories under same path for Admin Panel compatibility
