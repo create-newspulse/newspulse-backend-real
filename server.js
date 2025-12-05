@@ -54,23 +54,26 @@ const app = express();
 
 // --- Global CORS (placed before any other middleware/routes) ---
 const allowedOrigins = [
-  'http://localhost:5173',
   'http://localhost:3000',
+  'http://localhost:5173',
   'https://newspulse.co.in',
   'https://www.newspulse.co.in',
+  'https://admin.newspulse.co.in',
 ];
 
-app.use(cors({
-  origin(origin, cb) {
-    if (!origin) return cb(null, true);
-    if (allowedOrigins.includes(origin)) return cb(null, true);
-    return cb(null, false);
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
-  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization'],
-}));
-app.options('*', cors());
+  methods: ['GET','HEAD','PUT','PATCH','POST','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization','X-Requested-With','X-Admin-Auth'],
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 // --- END Global CORS ---
 const server = http.createServer(app);
 const startTime = Date.now();
