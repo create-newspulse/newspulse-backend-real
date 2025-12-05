@@ -19,9 +19,9 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^7.2.2",
     "nodemailer": "^7.0.10",
+    "openai": "^4.0.0",
     "pdfkit": "^0.15.0",
-    "socket.io": "^4.7.5",
-    "openai": "^4.0.0"
+    "socket.io": "^4.7.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.10",

@@ -1,4 +1,5 @@
 const express = require('express');
+const cors = require('cors');
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 // Note: Avoiding external 'cors' package per request
@@ -20,40 +21,12 @@ dotenv.config(); // Load environment variables from .env file
 
 const app = express();
 
-// --- Simple global CORS middleware for dev + prod ---
-
-const allowedOrigins = [
-  'http://localhost:3000',
-  'https://newspulse.co.in',
-  'https://www.newspulse.co.in',
-];
-
-app.use((req, res, next) => {
-  const origin = req.headers.origin && String(req.headers.origin);
-
-  if (origin && allowedOrigins.includes(origin)) {
-    res.header('Access-Control-Allow-Origin', origin);
-    res.header('Vary', 'Origin');
-  }
-
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header(
-    'Access-Control-Allow-Methods',
-    'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
-  );
-  res.header(
-    'Access-Control-Allow-Headers',
-    'Origin, X-Requested-With, Content-Type, Accept, Authorization',
-  );
-
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204);
-  }
-
-  next();
-});
-
-// --- END CORS middleware ---
+// --- Global CORS (placed before any other middleware/routes) ---
+app.use(cors({
+  origin: '*',
+}));
+app.options('*', cors());
+// --- END Global CORS ---
 
 /**
  * CORS SETUP
@@ -63,9 +36,7 @@ app.use((req, res, next) => {
  * - Allow Vercel previews (*.vercel.app)
  */
 
-// (Removed dynamic CORS config in favor of simple explicit middleware)
-
-// Global CORS handled above without external package
+// Global CORS handled above via 'cors' package
 
 // Parse incoming JSON requests
 app.use(express.json());

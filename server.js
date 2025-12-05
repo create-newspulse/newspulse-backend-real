@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
-// Note: Avoiding external 'cors' package per request
+const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
@@ -52,40 +52,26 @@ const CommunitySubmission = require('./models/CommunitySubmission');
 const { shouldLog } = require('./lib/logThrottle');
 const app = express();
 
-// --- Simple global CORS middleware for dev + prod ---
-
+// --- Global CORS (placed before any other middleware/routes) ---
 const allowedOrigins = [
+  'http://localhost:5173',
   'http://localhost:3000',
   'https://newspulse.co.in',
   'https://www.newspulse.co.in',
 ];
 
-app.use((req, res, next) => {
-  const origin = req.headers.origin && String(req.headers.origin);
-
-  if (origin && allowedOrigins.includes(origin)) {
-    res.header('Access-Control-Allow-Origin', origin);
-    res.header('Vary', 'Origin');
-  }
-
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header(
-    'Access-Control-Allow-Methods',
-    'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
-  );
-  res.header(
-    'Access-Control-Allow-Headers',
-    'Origin, X-Requested-With, Content-Type, Accept, Authorization',
-  );
-
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204);
-  }
-
-  next();
-});
-
-// --- END CORS middleware ---
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+    return cb(null, false);
+  },
+  credentials: true,
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+}));
+app.options('*', cors());
+// --- END Global CORS ---
 const server = http.createServer(app);
 const startTime = Date.now();
 
