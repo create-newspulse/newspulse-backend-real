@@ -3,55 +3,84 @@ const CommunityReport = require('../models/CommunityReport');
 // POST /api/community-reporter/submit
 async function submitCommunityReport(req, res) {
   try {
+    console.log('[community-reporter-submit] incoming body', req.body);
     const body = req.body || {};
-    const {
-      reporterName,
-      reporterEmail,
-      reporterPhone,
-      reporterCity,
-      reporterState,
-      reporterCountry,
-      reporterType = 'community',
-      category,
-      headline,
-      storyText,
-      ageGroup,
-      preferredLanguages,
-    } = body;
+    // Support both nested payload ({ reporter, story }) and flat fields
+    const reporter = body.reporter || {};
+    const story = body.story || {};
 
-    if (!reporterName || !reporterEmail || !category || !headline || !storyText) {
-      return res.status(400).json({ success: false, message: 'Missing required fields' });
+    const reporterName = (reporter.fullName || body.reporterName || '').trim();
+    const reporterEmail = (reporter.email || body.reporterEmail || '').trim().toLowerCase();
+    const reporterPhone = reporter.phone || body.reporterPhone || undefined;
+    const reporterCity = reporter.city || body.reporterCity || undefined;
+    const reporterState = reporter.state || body.reporterState || undefined;
+    const reporterCountry = reporter.country || body.reporterCountry || undefined;
+    const reporterTypeRaw = (reporter.reporterType || body.reporterType || 'community').toString();
+    const preferredLanguages = Array.isArray(reporter.preferredLanguages) ? reporter.preferredLanguages : (Array.isArray(body.preferredLanguages) ? body.preferredLanguages : undefined);
+
+    const category = (story.category || body.category || '').trim();
+    const headline = (story.headline || body.headline || '').trim();
+    const storyText = (story.body || body.storyText || '').trim();
+    const ageGroup = story.ageGroup || body.ageGroup || undefined;
+    const locationCity = story.locationCity || undefined;
+    const locationState = story.locationState || undefined;
+    const urgency = story.urgency || 'normal';
+    const canContact = ('canContact' in story) ? !!story.canContact : true;
+
+    const agreesToEthics = ('agreesToEthics' in reporter) ? reporter.agreesToEthics : undefined;
+
+    // Basic validation -> 400, not 500
+    if (!reporterName || !reporterEmail || !reporterPhone || !category || !headline || !storyText) {
+      return res.status(400).json({
+        ok: false,
+        message: 'VALIDATION_ERROR',
+        details: {
+          reporterName: Boolean(reporterName),
+          reporterEmail: Boolean(reporterEmail),
+          reporterPhone: Boolean(reporterPhone),
+          category: Boolean(category),
+          headline: Boolean(headline),
+          story: Boolean(storyText),
+        }
+      });
+    }
+    if (agreesToEthics !== undefined && agreesToEthics !== true) {
+      return res.status(400).json({ ok: false, message: 'VALIDATION_ERROR', details: { agreesToEthics: false } });
     }
 
     const doc = new CommunityReport({
       reporterName: String(reporterName).trim(),
       reporterEmail: String(reporterEmail).trim().toLowerCase(),
       reporterPhone: reporterPhone || undefined,
-      reporterCity: reporterCity || undefined,
-      reporterState: reporterState || undefined,
+      reporterCity: (locationCity || reporterCity) || undefined,
+      reporterState: (locationState || reporterState) || undefined,
       reporterCountry: reporterCountry || undefined,
-      reporterType: reporterType === 'professional' ? 'professional' : 'community',
+      reporterType: (reporterTypeRaw === 'professional' || reporterTypeRaw === 'journalist') ? 'professional' : 'community',
       category: String(category).trim(),
       headline: String(headline).trim(),
       storyText: String(storyText).trim(),
       ageGroup: ageGroup || undefined,
       preferredLanguages: Array.isArray(preferredLanguages) ? preferredLanguages : undefined,
+      status: 'pending',
+      reviewNotes: undefined,
     });
 
     await doc.save();
+    const reporterTypeOut = doc.reporterType === 'professional' ? 'journalist' : 'community';
+    const statusOut = 'under_review'; // map internal 'pending' to external 'under_review'
+
     return res.status(201).json({
-      success: true,
-      message: 'Community report submitted successfully',
-      data: {
-        id: doc._id.toString(),
-        referenceId: doc.referenceId,
-        status: doc.status,
-        createdAt: doc.createdAt,
-      },
+      ok: true,
+      message: 'Story submitted successfully.',
+      storyId: doc._id.toString(),
+      referenceId: doc.referenceId || doc._id.toString(),
+      status: statusOut,
+      reporterType: reporterTypeOut,
+      reporterName: doc.reporterName,
     });
   } catch (e) {
     console.error('[COMMUNITY_REPORT][submit-error]', e?.message || e);
-    return res.status(500).json({ success: false, message: 'Server error creating report' });
+    return res.status(500).json({ ok: false, message: 'SERVER_ERROR' });
   }
 }
 

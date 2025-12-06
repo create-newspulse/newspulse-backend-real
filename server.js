@@ -31,6 +31,8 @@ const communityRoutes = require('./routes/community');
 const adminCommunityRoutes = require('./routes/adminCommunity');
 const adminCommunityReporterRoutes = require('./routes/adminCommunityReporter');
 const communityReporterRoutes = require('./routes/communityReporter');
+const communityReporterConfigRoutes = require('./routes/communityReporterConfig');
+const adminCommunityReporterConfigRoutes = require('./routes/adminCommunityReporterConfig');
 const communityStoriesRoutes = require('./routes/communityStories');
 const communityAdminCommunityRoutes = require('./routes/communityAdminCommunity');
 const communityAdminContactsRoutes = require('./routes/communityAdminContacts');
@@ -615,6 +617,8 @@ app.post('/admin/community/reporters/:id/status', requireAdminAuth, (req, res, n
 });
 // Phase 1 Community Reporter public API
 app.use('/api/community-reporter', communityReporterRoutes);
+// Public Community Reporter config
+app.use('/api/community-reporter', communityReporterConfigRoutes);
 // Verified Journalist public & admin routes
 app.use('/api/journalists', journalistsRoutes);
 // Admin community management (protected)
@@ -625,6 +629,8 @@ app.use('/admin-api/admin/community', adminCommunityRoutes);
 app.use('/api/community', communityStoriesRoutes);
 // New Phase 1 Community Reporter admin queue endpoints
 app.use('/api/admin/community-reporter', adminCommunityReporterRoutes);
+// Admin Community Reporter config (GET/PATCH)
+app.use('/api/admin', adminCommunityReporterConfigRoutes);
 // Non-/api alias consumed by admin panel: /admin/community-reporter/submissions
 app.use('/admin/community-reporter', adminCommunityReporterRoutes);
 // Admin Articles management endpoints (create + list + detail)

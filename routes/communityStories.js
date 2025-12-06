@@ -145,3 +145,108 @@ router.post('/stories/:id/withdraw', requireAdminAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+// --- Submit a community/journalist story ---
+// POST /api/community/stories/submit
+router.post('/stories/submit', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const {
+      reporterName,
+      name,
+      fullName,
+      email,
+      headline,
+      story,
+      category,
+      city,
+      state,
+      country,
+      location,
+      isProfessionalJournalist,
+      preferredLanguages,
+      organisationName,
+      organisationType,
+      positionTitle,
+      yearsExperience,
+      websiteOrPortfolio,
+      socialLinks,
+      journalistCharterAccepted,
+    } = body;
+
+    const normalizedName = (reporterName || fullName || name || '').trim();
+    const normalizedEmail = (email || '').trim().toLowerCase();
+    const normalizedCity = (city || location || '').trim();
+    const normalizedState = (state || '').trim();
+    const normalizedCountry = (country || '').trim();
+
+    if (!normalizedName || !normalizedEmail || !headline || !story) {
+      return res.status(400).json({ ok: false, code: 'VALIDATION_FAILED', message: 'Missing required fields' });
+    }
+
+    // Upsert reporter contact to determine reporterType
+    const { upsertReporterContactFromPayload } = require('../services/reporterContactService');
+    let reporterContact = null;
+    try {
+      const reporterType = isProfessionalJournalist ? 'journalist' : 'community';
+      const result = await upsertReporterContactFromPayload({
+        name: normalizedName,
+        email: normalizedEmail,
+        city: normalizedCity,
+        state: normalizedState,
+        country: normalizedCountry,
+        reporterType,
+        languages: Array.isArray(preferredLanguages) ? preferredLanguages : undefined,
+        organisationName,
+        organisationType,
+        positionTitle,
+        yearsExperience,
+        websiteOrPortfolio,
+        socialLinks,
+        journalistCharterAccepted,
+      });
+      reporterContact = result && result.contact ? result.contact : null;
+    } catch (e) {
+      // continue without reporterContact
+    }
+
+    if (!reporterContact) {
+      return res.status(400).json({ ok: false, code: 'REPORTER_NOT_FOUND', message: 'Reporter profile not found' });
+    }
+
+    // Create submission document with under_review status
+    const submission = await CommunitySubmission.create({
+      reporterName: normalizedName,
+      reporterEmail: normalizedEmail,
+      name: normalizedName,
+      email: normalizedEmail,
+      category: (category || '').trim(),
+      headline: (headline || '').trim(),
+      body: (story || '').trim(),
+      location: { city: normalizedCity || null, state: normalizedState || null, country: normalizedCountry || null },
+      city: normalizedCity || undefined,
+      state: normalizedState || undefined,
+      country: normalizedCountry || undefined,
+      reporterId: reporterContact && reporterContact._id ? reporterContact._id : undefined,
+      sourceType: reporterContact && reporterContact.reporterType === 'journalist' ? 'journalist' : 'community',
+      status: 'UNDER_REVIEW',
+    });
+
+    const referenceId = submission.referenceId || submission.publicId || submission._id.toString();
+    const reporterType = reporterContact && reporterContact.reporterType === 'journalist' ? 'journalist' : 'community';
+    const reporterNameOut = normalizedName || undefined;
+
+    return res.status(201).json({
+      ok: true,
+      message: 'Story submitted successfully.',
+      storyId: submission._id.toString(),
+      referenceId,
+      status: 'under_review',
+      reporterType,
+      reporterName: reporterNameOut,
+    });
+  } catch (e) {
+    console.error('[COMMUNITY_STORY_SUBMIT][error]', e?.message || e);
+    return res.status(500).json({ ok: false, code: 'COMMUNITY_STORY_SUBMIT_FAILED', message: 'Something went wrong while submitting story.' });
+  }
+});

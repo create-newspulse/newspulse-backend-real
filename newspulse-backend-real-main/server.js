@@ -22,33 +22,46 @@ dotenv.config(); // Load environment variables from .env file
 
 const app = express();
 
-// --- Global CORS (placed before any other middleware/routes) ---
+// --- Global CORS (clean setup for admin panel) ---
 const allowedOrigins = [
   'http://localhost:5173',
-  'http://localhost:3000',
   'https://admin.newspulse.co.in',
-  'https://newspulse.co.in',
 ];
 
 app.use(cors({
-  origin(origin, callback) {
+  origin: function (origin, callback) {
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
 }));
+
+// Preflight support
 app.options('*', cors({
-  origin(origin, callback) {
+  origin: function (origin, callback) {
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+}));
+// Targeted preflight for key endpoints
+app.options('/system/ai-training-info', cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+}));
+app.options('/api/admin/community/*', cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
 }));
 // --- END Global CORS ---
 
@@ -65,18 +78,36 @@ app.options('*', cors({
 // Parse incoming JSON requests
 app.use(express.json());
 
+// Lightweight system endpoints (placed early, before any 404 handlers)
+app.get('/system/health', (req, res) => {
+  res.json({
+    ok: true,
+    status: 'online',
+    env: process.env.NODE_ENV || 'development',
+    uptime: process.uptime(),
+  });
+});
+
+app.get('/system/ai-training-info', (req, res) => {
+  res.json({
+    success: true,
+    status: 'online',
+    lastUpdated: process.env.AI_TRAINING_LAST_UPDATED || new Date().toISOString(),
+  });
+});
+
 // MongoDB Connection (require explicit MONGO_URI, no localhost fallback)
 const MONGO_URI = process.env.MONGO_URI;
 if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
-  console.error('❌ MONGO_URI is not set correctly in .env (or still placeholder).');
-  process.exit(1);
+  console.warn('⚠️ MONGO_URI is not set correctly; starting server without DB connection for now.');
+} else {
+  mongoose
+    .connect(MONGO_URI)
+    .then(() => console.log('✅ MongoDB connected'))
+    .catch((err) => {
+      console.error('❌ MongoDB connection error:', err.message);
+    });
 }
-mongoose
-  .connect(MONGO_URI)
-  .then(() => console.log('✅ MongoDB connected'))
-  .catch((err) => {
-    console.error('❌ MongoDB connection error:', err.message);
-  });
 
 // Simple homepage route
 app.get('/', (req, res) => {
