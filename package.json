@@ -2,8 +2,8 @@
   "name": "newspulse-backend-full",
   "version": "1.0.0",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js",
+    "start": "node ./newspulse-backend-real-main/server.js",
+    "dev": "nodemon ./newspulse-backend-real-main/server.js",
     "test": "node --test tests/*.test.js",
     "inspect:community": "node scripts/inspectCommunitySubmissions.js",
     "test-email": "node scripts/test-email.js",

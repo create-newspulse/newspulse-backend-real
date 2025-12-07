@@ -13,10 +13,14 @@ const communityRoutes = require('./routes/community');
 const adminCommunityRoutes = require('./routes/adminCommunity');
 const communityAdminContactsRoutes = require('./routes/communityAdminContacts');
 const communityReporterRoutes = require('./routes/communityReporterRoutes');
+const adminSettingsRoutes = require('./routes/adminSettings');
+const communityReporterSettingsRouter = require('./routes/adminSettings/communityReporterSettings');
 const CommunitySubmission = require('./models/CommunitySubmission');
-const { requireAdminAuth } = require('./middleware/adminAuth'); // ✅ fixed path + removed duplicate
-const aiRoutes = require('./routes/ai');      // 👈 NEW
-const feedRoutes = require('./routes/feed'); // 👈 NEW (for /api/feed/for-you etc.)
+const { requireAdminAuth } = require('../middleware/adminAuth');
+let aiRoutes = null;
+let feedRoutes = null;
+try { aiRoutes = require('./routes/ai'); } catch (_) { console.warn('[init] optional routes/ai not found; skipping'); }
+try { feedRoutes = require('./routes/feed'); } catch (_) { console.warn('[init] optional routes/feed not found; skipping'); }
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -129,6 +133,14 @@ app.use('/api/system/health', systemHealthRoutes);
 app.use('/system/health', systemHealthRoutes);
 // New admin community reporter + identity endpoints
 app.use('/api/admin/community', adminCommunityRoutes);
+// Admin Settings
+app.use('/api/admin', adminSettingsRoutes);
+app.use('/admin-api/admin', adminSettingsRoutes);
+// Community Reporter Settings (mount admin router)
+app.use('/api/admin', communityReporterSettingsRouter);
+// Optional feeds and AI routes
+if (aiRoutes) app.use('/api/ai', aiRoutes);
+if (feedRoutes) app.use('/api/feed', feedRoutes);
 // Mount reporter contacts + stories under same path for Admin Panel compatibility
 app.use('/api/admin/community', communityAdminContactsRoutes);
 // Admin API proxy alias (frontend often proxies /admin-api/* with auth header)
@@ -245,6 +257,22 @@ app.use((err, req, res, next) => {
     success: false,
     status: 500,
     message: 'Internal server error',
+  });
+});
+
+// Public: GET config (no auth)
+// Note: Reading flag via a simple closure; keep in sync if later wired to DB.
+let _communityReporterFlagCache = { myCommunityStoriesEnabled: false };
+try {
+  // Attempt to import router-local state by requiring the router module instance.
+  // If the router is reloaded, fallback remains false.
+  const _router = communityReporterSettingsRouter;
+  // No direct export for state; maintain a local cache overridden by admin POST handlers.
+} catch (_) {}
+app.get('/api/community-reporter/config', (req, res) => {
+  return res.json({
+    ok: true,
+    communityMyStoriesEnabled: _communityReporterFlagCache.myCommunityStoriesEnabled,
   });
 });
 

@@ -1,6 +1,7 @@
 const express = require('express');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const { requireAdminAuth } = require('../middleware/adminAuth');
+const { getCommunityReporterSettings, updateCommunityReporterSettings } = require('../controllers/communityReporterSettingsController');
 const router = express.Router();
 
 // TODO: protect with admin auth again before production
@@ -103,6 +104,10 @@ router.get('/submissions/:id', requireAdminAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+// Settings: Community Reporter portal enable/disable
+router.get('/settings/community-reporter', requireAdminAuth, getCommunityReporterSettings);
+router.put('/settings/community-reporter', requireAdminAuth, updateCommunityReporterSettings);
 
 // GET /api/admin/community/reporter-contacts
 router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
