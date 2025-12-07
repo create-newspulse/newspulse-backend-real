@@ -4,4 +4,4 @@ services:
     env: node
     rootDir: .
     buildCommand: npm install
-    startCommand: npm start
+    startCommand: node newspulse-backend-real-main/server.js
