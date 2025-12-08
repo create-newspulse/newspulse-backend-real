@@ -82,7 +82,19 @@ router.get('/articles', async (req, res, next) => {
       News.countDocuments(query),
     ]);
 
-    return res.json({ ok: true, success: true, articles: items, total, page, limit, sort: sortParam });
+    // Align with Admin UI expectations: expose `data` as primary array
+    // while retaining `articles` for backward compatibility.
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: 200,
+      data: items,
+      articles: items,
+      total,
+      page,
+      limit,
+      sort: sortParam,
+    });
   } catch (err) {
     return next(err);
   }
