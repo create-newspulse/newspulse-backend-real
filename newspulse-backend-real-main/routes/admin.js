@@ -88,5 +88,43 @@ router.get('/health', (req, res) => {
     env: (process.env.NODE_ENV || 'development'),
   });
 });
+// --- Admin Dashboard Stats ---
+// GET /api/admin/dashboard-stats (mounted via app.use('/api/admin', adminRoutes))
+// Also works under /admin/dashboard-stats for legacy mounting.
+router.get('/dashboard-stats', (req, res) => {
+  // Basic placeholder stats. Replace with real DB queries as needed.
+  const data = {
+    totalNews: 0,
+    totalCategories: 0,
+    totalLanguages: 1,
+    activeUsers: 0,
+    aiLogs: 0,
+  };
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'Dashboard stats fetched',
+    data,
+  });
+});
+
+// --- Admin System Stats ---
+// GET /api/admin/stats (mounted via app.use('/api/admin', adminRoutes))
+// Also works under /admin/stats for legacy mounting.
+router.get('/stats', (req, res) => {
+  const systemHealth = {
+    uptime: parseFloat(process.uptime().toFixed(2)),
+    timestamp: new Date().toISOString(),
+    env: process.env.NODE_ENV || 'development',
+  };
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'System stats fetched',
+    data: { systemHealth },
+  });
+});
 
 module.exports = router;
