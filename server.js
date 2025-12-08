@@ -18,7 +18,10 @@ const communityAdminContactsRoutes = require(`${BASE}/routes/communityAdminConta
 const communityReporterRoutes = require(`${BASE}/routes/communityReporterRoutes`);
 const adminSettingsRoutes = require(`${BASE}/routes/adminSettings`);
 const communityReporterSettingsRouter = require(`${BASE}/routes/adminSettings/communityReporterSettings`);
+// Dashboard stats router lives in root-level routes, not nested BASE dir
+const dashboardStatsRouter = require('./routes/dashboardStats');
 const CommunitySubmission = require(`${BASE}/models/CommunitySubmission`);
+const News = require(`${BASE}/models/News`);
 const { requireAdminAuth } = require('./middleware/adminAuth');
 let aiRoutes = null;
 let feedRoutes = null;
@@ -29,43 +32,33 @@ dotenv.config();
 
 const app = express();
 
-// CORS
-const allowedOrigins = [
+// CORS (centralized, permissive for dev + common preview hostnames)
+const STATIC_ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'https://admin.newspulse.co.in',
 ];
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-}));
-app.options('*', cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-}));
-app.options('/system/ai-training-info', cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-}));
-app.options('/api/admin/community/*', cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-}));
+const ENV_ALLOWED_ORIGINS = (process.env.FRONTEND_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // non-browser or same-origin
+  if (STATIC_ALLOWED_ORIGINS.includes(origin) || ENV_ALLOWED_ORIGINS.includes(origin)) return true;
+  const localhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\\d+)?$/i;
+  const vercel = /^https?:\/\/([a-z0-9-]+\.)*vercel\.app$/i;
+  const render = /^https?:\/\/([a-z0-9-]+\.)*onrender\.com$/i;
+  const netlify = /^https?:\/\/([a-z0-9-]+\.)*netlify\.app$/i;
+  const pages = /^https?:\/\/([a-z0-9-]+\.)*pages\.dev$/i;
+  if (localhost.test(origin) || vercel.test(origin) || render.test(origin) || netlify.test(origin) || pages.test(origin)) return true;
+  return false;
+}
+const corsOptionsDelegate = (req, callback) => {
+  const origin = req.header('Origin');
+  const allowed = isAllowedOrigin(origin);
+  callback(null, { origin: allowed, credentials: true });
+};
+app.use(cors(corsOptionsDelegate));
+app.options('*', cors(corsOptionsDelegate));
 
 app.use(express.json());
 
@@ -75,6 +68,53 @@ app.get('/system/health', (req, res) => {
 });
 app.get('/system/ai-training-info', (req, res) => {
   res.json({ success: true, status: 'online', lastUpdated: process.env.AI_TRAINING_LAST_UPDATED || new Date().toISOString() });
+});
+
+// Root-level health and stats (no /api prefix)
+// These are defined directly on the app instance and must appear
+// before any 404/error handlers so they are always reachable.
+app.get('/health', (req, res) => {
+  return res.status(200).json({
+    status: 'ok',
+    service: 'newspulse-backend',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get('/stats', (req, res) => {
+  try {
+    return res.status(200).json({
+      status: 'ok',
+      service: 'newspulse-backend',
+      uptimeSeconds: Math.floor(process.uptime()),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error('[root:/stats] failed', e?.message || e);
+    return res.status(500).json({ status: 'error', message: 'Failed to fetch stats' });
+  }
+});
+
+app.get('/dashboard-stats', async (req, res) => {
+  try {
+    // Placeholder values; wire up real MongoDB counts later.
+    return res.status(200).json({
+      status: 'ok',
+      totalArticles: 0,
+      publishedArticles: 0,
+      draftArticles: 0,
+      breakingNewsCount: 0,
+      totalUsers: 0,
+      adminUsers: 0,
+      activeReporters: 0,
+      pendingReporterRequests: 0,
+      storiesLast7Days: 0,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error('[root:/dashboard-stats] failed', e?.message || e);
+    return res.status(500).json({ status: 'error', message: 'Failed to load dashboard stats' });
+  }
 });
 
 // Mongo
@@ -98,6 +138,12 @@ app.use('/api/news', newsRoutes);
 app.use('/api/community', communityRoutes);
 app.use('/api/community-reporter', communityReporterRoutes);
 app.use('/admin', adminRoutes);
+// Mount admin routes under /api to expose /api/dashboard-stats and /api/stats
+app.use('/api', adminRoutes);
+// Mount dashboard stats router under /api to serve /api/dashboard-stats and /api/stats
+app.use('/api', dashboardStatsRouter);
+// Also mount dashboard stats under /admin-api for frontend dev proxy
+app.use('/admin-api', dashboardStatsRouter);
 app.use('/admin-auth', adminAuthRoutes);
 app.use('/system/ai-training-info', aiTrainingInfoRoutes);
 app.use('/api/system/ai-training-info', aiTrainingInfoRoutes);
@@ -114,6 +160,9 @@ if (feedRoutes) app.use('/api/feed', feedRoutes);
 app.use('/api/admin/community', communityAdminContactsRoutes);
 app.use('/admin-api/admin/community', communityAdminContactsRoutes);
 app.use('/admin/community', communityAdminContactsRoutes);
+
+// Lightweight health/status endpoint under /api
+// (stats and dashboard-stats are now served by routes/dashboardStats.js mounted under /api and /admin-api)
 
 // Aliases and fallbacks
 app.get('/admin/community/journalist-applications', requireAdminAuth, (req, res, next) => {
@@ -177,6 +226,24 @@ app.get('/api/admin/me', requireAdminAuth, (req, res) => {
   return res.json({ success: true, admin: { id: a.id || 'unknown', email: a.email || '', role: a.role || 'admin' } });
 });
 
+// Aliases expected by some UIs
+app.get('/admin/stats', async (req, res) => {
+  try {
+    const totalArticles = await News.countDocuments({});
+    return res.json({ ok: true, stats: { totalArticles, timestamp: new Date().toISOString() } });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: 'Failed to load admin stats' });
+  }
+});
+app.get('/api/admin/stats', async (req, res) => {
+  try {
+    const totalArticles = await News.countDocuments({});
+    return res.json({ ok: true, stats: { totalArticles, timestamp: new Date().toISOString() } });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: 'Failed to load admin stats' });
+  }
+});
+
 // Public config
 let _communityReporterFlagCache = { myCommunityStoriesEnabled: false };
 app.get('/api/community-reporter/config', (req, res) => {
@@ -194,29 +261,31 @@ app.use((err, req, res, next) => {
   res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal server error' });
 });
 
-// Start
+// Start server only when invoked directly (not when imported by tests)
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
-  try {
-    const reporterRoutes = [];
-    app._router && app._router.stack && app._router.stack.forEach(layer => {
-      if (layer.route && layer.route.path && layer.route.path.includes('reporter')) {
-        reporterRoutes.push(layer.route.path);
-      } else if (layer.name === 'router' && layer.handle && layer.handle.stack) {
-        const prefix = layer.regexp && layer.regexp.fast_slash ? '' : extractPrefix(layer.regexp);
-        layer.handle.stack.forEach(rLayer => {
-          if (rLayer.route && rLayer.route.path && rLayer.route.path.includes('reporter')) {
-            reporterRoutes.push(prefix + rLayer.route.path);
-          }
-        });
-      }
-    });
-    console.log('[startup][reporter-routes]', reporterRoutes);
-  } catch (e) {
-    console.warn('[startup][reporter-routes] failed', e?.message || e);
-  }
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`✅ Server running on port ${PORT}`);
+    try {
+      const reporterRoutes = [];
+      app._router && app._router.stack && app._router.stack.forEach(layer => {
+        if (layer.route && layer.route.path && layer.route.path.includes('reporter')) {
+          reporterRoutes.push(layer.route.path);
+        } else if (layer.name === 'router' && layer.handle && layer.handle.stack) {
+          const prefix = layer.regexp && layer.regexp.fast_slash ? '' : extractPrefix(layer.regexp);
+          layer.handle.stack.forEach(rLayer => {
+            if (rLayer.route && rLayer.route.path && rLayer.route.path.includes('reporter')) {
+              reporterRoutes.push(prefix + rLayer.route.path);
+            }
+          });
+        }
+      });
+      console.log('[startup][reporter-routes]', reporterRoutes);
+    } catch (e) {
+      console.warn('[startup][reporter-routes] failed', e?.message || e);
+    }
+  });
+}
 
 function extractPrefix(regexp) {
   try {
@@ -228,6 +297,7 @@ function extractPrefix(regexp) {
 }
 
 // Debug routes list
+// Debug routes list (place before 404 handler)
 app.get('/_debug/routes', (req, res) => {
   const list = [];
   try {

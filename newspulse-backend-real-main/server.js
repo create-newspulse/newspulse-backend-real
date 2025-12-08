@@ -16,7 +16,10 @@ const communityReporterRoutes = require('./routes/communityReporterRoutes');
 const adminSettingsRoutes = require('./routes/adminSettings');
 const communityReporterSettingsRouter = require('./routes/adminSettings/communityReporterSettings');
 const CommunitySubmission = require('./models/CommunitySubmission');
+const News = require('./models/News');
 const { requireAdminAuth } = require('../middleware/adminAuth');
+// Mount dashboard stats from root-level routes (shared across apps)
+const dashboardStatsRoutes = require('../routes/dashboardStats');
 let aiRoutes = null;
 let feedRoutes = null;
 try { aiRoutes = require('./routes/ai'); } catch (_) { console.warn('[init] optional routes/ai not found; skipping'); }
@@ -26,47 +29,33 @@ dotenv.config(); // Load environment variables from .env file
 
 const app = express();
 
-// --- Global CORS (clean setup for admin panel) ---
-const allowedOrigins = [
+// --- Global CORS (centralized, permissive for dev + previews) ---
+const STATIC_ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'https://admin.newspulse.co.in',
 ];
-
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-}));
-
-// Preflight support
-app.options('*', cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-}));
-// Targeted preflight for key endpoints
-app.options('/system/ai-training-info', cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-}));
-app.options('/api/admin/community/*', cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-}));
+const ENV_ALLOWED_ORIGINS = (process.env.FRONTEND_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  if (STATIC_ALLOWED_ORIGINS.includes(origin) || ENV_ALLOWED_ORIGINS.includes(origin)) return true;
+  const localhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\\d+)?$/i;
+  const vercel = /^https?:\/\/([a-z0-9-]+\.)*vercel\.app$/i;
+  const render = /^https?:\/\/([a-z0-9-]+\.)*onrender\.com$/i;
+  const netlify = /^https?:\/\/([a-z0-9-]+\.)*netlify\.app$/i;
+  const pages = /^https?:\/\/([a-z0-9-]+\.)*pages\.dev$/i;
+  if (localhost.test(origin) || vercel.test(origin) || render.test(origin) || netlify.test(origin) || pages.test(origin)) return true;
+  return false;
+}
+const corsOptionsDelegate = (req, callback) => {
+  const origin = req.header('Origin');
+  const allowed = isAllowedOrigin(origin);
+  callback(null, { origin: allowed, credentials: true });
+};
+app.use(cors(corsOptionsDelegate));
+app.options('*', cors(corsOptionsDelegate));
 // --- END Global CORS ---
 
 /**
@@ -100,6 +89,51 @@ app.get('/system/ai-training-info', (req, res) => {
   });
 });
 
+// Root-level health and stats (no /api prefix)
+// Ensure these are defined before 404/error handlers.
+app.get('/health', (req, res) => {
+  return res.status(200).json({
+    status: 'ok',
+    service: 'newspulse-backend',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get('/stats', (req, res) => {
+  try {
+    return res.status(200).json({
+      status: 'ok',
+      service: 'newspulse-backend',
+      uptimeSeconds: Math.floor(process.uptime()),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error('[root:/stats] failed', e?.message || e);
+    return res.status(500).json({ status: 'error', message: 'Failed to fetch stats' });
+  }
+});
+
+app.get('/dashboard-stats', async (req, res) => {
+  try {
+    return res.status(200).json({
+      status: 'ok',
+      totalArticles: 0,
+      publishedArticles: 0,
+      draftArticles: 0,
+      breakingNewsCount: 0,
+      totalUsers: 0,
+      adminUsers: 0,
+      activeReporters: 0,
+      pendingReporterRequests: 0,
+      storiesLast7Days: 0,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error('[root:/dashboard-stats] failed', e?.message || e);
+    return res.status(500).json({ status: 'error', message: 'Failed to load dashboard stats' });
+  }
+});
+
 // MongoDB Connection (require explicit MONGO_URI, no localhost fallback)
 const MONGO_URI = process.env.MONGO_URI;
 if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
@@ -125,6 +159,11 @@ app.use('/api/community', communityRoutes); // POST /api/community/submissions (
 app.use('/api/community-reporter', communityReporterRoutes);
 // Admin routes mounted at both legacy root and new /api/admin paths where required.
 app.use('/admin', adminRoutes); // legacy POST /admin/login
+// Also mount admin router under /api for endpoints like /api/stats, /api/dashboard-stats
+app.use('/api', adminRoutes);
+// Mount dashboard stats under /api and /admin-api to satisfy Admin Panel
+app.use('/api', dashboardStatsRoutes);
+app.use('/admin-api', dashboardStatsRoutes);
 app.use('/admin-auth', adminAuthRoutes); // legacy GET /admin-auth/session
 app.use('/system/ai-training-info', aiTrainingInfoRoutes); // GET /system/ai-training-info
 app.use('/api/system/ai-training-info', aiTrainingInfoRoutes); // GET /api/system/ai-training-info
@@ -224,6 +263,24 @@ app.get('/api/admin/me', requireAdminAuth, (req, res) => {
   });
 });
 
+// Aliases expected by some UIs
+app.get('/admin/stats', async (req, res) => {
+  try {
+    const totalArticles = await News.countDocuments({});
+    return res.json({ ok: true, stats: { totalArticles, timestamp: new Date().toISOString() } });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: 'Failed to load admin stats' });
+  }
+});
+app.get('/api/admin/stats', async (req, res) => {
+  try {
+    const totalArticles = await News.countDocuments({});
+    return res.json({ ok: true, stats: { totalArticles, timestamp: new Date().toISOString() } });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: 'Failed to load admin stats' });
+  }
+});
+
 // Direct health route safeguard (in case router mounting conflicts)
 app.get('/admin/health', (req, res) => {
   res.json({
@@ -276,8 +333,9 @@ app.get('/api/community-reporter/config', (req, res) => {
   });
 });
 
-// Start the server
+// Start the server only when invoked directly, not when imported
 const PORT = process.env.PORT || 5000;
+if (require.main === module) {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
   try {
@@ -300,6 +358,7 @@ app.listen(PORT, () => {
     console.warn('[startup][reporter-routes] failed', e?.message || e);
   }
 });
+}
 
 function extractPrefix(regexp) {
   try {
