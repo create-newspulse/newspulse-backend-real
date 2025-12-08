@@ -2,6 +2,7 @@ const express = require('express');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const { runCommunityAiChecks } = require('../services/communityAi');
 const { submitCommunityReport, listMyCommunityReports } = require('../controllers/communityReporterController');
+const { requireAdminAuth } = require('../middleware/adminAuth');
 
 const router = express.Router();
 
@@ -150,5 +151,23 @@ router.post('/submissions', async (req, res) => {
 // Phase 1 endpoints (public): submit + list by email
 router.post('/submit', submitCommunityReport);
 router.get('/my-stories', listMyCommunityReports);
+
+// Admin: GET /api/community-reporter/queue?status=pending
+router.get('/queue', requireAdminAuth, async (req, res) => {
+  try {
+    const status = (req.query.status || 'pending').toString();
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: 200,
+      data: [],
+      meta: { statusFilter: status, total: 0 },
+      message: 'Community reporter queue (placeholder)',
+    });
+  } catch (e) {
+    console.error('[community-reporter][queue] error', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load community reporter queue' });
+  }
+});
 
 module.exports = router;

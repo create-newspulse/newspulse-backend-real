@@ -60,22 +60,29 @@ router.post('/articles', async (req, res, next) => {
   }
 });
 
-// GET /api/articles → list articles (status, page, limit)
+// GET /api/articles → list articles (status, page, limit, sort)
 router.get('/articles', async (req, res, next) => {
   try {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
-    const status = (req.query.status || '').trim();
+    const sortParam = (req.query.sort || '-createdAt').toString();
+    const statusRaw = (req.query.status || '').toString();
     const query = {};
-    if (status) query.status = status;
+    if (statusRaw) {
+      const statuses = statusRaw
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+      if (statuses.length > 0) query.status = { $in: statuses };
+    }
     const skip = (page - 1) * limit;
 
     const [items, total] = await Promise.all([
-      News.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      News.find(query).sort(sortParam).skip(skip).limit(limit).lean(),
       News.countDocuments(query),
     ]);
 
-    return res.json({ ok: true, success: true, articles: items, total, page, limit });
+    return res.json({ ok: true, success: true, articles: items, total, page, limit, sort: sortParam });
   } catch (err) {
     return next(err);
   }

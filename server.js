@@ -8,6 +8,7 @@ const BASE = './newspulse-backend-real-main';
 
 // Nested routes and modules
 const newsRoutes = require(`${BASE}/routes/news`);
+const articlesRoutes = require('./routes/articles');
 const adminRoutes = require(`${BASE}/routes/admin`);
 const adminAuthRoutes = require(`${BASE}/routes/adminAuth`);
 const aiTrainingInfoRoutes = require(`${BASE}/routes/system/aiTrainingInfo`);
@@ -137,6 +138,9 @@ app.get('/', (req, res) => { res.send('🟢 News Pulse Admin Backend is Live'); 
 
 // API Routes
 app.use('/api/news', newsRoutes);
+// Articles router mounted at /api and alias at root for /articles
+app.use('/api', articlesRoutes);
+app.use('/', articlesRoutes);
 app.use('/api/community', communityRoutes);
 app.use('/api/community-reporter', communityReporterRoutes);
 app.use('/admin', adminRoutes);
