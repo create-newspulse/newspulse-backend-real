@@ -161,6 +161,9 @@ app.use('/api/community', communityRoutes); // POST /api/community/submissions (
 // PUBLIC routes – must be before any auth-protected mounts
 app.get('/api/community-reporter/queue', getCommunityReporterQueue);
 app.get('/api/community-reporter/contacts', listReporterContacts);
+// Admin UI aliases (public read-only for directory)
+app.get('/api/admin/community/reporter-contacts', listReporterContacts);
+app.get('/admin-api/admin/community/reporter-contacts', listReporterContacts);
 app.use('/api/community-reporter', communityReporterRoutes);
 // Admin routes mounted at both legacy root and new /api/admin paths where required.
 app.use('/admin', adminRoutes); // legacy POST /admin/login

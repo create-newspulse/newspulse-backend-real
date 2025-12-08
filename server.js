@@ -146,6 +146,9 @@ app.use('/api/community', communityRoutes);
 // PUBLIC routes – must be before any /api auth-protected mounts
 app.get('/api/community-reporter/queue', getCommunityReporterQueue);
 app.get('/api/community-reporter/contacts', listReporterContacts);
+// Admin UI often calls these aliases; expose public read-only directory
+app.get('/api/admin/community/reporter-contacts', listReporterContacts);
+app.get('/admin-api/admin/community/reporter-contacts', listReporterContacts);
 app.use('/api/community-reporter', communityReporterRoutes);
 app.use('/admin', adminRoutes);
 // Mount admin routes under /api to expose /api/dashboard-stats and /api/stats
