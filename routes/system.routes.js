@@ -8,15 +8,17 @@ router.post('/assist/suggest/v2', (req, res) => {
   return res.json({ ok: true, success: true, suggestions: [] });
 });
 
-// GET /api/system/monitor-hub → health stub
-router.get('/system/monitor-hub', (req, res) => {
+// GET /monitor-hub → will be mounted under /api/system and /system
+router.get('/monitor-hub', (req, res) => {
   return res.json({
     ok: true,
     success: true,
-    status: 'healthy',
-    services: {
-      api: 'up',
-      db: 'up',
+    status: 200,
+    message: 'System monitor status',
+    data: {
+      publishRuntime: { envDefault: false, override: false, effective: false },
+      timestamp: new Date().toISOString(),
+      env: process.env.NODE_ENV || 'development',
     },
   });
 });

@@ -12,6 +12,7 @@ const adminRoutes = require(`${BASE}/routes/admin`);
 const adminAuthRoutes = require(`${BASE}/routes/adminAuth`);
 const aiTrainingInfoRoutes = require(`${BASE}/routes/system/aiTrainingInfo`);
 const systemHealthRoutes = require(`${BASE}/routes/system/health`);
+const systemRoutesRouter = require('./routes/system.routes');
 const communityRoutes = require(`${BASE}/routes/community`);
 const adminCommunityRoutes = require(`${BASE}/routes/adminCommunity`);
 const communityAdminContactsRoutes = require(`${BASE}/routes/communityAdminContacts`);
@@ -20,6 +21,7 @@ const adminSettingsRoutes = require(`${BASE}/routes/adminSettings`);
 const communityReporterSettingsRouter = require(`${BASE}/routes/adminSettings/communityReporterSettings`);
 // Dashboard stats router lives in root-level routes, not nested BASE dir
 const dashboardStatsRouter = require('./routes/dashboardStats');
+const adminCommunityReporterQueueRouter = require('./routes/admin/communityReporterQueue');
 const CommunitySubmission = require(`${BASE}/models/CommunitySubmission`);
 const News = require(`${BASE}/models/News`);
 const { requireAdminAuth } = require('./middleware/adminAuth');
@@ -149,12 +151,19 @@ app.use('/system/ai-training-info', aiTrainingInfoRoutes);
 app.use('/api/system/ai-training-info', aiTrainingInfoRoutes);
 app.use('/api/system/health', systemHealthRoutes);
 app.use('/system/health', systemHealthRoutes);
+// System monitor hub (API + non-API alias)
+app.use('/api/system', systemRoutesRouter);
+app.use('/system', systemRoutesRouter);
 app.use('/api/admin/community', adminCommunityRoutes);
 // Admin Settings (includes /api/admin/settings/community-reporter)
 app.use('/api/admin', adminSettingsRoutes);
 app.use('/admin-api/admin', adminSettingsRoutes);
 // Community Reporter Settings router (same mount /api/admin)
 app.use('/api/admin', communityReporterSettingsRouter);
+// Community Reporter Queue (admin protected)
+app.use('/api/admin', adminCommunityReporterQueueRouter);
+app.use('/admin-api/admin', adminCommunityReporterQueueRouter);
+app.use('/admin', adminCommunityReporterQueueRouter);
 if (aiRoutes) app.use('/api/ai', aiRoutes);
 if (feedRoutes) app.use('/api/feed', feedRoutes);
 app.use('/api/admin/community', communityAdminContactsRoutes);
