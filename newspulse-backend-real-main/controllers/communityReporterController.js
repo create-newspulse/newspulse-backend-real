@@ -66,3 +66,25 @@ async function listStoriesByReporter(req, res) {
 }
 
 module.exports = { submitStory, listStoriesByReporter };
+// Temporary public placeholder for queue
+module.exports.getCommunityReporterQueue = async function getCommunityReporterQueue(req, res) {
+  try {
+    const status = (req.query.status || 'pending').toString();
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: 200,
+      data: [],
+      meta: { statusFilter: status, total: 0 },
+      message: 'Community reporter queue (public placeholder)',
+    });
+  } catch (err) {
+    console.error('Error in GET /api/community-reporter/queue:', err);
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      status: 500,
+      message: 'Failed to load community reporter queue',
+    });
+  }
+};

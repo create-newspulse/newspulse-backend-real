@@ -13,6 +13,7 @@ const communityRoutes = require('./routes/community');
 const adminCommunityRoutes = require('./routes/adminCommunity');
 const communityAdminContactsRoutes = require('./routes/communityAdminContacts');
 const communityReporterRoutes = require('./routes/communityReporterRoutes');
+const { getCommunityReporterQueue } = require('./controllers/communityReporterController');
 const adminSettingsRoutes = require('./routes/adminSettings');
 const communityReporterSettingsRouter = require('./routes/adminSettings/communityReporterSettings');
 const CommunitySubmission = require('./models/CommunitySubmission');
@@ -156,6 +157,8 @@ app.get('/', (req, res) => {
 app.use('/api/news', newsRoutes);
 app.use('/api/community', communityRoutes); // POST /api/community/submissions (public)
 // Community Reporter public endpoints (submit, my-stories)
+// PUBLIC temporary route – must be before any auth-protected mounts
+app.get('/api/community-reporter/queue', getCommunityReporterQueue);
 app.use('/api/community-reporter', communityReporterRoutes);
 // Admin routes mounted at both legacy root and new /api/admin paths where required.
 app.use('/admin', adminRoutes); // legacy POST /admin/login
