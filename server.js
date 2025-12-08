@@ -15,9 +15,11 @@ const aiTrainingInfoRoutes = require(`${BASE}/routes/system/aiTrainingInfo`);
 const systemHealthRoutes = require(`${BASE}/routes/system/health`);
 const systemRoutesRouter = require('./routes/system.routes');
 const communityRoutes = require(`${BASE}/routes/community`);
+const communityStoriesRouter = require('./routes/communityStories');
 const adminCommunityRoutes = require(`${BASE}/routes/adminCommunity`);
 const communityAdminContactsRoutes = require(`${BASE}/routes/communityAdminContacts`);
-const communityReporterRoutes = require(`${BASE}/routes/communityReporterRoutes`);
+// Use root-level communityReporter routes to match tests
+const communityReporterRoutes = require('./routes/communityReporter');
 const { getCommunityReporterQueue, listReporterContacts } = require('./controllers/communityReporterController');
 const adminSettingsRoutes = require(`${BASE}/routes/adminSettings`);
 const communityReporterSettingsRouter = require(`${BASE}/routes/adminSettings/communityReporterSettings`);
@@ -31,6 +33,8 @@ let aiRoutes = null;
 let feedRoutes = null;
 try { aiRoutes = require(`${BASE}/routes/ai`); } catch (_) { console.warn('[init] optional routes/ai not found; skipping'); }
 try { feedRoutes = require(`${BASE}/routes/feed`); } catch (_) { console.warn('[init] optional routes/feed not found; skipping'); }
+let publicCommunitySettingsRouter = null;
+try { publicCommunitySettingsRouter = require(`${BASE}/routes/public/communitySettings`); } catch (_) { console.warn('[init] optional public community settings router not found; skipping'); }
 
 dotenv.config();
 
@@ -123,7 +127,9 @@ app.get('/dashboard-stats', async (req, res) => {
 
 // Mongo
 const MONGO_URI = process.env.MONGO_URI;
-if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
+if (process.env.NODE_ENV === 'test') {
+  console.warn('[init] Test mode: skipping MongoDB connection');
+} else if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
   console.warn('⚠️ MONGO_URI is not set correctly; starting server without DB connection for now.');
 } else {
   mongoose
@@ -143,6 +149,8 @@ app.use('/api/news', newsRoutes);
 app.use('/api', articlesRoutes);
 app.use('/', articlesRoutes);
 app.use('/api/community', communityRoutes);
+// Reporter portal: My Community Stories
+app.use('/api/community', communityStoriesRouter);
 // PUBLIC routes – must be before any /api auth-protected mounts
 app.get('/api/community-reporter/queue', getCommunityReporterQueue);
 app.get('/api/community-reporter/contacts', listReporterContacts);
@@ -150,8 +158,21 @@ app.get('/api/community-reporter/contacts', listReporterContacts);
 app.get('/api/admin/community/reporter-contacts', listReporterContacts);
 app.get('/admin-api/admin/community/reporter-contacts', listReporterContacts);
 app.use('/api/community-reporter', communityReporterRoutes);
+// Public alias to match frontend expectation
+app.use('/api/public/community-reporter', communityReporterRoutes);
+// Public community settings
+if (publicCommunitySettingsRouter) {
+  app.use('/api/public/community', publicCommunitySettingsRouter);
+}
+// Journalists public/apply + admin ops
+try {
+  const journalistsRouter = require('./routes/journalists');
+  app.use('/api/journalists', journalistsRouter);
+} catch (e) {
+  console.warn('[init] optional routes/journalists not found; skipping');
+}
+// Admin routes for legacy and new admin UI paths
 app.use('/admin', adminRoutes);
-// Mount admin routes under /api/admin to expose /api/admin/* endpoints
 app.use('/api/admin', adminRoutes);
 // Mount dashboard stats router under /api to serve /api/dashboard-stats and /api/stats
 app.use('/api', dashboardStatsRouter);
@@ -175,11 +196,28 @@ app.use('/api/admin', communityReporterSettingsRouter);
 app.use('/api/admin', adminCommunityReporterQueueRouter);
 app.use('/admin-api/admin', adminCommunityReporterQueueRouter);
 app.use('/admin', adminCommunityReporterQueueRouter);
+// Mount full admin community-reporter routes (submissions, decisions, journalist applications)
+try {
+  const adminCommunityReporterRouter = require('./routes/adminCommunityReporter');
+  app.use('/api/admin/community-reporter', adminCommunityReporterRouter);
+  app.use('/admin/community-reporter', adminCommunityReporterRouter);
+  // Also mount under /admin/community for journalist applications aliases
+  app.use('/admin/community', adminCommunityReporterRouter);
+} catch (e) {
+  console.warn('[init] optional routes/adminCommunityReporter not found; skipping');
+}
 if (aiRoutes) app.use('/api/ai', aiRoutes);
 if (feedRoutes) app.use('/api/feed', feedRoutes);
 app.use('/api/admin/community', communityAdminContactsRoutes);
 app.use('/admin-api/admin/community', communityAdminContactsRoutes);
 app.use('/admin/community', communityAdminContactsRoutes);
+// Admin journalists endpoints
+try {
+  const adminJournalists = require('./routes/admin/journalistsAdmin');
+  app.use('/api/admin', adminJournalists);
+} catch (e) {
+  console.warn('[init] optional routes/admin/journalistsAdmin not found; skipping');
+}
 
 // Lightweight health/status endpoint under /api
 // (stats and dashboard-stats are now served by routes/dashboardStats.js mounted under /api and /admin-api)
