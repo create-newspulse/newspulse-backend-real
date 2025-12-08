@@ -61,22 +61,22 @@ async function listReporterContacts(req, res) {
     if (q.status) filter.status = String(q.status);
 
     const contacts = await ReporterContact.find(filter).sort({ fullName: 1 }).lean();
-    const data = contacts.map(c => ({
+    const items = contacts.map(c => ({
       id: c._id.toString(),
       name: c.fullName,
       email: c.email,
       phone: c.phoneFull || c.phoneNumber || null,
-      country: c.country,
-      state: c.stateName,
-      district: c.districtName,
       city: c.cityTownVillage,
-      reporterType: c.reporterType,
-      verificationLevel: c.verificationLevel,
+      state: c.stateName,
+      country: c.country,
+      district: c.districtName,
+      type: c.reporterType,
+      verification: c.verificationLevel,
       status: c.status,
       stats: c.stats || {},
       lastStoryAt: c.stats && c.stats.lastStoryAt ? c.stats.lastStoryAt : null,
     }));
-    return res.status(200).json({ ok: true, success: true, status: 200, data, total: data.length, message: 'Reporter contacts directory' });
+    return res.status(200).json({ ok: true, success: true, status: 200, items, total: items.length, message: 'Reporter contacts directory' });
   } catch (err) {
     console.error('Error in listReporterContacts:', err?.message || err);
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load reporter contacts' });
