@@ -14,6 +14,7 @@ const adminAuthRoutes = require(`${BASE}/routes/adminAuth`);
 const aiTrainingInfoRoutes = require(`${BASE}/routes/system/aiTrainingInfo`);
 const systemHealthRoutes = require(`${BASE}/routes/system/health`);
 const systemRoutesRouter = require('./routes/system.routes');
+const systemRoutes = require('./routes/system');
 const communityRoutes = require(`${BASE}/routes/community`);
 const communityStoriesRouter = require('./routes/communityStories');
 const adminCommunityRoutes = require(`${BASE}/routes/adminCommunity`);
@@ -69,6 +70,10 @@ app.use(cors(corsOptionsDelegate));
 app.options('*', cors(corsOptionsDelegate));
 
 app.use(express.json());
+
+// Mount small system router for admin dashboard health + AI debug
+app.use('/system', systemRoutes);
+app.use('/api/system', systemRoutes);
 
 // Lightweight system endpoints
 app.get('/system/health', (req, res) => {
