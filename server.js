@@ -18,7 +18,7 @@ const communityRoutes = require(`${BASE}/routes/community`);
 const adminCommunityRoutes = require(`${BASE}/routes/adminCommunity`);
 const communityAdminContactsRoutes = require(`${BASE}/routes/communityAdminContacts`);
 const communityReporterRoutes = require(`${BASE}/routes/communityReporterRoutes`);
-const { getCommunityReporterQueue } = require('./controllers/communityReporterController');
+const { getCommunityReporterQueue, listReporterContacts } = require('./controllers/communityReporterController');
 const adminSettingsRoutes = require(`${BASE}/routes/adminSettings`);
 const communityReporterSettingsRouter = require(`${BASE}/routes/adminSettings/communityReporterSettings`);
 // Dashboard stats router lives in root-level routes, not nested BASE dir
@@ -143,8 +143,9 @@ app.use('/api/news', newsRoutes);
 app.use('/api', articlesRoutes);
 app.use('/', articlesRoutes);
 app.use('/api/community', communityRoutes);
-// PUBLIC temporary route – must be before any /api auth-protected mounts
+// PUBLIC routes – must be before any /api auth-protected mounts
 app.get('/api/community-reporter/queue', getCommunityReporterQueue);
+app.get('/api/community-reporter/contacts', listReporterContacts);
 app.use('/api/community-reporter', communityReporterRoutes);
 app.use('/admin', adminRoutes);
 // Mount admin routes under /api to expose /api/dashboard-stats and /api/stats
