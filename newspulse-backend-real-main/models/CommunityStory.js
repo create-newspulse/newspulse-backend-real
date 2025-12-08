@@ -1,21 +1,25 @@
 const mongoose = require('mongoose');
 
 const CommunityStorySchema = new mongoose.Schema({
-  reporterName: { type: String, required: true, trim: true },
-  reporterEmail: { type: String, required: true, trim: true, lowercase: true, index: true },
-  reporterPhone: { type: String, trim: true },
-  reporterCity: { type: String, trim: true },
-  reporterState: { type: String, trim: true },
-  reporterCountry: { type: String, trim: true },
-  reporterType: { type: String, enum: ['community', 'professional'], default: 'community' },
-  category: { type: String, required: true, trim: true },
-  headline: { type: String, required: true, trim: true },
-  storyText: { type: String, required: true, trim: true },
+  reporterId: { type: mongoose.Schema.Types.ObjectId, ref: 'Reporter' },
+
+  source: { type: String, enum: ['community', 'journalist'], default: 'community' },
+
+  category: { type: String, trim: true },
+  headline: { type: String, trim: true },
+  body: { type: String, trim: true },
   ageGroup: { type: String, trim: true },
-  preferredLanguages: { type: [String], default: [] },
-  status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending', index: true },
+
+  storyCity: { type: String, trim: true },
+  storyState: { type: String, trim: true },
+  storyCountry: { type: String, trim: true },
+
+  priority: { type: String, enum: ['normal', 'high'], default: 'normal' },
+  risk: { type: String, enum: ['low', 'medium', 'high'], default: 'low' },
+
+  status: { type: String, enum: ['pending', 'approved', 'rejected', 'withdrawn'], default: 'pending', index: true },
 }, { timestamps: true });
 
-CommunityStorySchema.index({ reporterEmail: 1, createdAt: -1 });
+CommunityStorySchema.index({ reporterId: 1, createdAt: -1 });
 
 module.exports = mongoose.models.CommunityStory || mongoose.model('CommunityStory', CommunityStorySchema);

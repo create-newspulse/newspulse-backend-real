@@ -151,8 +151,8 @@ app.get('/api/admin/community/reporter-contacts', listReporterContacts);
 app.get('/admin-api/admin/community/reporter-contacts', listReporterContacts);
 app.use('/api/community-reporter', communityReporterRoutes);
 app.use('/admin', adminRoutes);
-// Mount admin routes under /api to expose /api/dashboard-stats and /api/stats
-app.use('/api', adminRoutes);
+// Mount admin routes under /api/admin to expose /api/admin/* endpoints
+app.use('/api/admin', adminRoutes);
 // Mount dashboard stats router under /api to serve /api/dashboard-stats and /api/stats
 app.use('/api', dashboardStatsRouter);
 // Also mount dashboard stats under /admin-api for frontend dev proxy

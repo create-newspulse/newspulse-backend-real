@@ -5,6 +5,8 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const router = express.Router();
+const { requireAdminAuth } = require('../../middleware/adminAuth');
+const { listReporters, getCommunityStats } = require('../controllers/communityReporterController');
 
 // In-memory rate limiter state (per-IP)
 const loginAttempts = new Map(); // key: ip, value: array of timestamps (ms)
@@ -126,5 +128,11 @@ router.get('/stats', (req, res) => {
     data: { systemHealth },
   });
 });
+
+// --- Admin Reporter Directory & Community Stats ---
+// GET /api/admin/reporters
+router.get('/reporters', requireAdminAuth, listReporters);
+// GET /api/admin/community/stats
+router.get('/community/stats', requireAdminAuth, getCommunityStats);
 
 module.exports = router;

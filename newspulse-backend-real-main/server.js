@@ -168,7 +168,10 @@ app.use('/api/community-reporter', communityReporterRoutes);
 // Admin routes mounted at both legacy root and new /api/admin paths where required.
 app.use('/admin', adminRoutes); // legacy POST /admin/login
 // Also mount admin router under /api for endpoints like /api/stats, /api/dashboard-stats
+// NOTE: Admin router currently mounted at '/api' and legacy '/admin'.
+// To ensure final URL '/api/admin/reporters' works, also mount under '/api/admin'.
 app.use('/api', adminRoutes);
+app.use('/api/admin', adminRoutes);
 // Mount dashboard stats under /api and /admin-api to satisfy Admin Panel
 app.use('/api', dashboardStatsRoutes);
 app.use('/admin-api', dashboardStatsRoutes);

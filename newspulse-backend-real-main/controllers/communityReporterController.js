@@ -1,4 +1,5 @@
 const CommunityStory = require('../models/CommunityStory');
+const Reporter = require('../models/Reporter');
 const CommunitySubmission = require('../models/CommunitySubmission');
 // ReporterContact model exists in root-level models
 const ReporterContact = require('../../models/ReporterContact');
@@ -6,65 +7,99 @@ const ReporterContact = require('../../models/ReporterContact');
 // POST /api/community-reporter/submit
 async function submitStory(req, res) {
   try {
-    const {
-      reporterName,
-      reporterEmail,
-      reporterPhone,
-      reporterCity,
-      reporterState,
-      reporterCountry,
-      reporterType,
-      category,
-      headline,
-      storyText,
-      ageGroup,
-      preferredLanguages,
-    } = req.body || {};
+    const reporterPayload = (req.body && req.body.reporter) || {};
+    const storyPayload = (req.body && req.body.story) || {};
 
-    // Minimal validation
-    if (!reporterName || !reporterEmail || !category || !headline || !storyText) {
-      return res.status(400).json({ success: false, message: 'Missing required fields' });
+    const {
+      fullName,
+      email,
+      phone,
+      city,
+      state,
+      country,
+      languages,
+      beats,
+      isProfessional,
+    } = reporterPayload;
+
+    if (!email || !fullName) {
+      return res.status(400).json({ ok: false, message: 'Reporter name and email are required' });
     }
 
-    const doc = await CommunityStory.create({
-      reporterName: String(reporterName).trim(),
-      reporterEmail: String(reporterEmail).trim().toLowerCase(),
-      reporterPhone: reporterPhone || undefined,
-      reporterCity: reporterCity || undefined,
-      reporterState: reporterState || undefined,
-      reporterCountry: reporterCountry || undefined,
-      reporterType: reporterType === 'professional' ? 'professional' : 'community',
-      category: String(category).trim(),
-      headline: String(headline).trim(),
-      storyText: String(storyText).trim(),
-      ageGroup: ageGroup || undefined,
-      preferredLanguages: Array.isArray(preferredLanguages) ? preferredLanguages : [],
+    let reporter = await Reporter.findOne({ email });
+    if (!reporter) {
+      reporter = await Reporter.create({
+        fullName,
+        email,
+        phone,
+        city,
+        state,
+        country,
+        languages,
+        beats,
+        type: isProfessional ? 'journalist' : 'community',
+      });
+    } else {
+      reporter.fullName = fullName || reporter.fullName;
+      reporter.phone = phone || reporter.phone;
+      reporter.city = city || reporter.city;
+      reporter.state = state || reporter.state;
+      reporter.country = country || reporter.country;
+      reporter.languages = languages || reporter.languages;
+      reporter.beats = beats || reporter.beats;
+      if (isProfessional) reporter.type = 'journalist';
+      await reporter.save();
+    }
+
+    const {
+      category,
+      headline,
+      story,
+      ageGroup,
+      storyCity,
+      storyState,
+      storyCountry,
+      isUrgent,
+    } = storyPayload;
+
+    if (!headline || !story) {
+      return res.status(400).json({ ok: false, message: 'Headline and story are required' });
+    }
+
+    const newStory = await CommunityStory.create({
+      reporterId: reporter._id,
+      source: reporter.type === 'journalist' ? 'journalist' : 'community',
+      category,
+      headline,
+      body: story,
+      ageGroup,
+      storyCity,
+      storyState,
+      storyCountry,
+      priority: isUrgent ? 'high' : 'normal',
     });
 
-    return res.status(201).json({ success: true, storyId: doc._id.toString() });
+    const ref = `NP-CR-${newStory.createdAt.getFullYear()}-${newStory._id.toString().slice(-4)}`;
+
+    return res.status(201).json({ ok: true, reporterId: reporter._id.toString(), storyId: newStory._id.toString(), reference: ref });
   } catch (e) {
     console.error('[CommunityReporter][submitStory][error]', e?.message || e);
-    return res.status(500).json({ success: false, message: 'Server error creating story' });
+    return res.status(400).json({ ok: false, message: 'Could not submit story. Please try again.' });
   }
 }
 
-// GET /api/community-reporter/my-stories?email=...
+// GET /api/community-reporter/my-stories?reporterId=...
 async function listStoriesByReporter(req, res) {
   try {
-    const email = String(req.query.email || '').trim().toLowerCase();
-    if (!email) return res.status(400).json({ success: false, message: 'Email is required' });
-    const items = await CommunityStory.find({ reporterEmail: email }).sort({ createdAt: -1 }).lean();
-    const stories = items.map(i => ({
-      id: i._id.toString(),
-      headline: i.headline,
-      category: i.category,
-      status: i.status,
-      createdAt: i.createdAt,
-    }));
-    return res.json({ success: true, stories });
+    const reporterId = req.query && req.query.reporterId;
+    if (!reporterId) {
+      return res.status(400).json({ ok: false, message: 'reporterId is required' });
+    }
+    const stories = await CommunityStory.find({ reporterId }).sort({ createdAt: -1 }).lean();
+    return res.json({ ok: true, items: stories });
   } catch (e) {
     console.error('[CommunityReporter][listStoriesByReporter][error]', e?.message || e);
-    return res.status(500).json({ success: false, message: 'Failed to load stories' });
+    return res.status(500).json({ ok: false, message: 'Failed to load stories' });
   }
 }
 
@@ -141,5 +176,75 @@ module.exports.listReporterContacts = async function listReporterContacts(req, r
   } catch (err) {
     console.error('Error in listReporterContacts:', err?.message || err);
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load reporter contacts' });
+  }
+};
+
+// Admin: list reporters with story aggregation
+module.exports.listReporters = async function listReporters(req, res) {
+  try {
+    const { country, state, city, search, type, status, hasNotes } = req.query || {};
+    const match = {};
+    if (country && country !== 'all') match.country = country;
+    if (state && state !== 'all') match.state = state;
+    if (city && city !== 'all') match.city = city;
+    if (type && type !== 'all') match.type = type;
+    if (status && status !== 'all') match.status = status;
+    if (hasNotes === 'true') match.notes = { $exists: true, $ne: '' };
+    if (search) {
+      const regex = new RegExp(String(search), 'i');
+      match.$or = [{ fullName: regex }, { email: regex }, { phone: regex }];
+    }
+
+    // collection name for CommunityStory model
+    const fromCollection = (CommunityStory.collection && CommunityStory.collection.name) || 'communitiestories';
+    const reporters = await Reporter.aggregate([
+      { $match: match },
+      {
+        $lookup: {
+          from: fromCollection,
+          localField: '_id',
+          foreignField: 'reporterId',
+          as: 'stories',
+        },
+      },
+      {
+        $addFields: {
+          storiesCount: { $size: '$stories' },
+          lastStoryAt: { $max: '$stories.createdAt' },
+          activity: { $cond: [{ $gt: [{ $size: '$stories' }, 0] }, 'active', 'new'] },
+        },
+      },
+      { $project: { stories: 0 } },
+    ]);
+
+    return res.json({ ok: true, items: reporters });
+  } catch (err) {
+    console.error('[Admin][listReporters][error]', err?.message || err);
+    return res.status(500).json({ ok: false, message: 'Failed to load reporters' });
+  }
+};
+
+// Admin: community hub stats
+module.exports.getCommunityStats = async function getCommunityStats(req, res) {
+  try {
+    const [pending, approved, rejected, reporters, journalists] = await Promise.all([
+      CommunityStory.countDocuments({ status: 'pending' }),
+      CommunityStory.countDocuments({ status: 'approved' }),
+      CommunityStory.countDocuments({ status: 'rejected' }),
+      Reporter.countDocuments({}),
+      Reporter.countDocuments({ type: 'journalist' }),
+    ]);
+
+    return res.json({
+      ok: true,
+      pendingStories: pending,
+      approvedStories: approved,
+      rejectedStories: rejected,
+      totalReporters: reporters,
+      verifiedJournalists: journalists,
+    });
+  } catch (err) {
+    console.error('[Admin][communityStats][error]', err?.message || err);
+    return res.status(500).json({ ok: false, message: 'Failed to load community stats' });
   }
 };
