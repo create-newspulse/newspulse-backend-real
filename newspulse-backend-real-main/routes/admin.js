@@ -5,7 +5,8 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const router = express.Router();
-const { requireAdminAuth } = require('../../middleware/adminAuth');
+const { requireAdminAuth, requireFounderOnly } = require('../../middleware/adminAuth');
+const { getAdminCommunitySettings, patchAdminCommunitySettings } = require('../controllers/admin/communitySettingsController');
 const { listReporters, getCommunityStats } = require('../controllers/communityReporterController');
 
 // In-memory rate limiter state (per-IP)
@@ -134,5 +135,11 @@ router.get('/stats', (req, res) => {
 router.get('/reporters', requireAdminAuth, listReporters);
 // GET /api/admin/community/stats
 router.get('/community/stats', requireAdminAuth, getCommunityStats);
+
+// --- Community Settings ---
+// GET   /api/admin/community/settings
+router.get('/community/settings', requireAdminAuth, getAdminCommunitySettings);
+// PATCH /api/admin/community/settings (founder-only)
+router.patch('/community/settings', requireFounderOnly, patchAdminCommunitySettings);
 
 module.exports = router;
