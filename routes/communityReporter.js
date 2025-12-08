@@ -5,6 +5,32 @@ const { submitCommunityReport, listMyCommunityReports } = require('../controller
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
 const router = express.Router();
+// POST /api/public/community-reporter/:id/withdraw
+router.post('/:id/withdraw', async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    const { reporterId } = req.body || {};
+    if (!id || !/^[a-fA-F0-9]{24}$/.test(String(id))) {
+      return res.status(400).json({ ok: false, message: 'Invalid story id' });
+    }
+    const story = await CommunitySubmission.findById(id);
+    if (!story) return res.status(404).json({ ok: false, message: 'Story not found' });
+    if (reporterId && story.reporterId && String(story.reporterId) !== String(reporterId)) {
+      return res.status(403).json({ ok: false, message: 'Not your story' });
+    }
+    const status = String(story.status || '').toLowerCase();
+    if (!['under_review','pending','new','pending_founder'].includes(status)) {
+      return res.status(400).json({ ok: false, message: 'You can withdraw only while the story is under review.' });
+    }
+    story.status = 'withdrawn';
+    try { story.withdrawnAt = new Date(); } catch (_) {}
+    await story.save();
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[COMMUNITY_REPORTER][withdraw-error]', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to withdraw story' });
+  }
+});
 
 // Map internal status -> external Phase 1 label
 function externalStatus(internal) {

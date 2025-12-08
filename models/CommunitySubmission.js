@@ -90,6 +90,8 @@ const CommunitySubmissionSchema = new mongoose.Schema({
     country: { type: String, trim: true },
     district: { type: String, trim: true },
   },
+  // Withdrawal tracking
+  withdrawnAt: { type: Date, required: false },
 }, { timestamps: true });
 
 // Virtual alias so Phase 1 routes can use "story" seamlessly

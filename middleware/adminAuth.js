@@ -75,4 +75,16 @@ function requireAdminAuth(req, res, next) {
   return res.status(401).json({ ok: false, message: 'Unauthorized' });
 }
 
-module.exports = { requireAdminAuth };
+function requireFounderOnly(req, res, next) {
+  // First ensure admin auth passes
+  requireAdminAuth(req, res, function onAuthed(err) {
+    if (err) return; // express error path
+    const role = (req.admin && req.admin.role) || 'admin';
+    if (role !== 'founder') {
+      return res.status(403).json({ ok: false, message: 'Founder-only endpoint' });
+    }
+    return next();
+  });
+}
+
+module.exports = { requireAdminAuth, requireFounderOnly };

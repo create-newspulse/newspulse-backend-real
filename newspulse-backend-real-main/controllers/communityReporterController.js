@@ -20,36 +20,43 @@ async function submitStory(req, res) {
       languages,
       beats,
       isProfessional,
+      organisation,
+      roleOrTitle,
+      yearsExperience,
+      portfolioLinks,
     } = reporterPayload;
 
     if (!email || !fullName) {
       return res.status(400).json({ ok: false, message: 'Reporter name and email are required' });
     }
 
-    let reporter = await Reporter.findOne({ email });
-    if (!reporter) {
-      reporter = await Reporter.create({
-        fullName,
-        email,
-        phone,
-        city,
-        state,
-        country,
-        languages,
-        beats,
-        type: isProfessional ? 'journalist' : 'community',
-      });
-    } else {
-      reporter.fullName = fullName || reporter.fullName;
-      reporter.phone = phone || reporter.phone;
-      reporter.city = city || reporter.city;
-      reporter.state = state || reporter.state;
-      reporter.country = country || reporter.country;
-      reporter.languages = languages || reporter.languages;
-      reporter.beats = beats || reporter.beats;
-      if (isProfessional) reporter.type = 'journalist';
-      await reporter.save();
+    const existingReporter = await Reporter.findOne({ email });
+    const type = isProfessional ? 'journalist' : 'community';
+    const update = {
+      fullName,
+      email,
+      phone,
+      city,
+      state,
+      country,
+      languages,
+      beats,
+      type,
+    };
+    if (isProfessional) {
+      if (organisation) update.organisation = organisation;
+      if (roleOrTitle) update.roleOrTitle = roleOrTitle;
+      if (typeof yearsExperience === 'number') update.yearsExperience = yearsExperience;
+      if (Array.isArray(portfolioLinks)) update.portfolioLinks = portfolioLinks;
+      if (!existingReporter || existingReporter.verificationStatus === 'unverified') {
+        update.verificationStatus = 'pending';
+      }
     }
+    const reporter = await Reporter.findOneAndUpdate(
+      { email },
+      { $set: update },
+      { upsert: true, new: true }
+    );
 
     const {
       category,
@@ -66,9 +73,13 @@ async function submitStory(req, res) {
       return res.status(400).json({ ok: false, message: 'Headline and story are required' });
     }
 
+    const reporterType = reporter.type === 'journalist' ? 'journalist' : 'community';
+    const verificationLevel = reporter.verificationStatus || 'unverified';
     const newStory = await CommunityStory.create({
       reporterId: reporter._id,
-      source: reporter.type === 'journalist' ? 'journalist' : 'community',
+      reporterType,
+      reporterVerificationLevel: verificationLevel,
+      source: reporterType,
       category,
       headline,
       body: story,
@@ -91,12 +102,32 @@ async function submitStory(req, res) {
 // GET /api/community-reporter/my-stories?reporterId=...
 async function listStoriesByReporter(req, res) {
   try {
-    const reporterId = req.query && req.query.reporterId;
-    if (!reporterId) {
-      return res.status(400).json({ ok: false, message: 'reporterId is required' });
+    const q = req.query || {};
+    let reporterId = q.reporterId || null;
+    const email = (q.email || '').toString().trim().toLowerCase();
+
+    if (!reporterId && email) {
+      const rep = await Reporter.findOne({ email }, '_id').lean();
+      reporterId = rep ? rep._id : null;
     }
-    const stories = await CommunityStory.find({ reporterId }).sort({ createdAt: -1 }).lean();
-    return res.json({ ok: true, items: stories });
+    if (!reporterId) {
+      return res.status(400).json({ ok: false, message: 'reporterId or email is required' });
+    }
+
+    const docs = await CommunityStory.find({ reporterId }).sort({ createdAt: -1 }).lean();
+    const items = docs.map(d => ({
+      _id: d._id,
+      headline: d.headline,
+      category: d.category,
+      locationCity: d.storyCity || null,
+      locationState: d.storyState || null,
+      status: d.status,
+      priority: d.priority || 'normal',
+      sourceType: d.reporterType || d.source || 'community',
+      reporterVerificationLevel: d.reporterVerificationLevel || 'unverified',
+      createdAt: d.createdAt,
+    }));
+    return res.json({ ok: true, items });
   } catch (e) {
     console.error('[CommunityReporter][listStoriesByReporter][error]', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to load stories' });
@@ -182,13 +213,16 @@ module.exports.listReporterContacts = async function listReporterContacts(req, r
 // Admin: list reporters with story aggregation
 module.exports.listReporters = async function listReporters(req, res) {
   try {
-    const { country, state, city, search, type, status, hasNotes } = req.query || {};
+    const { country, state, city, district, areaType, search, type, status, hasNotes, beat, activity } = req.query || {};
     const match = {};
     if (country && country !== 'all') match.country = country;
     if (state && state !== 'all') match.state = state;
     if (city && city !== 'all') match.city = city;
+    if (district && district !== 'all') match.district = district;
+    if (areaType && areaType !== 'all') match.areaType = areaType;
     if (type && type !== 'all') match.type = type;
     if (status && status !== 'all') match.status = status;
+    if (beat && beat !== 'all') match.beats = beat;
     if (hasNotes === 'true') match.notes = { $exists: true, $ne: '' };
     if (search) {
       const regex = new RegExp(String(search), 'i');
@@ -197,7 +231,13 @@ module.exports.listReporters = async function listReporters(req, res) {
 
     // collection name for CommunityStory model
     const fromCollection = (CommunityStory.collection && CommunityStory.collection.name) || 'communitiestories';
-    const reporters = await Reporter.aggregate([
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limitRaw = Math.max(parseInt(req.query.limit || '50', 10), 1);
+    const limit = Math.min(limitRaw, 200);
+    const skip = (page - 1) * limit;
+
+    const now = new Date();
+    const pipeline = [
       { $match: match },
       {
         $lookup: {
@@ -211,13 +251,90 @@ module.exports.listReporters = async function listReporters(req, res) {
         $addFields: {
           storiesCount: { $size: '$stories' },
           lastStoryAt: { $max: '$stories.createdAt' },
-          activity: { $cond: [{ $gt: [{ $size: '$stories' }, 0] }, 'active', 'new'] },
+        },
+      },
+      {
+        $addFields: {
+          activity: {
+            $switch: {
+              branches: [
+                { case: { $eq: ['$status', 'blacklisted'] }, then: 'blacklisted' },
+                { case: { $eq: ['$status', 'on_leave'] }, then: 'on_leave' },
+                {
+                  case: { $gt: ['$lastStoryAt', { $subtract: [now, 1000 * 60 * 60 * 24 * 60] }] },
+                  then: 'active',
+                },
+                {
+                  case: { $and: [ { $lte: ['$lastStoryAt', { $subtract: [now, 1000 * 60 * 60 * 24 * 60] }] }, { $ne: ['$lastStoryAt', null] } ] },
+                  then: 'inactive',
+                },
+              ],
+              default: 'new',
+            },
+          },
         },
       },
       { $project: { stories: 0 } },
-    ]);
+    ];
 
-    return res.json({ ok: true, items: reporters });
+    if (activity && activity !== 'all') {
+      pipeline.push({ $match: { activity } });
+    }
+
+    pipeline.push({ $sort: { lastStoryAt: -1, fullName: 1 } });
+    const totalAgg = await Reporter.aggregate([...pipeline, { $count: 'count' }]);
+    const total = totalAgg[0]?.count || 0;
+    pipeline.push({ $skip: skip }, { $limit: limit });
+    const reporters = await Reporter.aggregate(pipeline);
+
+    let items = reporters.map(r => ({
+      _id: r._id,
+      fullName: r.fullName,
+      email: r.email,
+      phone: r.phone,
+      country: r.country,
+      state: r.state,
+      district: r.district || null,
+      city: r.city,
+      areaType: r.areaType || null,
+      beats: Array.isArray(r.beats) ? r.beats : [],
+      status: r.status,
+      type: r.type,
+      verificationStatus: r.verificationStatus,
+      ethicsStrikes: r.ethicsStrikes || 0,
+      storiesCount: r.storiesCount || 0,
+      lastStoryAt: r.lastStoryAt || null,
+      activity: r.activity || 'new',
+    }));
+
+    // Privacy masking for non-founder admins
+    try {
+      const admin = req.admin || req.user || {};
+      const isFounder = admin && (admin.role === 'founder' || admin.isFounder === true);
+      if (!isFounder) {
+        const maskEmail = (email) => {
+          if (!email) return email;
+          const parts = String(email).split('@');
+          if (parts.length !== 2) return email;
+          const name = parts[0]; const domain = parts[1];
+          if (name.length <= 2) return `***@${domain}`;
+          return `${name[0]}***${name[name.length - 1]}@${domain}`;
+        };
+        const maskPhone = (phone) => {
+          if (!phone) return phone;
+          const digits = String(phone).replace(/\D/g, '');
+          if (digits.length <= 4) return '****';
+          return `***${digits.slice(-4)}`;
+        };
+        items = items.map(r => ({
+          ...r,
+          email: maskEmail(r.email),
+          phone: maskPhone(r.phone),
+        }));
+      }
+    } catch (_) {}
+
+    return res.json({ ok: true, items, page, limit, total });
   } catch (err) {
     console.error('[Admin][listReporters][error]', err?.message || err);
     return res.status(500).json({ ok: false, message: 'Failed to load reporters' });

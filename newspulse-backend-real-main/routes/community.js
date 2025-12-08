@@ -1,11 +1,44 @@
 const express = require('express');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const { getCommunitySettings } = require('../../services/communitySettingsService');
 
 const router = express.Router();
+// GET /api/community/settings (public)
+router.get('/settings', async (req, res) => {
+  try {
+    const settings = await getCommunitySettings();
+    return res.json({
+      ok: true,
+      settings: {
+        communityReporterEnabled: settings.communityReporterEnabled,
+        allowNewSubmissions: settings.allowNewSubmissions,
+        allowMyStoriesPortal: settings.allowMyStoriesPortal,
+        allowJournalistApplications: settings.allowJournalistApplications,
+      },
+    });
+  } catch (err) {
+    console.error('[COMMUNITY][settings][error]', err?.message || err);
+    return res.status(500).json({ ok: false, message: 'Failed to load settings' });
+  }
+});
 
 // POST /api/community/submissions (public)
 router.post('/submissions', async (req, res) => {
   try {
+    // Enforce settings toggles
+    try {
+      const { getCommunitySettings } = require('../../services/communitySettingsService');
+      const settings = await getCommunitySettings();
+      if (!settings.communityReporterEnabled || !settings.allowNewSubmissions) {
+        return res.status(503).json({
+          ok: false,
+          code: 'COMMUNITY_CLOSED',
+          message: 'Community Reporter submissions are currently closed.',
+        });
+      }
+    } catch (cfgErr) {
+      // continue if settings service fails
+    }
     const { name, userName, email, location, category, headline, body, story, storyText, content, mediaLink, mediaUrl, age, ageGroup, acceptTerms } = req.body || {};
 
     const bodyText = (story || storyText || content || body || '').toString().trim();
@@ -51,7 +84,15 @@ router.post('/submissions', async (req, res) => {
         return '25–40';
       })(normalizedAgeGroup),
       acceptedPolicy: true,
-      status: 'pending',
+      status: (async () => {
+        try {
+          const { getCommunitySettings } = require('../../services/communitySettingsService');
+          const s = await getCommunitySettings();
+          return s.safeModeManualReviewOnly ? 'pending' : 'pending';
+        } catch (_) {
+          return 'pending';
+        }
+      })(),
       createdAt: new Date(),
     });
 

@@ -9,7 +9,7 @@ const BASE = './newspulse-backend-real-main';
 // Nested routes and modules
 const newsRoutes = require(`${BASE}/routes/news`);
 const articlesRoutes = require('./routes/articles');
-const adminRoutes = require(`${BASE}/routes/admin`);
+const adminRoutes = require('./routes/admin');
 const adminAuthRoutes = require(`${BASE}/routes/adminAuth`);
 const aiTrainingInfoRoutes = require(`${BASE}/routes/system/aiTrainingInfo`);
 const systemHealthRoutes = require(`${BASE}/routes/system/health`);
@@ -172,8 +172,8 @@ try {
   console.warn('[init] optional routes/journalists not found; skipping');
 }
 // Admin routes for legacy and new admin UI paths
-app.use('/admin', adminRoutes);
-app.use('/api/admin', adminRoutes);
+app.use('/api/admin', adminRoutes); // used by admin UI
+app.use('/admin', adminRoutes);     // legacy path
 // Mount dashboard stats router under /api to serve /api/dashboard-stats and /api/stats
 app.use('/api', dashboardStatsRouter);
 // Also mount dashboard stats under /admin-api for frontend dev proxy

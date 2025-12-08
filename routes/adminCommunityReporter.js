@@ -2,6 +2,7 @@ const express = require('express');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const ReporterContact = require('../models/ReporterContact');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const { addStrikeForReporter } = require('../services/reporterSafetyService');
 const News = require('../models/News');
 const mongoose = require('mongoose');
 
@@ -511,6 +512,13 @@ router.post('/submissions/:id/reject', requireAdminAuth, async (req, res) => {
     } catch (_) {}
     try {
       await submission.save();
+      // Safety: ethics strike on reject when reporterId present
+      try {
+        const reason = rejectReason || submission.rejectReason || 'rejected';
+        if (submission.reporterId) {
+          await addStrikeForReporter(submission.reporterId.toString(), reason);
+        }
+      } catch (sErr) { console.warn('[ADMIN_COMMUNITY][reject][strike-failed]', sErr?.message || sErr); }
       return res.json({ ok: true, success: true, submission });
     } catch (e) {
       // Fallback update without validation
@@ -521,6 +529,13 @@ router.post('/submissions/:id/reject', requireAdminAuth, async (req, res) => {
         if ('updatedAt' in submission) setObj.updatedAt = new Date();
         const upd = await CommunitySubmission.updateOne({ _id: submission._id }, { $set: setObj });
         console.log('[ADMIN_COMMUNITY][reject][fallback-update]', upd);
+        // Strike on fallback path too
+        try {
+          const reason = rejectReason || 'rejected';
+          if (submission.reporterId) {
+            await addStrikeForReporter(submission.reporterId.toString(), reason);
+          }
+        } catch (sErr) { console.warn('[ADMIN_COMMUNITY][reject][fallback-strike-failed]', sErr?.message || sErr); }
         const fresh = await CommunitySubmission.findById(submission._id).lean();
         return res.json({ ok: true, success: true, submission: fresh });
       } catch (ue) {

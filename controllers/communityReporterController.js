@@ -1,6 +1,8 @@
 const CommunityReport = require('../models/CommunityReport');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const ReporterContact = require('../models/ReporterContact');
+let CommunityStory = null;
+try { CommunityStory = require('../models/CommunityStory'); } catch (_) { /* optional model */ }
 
 // GET /api/community-reporter/queue
 // Returns real queue items from CommunitySubmission with status mapping
@@ -80,6 +82,43 @@ async function listReporterContacts(req, res) {
   } catch (err) {
     console.error('Error in listReporterContacts:', err?.message || err);
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load reporter contacts' });
+  }
+}
+
+// Admin: Reporter Directory list
+async function listReporters(req, res) {
+  try {
+    const items = await ReporterContact.find({}).sort({ fullName: 1 }).lean();
+    const mapped = items.map(c => ({
+      id: c._id.toString(),
+      name: c.fullName,
+      email: c.email,
+      phone: c.phoneFull || c.phoneNumber || null,
+      city: c.cityTownVillage,
+      state: c.stateName,
+      country: c.country,
+      type: c.reporterType,
+      status: c.status,
+    }));
+    return res.json({ ok: true, items: mapped, total: mapped.length });
+  } catch (e) {
+    console.error('[ADMIN][listReporters] failed', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load reporter directory' });
+  }
+}
+
+// Admin: Community summary stats
+async function getCommunityStats(req, res) {
+  try {
+    const [contacts, submissions, stories] = await Promise.all([
+      ReporterContact.countDocuments({}),
+      CommunitySubmission.countDocuments({}),
+      CommunityStory && CommunityStory.countDocuments ? CommunityStory.countDocuments({}) : Promise.resolve(0),
+    ]);
+    return res.json({ ok: true, data: { contacts, submissions, stories } });
+  } catch (e) {
+    console.error('[ADMIN][getCommunityStats] failed', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load community stats' });
   }
 }
 
@@ -189,4 +228,4 @@ async function listMyCommunityReports(req, res) {
   }
 }
 
-module.exports = { submitCommunityReport, listMyCommunityReports, getCommunityReporterQueue, listReporterContacts };
+module.exports = { submitCommunityReport, listMyCommunityReports, getCommunityReporterQueue, listReporterContacts, listReporters, getCommunityStats };

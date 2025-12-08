@@ -1,4 +1,5 @@
 // controllers/communitySettingsController.js
+
 const CommunitySettings = require('../models/CommunitySettings');
 
 // Make sure there is always exactly ONE settings document
@@ -17,9 +18,10 @@ async function getAdminCommunitySettings(req, res, next) {
 
     res.json({
       ok: true,
+      success: true,
+      status: 200,
+      message: 'Community settings fetched',
       data: {
-        // use the field names you defined in CommunitySettings.js
-        // the ones below match the prompts I gave earlier
         portalOpen: settings.portalOpen,
         acceptCommunityStories: settings.acceptCommunityStories,
         allowAnonymousTips: settings.allowAnonymousTips,
@@ -61,6 +63,9 @@ async function patchAdminCommunitySettings(req, res, next) {
 
     res.json({
       ok: true,
+      success: true,
+      status: 200,
+      message: 'Community settings updated',
       data: {
         portalOpen: settings.portalOpen,
         acceptCommunityStories: settings.acceptCommunityStories,

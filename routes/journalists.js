@@ -9,6 +9,14 @@ const router = express.Router();
 // POST /api/journalists/apply (public)
 router.post('/apply', async (req, res) => {
   try {
+    // Enforce toggle: journalist applications open
+    try {
+      const { getCommunitySettings } = require('../services/communitySettingsService');
+      const settings = await getCommunitySettings();
+      if (!settings.allowJournalistApplications) {
+        return res.status(503).json({ ok: false, message: 'Journalist applications are currently closed.' });
+      }
+    } catch (_) {}
     const body = req.body || {};
     const {
       name,

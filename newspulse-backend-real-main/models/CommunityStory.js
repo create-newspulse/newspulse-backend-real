@@ -2,6 +2,10 @@ const mongoose = require('mongoose');
 
 const CommunityStorySchema = new mongoose.Schema({
   reporterId: { type: mongoose.Schema.Types.ObjectId, ref: 'Reporter' },
+  // Snapshot of reporter type at submission time
+  reporterType: { type: String, enum: ['community', 'journalist'], default: 'community', index: true },
+  // Snapshot of reporter verification at submission time
+  reporterVerificationLevel: { type: String, enum: ['unverified', 'pending', 'verified', 'limited', 'revoked'], default: 'unverified', index: true },
 
   source: { type: String, enum: ['community', 'journalist'], default: 'community' },
 

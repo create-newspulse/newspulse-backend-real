@@ -75,6 +75,8 @@ const ReporterContactSchema = new mongoose.Schema({
   organisationName: { type: String, trim: true },
   organisationType: { type: String, enum: ['print', 'tv', 'radio', 'digital', 'freelance', 'other'] },
   positionTitle: { type: String, trim: true },
+  // Optional alias to support alternate payloads
+  roleOrTitle: { type: String, trim: true },
 
   // Separate professional beats list (distinct from existing beats enum list)
   beatsProfessional: [{ type: String, trim: true }],
@@ -91,6 +93,10 @@ const ReporterContactSchema = new mongoose.Schema({
     createdBy: { type: String, trim: true },
   }],
   websiteOrPortfolio: { type: String, trim: true },
+  // Optional array of portfolio links if provided by client
+  portfolioLinks: [{ type: String, trim: true }],
+  // Internal notes about journalist verification/review
+  journalistNotes: { type: String, trim: true },
   socialLinks: {
     linkedin: { type: String, trim: true },
     twitter: { type: String, trim: true },

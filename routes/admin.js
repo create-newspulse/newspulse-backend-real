@@ -7,16 +7,24 @@ const jwt = require('jsonwebtoken');
 
 const router = express.Router();
 
-// IMPORTANT: paths are relative to /routes/admin.js
-const { requireAdminAuth, requireFounderOnly } = require('../middleware/adminAuth');
+// ✅ correct relative paths from routes/admin.js
+const {
+  requireAdminAuth,
+  requireFounderOnly,
+} = require('../middleware/adminAuth');
+
+const communitySettingsController = require('../controllers/communitySettingsController');
+const communityReporterController = require('../controllers/communityReporterController');
+
 const {
   getAdminCommunitySettings,
   patchAdminCommunitySettings,
-} = require('../controllers/admin/communitySettingsController');
+} = communitySettingsController;
+
 const {
   listReporters,
   getCommunityStats,
-} = require('../controllers/communityReporterController');
+} = communityReporterController;
 
 // In-memory rate limiter state (per-IP)
 const loginAttempts = new Map(); // key: ip, value: array of timestamps (ms)

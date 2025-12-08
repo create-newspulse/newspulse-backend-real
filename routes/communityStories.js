@@ -28,6 +28,14 @@ async function fetchSubmissionMap(ids) {
 // GET /api/community/stories/my
 router.get('/stories/my', requireAdminAuth, async (req, res) => {
   try {
+    // Toggle: My Stories portal availability
+    try {
+      const { getCommunitySettings } = require('../services/communitySettingsService');
+      const settings = await getCommunitySettings();
+      if (!settings.allowMyStoriesPortal) {
+        return res.status(503).json({ ok: false, message: 'My Community Stories portal is currently unavailable.' });
+      }
+    } catch (_) {}
     // Auth user (admin/founder). For community ownership filtering we match submission reporterEmail if available.
     const currentEmail = req.admin?.email?.toLowerCase();
 
@@ -150,6 +158,14 @@ module.exports = router;
 // POST /api/community/stories/submit
 router.post('/stories/submit', async (req, res) => {
   try {
+    // Enforce global toggles on submissions
+    try {
+      const { getCommunitySettings } = require('../services/communitySettingsService');
+      const settings = await getCommunitySettings();
+      if (!settings.communityReporterEnabled || !settings.allowNewSubmissions) {
+        return res.status(503).json({ ok: false, code: 'COMMUNITY_CLOSED', message: 'Community Reporter submissions are currently closed.' });
+      }
+    } catch (_) {}
     const body = req.body || {};
     const {
       reporterName,
@@ -214,7 +230,7 @@ router.post('/stories/submit', async (req, res) => {
       return res.status(400).json({ ok: false, code: 'REPORTER_NOT_FOUND', message: 'Reporter profile not found' });
     }
 
-    // Create submission document with under_review status
+    // Create submission document; force pending in safe mode
     const submission = await CommunitySubmission.create({
       reporterName: normalizedName,
       reporterEmail: normalizedEmail,
@@ -229,7 +245,15 @@ router.post('/stories/submit', async (req, res) => {
       country: normalizedCountry || undefined,
       reporterId: reporterContact && reporterContact._id ? reporterContact._id : undefined,
       sourceType: reporterContact && reporterContact.reporterType === 'journalist' ? 'journalist' : 'community',
-      status: 'UNDER_REVIEW',
+      status: (async () => {
+        try {
+          const { getCommunitySettings } = require('../services/communitySettingsService');
+          const s = await getCommunitySettings();
+          return s.safeModeManualReviewOnly ? 'pending' : 'UNDER_REVIEW';
+        } catch (_) {
+          return 'UNDER_REVIEW';
+        }
+      })(),
     });
 
     const referenceId = submission.referenceId || submission.publicId || submission._id.toString();
