@@ -51,9 +51,32 @@ async function getCommunityReporterQueue(req, res) {
 // GET /api/community-reporter/contacts
 async function listReporterContacts(req, res) {
   try {
+    const q = req.query || {};
     const filter = {};
+    if (q.country) filter.country = String(q.country);
+    if (q.state) filter.stateName = String(q.state);
+    if (q.district) filter.districtName = String(q.district);
+    if (q.city) filter.cityTownVillage = String(q.city);
+    if (q.type) filter.reporterType = String(q.type);
+    if (q.status) filter.status = String(q.status);
+
     const contacts = await ReporterContact.find(filter).sort({ fullName: 1 }).lean();
-    return res.status(200).json({ ok: true, success: true, status: 200, data: contacts, total: contacts.length, message: 'Reporter contacts directory' });
+    const data = contacts.map(c => ({
+      id: c._id.toString(),
+      name: c.fullName,
+      email: c.email,
+      phone: c.phoneFull || c.phoneNumber || null,
+      country: c.country,
+      state: c.stateName,
+      district: c.districtName,
+      city: c.cityTownVillage,
+      reporterType: c.reporterType,
+      verificationLevel: c.verificationLevel,
+      status: c.status,
+      stats: c.stats || {},
+      lastStoryAt: c.stats && c.stats.lastStoryAt ? c.stats.lastStoryAt : null,
+    }));
+    return res.status(200).json({ ok: true, success: true, status: 200, data, total: data.length, message: 'Reporter contacts directory' });
   } catch (err) {
     console.error('Error in listReporterContacts:', err?.message || err);
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load reporter contacts' });
