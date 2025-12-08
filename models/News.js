@@ -26,4 +26,5 @@ newsSchema.virtual('body')
 newsSchema.set('toJSON', { virtuals: true });
 newsSchema.set('toObject', { virtuals: true });
 
-module.exports = mongoose.model('News', newsSchema);
+// Avoid OverwriteModelError when multiple apps import this model.
+module.exports = mongoose.models.News || mongoose.model('News', newsSchema);

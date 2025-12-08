@@ -10,4 +10,5 @@ const newsSchema = new mongoose.Schema({
   imageURL: String,
 });
 
-module.exports = mongoose.model('News', newsSchema);
+// Avoid OverwriteModelError when model already exists
+module.exports = mongoose.models.News || mongoose.model('News', newsSchema);
