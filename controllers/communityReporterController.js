@@ -1,26 +1,62 @@
 const CommunityReport = require('../models/CommunityReport');
+const CommunitySubmission = require('../models/CommunitySubmission');
+const ReporterContact = require('../models/ReporterContact');
 
-// Temporary public placeholder: GET /api/community-reporter/queue
-// Always returns 200 with ok: true and empty data array
+// GET /api/community-reporter/queue
+// Returns real queue items from CommunitySubmission with status mapping
 async function getCommunityReporterQueue(req, res) {
   try {
     const status = (req.query.status || 'pending').toString();
-    return res.status(200).json({
-      ok: true,
-      success: true,
-      status: 200,
-      data: [],
-      meta: { statusFilter: status, total: 0 },
-      message: 'Community reporter queue (public placeholder)',
-    });
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
+    const skip = (page - 1) * limit;
+
+    const mapStatus = (s) => {
+      const key = (s || '').toString().toLowerCase();
+      if (key === 'pending' || key === 'under_review') return ['PENDING_FOUNDER', 'UNDER_REVIEW', 'NEW', 'pending', 'under_review'];
+      if (key === 'approved') return ['APPROVED', 'approved'];
+      if (key === 'rejected') return ['REJECTED', 'rejected'];
+      if (key === 'all') return null;
+      return [s];
+    };
+
+    const filter = {};
+    const mapped = mapStatus(status);
+    if (mapped) filter.status = { $in: mapped };
+
+    const [docs, total] = await Promise.all([
+      CommunitySubmission.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      CommunitySubmission.countDocuments(mapped ? { status: { $in: mapped } } : {}),
+    ]);
+
+    const data = docs.map(d => ({
+      id: d._id.toString(),
+      headline: d.headline || '',
+      category: d.category || null,
+      reporter: (d.contact && d.contact.name) || d.reporterName || d.name || 'Unknown',
+      location: (d.location && d.location.city) || d.city || null,
+      priority: d.priority || 'normal',
+      aiRisk: typeof d.riskScore === 'number' ? d.riskScore : null,
+      status: d.status || 'under_review',
+      createdAt: d.createdAt || null,
+    }));
+
+    return res.status(200).json({ ok: true, success: true, status: 200, data, meta: { statusFilter: status, total, page, limit }, message: 'Community reporter queue' });
   } catch (err) {
-    console.error('Error in GET /api/community-reporter/queue:', err);
-    return res.status(500).json({
-      ok: false,
-      success: false,
-      status: 500,
-      message: 'Failed to load community reporter queue',
-    });
+    console.error('Error in GET /api/community-reporter/queue:', err?.message || err);
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load community reporter queue' });
+  }
+}
+
+// GET /api/community-reporter/contacts
+async function listReporterContacts(req, res) {
+  try {
+    const filter = {};
+    const contacts = await ReporterContact.find(filter).sort({ fullName: 1 }).lean();
+    return res.status(200).json({ ok: true, success: true, status: 200, data: contacts, total: contacts.length, message: 'Reporter contacts directory' });
+  } catch (err) {
+    console.error('Error in listReporterContacts:', err?.message || err);
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load reporter contacts' });
   }
 }
 
@@ -130,4 +166,4 @@ async function listMyCommunityReports(req, res) {
   }
 }
 
-module.exports = { submitCommunityReport, listMyCommunityReports, getCommunityReporterQueue };
+module.exports = { submitCommunityReport, listMyCommunityReports, getCommunityReporterQueue, listReporterContacts };
