@@ -41,7 +41,7 @@ dotenv.config();
 
 const app = express();
 
-// Global CORS middleware (strict allowlist for admin panel and site)
+// Global CORS middleware (admin panel + Vercel domains)
 const allowedOrigins = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
@@ -49,11 +49,26 @@ const allowedOrigins = [
   'https://newspulse.co.in',
 ];
 
+function isAllowedOrigin(origin) {
+  try {
+    if (!origin) return true;
+    if (allowedOrigins.includes(origin)) return true;
+    const lower = origin.toLowerCase();
+    // Allow any Vercel preview/production domain
+    if (lower.endsWith('.vercel.app')) return true;
+    // Allow common localhost variations
+    if (lower.startsWith('http://localhost:')) return true;
+    if (lower.startsWith('http://127.0.0.1:')) return true;
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
+      if (isAllowedOrigin(origin)) return callback(null, true);
       return callback(null, false);
     },
     credentials: true,
@@ -171,18 +186,25 @@ try {
 // Admin routes for legacy and new admin UI paths
 app.use('/api/admin', adminRoutes); // used by admin UI
 app.use('/admin', adminRoutes);     // legacy path
-// Mount dashboard stats router under /api to serve /api/dashboard-stats and /api/stats
+// Mount dashboard stats router
+// /api -> /api/stats, /api/dashboard-stats
 app.use('/api', dashboardStatsRouter);
-// Also mount dashboard stats under /admin-api for frontend dev proxy
+// /admin-api -> alias used by some frontends
 app.use('/admin-api', dashboardStatsRouter);
+// /api/admin -> explicit admin-prefixed endpoints
+app.use('/api/admin', dashboardStatsRouter);
 app.use('/admin-auth', adminAuthRoutes);
 app.use('/system/ai-training-info', aiTrainingInfoRoutes);
 app.use('/api/system/ai-training-info', aiTrainingInfoRoutes);
+// Admin-prefixed alias for system AI training info
+app.use('/api/admin/system/ai-training-info', aiTrainingInfoRoutes);
 app.use('/api/system/health', systemHealthRoutes);
 app.use('/system/health', systemHealthRoutes);
 // System monitor hub (API + non-API alias)
 app.use('/api/system', systemRoutesRouter);
 app.use('/system', systemRoutesRouter);
+// Admin-prefixed alias for system routes (ensures /api/admin/system/health via mounted router)
+app.use('/api/admin/system', systemRoutesRouter);
 app.use('/api/admin/community', adminCommunityRoutes);
 // Admin Settings (includes /api/admin/settings/community-reporter)
 app.use('/api/admin', adminSettingsRoutes);
