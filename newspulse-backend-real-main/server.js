@@ -175,12 +175,18 @@ app.use('/api/admin', adminRoutes);
 // Mount dashboard stats under /api and /admin-api to satisfy Admin Panel
 app.use('/api', dashboardStatsRoutes);
 app.use('/admin-api', dashboardStatsRoutes);
+// Explicit admin-prefixed mounts for dashboard + stats
+app.use('/api/admin', dashboardStatsRoutes);
 app.use('/admin-auth', adminAuthRoutes); // legacy GET /admin-auth/session
 app.use('/system/ai-training-info', aiTrainingInfoRoutes); // GET /system/ai-training-info
 app.use('/api/system/ai-training-info', aiTrainingInfoRoutes); // GET /api/system/ai-training-info
+// Admin alias: /api/admin/system/ai-training-info
+app.use('/api/admin/system/ai-training-info', aiTrainingInfoRoutes);
 // Health endpoints (API + compatibility alias)
 app.use('/api/system/health', systemHealthRoutes);
 app.use('/system/health', systemHealthRoutes);
+// Admin alias: /api/admin/system/health
+app.use('/api/admin/system', systemHealthRoutes);
 // New admin community reporter + identity endpoints
 app.use('/api/admin/community', adminCommunityRoutes);
 // Admin Settings
