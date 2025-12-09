@@ -95,9 +95,19 @@ app.use('/system', systemRoutes);
 app.use('/api/system', systemRoutes);
 
 // Lightweight system endpoints
-app.get('/system/health', (req, res) => {
-  res.json({ ok: true, status: 'online', env: process.env.NODE_ENV || 'development', uptime: process.uptime() });
-});
+// Shared health handler used by both non-API and API paths
+const handleHealth = (req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: 'newspulse-backend',
+    env: process.env.NODE_ENV || 'development',
+    uptimeSeconds: Math.round(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+};
+// Support both paths for safety
+app.get('/system/health', handleHealth);
+app.get('/api/system/health', handleHealth);
 app.get('/system/ai-training-info', (req, res) => {
   res.json({ success: true, status: 'online', lastUpdated: process.env.AI_TRAINING_LAST_UPDATED || new Date().toISOString() });
 });

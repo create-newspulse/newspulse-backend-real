@@ -74,14 +74,19 @@ app.options('*', cors(corsOptionsDelegate));
 app.use(express.json());
 
 // Lightweight system endpoints (placed early, before any 404 handlers)
-app.get('/system/health', (req, res) => {
-  res.json({
+// Shared health handler used by both non-API and API paths
+const handleHealth = (req, res) => {
+  res.status(200).json({
     ok: true,
-    status: 'online',
+    service: 'newspulse-backend',
     env: process.env.NODE_ENV || 'development',
-    uptime: process.uptime(),
+    uptimeSeconds: Math.round(process.uptime()),
+    timestamp: new Date().toISOString(),
   });
-});
+};
+// Support both paths for safety
+app.get('/system/health', handleHealth);
+app.get('/api/system/health', handleHealth);
 
 app.get('/system/ai-training-info', (req, res) => {
   res.json({

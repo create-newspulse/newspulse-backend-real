@@ -2,26 +2,8 @@
 // Small health + AI debug endpoints for the Admin Dashboard UI.
 
 const express = require('express');
-const cors = require('cors');
 const router = express.Router();
-
-// Router-level CORS to ensure /system/* works cross-origin
-const allowedOrigins = [
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  'https://admin.newspulse.co.in',
-  'https://newspulse.co.in',
-];
-router.use(
-  cors({
-    origin(origin, callback) {
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      return callback(null, false);
-    },
-    credentials: true,
-  })
-);
+// Note: CORS is handled globally in server.js. This router remains simple.
 
 // GET /system/health  (and /api/system/health via server.js mounting)
 router.get('/health', (req, res) => {
