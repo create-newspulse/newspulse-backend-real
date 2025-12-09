@@ -41,33 +41,25 @@ dotenv.config();
 
 const app = express();
 
-// CORS (centralized, permissive for dev + common preview hostnames)
-const STATIC_ALLOWED_ORIGINS = [
+// Global CORS middleware (strict allowlist for admin panel and site)
+const allowedOrigins = [
   'http://localhost:5173',
+  'http://127.0.0.1:5173',
   'https://admin.newspulse.co.in',
+  'https://newspulse.co.in',
 ];
-const ENV_ALLOWED_ORIGINS = (process.env.FRONTEND_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
-function isAllowedOrigin(origin) {
-  if (!origin) return true; // non-browser or same-origin
-  if (STATIC_ALLOWED_ORIGINS.includes(origin) || ENV_ALLOWED_ORIGINS.includes(origin)) return true;
-  const localhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\\d+)?$/i;
-  const vercel = /^https?:\/\/([a-z0-9-]+\.)*vercel\.app$/i;
-  const render = /^https?:\/\/([a-z0-9-]+\.)*onrender\.com$/i;
-  const netlify = /^https?:\/\/([a-z0-9-]+\.)*netlify\.app$/i;
-  const pages = /^https?:\/\/([a-z0-9-]+\.)*pages\.dev$/i;
-  if (localhost.test(origin) || vercel.test(origin) || render.test(origin) || netlify.test(origin) || pages.test(origin)) return true;
-  return false;
-}
-const corsOptionsDelegate = (req, callback) => {
-  const origin = req.header('Origin');
-  const allowed = isAllowedOrigin(origin);
-  callback(null, { origin: allowed, credentials: true });
-};
-app.use(cors(corsOptionsDelegate));
-app.options('*', cors(corsOptionsDelegate));
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      return callback(null, false);
+    },
+    credentials: true,
+  })
+);
+app.options('*', cors());
 
 app.use(express.json());
 
@@ -311,6 +303,171 @@ app.get('/api/admin/stats', async (req, res) => {
 let _communityReporterFlagCache = { myCommunityStoriesEnabled: false };
 app.get('/api/community-reporter/config', (req, res) => {
   return res.json({ ok: true, communityMyStoriesEnabled: _communityReporterFlagCache.myCommunityStoriesEnabled });
+});
+
+// --- AI / System health stubs ---
+app.get('/api/system/ai-health', (req, res) => {
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'AI health stub (no real engine wired yet)',
+    data: {
+      status: 'offline',
+      engines: [],
+      notes: 'This is a placeholder response from newspulse-backend-real-main.',
+    },
+  });
+});
+
+app.get('/system/ai-training-info', (req, res) => {
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'AI training info stub',
+    data: {
+      lastUpdated: null,
+      datasets: [],
+      notes: 'Training info not yet implemented.',
+    },
+  });
+});
+
+// --- AIRA bulletins stub ---
+app.get('/api/aira/bulletins', (req, res) => {
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'AIRA bulletins stub',
+    data: {
+      items: [],
+      notes: 'No bulletins yet – backend stub response.',
+    },
+  });
+});
+
+// --- Vault stub ---
+app.get('/api/vault/list', (req, res) => {
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'AI vault list stub',
+    data: {
+      items: [],
+    },
+  });
+});
+
+// --- Media uploads stub ---
+app.get('/api/uploads', (req, res) => {
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'Uploads list stub',
+    data: {
+      items: [],
+    },
+  });
+});
+
+// --- SEO audit history stub ---
+app.get('/api/seo/audit/history', (req, res) => {
+  const limit = Number(req.query.limit || 0);
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'SEO audit history stub',
+    data: {
+      limit,
+      items: [],
+    },
+  });
+});
+
+// --- Analytics stubs ---
+app.get('/api/analytics/revenue', (req, res) => {
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'Revenue analytics stub',
+    data: {
+      total: 0,
+      bySource: [],
+    },
+  });
+});
+
+app.get('/api/analytics/traffic', (req, res) => {
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'Traffic analytics stub',
+    data: {
+      sessions: 0,
+      pageViews: 0,
+      byChannel: [],
+    },
+  });
+});
+
+app.get('/api/analytics/ad-performance', (req, res) => {
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'Ad performance stub',
+    data: {
+      campaigns: [],
+    },
+  });
+});
+
+app.get('/api/analytics/ab-tests', (req, res) => {
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'A/B tests stub',
+    data: {
+      experiments: [],
+    },
+  });
+});
+
+// --- System version log stub ---
+app.get('/api/system/version-log', (req, res) => {
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'Version log stub',
+    data: {
+      items: [],
+      notes: 'No version log entries yet on backend.',
+    },
+  });
+});
+
+// --- Threat stats stub ---
+app.get('/threat-stats', (req, res) => {
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'Threat stats stub',
+    data: {
+      level: 'normal',
+      lastScan: null,
+      issues: [],
+    },
+  });
 });
 
 // 404
