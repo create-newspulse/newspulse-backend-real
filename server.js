@@ -43,10 +43,17 @@ const app = express();
 
 // Global CORS middleware (admin panel + Vercel domains)
 const allowedOrigins = [
+  // Local dev admin panel
   'http://localhost:5173',
   'http://127.0.0.1:5173',
+  // Known admin/public deployments
+  'https://newspulse-admin-panel-real-main.vercel.app',
+  'https://newspulse-frontend-live.vercel.app',
+  // Custom domains (if frontends are mapped)
   'https://admin.newspulse.co.in',
   'https://newspulse.co.in',
+  // Backend host
+  'https://newspulse-backend-real-main.onrender.com',
 ];
 
 function isAllowedOrigin(origin) {
@@ -56,6 +63,8 @@ function isAllowedOrigin(origin) {
     const lower = origin.toLowerCase();
     // Allow any Vercel preview/production domain
     if (lower.endsWith('.vercel.app')) return true;
+    // Allow Render-hosted backends
+    if (lower.endsWith('.onrender.com')) return true;
     // Allow common localhost variations
     if (lower.startsWith('http://localhost:')) return true;
     if (lower.startsWith('http://127.0.0.1:')) return true;
@@ -68,8 +77,11 @@ function isAllowedOrigin(origin) {
 app.use(
   cors({
     origin(origin, callback) {
+      // Allow non-browser/server-to-server calls (no origin)
+      if (!origin) return callback(null, true);
       if (isAllowedOrigin(origin)) return callback(null, true);
-      return callback(null, false);
+      try { console.warn('[CORS] Blocked origin:', origin); } catch (_) {}
+      return callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
   })
