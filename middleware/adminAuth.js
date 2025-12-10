@@ -24,28 +24,41 @@ function requireAdminAuth(req, res, next) {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice('Bearer '.length).trim() : '';
   const cookies = parseCookies(req.headers.cookie || '');
   // Accept multiple legacy cookie keys for backward compatibility with older admin panel builds
-  const legacyEmail = cookies['np_admin'] || cookies['np_admin_email'] || '';
+  // Common variants observed in production/admin panel: np_admin, np_admin_email, np_admin_session
+  const legacyEmail = cookies['np_admin'] || cookies['np_admin_email'] || cookies['np_admin_session'] || '';
   // Optional explicit access cookie (contains email value). Not considered privileged beyond email identification.
   const accessEmail = cookies['np_admin_access'] || '';
+  // Some builds store an opaque admin token in a cookie; treat it like Bearer if present
+  const cookieToken = cookies['np_admin_token'] || '';
 
-  if (!token && !legacyEmail && !accessEmail) {
-    console.warn('[ADMIN_AUTH][401][missing] no bearer token or recognized admin cookie');
-    return res.status(401).json({ ok: false, message: 'Unauthorized' });
+  if (!token && !legacyEmail && !accessEmail && !cookieToken) {
+    console.warn('[ADMIN_AUTH][401][missing]', {
+      path: req.originalUrl,
+      method: req.method,
+      reason: 'no bearer token or recognized admin cookie',
+      origin: req.headers.origin || null,
+    });
+    return res.status(401).json({ ok: false, code: 'NO_TOKEN', message: 'Unauthorized' });
   }
 
-  if (token) {
+  const effectiveToken = token || cookieToken;
+  if (effectiveToken) {
     try {
       // Accept opaque admin tokens issued by /admin-auth/login (prefix np.)
-      if (token.startsWith('np.')) {
+      if (effectiveToken.startsWith('np.')) {
         req.admin = { id: 'opaque', email: 'admin@newspulse.ai', role: 'admin', name: 'Admin' };
         return next();
       }
       const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
-      const payload = jwt.verify(token, secret);
+      const payload = jwt.verify(effectiveToken, secret);
       const role = payload.role;
       if (role !== 'admin' && role !== 'founder') {
-        console.warn('[ADMIN_AUTH][403][role] disallowed role', { role });
-        return res.status(403).json({ ok: false, message: 'Forbidden' });
+        console.warn('[ADMIN_AUTH][403][role] disallowed role', {
+          path: req.originalUrl,
+          method: req.method,
+          role,
+        });
+        return res.status(403).json({ ok: false, code: 'ROLE_FORBIDDEN', message: 'Forbidden' });
       }
       req.admin = { id: payload.sub, email: payload.email, role, name: payload.name };
       return next();
@@ -54,10 +67,18 @@ function requireAdminAuth(req, res, next) {
         // Throttle noisy expired token logs (once per 60s per route key)
         const key = `adminAuth.expired:${req.method}:${req.originalUrl.split('?')[0]}`;
         if (shouldLog(key, 60_000)) {
-          console.info('[ADMIN_AUTH][token] expired', { reason: 'access token expired' });
+          console.info('[ADMIN_AUTH][token] expired', {
+            path: req.originalUrl,
+            method: req.method,
+            reason: 'access token expired',
+          });
         }
       } else {
-        console.warn('[ADMIN_AUTH][token-verify-failed]', { message: e?.message });
+        console.warn('[ADMIN_AUTH][token-verify-failed]', {
+          path: req.originalUrl,
+          method: req.method,
+          message: e?.message,
+        });
       }
       if (!legacyEmail) {
         // Provide a machine-readable code to help clients trigger refresh.
@@ -72,7 +93,13 @@ function requireAdminAuth(req, res, next) {
     return next();
   }
 
-  return res.status(401).json({ ok: false, message: 'Unauthorized' });
+  console.warn('[ADMIN_AUTH][401][fallback]', {
+    path: req.originalUrl,
+    method: req.method,
+    reason: 'no valid token or cookie after checks',
+    origin: req.headers.origin || null,
+  });
+  return res.status(401).json({ ok: false, code: 'UNAUTHORIZED', message: 'Unauthorized' });
 }
 
 function requireFounderOnly(req, res, next) {
