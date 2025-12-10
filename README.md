@@ -197,4 +197,79 @@ Logs emitted (stub mode):
 - `[OTP_REQUEST][success]` final success response
 - `[OTP_REQUEST][send-fail]` unexpected stub failure
 
+### Auth for Admin Endpoints
+
+Admin routes use `requireAdminAuth` middleware. Clients must provide one of:
+
+- Bearer token in `Authorization` header:
+  - Opaque admin tokens prefixed with `np.` (e.g., `np.some-admin-token`) are accepted for testing/dev.
+  - JWT with `role` set to `admin` or `founder` is accepted.
+- Legacy admin cookie (for compatibility with older admin panel builds):
+  - `np_admin` or `np_admin_email` containing the admin email.
+
+Responses:
+- `401 Unauthorized` when no recognized token/cookie is provided or token is invalid/expired.
+- `403 Forbidden` when a token is provided but the role is not allowed.
+
+Example requests:
+
+Bearer (Axios)
+
+```javascript
+import axios from 'axios';
+
+const client = axios.create({ baseURL: 'https://your-backend.example.com' });
+const token = 'np.some-admin-token';
+
+const res = await client.get('/api/admin/community-reporter/queue', {
+  params: { status: 'pending' },
+  headers: { Authorization: `Bearer ${token}` },
+});
+console.log(res.status, res.data.items);
+```
+
+Cookie (Axios)
+
+```javascript
+import axios from 'axios';
+
+const client = axios.create({
+  baseURL: 'https://your-backend.example.com',
+  withCredentials: true,
+});
+
+// Ensure your login flow sets np_admin or set via browser dev tools for testing
+const res = await client.get('/api/admin/community-reporter/queue', {
+  params: { status: 'pending' },
+});
+console.log(res.status, res.data.items);
+```
+
+Fetch (Bearer)
+
+```javascript
+const token = 'np.some-admin-token';
+const url = 'https://your-backend.example.com/api/admin/community-reporter/queue?status=pending';
+const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+const data = await res.json();
+console.log(res.status, data.items);
+```
+
+### Community Reporter Queue Endpoint
+
+Path: `GET /api/admin/community-reporter/queue?status=pending`
+
+- Auth: Standard admin guard via `requireAdminAuth`.
+- Status: Always returns `200` for valid admin/founder auth, even when there are zero items.
+- Response shape:
+
+```json
+{
+  "ok": true,
+  "items": [],
+  "meta": { "statusFilter": "pending", "total": 0, "page": 1, "limit": 20 },
+  "message": "Community reporter queue"
+}
+```
+
 Set `OTP_DEV_ECHO=1` locally ONLY to include `devCode` in the JSON response for quick testing.
