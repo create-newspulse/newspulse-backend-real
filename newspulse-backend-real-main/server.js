@@ -46,6 +46,7 @@ const corsOptions = {
     if (!origin || allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
+    console.log('CORS blocked origin:', origin);
     return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
@@ -53,7 +54,8 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
 };
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+// Ensure preflight requests are handled
+app.options('*', cors());
 // --- END Global CORS ---
 
 /**
