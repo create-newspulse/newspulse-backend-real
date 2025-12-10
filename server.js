@@ -207,6 +207,22 @@ app.use('/api/admin', communityReporterSettingsRouter);
 app.use('/api/admin', adminCommunityReporterQueueRouter);
 app.use('/admin-api/admin', adminCommunityReporterQueueRouter);
 app.use('/admin', adminCommunityReporterQueueRouter);
+// Explicit alias to ensure GET /api/admin/community-reporter/queue returns 200 with auth
+app.get('/api/admin/community-reporter/queue', requireAdminAuth, async (req, res) => {
+  try {
+    const result = await getCommunityReporterQueue(req, {
+      status: (code) => ({ json: (payload) => ({ code, payload }) }),
+      json: (payload) => ({ code: 200, payload }),
+    });
+    const payload = result && result.payload ? result.payload : null;
+    const items = payload && Array.isArray(payload.data) ? payload.data : [];
+    const meta = payload && payload.meta ? payload.meta : { statusFilter: String(req.query.status || 'pending') };
+    return res.status(200).json({ ok: true, success: true, status: 200, items, meta, message: 'Community reporter queue' });
+  } catch (e) {
+    console.error('[alias][api/admin/community-reporter/queue] error', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load community reporter queue' });
+  }
+});
 // Mount full admin community-reporter routes (submissions, decisions, journalist applications)
 try {
   const adminCommunityReporterRouter = require('./routes/adminCommunityReporter');

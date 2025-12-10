@@ -60,5 +60,4 @@ Desktop.ini
 ###################################
 *.swp
 *.swo
-.expo/src/
-src/
+.expo/
