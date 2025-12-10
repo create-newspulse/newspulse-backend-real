@@ -31,15 +31,29 @@ dotenv.config(); // Load environment variables from .env file
 
 const app = express();
 
-// --- Global CORS: VERY permissive for now (allow all origins) ---
-const permissiveCors = cors({
+// --- Global CORS: strict allowlist for prod + local dev ---
+const allowedOrigins = [
+  'https://admin.newspulse.co.in',
+  'https://newspulse.co.in',
+  'https://www.newspulse.co.in',
+  'https://newspulse-admin-panel-real-main.vercel.app',
+  'https://newspulse-frontend-live.vercel.app',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+];
+const corsOptions = {
   origin: (origin, callback) => {
-    callback(null, true);
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
-});
-app.use(permissiveCors);
-app.options('*', permissiveCors);
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 // --- END Global CORS ---
 
 /**
