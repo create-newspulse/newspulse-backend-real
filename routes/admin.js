@@ -82,7 +82,10 @@ router.post('/login', (req, res) => {
     );
 
     // Optional legacy cookie for backward compatibility
-    res.setHeader('Set-Cookie', `np_admin=${encodeURIComponent(founderEmail)}; Path=/; SameSite=Lax`);
+    // Use cross-site compatible attributes so admin panel on a different origin
+    // can include this cookie with credentialed fetches.
+    // SameSite=None requires Secure.
+    res.setHeader('Set-Cookie', `np_admin=${encodeURIComponent(founderEmail)}; Path=/; SameSite=None; Secure`);
 
     return res.json({
       ok: true,

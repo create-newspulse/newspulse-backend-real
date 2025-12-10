@@ -88,8 +88,42 @@ async function listReporterContacts(req, res) {
 // Admin: Reporter Directory list
 async function listReporters(req, res) {
   try {
-    const items = await ReporterContact.find({}).sort({ fullName: 1 }).lean();
-    const mapped = items.map(c => ({
+    // Accept common admin panel filters; default to 'all' and ignore when 'all'
+    const {
+      district = 'all',
+      areaType = 'all',
+      beat = 'all',
+      activity = 'all',
+    } = req.query || {};
+
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limitRaw = Math.max(parseInt(req.query.limit || '20', 10), 1);
+    const limit = Math.min(limitRaw, 200);
+    const skip = (page - 1) * limit;
+
+    const q = {};
+    if (district && String(district).toLowerCase() !== 'all') {
+      q.districtName = new RegExp(String(district).trim(), 'i');
+    }
+    if (areaType && String(areaType).toLowerCase() !== 'all') {
+      q.areaType = String(areaType).trim().toUpperCase();
+    }
+    if (beat && String(beat).toLowerCase() !== 'all') {
+      // beats is an array; match by value equality
+      q.beats = String(beat).trim().toUpperCase();
+    }
+    if (activity && String(activity).toLowerCase() !== 'all') {
+      // Map activity to status field if present
+      q.status = String(activity).trim().toUpperCase();
+    }
+
+    const sort = { fullName: 1 };
+    const [itemsRaw, total] = await Promise.all([
+      ReporterContact.find(q).sort(sort).skip(skip).limit(limit).lean(),
+      ReporterContact.countDocuments(q),
+    ]);
+
+    const items = itemsRaw.map(c => ({
       id: c._id.toString(),
       name: c.fullName,
       email: c.email,
@@ -97,10 +131,12 @@ async function listReporters(req, res) {
       city: c.cityTownVillage,
       state: c.stateName,
       country: c.country,
+      district: c.districtName,
       type: c.reporterType,
       status: c.status,
     }));
-    return res.json({ ok: true, items: mapped, total: mapped.length });
+
+    return res.json({ ok: true, items, total, page, limit });
   } catch (e) {
     console.error('[ADMIN][listReporters] failed', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to load reporter directory' });
