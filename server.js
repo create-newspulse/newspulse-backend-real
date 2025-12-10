@@ -12,7 +12,6 @@ const articlesRoutes = require('./routes/articles');
 const adminRoutes = require('./routes/admin');
 const adminAuthRoutes = require(`${BASE}/routes/adminAuth`);
 const aiTrainingInfoRoutes = require(`${BASE}/routes/system/aiTrainingInfo`);
-const systemHealthRoutes = require(`${BASE}/routes/system/health`);
 const systemRoutesRouter = require('./routes/system.routes');
 const systemRoutes = require('./routes/system');
 const communityRoutes = require(`${BASE}/routes/community`);
@@ -41,56 +40,26 @@ dotenv.config();
 
 const app = express();
 
-// Global CORS (manual middleware) BEFORE any routes
+// Global CORS (cors package) BEFORE any routes
+// Fixed allowlist to avoid over-broad CORS. This server must be callable
+// from the production admin panel and local dev admin (Vite).
 const allowedOrigins = [
   'https://admin.newspulse.co.in',
-  'https://newspulse.co.in',
-  'https://www.newspulse.co.in',
-  'https://newspulse-admin-panel-real-main.vercel.app',
-  'https://newspulse-frontend-live.vercel.app',
-  'https://newspulse-backend-real-main.onrender.com',
   'http://localhost:5173',
-  'http://127.0.0.1:5173',
 ];
 
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  let allow = false;
-  try {
-    if (!origin) {
-      allow = true; // non-browser or same-origin
-    } else if (allowedOrigins.includes(origin)) {
-      allow = true;
-    } else {
-      const u = new URL(origin);
-      const base = `${u.protocol}//${u.hostname}`;
-      const isPreview = /^(https:\/\/([a-z0-9-]+)\.)?(vercel\.app|onrender\.com)$/i.test(base);
-      const isLocal = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
-      allow = isPreview || isLocal;
-    }
-  } catch (_) {}
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error(`Not allowed by CORS: ${origin}`));
+  },
+  credentials: true,
+};
 
-  if (allow && origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
-  }
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept,Origin');
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
-  return next();
-});
-console.log('🔓 Global CORS middleware active for:', allowedOrigins);
-
-// Ensure all preflight paths are explicitly handled (defensive)
-app.options('*', (req, res) => {
-  const origin = req.headers.origin;
-  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept,Origin');
-  return res.sendStatus(204);
-});
+app.use(cors(corsOptions));
+// Handle CORS preflight for all routes
+app.options('*', cors());
 
 app.use(express.json());
 
@@ -98,20 +67,18 @@ app.use(express.json());
 app.use('/system', systemRoutes);
 app.use('/api/system', systemRoutes);
 
-// Lightweight system endpoints
-// Shared health handler used by both non-API and API paths
-const handleHealth = (req, res) => {
+// Health handler used by the admin panel's SystemHealthBadge
+// Returns a minimal, stable JSON schema.
+const pkg = require('./package.json');
+const healthHandler = async (req, res) => {
   res.status(200).json({
     status: 'ok',
-    service: 'newspulse-backend-real',
-    timestamp: new Date().toISOString(),
-    uptimeSeconds: Math.round(process.uptime()),
-    env: process.env.NODE_ENV || 'development',
+    service: 'newspulse-backend',
+    time: new Date().toISOString(),
   });
 };
-// Support both paths for safety
-app.get('/system/health', handleHealth);
-app.get('/api/system/health', handleHealth);
+app.get('/system/health', healthHandler);
+app.get('/api/system/health', healthHandler);
 app.get('/system/ai-training-info', (req, res) => {
   res.json({ success: true, status: 'online', lastUpdated: process.env.AI_TRAINING_LAST_UPDATED || new Date().toISOString() });
 });
@@ -224,8 +191,7 @@ app.use('/system/ai-training-info', aiTrainingInfoRoutes);
 app.use('/api/system/ai-training-info', aiTrainingInfoRoutes);
 // Admin-prefixed alias for system AI training info
 app.use('/api/admin/system/ai-training-info', aiTrainingInfoRoutes);
-app.use('/api/system/health', systemHealthRoutes);
-app.use('/system/health', systemHealthRoutes);
+// health routes handled directly above by healthHandler
 // System monitor hub (API + non-API alias)
 app.use('/api/system', systemRoutesRouter);
 app.use('/system', systemRoutesRouter);
