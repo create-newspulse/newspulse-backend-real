@@ -214,6 +214,8 @@ try {
   app.use('/admin/community-reporter', adminCommunityReporterRouter);
   // Also mount under /admin/community for journalist applications aliases
   app.use('/admin/community', adminCommunityReporterRouter);
+  // Legacy alias: /api/admin/community/submissions → /api/admin/community-reporter/submissions
+  app.use('/api/admin/community/submissions', (req, res, next) => { try { req.url = '/submissions'; return adminCommunityReporterRouter(req, res, next); } catch (e) { return next(e); } });
 } catch (e) {
   console.warn('[init] optional routes/adminCommunityReporter not found; skipping');
 }
@@ -238,6 +240,37 @@ app.get('/admin/community/journalist-applications', requireAdminAuth, (req, res,
   try { req.url = '/journalist-applications'; return communityAdminContactsRoutes(req, res, next); } catch (e) {
     console.error('[nested][ALIAS][journalist-applications] delegate failed', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to load journalist applications' });
+  }
+});
+// Legacy path aliases expected by admin panel
+app.get('/community/stats', requireAdminAuth, (req, res, next) => {
+  try { req.url = '/community/stats'; return adminRoutes(req, res, next); } catch (e) {
+    console.error('[alias][community/stats] delegate failed', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load community stats' });
+  }
+});
+app.get('/reporters', requireAdminAuth, (req, res, next) => {
+  try { req.url = '/reporters'; return adminRoutes(req, res, next); } catch (e) {
+    console.error('[alias][reporters] delegate failed', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load reporters' });
+  }
+});
+// Admin panel expects /api/admin/community/reporters; delegate to routes/admin.js /reporters
+app.get('/api/admin/community/reporters', requireAdminAuth, (req, res, next) => {
+  try { req.url = '/reporters'; return adminRoutes(req, res, next); } catch (e) {
+    console.error('[alias][api/admin/community/reporters] delegate failed', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load reporter directory' });
+  }
+});
+app.get('/community/submissions', requireAdminAuth, (req, res, next) => {
+  try {
+    // delegate to admin community-reporter submissions
+    req.url = '/submissions';
+    const adminCommunityReporterRouter = require('./routes/adminCommunityReporter');
+    return adminCommunityReporterRouter(req, res, next);
+  } catch (e) {
+    console.error('[alias][community/submissions] delegate failed', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load submissions' });
   }
 });
 app.get('/admin/community/reporter-contacts', requireAdminAuth, async (req, res, next) => {

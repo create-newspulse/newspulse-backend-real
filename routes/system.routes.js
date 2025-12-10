@@ -6,10 +6,12 @@ const router = express.Router();
 // GET /health → will be mounted under /api/system and /system and /api/admin/system
 router.get('/health', (req, res) => {
   return res.json({
-    status: 'ok',
-    env: process.env.NODE_ENV || 'development',
+    ok: true,
+    env: 'admin',
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
+    status: 'ok',
+    nodeEnv: process.env.NODE_ENV || 'development',
   });
 });
 

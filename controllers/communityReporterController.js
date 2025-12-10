@@ -146,12 +146,17 @@ async function listReporters(req, res) {
 // Admin: Community summary stats
 async function getCommunityStats(req, res) {
   try {
-    const [contacts, submissions, stories] = await Promise.all([
+    const pendingStatuses = ['pending', 'under_review', 'PENDING_FOUNDER', 'UNDER_REVIEW', 'NEW'];
+    const [pendingStories, totalReporters, verifiedJournalists] = await Promise.all([
+      CommunitySubmission.countDocuments({ status: { $in: pendingStatuses } }),
       ReporterContact.countDocuments({}),
-      CommunitySubmission.countDocuments({}),
-      CommunityStory && CommunityStory.countDocuments ? CommunityStory.countDocuments({}) : Promise.resolve(0),
+      ReporterContact.countDocuments({ $or: [ { verificationLevel: 'verified' }, { status: 'verified' } ] }),
     ]);
-    return res.json({ ok: true, data: { contacts, submissions, stories } });
+    return res.json({
+      pendingStories,
+      totalReporters,
+      verifiedJournalists,
+    });
   } catch (e) {
     console.error('[ADMIN][getCommunityStats] failed', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to load community stats' });
