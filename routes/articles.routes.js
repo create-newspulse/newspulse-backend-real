@@ -65,7 +65,8 @@ router.get('/articles', async (req, res, next) => {
   try {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
-    const sortParam = (req.query.sort || '-createdAt').toString();
+    // Default to 'date' since legacy docs may not have createdAt
+    const sortParam = (req.query.sort || '-date').toString();
     const statusRaw = (req.query.status || '').toString();
     const query = {};
     if (statusRaw) {
@@ -73,7 +74,13 @@ router.get('/articles', async (req, res, next) => {
         .split(',')
         .map(s => s.trim())
         .filter(Boolean);
-      if (statuses.length > 0) query.status = { $in: statuses };
+      if (statuses.length > 0) {
+        // Include docs where status matches OR status is missing (legacy)
+        query.$or = [
+          { status: { $in: statuses } },
+          { status: { $exists: false } },
+        ];
+      }
     }
     const skip = (page - 1) * limit;
 
