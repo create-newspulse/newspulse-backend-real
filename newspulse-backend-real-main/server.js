@@ -51,11 +51,12 @@ const corsOptions = {
   },
   credentials: true,
   methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
 };
 app.use(cors(corsOptions));
-// Ensure preflight requests are handled
-app.options('*', cors());
+// Ensure preflight requests are handled with same options (incl. credentials)
+app.options('*', cors(corsOptions));
+console.log('🔓 CORS enabled. Allowed origins:', allowedOrigins);
 // --- END Global CORS ---
 
 /**
