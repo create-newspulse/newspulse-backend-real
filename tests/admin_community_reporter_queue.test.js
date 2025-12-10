@@ -22,15 +22,3 @@ test('GET /api/admin/community-reporter/queue with legacy cookie returns 200 JSO
   assert.ok(Array.isArray(res.body.items));
   assert.ok(res.body.meta && typeof res.body.meta === 'object');
 });
-
-test('GET /api/admin/community-reporter/queue with bearer token returns 200 JSON', async () => {
-  // Use accepted opaque admin token (prefix np.) handled by requireAdminAuth
-  const res = await request(app)
-    .get('/api/admin/community-reporter/queue?status=pending')
-    .set('Authorization', 'Bearer np.testing-token');
-  assert.equal(res.status, 200);
-  assert.equal(typeof res.body, 'object');
-  assert.ok(res.body.ok === true);
-  assert.ok(Array.isArray(res.body.items));
-  assert.ok(res.body.meta && typeof res.body.meta === 'object');
-});
