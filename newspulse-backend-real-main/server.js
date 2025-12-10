@@ -14,7 +14,6 @@ const adminCommunityRoutes = require('./routes/adminCommunity');
 const communityAdminContactsRoutes = require('./routes/communityAdminContacts');
 const communityReporterRoutes = require('./routes/communityReporterRoutes');
 const { getCommunityReporterQueue, listReporterContacts } = require('./controllers/communityReporterController');
-const { getCommunityReporterQueue } = require('./controllers/communityReporterController');
 const adminSettingsRoutes = require('./routes/adminSettings');
 const communityReporterSettingsRouter = require('./routes/adminSettings/communityReporterSettings');
 const CommunitySubmission = require('./models/CommunitySubmission');
@@ -38,16 +37,35 @@ const allowedOrigins = [
   'https://www.newspulse.co.in',
   'https://newspulse-admin-panel-real-main.vercel.app',
   'https://newspulse-frontend-live.vercel.app',
+  'https://newspulse-backend-real-main.onrender.com',
   'http://localhost:5173',
   'http://127.0.0.1:5173',
 ];
 const corsOptions = {
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
-      return callback(null, true);
+    try {
+      // Allow same-origin or non-browser requests (no origin header)
+      if (!origin) return callback(null, true);
+
+      // Exact matches
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+
+      // Allow Vercel and Render preview subdomains
+      const allowWildcard = /^(https:\/\/([a-z0-9-]+)\.)?(vercel\.app|onrender\.com)$/i;
+      const url = new URL(origin);
+      const host = url.hostname;
+      const base = `${url.protocol}//${host}`;
+      if (allowWildcard.test(base)) return callback(null, true);
+
+      // Allow localhost on any port during dev
+      if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) return callback(null, true);
+
+      console.log('CORS blocked origin:', origin);
+      return callback(new Error('Not allowed by CORS'));
+    } catch (e) {
+      console.log('CORS origin parse error:', e?.message || e);
+      return callback(new Error('Not allowed by CORS'));
     }
-    console.log('CORS blocked origin:', origin);
-    return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
   methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
@@ -156,6 +174,37 @@ if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
 // Simple homepage route
 app.get('/', (req, res) => {
   res.send('🟢 News Pulse Admin Backend is Live');
+});
+
+// Compatibility alias for frontends requesting `/articles`
+// Provides basic pagination and sorting over `News` items.
+app.get('/articles', async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
+    const sortField = (req.query.sort || 'date').toString();
+    const sortOrder = sortField.startsWith('-') ? -1 : 1;
+    const sortBy = sortField.replace(/^[-+]/, '') || 'date';
+
+    const skip = (page - 1) * limit;
+
+    const [items, total] = await Promise.all([
+      News.find({}).sort({ [sortBy]: sortOrder }).skip(skip).limit(limit).lean(),
+      News.countDocuments({}),
+    ]);
+
+    return res.json({
+      ok: true,
+      items,
+      total,
+      page,
+      limit,
+      sort: `${sortOrder === -1 ? '-' : ''}${sortBy}`,
+    });
+  } catch (e) {
+    console.error('[compat:/articles] failed', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load articles' });
+  }
 });
 
 // API Routes
