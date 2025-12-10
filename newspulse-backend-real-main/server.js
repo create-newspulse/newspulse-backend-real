@@ -31,33 +31,15 @@ dotenv.config(); // Load environment variables from .env file
 
 const app = express();
 
-// --- Global CORS (centralized, permissive for dev + previews) ---
-const STATIC_ALLOWED_ORIGINS = [
-  'http://localhost:5173',
-  'https://admin.newspulse.co.in',
-];
-const ENV_ALLOWED_ORIGINS = (process.env.FRONTEND_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
-function isAllowedOrigin(origin) {
-  if (!origin) return true;
-  if (STATIC_ALLOWED_ORIGINS.includes(origin) || ENV_ALLOWED_ORIGINS.includes(origin)) return true;
-  const localhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\\d+)?$/i;
-  const vercel = /^https?:\/\/([a-z0-9-]+\.)*vercel\.app$/i;
-  const render = /^https?:\/\/([a-z0-9-]+\.)*onrender\.com$/i;
-  const netlify = /^https?:\/\/([a-z0-9-]+\.)*netlify\.app$/i;
-  const pages = /^https?:\/\/([a-z0-9-]+\.)*pages\.dev$/i;
-  if (localhost.test(origin) || vercel.test(origin) || render.test(origin) || netlify.test(origin) || pages.test(origin)) return true;
-  return false;
-}
-const corsOptionsDelegate = (req, callback) => {
-  const origin = req.header('Origin');
-  const allowed = isAllowedOrigin(origin);
-  callback(null, { origin: allowed, credentials: true });
-};
-app.use(cors(corsOptionsDelegate));
-app.options('*', cors(corsOptionsDelegate));
+// --- Global CORS: VERY permissive for now (allow all origins) ---
+const permissiveCors = cors({
+  origin: (origin, callback) => {
+    callback(null, true);
+  },
+  credentials: true,
+});
+app.use(permissiveCors);
+app.options('*', permissiveCors);
 // --- END Global CORS ---
 
 /**
