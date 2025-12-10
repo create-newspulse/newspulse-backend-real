@@ -114,6 +114,17 @@ router.get('/health', (req, res) => {
   });
 });
 
+// GET /api/admin/system/health (mounted under /api/admin)
+// Mirrors system health used by the admin panel to avoid 404s
+router.get('/system/health', (req, res) => {
+  res.json({
+    ok: true,
+    status: 'healthy',
+    env: process.env.NODE_ENV || 'development',
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // --- Admin Dashboard Stats ---
 // GET /api/admin/dashboard-stats (mounted via app.use('/api/admin', adminRoutes))
 // Also works under /admin/dashboard-stats for legacy mounting.
