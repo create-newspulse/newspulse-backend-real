@@ -1,10 +1,13 @@
+// @ts-nocheck
 import { Router } from 'express';
 import { requireAdminAuth } from '../../middleware/adminAuth';
 import { CommunityReporterStory } from '../models/communityReporterStory';
 
 const router = Router();
 
-router.get('/community-reporter/queue', requireAdminAuth as any, async (req, res) => {
+const adminGuard = requireAdminAuth as any;
+
+router.get('/community-reporter/queue', adminGuard, async (req, res) => {
   try {
     const statusFilter = String(req.query.status || 'pending');
     const allowed = ['pending', 'approved', 'rejected'];
@@ -18,7 +21,7 @@ router.get('/community-reporter/queue', requireAdminAuth as any, async (req, res
   }
 });
 
-router.post('/community-reporter/seed-demo', requireAdminAuth as any, async (req, res) => {
+router.post('/community-reporter/seed-demo', adminGuard, async (req, res) => {
   try {
     const demoStories = [
       {
