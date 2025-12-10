@@ -48,23 +48,49 @@ const allowedOrigins = [
   'https://www.newspulse.co.in',
   'https://newspulse-admin-panel-real-main.vercel.app',
   'https://newspulse-frontend-live.vercel.app',
+  'https://newspulse-backend-real-main.onrender.com',
   'http://localhost:5173',
   'http://127.0.0.1:5173',
 ];
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin && allowedOrigins.includes(origin)) {
+  let allow = false;
+  try {
+    if (!origin) {
+      allow = true; // non-browser or same-origin
+    } else if (allowedOrigins.includes(origin)) {
+      allow = true;
+    } else {
+      const u = new URL(origin);
+      const base = `${u.protocol}//${u.hostname}`;
+      const isPreview = /^(https:\/\/([a-z0-9-]+)\.)?(vercel\.app|onrender\.com)$/i.test(base);
+      const isLocal = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+      allow = isPreview || isLocal;
+    }
+  } catch (_) {}
+
+  if (allow && origin) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
   }
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept,Origin');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   return next();
 });
 console.log('🔓 Global CORS middleware active for:', allowedOrigins);
+
+// Ensure all preflight paths are explicitly handled (defensive)
+app.options('*', (req, res) => {
+  const origin = req.headers.origin;
+  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept,Origin');
+  return res.sendStatus(204);
+});
 
 app.use(express.json());
 
