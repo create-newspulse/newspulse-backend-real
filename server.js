@@ -21,6 +21,7 @@ const communityAdminContactsRoutes = require(`${BASE}/routes/communityAdminConta
 // Use root-level communityReporter routes to match tests
 const communityReporterRoutes = require('./routes/communityReporter');
 const { getCommunityReporterQueue, listReporterContacts } = require('./controllers/communityReporterController');
+const { getCommunityReporterAnalytics } = require('./controllers/communityReporterController');
 const adminSettingsRoutes = require(`${BASE}/routes/adminSettings`);
 const communityReporterSettingsRouter = require(`${BASE}/routes/adminSettings/communityReporterSettings`);
 // Dashboard stats router lives in root-level routes, not nested BASE dir
@@ -179,6 +180,8 @@ try {
 // Admin routes for legacy and new admin UI paths
 app.use('/api/admin', adminRoutes); // used by admin UI
 app.use('/admin', adminRoutes);     // legacy path
+// Alias for admin analytics screen expecting /community/reporters at root
+app.get('/community/reporters', requireAdminAuth, getCommunityReporterAnalytics);
 // Mount dashboard stats router
 // /api -> /api/stats, /api/dashboard-stats
 app.use('/api', dashboardStatsRouter);

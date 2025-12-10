@@ -24,6 +24,7 @@ const {
 const {
   listReporters,
   getCommunityStats,
+  getCommunityReporterAnalytics,
 } = communityReporterController;
 
 // In-memory rate limiter state (per-IP)
@@ -167,6 +168,8 @@ router.get('/stats', (req, res) => {
 // --- Admin Reporter Directory & Community Stats ---
 // GET /api/admin/reporters
 router.get('/reporters', requireAdminAuth, listReporters);
+// GET /api/admin/community/reporters (analytics for admin screen)
+router.get('/community/reporters', requireAdminAuth, getCommunityReporterAnalytics);
 // GET /api/admin/community/stats
 router.get('/community/stats', requireAdminAuth, getCommunityStats);
 

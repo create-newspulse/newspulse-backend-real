@@ -21,6 +21,39 @@ router.get('/community-reporter/queue', adminGuard, async (req, res) => {
   }
 });
 
+// Paginated analytics of community reporters used on admin analytics screen
+router.get('/community/reporters', adminGuard, async (req, res, next) => {
+  try {
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 50;
+    const skip = (page - 1) * limit;
+
+    const pipeline: any[] = [
+      { $match: { source: 'community' } },
+      {
+        $group: {
+          _id: '$reporterId',
+          name: { $first: '$reporterName' },
+          email: { $first: '$email' },
+          totalStories: { $sum: 1 },
+          approvedStories: {
+            $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] },
+          },
+          lastStoryAt: { $max: '$createdAt' },
+        },
+      },
+      { $sort: { totalStories: -1 } },
+      { $skip: skip },
+      { $limit: limit },
+    ];
+
+    const items = await (CommunityReporterStory as any).aggregate(pipeline);
+    res.json({ items, page, limit });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post('/community-reporter/seed-demo', adminGuard, async (req, res) => {
   try {
     const demoStories = [

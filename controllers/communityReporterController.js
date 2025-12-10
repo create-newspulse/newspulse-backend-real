@@ -3,6 +3,7 @@ const CommunitySubmission = require('../models/CommunitySubmission');
 const ReporterContact = require('../models/ReporterContact');
 let CommunityStory = null;
 try { CommunityStory = require('../models/CommunityStory'); } catch (_) { /* optional model */ }
+const CommunitySubmissionModel = require('../models/CommunitySubmission');
 
 // GET /api/community-reporter/queue
 // Returns real queue items from CommunitySubmission with status mapping
@@ -163,6 +164,41 @@ async function getCommunityStats(req, res) {
   }
 }
 
+// Admin: Community Reporter Analytics
+// GET /api/admin/community/reporters
+async function getCommunityReporterAnalytics(req, res, next) {
+  try {
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limitRaw = Math.max(parseInt(req.query.limit || '50', 10), 1);
+    const limit = Math.min(limitRaw, 200);
+    const skip = (page - 1) * limit;
+
+    const pipeline = [
+      { $match: { sourceType: 'community' } },
+      {
+        $group: {
+          _id: '$reporterId',
+          name: { $first: '$reporterName' },
+          email: { $first: '$reporterEmail' },
+          totalStories: { $sum: 1 },
+          approvedStories: {
+            $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] },
+          },
+          lastStoryAt: { $max: '$createdAt' },
+        },
+      },
+      { $sort: { totalStories: -1 } },
+      { $skip: skip },
+      { $limit: limit },
+    ];
+
+    const items = await CommunitySubmissionModel.aggregate(pipeline);
+    return res.json({ items, page, limit });
+  } catch (err) {
+    return next ? next(err) : res.status(500).json({ ok: false, message: 'Failed to load reporter analytics' });
+  }
+}
+
 // POST /api/community-reporter/submit
 async function submitCommunityReport(req, res) {
   try {
@@ -269,4 +305,4 @@ async function listMyCommunityReports(req, res) {
   }
 }
 
-module.exports = { submitCommunityReport, listMyCommunityReports, getCommunityReporterQueue, listReporterContacts, listReporters, getCommunityStats };
+module.exports = { submitCommunityReport, listMyCommunityReports, getCommunityReporterQueue, listReporterContacts, listReporters, getCommunityStats, getCommunityReporterAnalytics };
