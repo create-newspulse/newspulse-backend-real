@@ -41,7 +41,7 @@ dotenv.config();
 
 const app = express();
 
-// Global CORS: strict allowlist for admin panel + site + local dev
+// Global CORS (manual middleware) BEFORE any routes
 const allowedOrigins = [
   'https://admin.newspulse.co.in',
   'https://newspulse.co.in',
@@ -52,20 +52,19 @@ const allowedOrigins = [
   'http://127.0.0.1:5173',
 ];
 
-// Single global CORS middleware using 'cors' package (BEFORE all routes)
-const corsOptions = {
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true); // allow non-browser or same-origin
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
-};
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
-console.log('🔓 CORS enabled. Allowed origins:', allowedOrigins);
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  return next();
+});
+console.log('🔓 Global CORS middleware active for:', allowedOrigins);
 
 app.use(express.json());
 
