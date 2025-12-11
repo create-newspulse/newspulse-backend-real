@@ -1,0 +1,26 @@
+name: gitleaks
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  scan:
+    name: Run Gitleaks Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          version: latest
+
+      - name: Run gitleaks
+        run: |
+          gitleaks detect --verbose --redact --source . --config .gitleaks.toml || { echo "Potential secrets detected"; exit 1; }

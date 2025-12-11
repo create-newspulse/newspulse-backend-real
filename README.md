@@ -109,6 +109,27 @@ Unknown routes return:
 - Mongo connection retries every 30s if unreachable; server stays up.
 - Avoid using the nested folder for new changes; all future changes belong at repo root.
 
+### Secret Rotation & Hygiene
+
+- If any credential is leaked (e.g., MongoDB Atlas `MONGO_URI`), immediately rotate the user/password in the provider (Atlas), then update `MONGO_URI` in deployment and local `.env`.
+- Confirm `.gitignore` excludes all `.env*` files; only `.env.example` remains versioned with placeholders.
+- Optional history scrub (recommended if a real secret was committed):
+  - Install `git-filter-repo` and run:
+    ```bash
+    # Remove entire file from history (example)
+    git filter-repo --force --invert-paths --path .env --path newspulse-backend-real-main/.env
+
+    # Or surgically replace a leaked value
+    git filter-repo --force --replace-text replacements.txt
+    # replacements.txt format:
+    # SECRET_VALUE==>REDACTED
+    ```
+  - Force-push and notify collaborators:
+    ```bash
+    git push --force-with-lease origin main
+    ```
+- CI guardrails: gitleaks GitHub Action scans pushes/PRs to `main` and fails on potential secrets.
+
 ## Deployment (Render)
 Blueprint `render.yaml` sets rootDir to `.`. Build with `npm install`, start with `npm start` (which runs `node server.js`). Ensure the required env variables are configured.
 

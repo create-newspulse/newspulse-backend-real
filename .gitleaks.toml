@@ -1,0 +1,13 @@
+[rules]
+
+[[rules.allowlist.regexes]]
+description = "Allow placeholder Mongo URIs in .env.example"
+regex = '''mongodb\+srv:\/\/<user>:<pass>@<cluster>\/[^\s]+'''
+
+[[rules.allowlist.files]]
+description = "Ignore sample env"
+path = "\.env\.example$"
+
+[rules.config]
+# Enable default gitleaks rules
+enableDefaultRules = true
