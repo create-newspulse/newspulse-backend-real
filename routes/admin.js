@@ -1,25 +1,28 @@
 // routes/admin.js
 // Admin panel routes used by https://admin.newspulse.co.in
-// Exposes POST /admin/login and GET /admin/health at ROOT paths for the Vercel admin UI.
+// Mounted from server.js as /api/admin (and optionally /admin).
 
 const express = require('express');
 const jwt = require('jsonwebtoken');
 
 const router = express.Router();
 
-// ✅ correct relative paths from routes/admin.js
+// ✅ Shared admin/founder auth middleware
 const {
   requireAdminAuth,
   requireFounderAuth,
 } = require('../middleware/adminAuth');
 
+// ✅ Admin controllers
+// communitySettings & communityReporter live under controllers/ (not controllers/admin)
 const communitySettingsController = require('../controllers/communitySettingsController');
 const communityReporterController = require('../controllers/communityReporterController');
 const {
   getCommunityFeatureToggles,
   updateCommunityFeatureToggles,
-} = require('../controllers/founderFeatureToggleController');
+} = require('../controllers/admin/communityFeatureToggles');
 
+// Destructure controller functions for clarity
 const {
   getAdminCommunitySettings,
   patchAdminCommunitySettings,
@@ -31,15 +34,17 @@ const {
   getCommunityReporterAnalytics,
 } = communityReporterController;
 
-// In-memory rate limiter state (per-IP)
-const loginAttempts = new Map(); // key: ip, value: array of timestamps (ms)
+// ─────────────────────────────────────────────
+// In-memory rate limiter for /login
+// ─────────────────────────────────────────────
+
+const loginAttempts = new Map(); // key: ip, value: number[]
 const WINDOW_MS = 15 * 60 * 1000; // 15 minutes
-const MAX_ATTEMPTS = 20; // max attempts per window
+const MAX_ATTEMPTS = 20;
 
 function isRateLimited(ip) {
   const now = Date.now();
   const arr = loginAttempts.get(ip) || [];
-  // prune old
   const fresh = arr.filter((ts) => now - ts < WINDOW_MS);
   loginAttempts.set(ip, fresh);
   return fresh.length >= MAX_ATTEMPTS;
@@ -52,7 +57,9 @@ function recordAttempt(ip) {
   loginAttempts.set(ip, arr);
 }
 
-// Rate-limit + logging wrapper
+// ─────────────────────────────────────────────
+// POST /api/admin/login
+// ─────────────────────────────────────────────
 router.post('/login', (req, res) => {
   const ip = req.ip || req.connection?.remoteAddress || 'unknown';
   const { email = '', password = '' } = req.body || {};
@@ -78,7 +85,7 @@ router.post('/login', (req, res) => {
 
   if (email.toLowerCase() === founderEmail.toLowerCase() && password === founderPassword) {
     console.info(`ADMIN LOGIN SUCCESS email=${email} ip=${ip}`);
-    // Issue JWT for bearer auth compatibility
+
     const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
     const token = jwt.sign(
       { sub: founderId, email: founderEmail, name: founderName, role: 'founder' },
@@ -86,11 +93,11 @@ router.post('/login', (req, res) => {
       { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' },
     );
 
-    // Optional legacy cookie for backward compatibility
-    // Cross-site build needs SameSite=None; Secure in prod, but for local dev over http, omit Secure.
+    // Legacy cookie so old admin builds keep working
     const dev = (process.env.NODE_ENV || 'development') === 'development';
     const secureAttr = (process.env.ADMIN_COOKIE_SECURE === '0' || dev) ? '' : '; Secure';
     const sameSite = process.env.ADMIN_COOKIE_SAMESITE || (secureAttr ? 'None' : 'Lax');
+
     res.setHeader(
       'Set-Cookie',
       `np_admin=${encodeURIComponent(founderEmail)}; Path=/; SameSite=${sameSite}${secureAttr}`
@@ -112,7 +119,11 @@ router.post('/login', (req, res) => {
   return res.status(401).json({ ok: false, message: 'Invalid credentials' });
 });
 
-// GET /admin/health - lightweight health check
+// ─────────────────────────────────────────────
+// Health + system stats
+// ─────────────────────────────────────────────
+
+// GET /api/admin/health
 router.get('/health', (req, res) => {
   res.json({
     ok: true,
@@ -123,8 +134,7 @@ router.get('/health', (req, res) => {
   });
 });
 
-// GET /api/admin/system/health (mounted under /api/admin)
-// Mirrors system health used by the admin panel to avoid 404s
+// GET /api/admin/system/health
 router.get('/system/health', (req, res) => {
   res.json({
     ok: true,
@@ -134,30 +144,7 @@ router.get('/system/health', (req, res) => {
   });
 });
 
-// --- Admin Dashboard Stats ---
-// GET /api/admin/dashboard-stats (mounted via app.use('/api/admin', adminRoutes))
-// Also works under /admin/dashboard-stats for legacy mounting.
-router.get('/dashboard-stats', (req, res) => {
-  // Basic placeholder stats. Replace with real DB queries as needed.
-  const data = {
-    totalNews: 0,
-    totalCategories: 0,
-    totalLanguages: 1,
-    activeUsers: 0,
-    aiLogs: 0,
-  };
-  return res.json({
-    ok: true,
-    success: true,
-    status: 200,
-    message: 'Dashboard stats fetched',
-    data,
-  });
-});
-
-// --- Admin System Stats ---
-// GET /api/admin/stats (mounted via app.use('/api/admin', adminRoutes))
-// Also works under /admin/stats for legacy mounting.
+// GET /api/admin/stats
 router.get('/stats', (req, res) => {
   const systemHealth = {
     uptime: parseFloat(process.uptime().toFixed(2)),
@@ -173,24 +160,37 @@ router.get('/stats', (req, res) => {
   });
 });
 
-// --- Admin Reporter Directory & Community Stats ---
+// ─────────────────────────────────────────────
+// Reporter directory & community stats
+// ─────────────────────────────────────────────
+
 // GET /api/admin/reporters
 router.get('/reporters', requireAdminAuth, listReporters);
-// GET /api/admin/community/reporters (analytics for admin screen)
+
+// GET /api/admin/community/reporters (analytics)
 router.get('/community/reporters', requireAdminAuth, getCommunityReporterAnalytics);
+
 // GET /api/admin/community/stats
 router.get('/community/stats', requireAdminAuth, getCommunityStats);
 
-// --- Community Settings ---
+// ─────────────────────────────────────────────
+// Community Settings (Admin / Founder)
+// ─────────────────────────────────────────────
+
 // GET   /api/admin/community/settings
 router.get('/community/settings', requireAdminAuth, getAdminCommunitySettings);
-// PATCH /api/admin/community/settings (founder-only)
+
+// PATCH /api/admin/community/settings  (founder only)
 router.patch('/community/settings', requireFounderAuth, patchAdminCommunitySettings);
 
-// --- Founder Feature Toggles ---
-// GET   /api/admin/founder/feature-toggles (founder-only)
+// ─────────────────────────────────────────────
+// Founder-only Feature Toggles (Admin Panel UI)
+// ─────────────────────────────────────────────
+
+// GET   /api/admin/founder/feature-toggles   (founder only)
 router.get('/founder/feature-toggles', requireFounderAuth, getCommunityFeatureToggles);
-// PATCH /api/admin/founder/feature-toggles (founder-only)
+
+// PATCH /api/admin/founder/feature-toggles   (founder only)
 router.patch('/founder/feature-toggles', requireFounderAuth, updateCommunityFeatureToggles);
 
 module.exports = router;

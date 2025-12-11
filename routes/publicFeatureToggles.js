@@ -1,10 +1,13 @@
+// routes/publicFeatureToggles.js
 const express = require('express');
-const { getPublicFeatureToggles } = require('../controllers/publicFeatureToggleController');
-
 const router = express.Router();
 
-// Public read-only feature toggles
-// GET /public/feature-toggles
-router.get('/public/feature-toggles', getPublicFeatureToggles);
+const {
+  getPublicCommunityFeatureToggles,
+} = require('../controllers/admin/communityFeatureToggles');
+
+// Public read-only endpoint used by Next.js
+// GET /api/public/feature-toggles
+router.get('/feature-toggles', getPublicCommunityFeatureToggles);
 
 module.exports = router;

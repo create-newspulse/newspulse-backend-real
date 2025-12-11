@@ -176,6 +176,8 @@ if (publicCommunitySettingsRouter) {
 if (publicFeatureTogglesRouter) {
   app.use('/', publicFeatureTogglesRouter);
   app.use('/api', publicFeatureTogglesRouter); // also expose under /api
+  // Explicit public namespace for admin panel usage
+  app.use('/api/public', publicFeatureTogglesRouter);
 }
 // Journalists public/apply + admin ops
 try {
