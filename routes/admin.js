@@ -10,11 +10,15 @@ const router = express.Router();
 // ✅ correct relative paths from routes/admin.js
 const {
   requireAdminAuth,
-  requireFounderOnly,
+  requireFounderAuth,
 } = require('../middleware/adminAuth');
 
 const communitySettingsController = require('../controllers/communitySettingsController');
 const communityReporterController = require('../controllers/communityReporterController');
+const {
+  getCommunityFeatureToggles,
+  updateCommunityFeatureToggles,
+} = require('../controllers/founderFeatureToggleController');
 
 const {
   getAdminCommunitySettings,
@@ -83,10 +87,14 @@ router.post('/login', (req, res) => {
     );
 
     // Optional legacy cookie for backward compatibility
-    // Use cross-site compatible attributes so admin panel on a different origin
-    // can include this cookie with credentialed fetches.
-    // SameSite=None requires Secure.
-    res.setHeader('Set-Cookie', `np_admin=${encodeURIComponent(founderEmail)}; Path=/; SameSite=None; Secure`);
+    // Cross-site build needs SameSite=None; Secure in prod, but for local dev over http, omit Secure.
+    const dev = (process.env.NODE_ENV || 'development') === 'development';
+    const secureAttr = (process.env.ADMIN_COOKIE_SECURE === '0' || dev) ? '' : '; Secure';
+    const sameSite = process.env.ADMIN_COOKIE_SAMESITE || (secureAttr ? 'None' : 'Lax');
+    res.setHeader(
+      'Set-Cookie',
+      `np_admin=${encodeURIComponent(founderEmail)}; Path=/; SameSite=${sameSite}${secureAttr}`
+    );
 
     return res.json({
       ok: true,
@@ -177,6 +185,12 @@ router.get('/community/stats', requireAdminAuth, getCommunityStats);
 // GET   /api/admin/community/settings
 router.get('/community/settings', requireAdminAuth, getAdminCommunitySettings);
 // PATCH /api/admin/community/settings (founder-only)
-router.patch('/community/settings', requireFounderOnly, patchAdminCommunitySettings);
+router.patch('/community/settings', requireFounderAuth, patchAdminCommunitySettings);
+
+// --- Founder Feature Toggles ---
+// GET   /api/admin/founder/feature-toggles (founder-only)
+router.get('/founder/feature-toggles', requireFounderAuth, getCommunityFeatureToggles);
+// PATCH /api/admin/founder/feature-toggles (founder-only)
+router.patch('/founder/feature-toggles', requireFounderAuth, updateCommunityFeatureToggles);
 
 module.exports = router;

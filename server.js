@@ -36,6 +36,8 @@ try { aiRoutes = require(`${BASE}/routes/ai`); } catch (_) { console.warn('[init
 try { feedRoutes = require(`${BASE}/routes/feed`); } catch (_) { console.warn('[init] optional routes/feed not found; skipping'); }
 let publicCommunitySettingsRouter = null;
 try { publicCommunitySettingsRouter = require(`${BASE}/routes/public/communitySettings`); } catch (_) { console.warn('[init] optional public community settings router not found; skipping'); }
+let publicFeatureTogglesRouter = null;
+try { publicFeatureTogglesRouter = require('./routes/publicFeatureToggles'); } catch (_) { console.warn('[init] optional public feature toggles router not found; skipping'); }
 
 dotenv.config();
 
@@ -169,6 +171,11 @@ app.use('/api/public/community-reporter', communityReporterRoutes);
 // Public community settings
 if (publicCommunitySettingsRouter) {
   app.use('/api/public/community', publicCommunitySettingsRouter);
+}
+// Public feature toggles
+if (publicFeatureTogglesRouter) {
+  app.use('/', publicFeatureTogglesRouter);
+  app.use('/api', publicFeatureTogglesRouter); // also expose under /api
 }
 // Journalists public/apply + admin ops
 try {

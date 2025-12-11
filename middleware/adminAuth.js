@@ -88,8 +88,16 @@ function requireAdminAuth(req, res, next) {
   }
 
   if (legacyEmail || accessEmail) {
-    const emailVal = (legacyEmail || accessEmail);
-    req.admin = { id: 'legacy-admin', email: emailVal, role: 'admin', name: 'Admin' };
+    const emailValRaw = (legacyEmail || accessEmail);
+    const emailVal = String(emailValRaw || '').toLowerCase();
+    const founderEmail = String(process.env.FOUNDER_EMAIL || 'founder@example.com').toLowerCase();
+    const isFounder = founderEmail && emailVal === founderEmail;
+    req.admin = {
+      id: isFounder ? 'founder' : 'legacy-admin',
+      email: emailValRaw,
+      role: isFounder ? 'founder' : 'admin',
+      name: isFounder ? 'Founder' : 'Admin',
+    };
     return next();
   }
 
@@ -113,5 +121,7 @@ function requireFounderOnly(req, res, next) {
     return next();
   });
 }
+// Alias for clarity with routing instructions
+const requireFounderAuth = requireFounderOnly;
 
-module.exports = { requireAdminAuth, requireFounderOnly };
+module.exports = { requireAdminAuth, requireFounderOnly, requireFounderAuth };
