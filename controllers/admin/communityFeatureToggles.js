@@ -74,32 +74,17 @@ async function updateCommunityFeatureToggles(req, res) {
 // ---------- PUBLIC ENDPOINT ----------
 
 // GET /api/public/feature-toggles
-// Used by Next.js: /api/public/feature-toggles.ts
+// Public-safe: never throws 500; falls back to defaults
 async function getPublicCommunityFeatureToggles(req, res) {
   try {
     let doc = await CommunityFeatureSettings.findOne({ key: 'community' }).lean();
-
     if (!doc) {
-      const created = await CommunityFeatureSettings.create({
-        key: 'community',
-        ...DEFAULT_SETTINGS,
-      });
-      doc = created.toObject();
+      doc = { key: 'community', ...DEFAULT_SETTINGS };
     }
-
-    // Only expose the safe public fields
-    const settings = toSettings(doc);
-
-    return res.json({
-      ok: true,
-      communityReporterEnabled: settings.communityReporterEnabled,
-      reporterPortalEnabled: settings.reporterPortalEnabled,
-    });
+    return res.json({ ok: true, settings: toSettings(doc) });
   } catch (err) {
     console.error('getPublicCommunityFeatureToggles error', err);
-    return res
-      .status(500)
-      .json({ ok: false, message: 'Failed to load public feature toggles.' });
+    return res.status(200).json({ ok: true, settings: toSettings(DEFAULT_SETTINGS) });
   }
 }
 
