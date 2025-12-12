@@ -184,13 +184,13 @@ router.get('/community/settings', requireAdminAuth, getAdminCommunitySettings);
 router.patch('/community/settings', requireFounderAuth, patchAdminCommunitySettings);
 
 // ─────────────────────────────────────────────
-// Founder-only Feature Toggles (Admin Panel UI)
+// Feature Toggles (Admin or Founder)
 // ─────────────────────────────────────────────
 
-// GET   /api/admin/founder/feature-toggles   (founder only)
-router.get('/founder/feature-toggles', requireFounderAuth, getCommunityFeatureToggles);
+// GET   /api/admin/feature-toggles   (admin or founder)
+router.get('/feature-toggles', requireAdminAuth, getCommunityFeatureToggles);
 
-// PATCH /api/admin/founder/feature-toggles   (founder only)
-router.patch('/founder/feature-toggles', requireFounderAuth, updateCommunityFeatureToggles);
+// PATCH /api/admin/feature-toggles   (admin or founder)
+router.patch('/feature-toggles', requireAdminAuth, updateCommunityFeatureToggles);
 
 module.exports = router;

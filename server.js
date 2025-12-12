@@ -27,6 +27,7 @@ const communityReporterSettingsRouter = require(`${BASE}/routes/adminSettings/co
 // Dashboard stats router lives in root-level routes, not nested BASE dir
 const dashboardStatsRouter = require('./routes/dashboardStats');
 const adminCommunityReporterQueueRouter = require('./routes/admin/communityReporterQueue');
+const founderFeatureTogglesRouter = require('./routes/admin/founderFeatureToggles');
 const CommunitySubmission = require(`${BASE}/models/CommunitySubmission`);
 const News = require(`${BASE}/models/News`);
 const { requireAdminAuth } = require('./middleware/adminAuth');
@@ -49,7 +50,10 @@ const app = express();
 const allowedOrigins = [
   'https://admin.newspulse.co.in',
   'http://localhost:5173',
-];
+  'https://newspulse.co.in',
+  'https://www.newspulse.co.in',
+  process.env.FRONTEND_ORIGIN || '',
+].filter(Boolean);
 
 const corsOptions = {
   origin(origin, callback) {
@@ -215,6 +219,8 @@ app.use('/api/admin', adminSettingsRoutes);
 app.use('/admin-api/admin', adminSettingsRoutes);
 // Community Reporter Settings router (same mount /api/admin)
 app.use('/api/admin', communityReporterSettingsRouter);
+// Founder feature toggles (admin/founder protected)
+app.use('/api/admin/founder', founderFeatureTogglesRouter);
 // Community Reporter Queue (admin protected)
 app.use('/api/admin', adminCommunityReporterQueueRouter);
 app.use('/admin-api/admin', adminCommunityReporterQueueRouter);

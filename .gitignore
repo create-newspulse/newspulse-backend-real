@@ -1,4 +1,31 @@
-###################################
+# Node/Express
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env & secrets
+.env
+.env.*
+
+# Logs & coverage
+*.log
+coverage/
+
+# Editor/OS junk
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Build outputs
+dist/
+build/
+out/
+
+# Temporary
+tmp/
+.tmp/###################################
 # Node / package managers
 ###################################
 node_modules/

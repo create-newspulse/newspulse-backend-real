@@ -1,43 +1,40 @@
 // controllers/admin/communityFeatureToggles.js
-const CommunityFeatureSettings = require('../../models/CommunityFeatureSettings');
+const FeatureToggles = require('../../models/FeatureToggles');
 
-const DEFAULT_SETTINGS = {
-  communityReporterEnabled: true,
-  reporterPortalEnabled: true,
-  allowNewSubmissions: true,
-  allowMyStoriesPortal: true,
-  allowJournalistApplications: true,
-  safeModeManualReviewOnly: false,
+const DEFAULT_TOGGLES = {
+  communityReporterClosed: false,
+  reporterPortalClosed: false,
 };
 
-function toSettings(doc) {
+function toAdminResponse(doc) {
   const s = doc || {};
   return {
-    communityReporterEnabled: !!s.communityReporterEnabled,
-    reporterPortalEnabled: !!s.reporterPortalEnabled,
-    allowNewSubmissions: !!s.allowNewSubmissions,
-    allowMyStoriesPortal: !!s.allowMyStoriesPortal,
-    allowJournalistApplications: !!s.allowJournalistApplications,
-    safeModeManualReviewOnly: !!s.safeModeManualReviewOnly,
+    communityReporterClosed: !!s.communityReporterClosed,
+    reporterPortalClosed: !!s.reporterPortalClosed,
+    updatedAt: s.updatedAt || null,
   };
 }
 
-// ---------- FOUNDER / ADMIN ENDPOINTS ----------
+function toPublicResponse(doc) {
+  const s = doc || {};
+  return {
+    communityReporterClosed: !!s.communityReporterClosed,
+    reporterPortalClosed: !!s.reporterPortalClosed,
+    updatedAt: s.updatedAt || null,
+  };
+}
 
-// GET /api/admin/founder/feature-toggles
+// ---------- ADMIN ENDPOINTS ----------
+
+// GET /api/admin/feature-toggles
 async function getCommunityFeatureToggles(req, res) {
   try {
-    let doc = await CommunityFeatureSettings.findOne({ key: 'community' }).lean();
-
+    let doc = await FeatureToggles.findOne({}).lean();
     if (!doc) {
-      const created = await CommunityFeatureSettings.create({
-        key: 'community',
-        ...DEFAULT_SETTINGS,
-      });
+      const created = await FeatureToggles.create({ ...DEFAULT_TOGGLES });
       doc = created.toObject();
     }
-
-    return res.json({ ok: true, settings: toSettings(doc) });
+    return res.json({ ok: true, settings: toAdminResponse(doc) });
   } catch (err) {
     console.error('getCommunityFeatureToggles error', err);
     return res
@@ -46,23 +43,24 @@ async function getCommunityFeatureToggles(req, res) {
   }
 }
 
-// PATCH /api/admin/founder/feature-toggles
+// PATCH /api/admin/feature-toggles
 async function updateCommunityFeatureToggles(req, res) {
   try {
     const patch = {};
-    for (const key of Object.keys(DEFAULT_SETTINGS)) {
+    for (const key of Object.keys(DEFAULT_TOGGLES)) {
       if (req.body && typeof req.body[key] === 'boolean') {
         patch[key] = req.body[key];
       }
     }
 
-    const updated = await CommunityFeatureSettings.findOneAndUpdate(
-      { key: 'community' },
+    const updatedDoc = await FeatureToggles.findOneAndUpdate(
+      {},
       { $set: patch },
       { new: true, upsert: true }
     ).lean();
 
-    return res.json({ ok: true, settings: toSettings(updated) });
+    console.log('[feature-toggles] updated', patch);
+    return res.json({ ok: true, settings: toAdminResponse(updatedDoc) });
   } catch (err) {
     console.error('updateCommunityFeatureToggles error', err);
     return res
@@ -74,17 +72,18 @@ async function updateCommunityFeatureToggles(req, res) {
 // ---------- PUBLIC ENDPOINT ----------
 
 // GET /api/public/feature-toggles
-// Public-safe: never throws 500; falls back to defaults
 async function getPublicCommunityFeatureToggles(req, res) {
   try {
-    let doc = await CommunityFeatureSettings.findOne({ key: 'community' }).lean();
+    let doc = await FeatureToggles.findOne({}).lean();
     if (!doc) {
-      doc = { key: 'community', ...DEFAULT_SETTINGS };
+      doc = { ...DEFAULT_TOGGLES };
     }
-    return res.json({ ok: true, settings: toSettings(doc) });
+    res.set('Cache-Control', 'no-store');
+    return res.json({ ok: true, settings: toPublicResponse(doc) });
   } catch (err) {
     console.error('getPublicCommunityFeatureToggles error', err);
-    return res.status(200).json({ ok: true, settings: toSettings(DEFAULT_SETTINGS) });
+    res.set('Cache-Control', 'no-store');
+    return res.status(200).json({ ok: true, settings: toPublicResponse(DEFAULT_TOGGLES) });
   }
 }
 

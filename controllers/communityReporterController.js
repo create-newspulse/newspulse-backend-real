@@ -265,6 +265,28 @@ async function submitCommunityReport(req, res) {
     });
 
     await doc.save();
+
+    // Also create a unified CommunitySubmission record to keep flows consistent
+    try {
+      await CommunitySubmissionModel.create({
+        reporterName: doc.reporterName,
+        reporterEmail: doc.reporterEmail,
+        name: doc.reporterName,
+        email: doc.reporterEmail,
+        category: doc.category,
+        headline: doc.headline,
+        body: doc.storyText,
+        city: doc.reporterCity || undefined,
+        state: doc.reporterState || undefined,
+        country: doc.reporterCountry || undefined,
+        location: { city: doc.reporterCity || null, state: doc.reporterState || null, country: doc.reporterCountry || null },
+        status: 'PENDING_FOUNDER',
+        sourceType: doc.reporterType === 'professional' ? 'journalist' : 'community',
+        reporterVerificationLevel: 'unverified',
+      });
+    } catch (syncErr) {
+      console.warn('[COMMUNITY_REPORT][submit-sync] failed to create CommunitySubmission mirror', syncErr?.message || syncErr);
+    }
     const reporterTypeOut = doc.reporterType === 'professional' ? 'journalist' : 'community';
     const statusOut = 'under_review'; // map internal 'pending' to external 'under_review'
 
@@ -288,17 +310,42 @@ async function listMyCommunityReports(req, res) {
   try {
     const email = String(req.query.email || '').trim().toLowerCase();
     if (!email) return res.status(400).json({ success: false, message: 'Email is required' });
-    const items = await CommunityReport.find({ reporterEmail: email }).sort({ createdAt: -1 }).lean();
-    // Minimal projection for public list
-    const mapped = items.map(i => ({
+
+    // Case-insensitive match on reporterEmail in CommunitySubmission
+    const emailRegex = new RegExp(`^${email}$`, 'i');
+    const submissions = await CommunitySubmissionModel.find({ reporterEmail: emailRegex })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // Also include legacy CommunityReport docs for completeness
+    const legacyReports = await CommunityReport.find({ reporterEmail: emailRegex })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const mappedSubs = submissions.map(i => ({
       id: i._id.toString(),
       referenceId: i.referenceId || null,
       headline: i.headline,
       category: i.category,
-      status: i.status,
+      status: (function () {
+        const s = String(i.status || '').toLowerCase();
+        if (['approved', 'rejected', 'withdrawn'].includes(s)) return s;
+        return 'under_review';
+      })(),
       createdAt: i.createdAt,
     }));
-    return res.json({ success: true, items: mapped, total: mapped.length });
+
+    const mappedLegacy = legacyReports.map(i => ({
+      id: i._id.toString(),
+      referenceId: i.referenceId || null,
+      headline: i.headline,
+      category: i.category,
+      status: i.status || 'under_review',
+      createdAt: i.createdAt,
+    }));
+
+    const items = [...mappedSubs, ...mappedLegacy].sort((a, b) => (new Date(b.createdAt)) - (new Date(a.createdAt)));
+    return res.json({ success: true, items, total: items.length });
   } catch (e) {
     console.error('[COMMUNITY_REPORT][list-error]', e?.message || e);
     return res.status(500).json({ success: false, message: 'Failed to load stories' });
