@@ -32,36 +32,28 @@ const app = express();
 
 // --- Global CORS: strict allowlist for prod + local dev ---
 const allowedOrigins = [
-  'https://admin.newspulse.co.in',
+  'http://localhost:5173',
+  'http://localhost:3000',
   'https://newspulse.co.in',
   'https://www.newspulse.co.in',
-  'https://newspulse-admin-panel-real-main.vercel.app',
-  'https://newspulse-frontend-live.vercel.app',
-  'https://newspulse-backend-real-main.onrender.com',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
+  'https://admin.newspulse.co.in',
+  'https://newspulse-admin-panel-real.vercel.app',
 ];
+
+// Allow all Vercel preview URLs for the admin panel project
+const ADMIN_PANEL_VERCEL_REGEX = /^https:\/\/newspulse-admin-panel-real-.*\.vercel\.app$/;
+
 const corsOptions = {
   origin: (origin, callback) => {
     try {
       // Allow same-origin or non-browser requests (no origin header)
       if (!origin) return callback(null, true);
 
-      // Exact matches
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-
-      // Allow Vercel and Render preview subdomains
-      const allowWildcard = /^(https:\/\/([a-z0-9-]+)\.)?(vercel\.app|onrender\.com)$/i;
-      const url = new URL(origin);
-      const host = url.hostname;
-      const base = `${url.protocol}//${host}`;
-      if (allowWildcard.test(base)) return callback(null, true);
-
-      // Allow localhost on any port during dev
-      if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) return callback(null, true);
+      const isAllowed = allowedOrigins.includes(origin) || ADMIN_PANEL_VERCEL_REGEX.test(origin);
+      if (isAllowed) return callback(null, true);
 
       console.log('CORS blocked origin:', origin);
-      return callback(new Error('Not allowed by CORS'));
+      return callback(new Error('Not allowed by CORS: ' + origin));
     } catch (e) {
       console.log('CORS origin parse error:', e?.message || e);
       return callback(new Error('Not allowed by CORS'));

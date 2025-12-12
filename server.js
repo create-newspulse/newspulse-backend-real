@@ -45,28 +45,36 @@ dotenv.config();
 const app = express();
 
 // Global CORS (cors package) BEFORE any routes
-// Fixed allowlist to avoid over-broad CORS. This server must be callable
-// from the production admin panel and local dev admin (Vite).
+// Allow specific known origins plus Vercel preview URLs for the admin panel.
 const allowedOrigins = [
-  'https://admin.newspulse.co.in',
   'http://localhost:5173',
+  'http://localhost:3000',
   'https://newspulse.co.in',
   'https://www.newspulse.co.in',
-  process.env.FRONTEND_ORIGIN || '',
-].filter(Boolean);
+  'https://admin.newspulse.co.in',
+  'https://newspulse-admin-panel-real.vercel.app',
+];
+
+// Allow all Vercel preview URLs for the admin panel project
+const ADMIN_PANEL_VERCEL_REGEX = /^https:\/\/newspulse-admin-panel-real-.*\.vercel\.app$/;
 
 const corsOptions = {
   origin(origin, callback) {
+    // Allow non-browser clients (no Origin header)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error(`Not allowed by CORS: ${origin}`));
+
+    const isAllowed =
+      allowedOrigins.includes(origin) || ADMIN_PANEL_VERCEL_REGEX.test(origin);
+
+    if (isAllowed) return callback(null, true);
+    return callback(new Error('Not allowed by CORS: ' + origin));
   },
   credentials: true,
 };
 
 app.use(cors(corsOptions));
-// Handle CORS preflight for all routes
-app.options('*', cors());
+// Handle CORS preflight for all routes with same options
+app.options('*', cors(corsOptions));
 
 app.use(express.json());
 
