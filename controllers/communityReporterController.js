@@ -264,6 +264,8 @@ async function submitCommunityReport(req, res) {
       reviewNotes: undefined,
     });
 
+    // Log reporterEmail being saved
+    console.log('[COMMUNITY_REPORT][submit] saving for reporterEmail:', String(doc.reporterEmail || '').toLowerCase());
     await doc.save();
 
     // Also create a unified CommunitySubmission record to keep flows consistent
@@ -308,7 +310,9 @@ async function submitCommunityReport(req, res) {
 // GET /api/community-reporter/my-stories?email=...
 async function listMyCommunityReports(req, res) {
   try {
-    const email = String(req.query.email || '').trim().toLowerCase();
+    const email = String(req.query.email || req.body?.email || '').trim().toLowerCase();
+    // Log email used to search my stories
+    console.log('[COMMUNITY_REPORT][my-stories] lookup email:', email);
     if (!email) return res.status(400).json({ success: false, message: 'Email is required' });
 
     // Case-insensitive match on reporterEmail in CommunitySubmission

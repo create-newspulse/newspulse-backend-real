@@ -113,6 +113,8 @@ router.post('/submissions', async (req, res) => {
     const cityNorm = (city || location || '').trim();
     const stateNorm = (state || '').trim();
     const countryNorm = (country || '').trim();
+    // Log reporter email used for saving
+    console.log('[COMMUNITY_REPORTER][create] saving submission for reporterEmail:', (email || '').trim().toLowerCase());
     const submission = await CommunitySubmission.create({
       // Required duplicates for model
       reporterName: (fullName || name || '').trim(),
