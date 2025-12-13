@@ -8,7 +8,9 @@ const mongoose = require('mongoose');
 const CommunitySubmissionSchema = new mongoose.Schema({
   // Core reporter info
   reporterName: { type: String, required: true, trim: true },
-  reporterEmail: { type: String, required: true, trim: true, lowercase: true },
+  reporterEmail: { type: String, required: true, trim: true, lowercase: true, index: true },
+  // Normalized reporter email for consistent lookups
+  reporterEmailNorm: { type: String, required: false, index: true },
   // Optional aliases preserved for backward compatibility and API expectations
   name: { type: String, required: false, trim: true },
   email: { type: String, required: false, trim: true, lowercase: true },
@@ -109,5 +111,19 @@ CommunitySubmissionSchema.virtual('reporterDisplayName').get(function() {
 // Ensure virtuals are included when converting to JSON (for future direct usage)
 CommunitySubmissionSchema.set('toJSON', { virtuals: true });
 CommunitySubmissionSchema.set('toObject', { virtuals: true });
+
+// Ensure reporterEmailNorm is always normalized before save
+CommunitySubmissionSchema.pre('save', function(next) {
+  try {
+    if (this.reporterEmail) {
+      this.reporterEmailNorm = String(this.reporterEmail).trim().toLowerCase();
+    } else if (this.email) {
+      this.reporterEmailNorm = String(this.email).trim().toLowerCase();
+    } else if (this.contact && this.contact.email) {
+      this.reporterEmailNorm = String(this.contact.email).trim().toLowerCase();
+    }
+  } catch (_) {}
+  next();
+});
 
 module.exports = mongoose.models.CommunitySubmission || mongoose.model('CommunitySubmission', CommunitySubmissionSchema);

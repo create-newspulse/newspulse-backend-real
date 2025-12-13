@@ -322,8 +322,8 @@ app.get('/admin/community/reporter-contacts', requireAdminAuth, async (req, res,
 });
 app.get('/admin/community/reporter-stories', requireAdminAuth, async (req, res) => {
   try {
-    const reporterKeyRaw = (req.query.reporterKey || '').toString().trim();
-    if (!reporterKeyRaw) return res.status(400).json({ ok: false, message: 'Missing reporterKey' });
+    const reporterKeyRaw = ((req.query.reporterKey || req.query.email || '')).toString().trim();
+    if (!reporterKeyRaw) return res.status(400).json({ ok: false, message: 'Missing reporterKey or email' });
     const reporterKey = reporterKeyRaw.toLowerCase();
     const pageNum = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limitNum = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);

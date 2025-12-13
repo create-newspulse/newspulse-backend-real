@@ -1,5 +1,10 @@
 const express = require('express');
 const CommunitySubmission = require('../models/CommunitySubmission');
+// Re-use legacy models from nested app for reporter + story linkage
+let Reporter = null;
+let ReporterStory = null;
+try { Reporter = require('../newspulse-backend-real-main/models/Reporter'); } catch (_) {}
+try { ReporterStory = require('../newspulse-backend-real-main/models/CommunityStory'); } catch (_) {}
 const { runCommunityAiChecks } = require('../services/communityAi');
 const { submitCommunityReport, listMyCommunityReports } = require('../controllers/communityReporterController');
 const { requireAdminAuth } = require('../middleware/adminAuth');
@@ -176,9 +181,91 @@ router.post('/submissions', async (req, res) => {
   }
 });
 
+// Public API: list community reporter stories by email for “My Community Stories” page.
+// GET /api/community-reporter/my-stories?email=...
+// Returns a safe public listing filtered by normalized reporter email
+router.get('/my-stories', async (req, res) => {
+  try {
+    const emailParam = req.query && req.query.email;
+    const rawEmail = String(emailParam || '').trim();
+    if (!rawEmail) {
+      return res.status(400).json({ ok: false, message: 'email is required' });
+    }
+
+    const normalizedEmail = rawEmail.toLowerCase();
+
+    // Prefer normalized reporterEmailNorm lookups, with fallback for legacy docs
+    const stories = await CommunitySubmission
+      .find({
+        $or: [
+          { reporterEmailNorm: normalizedEmail },
+          { reporterEmail: normalizedEmail },
+          { email: normalizedEmail },
+          { 'contact.email': normalizedEmail },
+        ],
+        isDeleted: { $ne: true },
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const payload = stories.map(s => ({
+      id: String(s._id),
+      headline: s.headline,
+      summary: (s.summary || (s.body || '')).slice(0, 160),
+      status: s.status,
+      category: s.category,
+      city: s.city || (s.location && s.location.city) || null,
+      language: s.language || 'en',
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt,
+    }));
+
+    console.log('[MyStories] email =', normalizedEmail, 'count =', payload.length);
+    return res.json({ ok: true, stories: payload });
+  } catch (err) {
+    console.error('MyStories: failed to load stories', err);
+    return res.status(500).json({ ok: false, message: 'Failed to load stories' });
+  }
+});
+
+// Generic stories listing supporting optional ?email= and ?status=
+// GET /api/community-reporter/reporter-stories?email=foo@example.com&status=pending
+router.get('/reporter-stories', async (req, res) => {
+  try {
+    const { email, status } = req.query || {};
+    const filter = {};
+
+    if (email) {
+      const normalized = String(email).trim().toLowerCase();
+      if (normalized) {
+        filter.$or = [
+          { reporterEmail: normalized },
+          { email: normalized },
+          { 'contact.email': normalized },
+        ];
+      }
+    }
+
+    if (status && status !== 'all') {
+      filter.status = status;
+    }
+
+    const stories = await CommunitySubmission
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.json({ ok: true, stories });
+  } catch (err) {
+    console.error('Error in GET /reporter-stories', err);
+    return res.status(500).json({ ok: false, error: 'internal_error' });
+  }
+});
+
 // Phase 1 endpoints (public): submit + list by email
 router.post('/submit', submitCommunityReport);
-router.get('/my-stories', listMyCommunityReports);
+// Keep legacy handler exported but our above inline endpoint returns desired shape
+// router.get('/my-stories', listMyCommunityReports);
 
 // Note: queue endpoint temporarily served publicly via app-level route in server.js
 
