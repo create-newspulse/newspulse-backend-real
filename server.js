@@ -365,6 +365,58 @@ app.get('/admin/community/reporter-stories', requireAdminAuth, async (req, res) 
   }
 });
 
+// Admin: Founder overview – list all community stories with optional status/search filters
+// GET /api/admin/community/my-stories?status=pending&search=foo
+app.get('/api/admin/community/my-stories', requireAdminAuth, async (req, res) => {
+  try {
+    const { status = 'all', search = '' } = req.query || {};
+    const filter = {};
+
+    // Status filter: only apply when not 'all'
+    const statusNorm = String(status || '').trim().toLowerCase();
+    if (statusNorm && statusNorm !== 'all') {
+      // Accept common status labels used across flows
+      const variants = {
+        pending: ['pending', 'under_review', 'new', 'PENDING_FOUNDER', 'PENDING', 'NEW'],
+        approved: ['approved', 'APPROVED'],
+        rejected: ['rejected', 'REJECTED'],
+        withdrawn: ['withdrawn', 'WITHDRAWN'],
+      };
+      const v = variants[statusNorm] || [statusNorm];
+      filter.status = { $in: v };
+    }
+
+    // Search filter: case-insensitive regex on headline
+    const searchNorm = String(search || '').trim();
+    if (searchNorm) {
+      filter.headline = { $regex: searchNorm, $options: 'i' };
+    }
+
+    const docs = await CommunitySubmission
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const items = docs.map(d => ({
+      _id: String(d._id),
+      id: String(d._id),
+      title: d.headline || '',
+      headline: d.headline || '',
+      status: d.status || 'pending',
+      language: d.language || 'en',
+      category: d.category || null,
+      city: (d.location?.city || d.city || d.locationDetail?.city || null),
+      createdAt: d.createdAt || null,
+      updatedAt: d.updatedAt || null,
+    }));
+
+    return res.json({ ok: true, items, total: items.length });
+  } catch (e) {
+    console.error('[ADMIN][my-stories] error', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load community stories' });
+  }
+});
+
 app.get('/api/admin/me', requireAdminAuth, (req, res) => {
   const a = req.admin || {};
   return res.json({ success: true, admin: { id: a.id || 'unknown', email: a.email || '', role: a.role || 'admin' } });
