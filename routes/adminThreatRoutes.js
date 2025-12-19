@@ -33,11 +33,11 @@ function requireAdmin(req, res, next) {
           req.admin = { id: payload.sub, email: payload.email, role, name: payload.name };
           return next();
         }
-        return res.status(403).json({ ok: false, success: false, status: 403, message: 'Forbidden' });
+        return res.status(403).json({ success: false, code: 'FORBIDDEN' });
       } catch (e) {
         // fall through to legacy cookie if present
         if (!legacyAdminEmail) {
-          return res.status(401).json({ ok: false, success: false, status: 401, message: 'Admin auth required' });
+          return res.status(401).json({ success: false, code: 'UNAUTHORIZED' });
         }
       }
     }
@@ -47,9 +47,9 @@ function requireAdmin(req, res, next) {
       return next();
     }
 
-    return res.status(401).json({ ok: false, success: false, status: 401, message: 'Admin auth required' });
+    return res.status(401).json({ success: false, code: 'UNAUTHORIZED' });
   } catch (e) {
-    return res.status(401).json({ ok: false, success: false, status: 401, message: 'Admin auth required' });
+    return res.status(401).json({ success: false, code: 'UNAUTHORIZED' });
   }
 }
 

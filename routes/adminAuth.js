@@ -28,7 +28,7 @@ router.get('/session', (req, res) => {
     // Include top-level email for legacy consumers in the admin UI
     return res.json({ ok: true, authenticated: true, email, user: { id: 'self', email, role: 'admin' } });
   }
-  return res.status(401).json({ ok: false, authenticated: false });
+  return res.status(401).json({ success: false, code: 'UNAUTHORIZED' });
 });
 
 // Simple login endpoint (env-based founder creds + optional alternate creds)
@@ -77,7 +77,7 @@ router.post('/login', (req, res) => {
     const matched = allowedCombos.find(c => c.email === email && c.pass === password);
     if (!matched) {
       console.warn('[admin/login] invalid credentials', { email, passwordLen: password.length });
-      return res.status(401).json({ ok: false, error: 'INVALID_CREDENTIALS', message: 'Invalid email or password' });
+      return res.status(401).json({ success: false, code: 'UNAUTHORIZED' });
     }
 
     // Issue a lightweight opaque token and set cookie for session probe

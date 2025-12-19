@@ -4,22 +4,7 @@
 
 const express = require('express');
 const router = express.Router();
-
-function requireAdmin(req, res, next) {
-  const auth = String(req.headers['authorization'] || '');
-  const bearer = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
-  const cookieHeader = req.headers.cookie || '';
-  let email = '';
-  cookieHeader.split(';').forEach(c => {
-    const [k, ...v] = c.trim().split('=');
-    if (k === 'np_admin') email = decodeURIComponent(v.join('=') || '');
-  });
-  if (!bearer && !email) {
-    return res.status(401).json({ ok: false, success: false, status: 401, message: 'Admin auth required' });
-  }
-  req.adminEmail = email || 'admin@newspulse.ai';
-  next();
-}
+const { requireAdminAuth } = require('../middleware/adminAuth');
 
 // Mock data stores (in-memory)
 let escalationRules = [
@@ -41,22 +26,22 @@ let latestScan = {
 };
 
 // GET /api/security/escalation-rules
-router.get('/escalation-rules', requireAdmin, (req, res) => {
+router.get('/escalation-rules', requireAdminAuth, (req, res) => {
   res.json({ ok: true, success: true, status: 200, data: { rules: escalationRules, lastUpdated: new Date().toISOString() } });
 });
 
 // GET /api/security/incidents
-router.get('/incidents', requireAdmin, (req, res) => {
+router.get('/incidents', requireAdminAuth, (req, res) => {
   res.json({ ok: true, success: true, status: 200, data: { items: incidents, total: incidents.length, lastUpdated: new Date().toISOString() } });
 });
 
 // GET /api/security/threat-scan (status of latest scan)
-router.get('/threat-scan', requireAdmin, (req, res) => {
+router.get('/threat-scan', requireAdminAuth, (req, res) => {
   res.json({ ok: true, success: true, status: 200, data: latestScan });
 });
 
 // POST /api/security/threat-scan (start new scan)
-router.post('/threat-scan', requireAdmin, (req, res) => {
+router.post('/threat-scan', requireAdminAuth, (req, res) => {
   const scanId = 'scan-' + Date.now();
   // Simulate an immediate completed scan with mock findings
   latestScan = {

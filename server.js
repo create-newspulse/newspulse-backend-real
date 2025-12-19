@@ -22,12 +22,18 @@ const communityAdminContactsRoutes = require(`${BASE}/routes/communityAdminConta
 const communityReporterRoutes = require('./routes/communityReporter');
 const { getCommunityReporterQueue, listReporterContacts } = require('./controllers/communityReporterController');
 const { getCommunityReporterAnalytics } = require('./controllers/communityReporterController');
-const adminSettingsRoutes = require(`${BASE}/routes/adminSettings`);
+// Use root-level admin settings router for base /settings endpoint
+const adminSettingsRoutes = require('./routes/adminSettings.routes');
+// Admin system routes (e.g., AI training info under /system)
+const adminSystemRoutes = require('./routes/adminSystem.routes');
 const communityReporterSettingsRouter = require(`${BASE}/routes/adminSettings/communityReporterSettings`);
 // Dashboard stats router lives in root-level routes, not nested BASE dir
 const dashboardStatsRouter = require('./routes/dashboardStats');
 const adminCommunityReporterQueueRouter = require('./routes/admin/communityReporterQueue');
 const founderFeatureTogglesRouter = require('./routes/admin/founderFeatureToggles');
+const alertsRouter = require('./routes/alerts');
+const securityRouter = require('./routes/security');
+const adminThreatRouter = require('./routes/adminThreatRoutes');
 const CommunitySubmission = require(`${BASE}/models/CommunitySubmission`);
 const News = require(`${BASE}/models/News`);
 const { requireAdminAuth } = require('./middleware/adminAuth');
@@ -103,6 +109,7 @@ app.get('/system/ai-training-info', (req, res) => {
 // before any 404/error handlers so they are always reachable.
 app.get('/health', (req, res) => {
   return res.status(200).json({
+    ok: true,
     status: 'ok',
     service: 'newspulse-backend',
     timestamp: new Date().toISOString(),
@@ -214,7 +221,8 @@ app.use('/admin-auth', adminAuthRoutes);
 app.use('/system/ai-training-info', aiTrainingInfoRoutes);
 app.use('/api/system/ai-training-info', aiTrainingInfoRoutes);
 // Admin-prefixed alias for system AI training info
-app.use('/api/admin/system/ai-training-info', aiTrainingInfoRoutes);
+// Admin system endpoints mounted under /api/admin (handled by adminSystemRoutes)
+app.use('/api/admin', adminSystemRoutes);
 // health routes handled directly above by healthHandler
 // System monitor hub (API + non-API alias)
 app.use('/api/system', systemRoutesRouter);
@@ -222,9 +230,15 @@ app.use('/system', systemRoutesRouter);
 // Admin-prefixed alias for system routes (ensures /api/admin/system/health via mounted router)
 app.use('/api/admin/system', systemRoutesRouter);
 app.use('/api/admin/community', adminCommunityRoutes);
+// Admin Settings router (GET /api/admin/settings)
+// Mounted router returns { success: true, data: {...} }
 // Admin Settings (includes /api/admin/settings/community-reporter)
 app.use('/api/admin', adminSettingsRoutes);
 app.use('/admin-api/admin', adminSettingsRoutes);
+// Compatibility alias: some frontends call /admin-api/api/admin/*
+app.use('/admin-api/api/admin', adminSettingsRoutes);
+// Legacy alias: expose admin settings under /admin as well
+app.use('/admin', adminSettingsRoutes);
 // Community Reporter Settings router (same mount /api/admin)
 app.use('/api/admin', communityReporterSettingsRouter);
 // Founder feature toggles (admin/founder protected)
@@ -233,6 +247,12 @@ app.use('/api/admin/founder', founderFeatureTogglesRouter);
 app.use('/api/admin', adminCommunityReporterQueueRouter);
 app.use('/admin-api/admin', adminCommunityReporterQueueRouter);
 app.use('/admin', adminCommunityReporterQueueRouter);
+// Security & Lockdown and Alerts routers
+app.use('/api/security', securityRouter);
+app.use('/api/alerts', alertsRouter);
+// Threat dashboard endpoints
+app.use('/api/dashboard', adminThreatRouter);
+app.use('/api/admin', adminThreatRouter);
 // Explicit alias to ensure GET /api/admin/community-reporter/queue returns 200 with auth
 app.get('/api/admin/community-reporter/queue', requireAdminAuth, async (req, res) => {
   try {
@@ -266,6 +286,15 @@ if (feedRoutes) app.use('/api/feed', feedRoutes);
 app.use('/api/admin/community', communityAdminContactsRoutes);
 app.use('/admin-api/admin/community', communityAdminContactsRoutes);
 app.use('/admin/community', communityAdminContactsRoutes);
+// Public website settings (safe keys only)
+app.get('/settings/public', (req, res) => {
+  return res.json({
+    ok: true,
+    version: 1,
+    public: {},
+    updatedAt: new Date().toISOString(),
+  });
+});
 // Admin journalists endpoints
 try {
   const adminJournalists = require('./routes/admin/journalistsAdmin');
@@ -641,6 +670,24 @@ app.get('/api/analytics/ab-tests', (req, res) => {
   });
 });
 
+// Debug routes list (place before 404 handler)
+app.get('/_debug/routes', (req, res) => {
+  const list = [];
+  try {
+    app._router && app._router.stack && app._router.stack.forEach(layer => {
+      if (layer.route && layer.route.path) {
+        list.push(layer.route.path);
+      } else if (layer.name === 'router' && layer.handle && layer.handle.stack) {
+        const prefix = layer.regexp && layer.regexp.fast_slash ? '' : extractPrefix(layer.regexp);
+        layer.handle.stack.forEach(rLayer => { if (rLayer.route && rLayer.route.path) list.push(prefix + rLayer.route.path); });
+      }
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: 'Introspection failed', error: e?.message || e });
+  }
+  return res.json({ ok: true, total: list.length, reporter: list.filter(r => r.includes('reporter')), all: list });
+});
+
 // --- System version log stub ---
 app.get('/api/system/version-log', (req, res) => {
   return res.json({
@@ -670,9 +717,9 @@ app.get('/threat-stats', (req, res) => {
   });
 });
 
-// 404
+// 404 (final handler returning requested shape)
 app.use((req, res) => {
-  res.status(404).json({ ok: false, success: false, status: 404, message: 'Route not found', path: req.originalUrl });
+  res.status(404).json({ success: false, message: 'Route not found', path: req.originalUrl });
 });
 
 // 500
@@ -715,24 +762,5 @@ function extractPrefix(regexp) {
   } catch (_) {}
   return '';
 }
-
-// Debug routes list
-// Debug routes list (place before 404 handler)
-app.get('/_debug/routes', (req, res) => {
-  const list = [];
-  try {
-    app._router && app._router.stack && app._router.stack.forEach(layer => {
-      if (layer.route && layer.route.path) {
-        list.push(layer.route.path);
-      } else if (layer.name === 'router' && layer.handle && layer.handle.stack) {
-        const prefix = layer.regexp && layer.regexp.fast_slash ? '' : extractPrefix(layer.regexp);
-        layer.handle.stack.forEach(rLayer => { if (rLayer.route && rLayer.route.path) list.push(prefix + rLayer.route.path); });
-      }
-    });
-  } catch (e) {
-    return res.status(500).json({ ok: false, message: 'Introspection failed', error: e?.message || e });
-  }
-  return res.json({ ok: true, total: list.length, reporter: list.filter(r => r.includes('reporter')), all: list });
-});
 
 module.exports = app;
