@@ -1,6 +1,7 @@
 const express = require('express');
 const FounderFeatureToggles = require('../../models/FounderFeatureToggles');
-const { requireAdminAuth } = require('../../middleware/adminAuth');
+const { requireAdminAuth, requireFounderAuth } = require('../../middleware/adminAuth');
+const { requireOwnerKey } = require('../../middleware/requireOwnerKey');
 
 const router = express.Router();
 
@@ -29,6 +30,9 @@ router.get('/feature-toggles', requireAdminAuth, async (req, res) => {
 });
 
 router.patch('/feature-toggles', requireAdminAuth, async (req, res) => {
+	// Owner-key unlock required for state-changing operations
+	return requireFounderAuth(req, res, async () => {
+		return requireOwnerKey(req, res, async () => {
 	const { communityReporterClosed, reporterPortalClosed } = req.body || {};
 	const update = {};
 	if (typeof communityReporterClosed === "boolean") update.communityReporterClosed = communityReporterClosed;
@@ -45,6 +49,8 @@ router.patch('/feature-toggles', requireAdminAuth, async (req, res) => {
 		communityReporterClosed: !!doc.communityReporterClosed,
 		reporterPortalClosed: !!doc.reporterPortalClosed,
 		updatedAt: doc.updatedAt,
+	});
+		});
 	});
 });
 

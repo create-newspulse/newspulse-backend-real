@@ -34,6 +34,9 @@ const founderFeatureTogglesRouter = require('./routes/admin/founderFeatureToggle
 const alertsRouter = require('./routes/alerts');
 const securityRouter = require('./routes/security');
 const adminThreatRouter = require('./routes/adminThreatRoutes');
+const ownerPasskeyRouter = require('./routes/ownerPasskey');
+const { requireOwnerKey } = require('./middleware/requireOwnerKey');
+const { requireFounderAuth } = require('./middleware/adminAuth');
 const CommunitySubmission = require(`${BASE}/models/CommunitySubmission`);
 const News = require(`${BASE}/models/News`);
 const { requireAdminAuth } = require('./middleware/adminAuth');
@@ -154,8 +157,9 @@ app.get('/dashboard-stats', async (req, res) => {
 
 // Mongo
 const MONGO_URI = process.env.MONGO_URI;
-if (process.env.NODE_ENV === 'test') {
-  console.warn('[init] Test mode: skipping MongoDB connection');
+const _isImported = require.main !== module;
+if (process.env.NODE_ENV === 'test' || _isImported) {
+  console.warn('[init] Test/import mode: skipping MongoDB connection');
 } else if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
   console.warn('⚠️ MONGO_URI is not set correctly; starting server without DB connection for now.');
 } else {
@@ -187,6 +191,9 @@ app.get('/admin-api/admin/community/reporter-contacts', listReporterContacts);
 app.use('/api/community-reporter', communityReporterRoutes);
 // Public alias to match frontend expectation
 app.use('/api/public/community-reporter', communityReporterRoutes);
+
+// Founder passkey (WebAuthn) owner-key unlock
+app.use('/api/owner/passkey', ownerPasskeyRouter);
 // Public community settings
 if (publicCommunitySettingsRouter) {
   app.use('/api/public/community', publicCommunitySettingsRouter);
@@ -578,7 +585,7 @@ app.get('/admin/metrics', (req, res) => {
 });
 
 // --- Vault stub ---
-app.get('/api/vault/list', (req, res) => {
+app.get('/api/vault/list', requireFounderAuth, requireOwnerKey, (req, res) => {
   return res.json({
     ok: true,
     success: true,

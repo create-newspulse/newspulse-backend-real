@@ -38,7 +38,7 @@ function requireAdminAuth(req, res, next) {
       reason: 'no bearer token or recognized admin cookie',
       origin: req.headers.origin || null,
     });
-    return res.status(401).json({ success: false, code: 'UNAUTHORIZED' });
+    return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
   }
 
   const effectiveToken = token || cookieToken;
@@ -58,7 +58,7 @@ function requireAdminAuth(req, res, next) {
           method: req.method,
           role,
         });
-        return res.status(403).json({ success: false, code: 'FORBIDDEN' });
+        return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' });
       }
       req.admin = { id: payload.sub, email: payload.email, role, name: payload.name };
       return next();
@@ -82,7 +82,7 @@ function requireAdminAuth(req, res, next) {
       }
       if (!legacyEmail) {
         // Provide a machine-readable code to help clients trigger refresh.
-        return res.status(401).json({ success: false, code: 'UNAUTHORIZED' });
+        return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
       }
     }
   }
@@ -107,7 +107,7 @@ function requireAdminAuth(req, res, next) {
     reason: 'no valid token or cookie after checks',
     origin: req.headers.origin || null,
   });
-  return res.status(401).json({ success: false, code: 'UNAUTHORIZED' });
+  return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
 }
 
 function requireFounderOnly(req, res, next) {
@@ -116,7 +116,7 @@ function requireFounderOnly(req, res, next) {
     if (err) return; // express error path
     const role = (req.admin && req.admin.role) || 'admin';
     if (role !== 'founder') {
-      return res.status(403).json({ success: false, code: 'FORBIDDEN' });
+      return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' });
     }
     return next();
   });

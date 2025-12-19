@@ -60,7 +60,10 @@ function recordAttempt(ip) {
 // ─────────────────────────────────────────────
 // POST /api/admin/login
 // ─────────────────────────────────────────────
-router.post('/login', (req, res) => {
+router.post('/login', (req, res, next) => {
+  // Keep legacy compatibility in server.js for /admin/login (tests and older clients)
+  if (req.baseUrl === '/admin') return next();
+
   const ip = req.ip || req.connection?.remoteAddress || 'unknown';
   const { email = '', password = '' } = req.body || {};
 
