@@ -31,7 +31,7 @@ exports.getSystemStats = async (req, res) => {
     version: getVersion(),
     env: process.env.NODE_ENV || 'development',
   };
-  res.status(200).json({ ok: true, data: payload });
+  res.status(200).json({ success: true, ok: true, data: payload });
 };
 
 // GET /dashboard-stats
@@ -76,10 +76,11 @@ exports.getDashboardStats = async (req, res) => {
       storiesLast7Days,
     };
 
-    res.status(200).json({ ok: true, data: payload });
+    res.status(200).json({ success: true, ok: true, data: payload });
   } catch (e) {
     console.error('[dashboard-stats] failed', e?.message || e);
     res.status(200).json({
+      success: true,
       ok: true,
       data: {
         totalArticles: 0,

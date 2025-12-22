@@ -68,6 +68,9 @@ router.get('/articles', async (req, res, next) => {
     // Default to 'date' since legacy docs may not have createdAt
     const sortParam = (req.query.sort || '-date').toString();
     const statusRaw = (req.query.status || '').toString();
+    const languageRaw = (req.query.language || '').toString().trim();
+    const categoryRaw = (req.query.category || '').toString().trim();
+    const qRaw = (req.query.q || '').toString().trim();
     const query = {};
     if (statusRaw) {
       const statuses = statusRaw
@@ -82,6 +85,20 @@ router.get('/articles', async (req, res, next) => {
         ];
       }
     }
+    if (languageRaw) query.language = languageRaw;
+    if (categoryRaw) query.category = categoryRaw;
+    if (qRaw) {
+      const rx = new RegExp(qRaw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      query.$and = (query.$and || []).concat([
+        {
+          $or: [
+            { title: rx },
+            { description: rx },
+            { content: rx },
+          ],
+        },
+      ]);
+    }
     const skip = (page - 1) * limit;
 
     const [items, total] = await Promise.all([
@@ -89,13 +106,14 @@ router.get('/articles', async (req, res, next) => {
       News.countDocuments(query),
     ]);
 
-    // Align with Admin UI expectations: expose `data` as primary array
-    // while retaining `articles` for backward compatibility.
     return res.status(200).json({
       ok: true,
       success: true,
       status: 200,
-      data: items,
+      data: { items, page, limit, total },
+
+      // Backward-compatible fields used by older admin panel builds
+      items,
       articles: items,
       total,
       page,
@@ -105,6 +123,20 @@ router.get('/articles', async (req, res, next) => {
   } catch (err) {
     return next(err);
   }
+});
+
+// Backward-compatible aliases for admin panel builds calling /api/news*
+router.get('/news', (req, res, next) => {
+  req.url = '/articles' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
+  return router.handle(req, res, next);
+});
+router.get('/news/list', (req, res, next) => {
+  req.url = '/articles' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
+  return router.handle(req, res, next);
+});
+router.get('/news/all', (req, res, next) => {
+  req.url = '/articles' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
+  return router.handle(req, res, next);
 });
 
 // GET /api/articles/:id → get single article by id

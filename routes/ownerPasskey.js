@@ -14,6 +14,21 @@ const { requireFounderAuth } = require('../middleware/adminAuth');
 
 const router = express.Router();
 
+// GET /api/owner/passkey/status
+// Minimal endpoint used by admin panel to know if passkey is configured.
+router.get('/status', async (_req, res) => {
+  try {
+    const available = !!(process.env.PASSKEY_RPID && process.env.PASSKEY_ORIGIN);
+    if (!available) {
+      return res.status(200).json({ ok: true, success: true, data: { available: false, enabled: false } });
+    }
+    const enabled = (await OwnerCredential.countDocuments({ ownerId: OWNER_ID })) > 0;
+    return res.status(200).json({ ok: true, success: true, data: { available: true, enabled } });
+  } catch (e) {
+    return res.status(200).json({ ok: true, success: true, data: { available: false, enabled: false } });
+  }
+});
+
 function cookieOpts({ maxAgeMs } = {}) {
   const isProd = String(process.env.NODE_ENV).toLowerCase() === 'production';
   return {

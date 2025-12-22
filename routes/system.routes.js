@@ -7,11 +7,26 @@ const router = express.Router();
 router.get('/health', (req, res) => {
   return res.json({
     ok: true,
-    env: 'admin',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    status: 'ok',
-    nodeEnv: process.env.NODE_ENV || 'development',
+    success: true,
+    service: 'newspulse-backend',
+    time: new Date().toISOString(),
+    env: process.env.NODE_ENV || 'development',
+    data: {
+      uptimeSeconds: Math.floor(process.uptime()),
+      timestamp: new Date().toISOString(),
+      env: process.env.NODE_ENV || 'development',
+    },
+  });
+});
+
+// GET /ai-health → stable 200 for admin panel (even when AI is not configured)
+router.get('/ai-health', (_req, res) => {
+  return res.status(200).json({
+    ok: true,
+    success: true,
+    aiEnabled: false,
+    message: 'AI command not configured',
+    data: { status: 'ok' },
   });
 });
 

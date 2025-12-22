@@ -46,7 +46,11 @@ function requireAdminAuth(req, res, next) {
     try {
       // Accept opaque admin tokens issued by /admin-auth/login (prefix np.)
       if (effectiveToken.startsWith('np.')) {
-        req.admin = { id: 'opaque', email: 'admin@newspulse.ai', role: 'admin', name: 'Admin' };
+        const decoded = decodeNpOpaqueToken(effectiveToken);
+        const email = decoded && decoded.email ? decoded.email : 'admin@newspulse.ai';
+        const founderEmail = String(process.env.FOUNDER_EMAIL || 'founder@example.com').toLowerCase();
+        const role = founderEmail && String(email).toLowerCase() === founderEmail ? 'founder' : 'admin';
+        req.admin = { id: 'opaque', email, role, name: role === 'founder' ? 'Founder' : 'Admin' };
         return next();
       }
       const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
@@ -108,6 +112,21 @@ function requireAdminAuth(req, res, next) {
     origin: req.headers.origin || null,
   });
   return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+}
+
+function decodeNpOpaqueToken(tok) {
+  // Token format: np.<base64(email:timestamp)>
+  try {
+    const raw = String(tok || '');
+    if (!raw.startsWith('np.')) return null;
+    const b64 = raw.slice('np.'.length);
+    const decoded = Buffer.from(b64, 'base64').toString('utf8');
+    const [email] = decoded.split(':');
+    const cleaned = String(email || '').trim();
+    return cleaned ? { email: cleaned } : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 function requireFounderOnly(req, res, next) {

@@ -10,9 +10,7 @@ router.get('/health', (req, res) => {
   res.json({
     ok: true,
     service: 'newspulse-backend',
-    uptimeSeconds: parseFloat(process.uptime().toFixed(2)),
-    timestamp: new Date().toISOString(),
-    env: process.env.NODE_ENV || 'development',
+    time: new Date().toISOString(),
   });
 });
 

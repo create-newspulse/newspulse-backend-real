@@ -6,6 +6,7 @@ const newsSchema = new mongoose.Schema({
   content: String,
   tags: [String],
   category: { type: String, index: true },
+  language: { type: String, default: 'en', index: true },
   date: { type: Date, default: Date.now },
   imageURL: String,
   views: { type: Number, default: 0 },

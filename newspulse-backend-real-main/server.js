@@ -19,6 +19,10 @@ const communityReporterSettingsRouter = require('./routes/adminSettings/communit
 const CommunitySubmission = require('./models/CommunitySubmission');
 const News = require('./models/News');
 const { requireAdminAuth } = require('../middleware/adminAuth');
+// Broadcast Center (shared root-level router)
+const broadcastRoutes = require('../routes/broadcast.routes');
+// Shared system routes (health + monitor stubs)
+const systemRoutes = require('../routes/system.routes');
 // Mount dashboard stats from root-level routes (shared across apps)
 const dashboardStatsRoutes = require('../routes/dashboardStats');
 let aiRoutes = null;
@@ -88,14 +92,17 @@ const handleHealth = (req, res) => {
   res.status(200).json({
     ok: true,
     service: 'newspulse-backend',
-    env: process.env.NODE_ENV || 'development',
-    uptimeSeconds: Math.round(process.uptime()),
-    timestamp: new Date().toISOString(),
+    time: new Date().toISOString(),
   });
 };
 // Support both paths for safety
 app.get('/system/health', handleHealth);
 app.get('/api/system/health', handleHealth);
+
+// Mount shared system router (supports GET /api/system/health via router too)
+app.use('/api/system', systemRoutes);
+app.use('/system', systemRoutes);
+app.use('/api/admin/system', systemRoutes);
 
 app.get('/system/ai-training-info', (req, res) => {
   res.json({
@@ -201,6 +208,12 @@ app.get('/articles', async (req, res) => {
 
 // API Routes
 app.use('/api/news', newsRoutes);
+// Broadcast Center (mount early)
+app.use('/api/broadcast', broadcastRoutes);
+// Compatibility alias: some frontends call /admin-api/api/broadcast/*
+app.use('/admin-api/api/broadcast', broadcastRoutes);
+// Compatibility alias: some frontends call /admin-api/broadcast/*
+app.use('/admin-api/broadcast', broadcastRoutes);
 app.use('/api/community', communityRoutes); // POST /api/community/submissions (public)
 // Community Reporter public endpoints (submit, my-stories)
 // PUBLIC routes – must be before any auth-protected mounts

@@ -12,8 +12,7 @@ const articlesRoutes = require('./routes/articles');
 const adminRoutes = require('./routes/admin');
 const adminAuthRoutes = require(`${BASE}/routes/adminAuth`);
 const aiTrainingInfoRoutes = require(`${BASE}/routes/system/aiTrainingInfo`);
-const systemRoutesRouter = require('./routes/system.routes');
-const systemRoutes = require('./routes/system');
+const systemRoutes = require('./routes/system.routes');
 const communityRoutes = require(`${BASE}/routes/community`);
 const communityStoriesRouter = require('./routes/communityStories');
 const adminCommunityRoutes = require(`${BASE}/routes/adminCommunity`);
@@ -37,6 +36,14 @@ const adminThreatRouter = require('./routes/adminThreatRoutes');
 const ownerPasskeyRouter = require('./routes/ownerPasskey');
 const { requireOwnerKey } = require('./middleware/requireOwnerKey');
 const { requireFounderAuth } = require('./middleware/adminAuth');
+const adminStaffRouter = require('./routes/adminStaff.routes');
+let adminSiteSettingsHomeTopBarsRouter = null;
+let publicHomeTopBarsRouter = null;
+try { adminSiteSettingsHomeTopBarsRouter = require('./routes/adminSiteSettings.homeTopBars.routes'); } catch (_) { console.warn('[init] optional routes/adminSiteSettings.homeTopBars.routes not found; skipping'); }
+try { publicHomeTopBarsRouter = require('./routes/publicHomeTopBars.routes'); } catch (_) { console.warn('[init] optional routes/publicHomeTopBars.routes not found; skipping'); }
+const broadcastRoutes = require('./routes/broadcast.routes');
+const authRoutes = require('./routes/auth.routes');
+const auditRoutes = require('./routes/audit.routes');
 const CommunitySubmission = require(`${BASE}/models/CommunitySubmission`);
 const News = require(`${BASE}/models/News`);
 const { requireAdminAuth } = require('./middleware/adminAuth');
@@ -52,6 +59,20 @@ try { publicFeatureTogglesRouter = require('./routes/publicFeatureToggles'); } c
 dotenv.config();
 
 const app = express();
+
+// Normalize accidental double-prefixes from some clients
+// (e.g. baseURL '/api' + request '/api/...' => '/api/api/...').
+// This keeps the backend tolerant and prevents confusing 404s.
+app.use((req, _res, next) => {
+  try {
+    if (req.url === '/api/api' || req.url === '/api/api/') {
+      req.url = '/api/';
+    } else if (req.url.startsWith('/api/api/')) {
+      req.url = req.url.slice('/api'.length);
+    }
+  } catch (_) {}
+  return next();
+});
 
 // Global CORS (cors package) BEFORE any routes
 // Allow specific known origins plus Vercel preview URLs for the admin panel.
@@ -72,6 +93,14 @@ const corsOptions = {
     // Allow non-browser clients (no Origin header)
     if (!origin) return callback(null, true);
 
+    // In non-production, allow any localhost/127.0.0.1 dev origin (any port).
+    // This avoids CORS failures when the admin panel runs on 127.0.0.1 or a different Vite port.
+    const env = String(process.env.NODE_ENV || 'development').toLowerCase();
+    if (env !== 'production') {
+      const devOk = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(String(origin));
+      if (devOk) return callback(null, true);
+    }
+
     const isAllowed =
       allowedOrigins.includes(origin) || ADMIN_PANEL_VERCEL_REGEX.test(origin);
 
@@ -90,15 +119,23 @@ app.use(express.json());
 // Mount small system router for admin dashboard health + AI debug
 app.use('/system', systemRoutes);
 app.use('/api/system', systemRoutes);
+app.use('/api/admin/system', systemRoutes);
 
 // Health handler used by the admin panel's SystemHealthBadge
 // Returns a minimal, stable JSON schema.
 const pkg = require('./package.json');
 const healthHandler = async (req, res) => {
   res.status(200).json({
-    status: 'ok',
+    ok: true,
+    success: true,
     service: 'newspulse-backend',
     time: new Date().toISOString(),
+    env: process.env.NODE_ENV || 'development',
+    data: {
+      uptimeSeconds: Math.floor(process.uptime()),
+      timestamp: new Date().toISOString(),
+      env: process.env.NODE_ENV || 'development',
+    },
   });
 };
 app.get('/system/health', healthHandler);
@@ -165,7 +202,16 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
 } else {
   mongoose
     .connect(MONGO_URI)
-    .then(() => console.log('✅ MongoDB connected'))
+    .then(async () => {
+      console.log('✅ MongoDB connected');
+      // Ensure TTL index for Broadcast Center is present.
+      try {
+        const BroadcastItem = require('./models/BroadcastItem');
+        await BroadcastItem.syncIndexes();
+      } catch (e) {
+        console.warn('[startup] BroadcastItem index sync failed', e?.message || e);
+      }
+    })
     .catch((err) => {
       console.error('❌ MongoDB connection error:', err.message);
     });
@@ -176,9 +222,21 @@ app.get('/', (req, res) => { res.send('🟢 News Pulse Admin Backend is Live'); 
 
 // API Routes
 app.use('/api/news', newsRoutes);
+// Auth bootstrap endpoint for admin panel
+app.use('/api/auth', authRoutes);
+// Audit (founder-only)
+app.use('/api/audit', auditRoutes);
+// Broadcast Center (mount early so it cannot be shadowed by other /api routers)
+app.use('/api/broadcast', broadcastRoutes);
+// Compatibility alias: some frontends call /admin-api/api/broadcast/*
+app.use('/admin-api/api/broadcast', broadcastRoutes);
+// Compatibility alias: some frontends call /admin-api/broadcast/*
+app.use('/admin-api/broadcast', broadcastRoutes);
 // Articles router mounted at /api and alias at root for /articles
 app.use('/api', articlesRoutes);
 app.use('/', articlesRoutes);
+// Admin panel compatibility: /api/admin/articles should behave like /api/articles
+app.use('/api/admin', articlesRoutes);
 app.use('/api/community', communityRoutes);
 // Reporter portal: My Community Stories
 app.use('/api/community', communityStoriesRouter);
@@ -205,6 +263,9 @@ if (publicFeatureTogglesRouter) {
   // Explicit public namespace for admin panel usage
   app.use('/api/public', publicFeatureTogglesRouter);
 }
+
+// Public homepage bars (Breaking + Live Updates)
+if (publicHomeTopBarsRouter) app.use('/api/public', publicHomeTopBarsRouter);
 // Journalists public/apply + admin ops
 try {
   const journalistsRouter = require('./routes/journalists');
@@ -215,6 +276,12 @@ try {
 // Admin routes for legacy and new admin UI paths
 app.use('/api/admin', adminRoutes); // used by admin UI
 app.use('/admin', adminRoutes);     // legacy path
+// Settings Center > Team Management (founder-only)
+app.use('/api/admin/staff', adminStaffRouter);
+// Backward-compatible alias used by some admin panel builds
+app.use('/api/admin/team', adminStaffRouter);
+// Admin site settings (Founder-only)
+if (adminSiteSettingsHomeTopBarsRouter) app.use('/api/admin', adminSiteSettingsHomeTopBarsRouter);
 // Alias for admin analytics screen expecting /community/reporters at root
 app.get('/community/reporters', requireAdminAuth, getCommunityReporterAnalytics);
 // Mount dashboard stats router
@@ -231,11 +298,7 @@ app.use('/api/system/ai-training-info', aiTrainingInfoRoutes);
 // Admin system endpoints mounted under /api/admin (handled by adminSystemRoutes)
 app.use('/api/admin', adminSystemRoutes);
 // health routes handled directly above by healthHandler
-// System monitor hub (API + non-API alias)
-app.use('/api/system', systemRoutesRouter);
-app.use('/system', systemRoutesRouter);
-// Admin-prefixed alias for system routes (ensures /api/admin/system/health via mounted router)
-app.use('/api/admin/system', systemRoutesRouter);
+// System monitor hub handled by systemRoutes (mounted above)
 app.use('/api/admin/community', adminCommunityRoutes);
 // Admin Settings router (GET /api/admin/settings)
 // Mounted router returns { success: true, data: {...} }
@@ -455,7 +518,13 @@ app.get('/api/admin/community/my-stories', requireAdminAuth, async (req, res) =>
 
 app.get('/api/admin/me', requireAdminAuth, (req, res) => {
   const a = req.admin || {};
-  return res.json({ success: true, admin: { id: a.id || 'unknown', email: a.email || '', role: a.role || 'admin' } });
+  const role = (a.role === 'founder' || a.role === 'admin') ? a.role : 'admin';
+  return res.json({
+    ok: true,
+    success: true,
+    role,
+    admin: { id: a.id || 'unknown', email: a.email || '', role },
+  });
 });
 
 // Aliases expected by some UIs
