@@ -23,6 +23,22 @@ async function safeCount(model, filter = {}) {
   }
 }
 
+async function safeDistinctCount(model, field, filter = {}) {
+  try {
+    if (!model || !model.distinct) return 0;
+    if (model.db && model.db.readyState !== 1) return 0;
+    const values = await model.distinct(field, filter);
+    if (!Array.isArray(values)) return 0;
+    const normalized = values
+      .map((v) => (typeof v === 'string' ? v.trim() : v))
+      .filter((v) => v !== null && v !== undefined && v !== '');
+    return new Set(normalized).size;
+  } catch (e) {
+    console.error('[stats] distinct failed', { model: model && model.modelName, field, error: e?.message || e });
+    return 0;
+  }
+}
+
 async function safeAggregate(model, pipeline) {
   try {
     if (!model || !model.aggregate) return [];
@@ -51,8 +67,6 @@ exports.getSystemStats = async (req, res) => {
   // Required keys: totalNews, categories, languages, activeUsers, aiLogs
   const AiLog = safeRequire('../models/AiLog');
 
-  const nonDeletedNewsFilter = { status: { $ne: 'deleted' } };
-
   const [
     totalNews,
     activeUsers,
@@ -60,31 +74,13 @@ exports.getSystemStats = async (req, res) => {
     categories,
     languages,
   ] = await Promise.all([
-    safeCount(News, nonDeletedNewsFilter),
+    // Count ALL articles (draft + published + scheduled + archived + deleted)
+    safeCount(News, {}),
     safeCount(User, { status: 'active' }),
     safeCount(AiLog, {}),
-    (async () => {
-      const rows = await safeAggregate(News, [
-        { $match: nonDeletedNewsFilter },
-        { $group: { _id: '$category', count: { $sum: 1 } } },
-        { $project: { _id: 0, category: '$_id', count: 1 } },
-        { $sort: { count: -1, category: 1 } },
-      ]);
-      return rows
-        .filter((r) => r && typeof r.count === 'number')
-        .map((r) => ({ category: r.category ?? null, count: r.count }));
-    })(),
-    (async () => {
-      const rows = await safeAggregate(News, [
-        { $match: nonDeletedNewsFilter },
-        { $group: { _id: '$language', count: { $sum: 1 } } },
-        { $project: { _id: 0, language: '$_id', count: 1 } },
-        { $sort: { count: -1, language: 1 } },
-      ]);
-      return rows
-        .filter((r) => r && typeof r.count === 'number')
-        .map((r) => ({ language: r.language ?? null, count: r.count }));
-    })(),
+    // For now: distinct counts are sufficient for dashboard.
+    safeDistinctCount(News, 'category', {}),
+    safeDistinctCount(News, 'language', {}),
   ]);
 
   return res.status(200).json({
