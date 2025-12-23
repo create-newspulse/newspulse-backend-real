@@ -2,13 +2,37 @@ const News = require('../models/News');
 const User = require('../models/User');
 const CommunitySubmission = require('../models/CommunitySubmission');
 
+function safeRequire(path) {
+  try {
+    // eslint-disable-next-line global-require, import/no-dynamic-require
+    return require(path);
+  } catch (_) {
+    return null;
+  }
+}
+
 async function safeCount(model, filter = {}) {
   try {
     if (!model || !model.countDocuments) return 0;
+    // Prevent Mongoose buffering timeouts when DB is not connected.
+    if (model.db && model.db.readyState !== 1) return 0;
     return await model.countDocuments(filter);
   } catch (e) {
     console.error('[stats] count failed', { model: model && model.modelName, filter, error: e?.message || e });
     return 0;
+  }
+}
+
+async function safeAggregate(model, pipeline) {
+  try {
+    if (!model || !model.aggregate) return [];
+    // Prevent Mongoose buffering timeouts when DB is not connected.
+    if (model.db && model.db.readyState !== 1) return [];
+    const rows = await model.aggregate(pipeline);
+    return Array.isArray(rows) ? rows : [];
+  } catch (e) {
+    console.error('[stats] aggregate failed', { model: model && model.modelName, error: e?.message || e });
+    return [];
   }
 }
 
@@ -23,15 +47,57 @@ function getVersion() {
 
 // GET /stats
 exports.getSystemStats = async (req, res) => {
-  const payload = {
-    service: 'newspulse-backend',
-    status: 'ok',
-    uptimeSeconds: Math.floor(process.uptime()),
-    timestamp: new Date().toISOString(),
-    version: getVersion(),
-    env: process.env.NODE_ENV || 'development',
-  };
-  res.status(200).json({ success: true, ok: true, data: payload });
+  // Dashboard-friendly stats payload (real DB counts; no demo data)
+  // Required keys: totalNews, categories, languages, activeUsers, aiLogs
+  const AiLog = safeRequire('../models/AiLog');
+
+  const nonDeletedNewsFilter = { status: { $ne: 'deleted' } };
+
+  const [
+    totalNews,
+    activeUsers,
+    aiLogs,
+    categories,
+    languages,
+  ] = await Promise.all([
+    safeCount(News, nonDeletedNewsFilter),
+    safeCount(User, { status: 'active' }),
+    safeCount(AiLog, {}),
+    (async () => {
+      const rows = await safeAggregate(News, [
+        { $match: nonDeletedNewsFilter },
+        { $group: { _id: '$category', count: { $sum: 1 } } },
+        { $project: { _id: 0, category: '$_id', count: 1 } },
+        { $sort: { count: -1, category: 1 } },
+      ]);
+      return rows
+        .filter((r) => r && typeof r.count === 'number')
+        .map((r) => ({ category: r.category ?? null, count: r.count }));
+    })(),
+    (async () => {
+      const rows = await safeAggregate(News, [
+        { $match: nonDeletedNewsFilter },
+        { $group: { _id: '$language', count: { $sum: 1 } } },
+        { $project: { _id: 0, language: '$_id', count: 1 } },
+        { $sort: { count: -1, language: 1 } },
+      ]);
+      return rows
+        .filter((r) => r && typeof r.count === 'number')
+        .map((r) => ({ language: r.language ?? null, count: r.count }));
+    })(),
+  ]);
+
+  return res.status(200).json({
+    ok: true,
+    success: true,
+    data: {
+      totalNews,
+      categories,
+      languages,
+      activeUsers,
+      aiLogs,
+    },
+  });
 };
 
 // GET /dashboard-stats
