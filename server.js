@@ -67,6 +67,8 @@ try { adminPushHistoryApiRouter = require('./src/routes/admin/pushHistory.routes
 try { adminWorkflowLegacyRouter = require('./routes/admin/workflow.routes'); } catch (_) { console.warn('[init] optional routes/admin/workflow.routes not found; skipping'); }
 const CommunitySubmission = require(`${BASE}/models/CommunitySubmission`);
 const News = require(`${BASE}/models/News`);
+// Public /api/public/stories uses the root Article model; reuse it for admin stories.
+const Story = require('./models/Article');
 const { requireAdminAuth } = require('./middleware/adminAuth');
 let aiRoutes = null;
 let feedRoutes = null;
@@ -531,6 +533,51 @@ app.post('/api/auth/login', (req, res) => {
 
   const token = jwt.sign({ email, role }, process.env.JWT_SECRET, { expiresIn: '7d' });
   return res.json({ success: true, token, user: { email, role } });
+});
+
+// ✅ Verify Bearer token (must be valid)
+function requireAuth(req, res, next) {
+  try {
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+
+    if (!token) {
+      return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    return next();
+  } catch (e) {
+    return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+  }
+}
+
+// ✅ Only admin/founder can access
+function requireAdmin(req, res, next) {
+  const role = req.user?.role;
+  if (role === 'admin' || role === 'founder') return next();
+  return res.status(403).json({ success: false, message: 'Forbidden' });
+}
+
+// ✅ ADMIN: list stories
+app.get('/api/admin/stories', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const stories = await Story.find().sort({ createdAt: -1 }).limit(200);
+    return res.json({ success: true, data: stories });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
+});
+
+// ✅ ADMIN: create story
+app.post('/api/admin/stories', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const created = await Story.create(req.body);
+    return res.json({ success: true, data: created });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err?.message || String(err) });
+  }
 });
 // Auth bootstrap endpoint for admin panel
 app.use('/api/auth', authRoutes);
