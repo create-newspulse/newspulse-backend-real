@@ -6,8 +6,8 @@ require('dotenv').config();
 
 // Ensure founder env set for tests (fallback values)
 process.env.FOUNDER_EMAIL = process.env.FOUNDER_EMAIL || 'founder@example.com';
-process.env.FOUNDER_PASSWORD = process.env.FOUNDER_PASSWORD || 'test-password';
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+process.env.FOUNDER_PASSWORD = process.env.FOUNDER_PASSWORD || 'local-test-credential';
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
 
 const app = require('../server');
 

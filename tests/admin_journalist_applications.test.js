@@ -4,7 +4,7 @@ const request = require('supertest');
 
 // Ensure server boot skips real Mongo connection
 process.env.NODE_ENV = 'test';
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
 
 const app = require('../server');
 

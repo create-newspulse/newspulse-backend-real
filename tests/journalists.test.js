@@ -5,7 +5,7 @@ process.env.NODE_ENV = 'test';
 require('dotenv').config();
 
 // Minimal env required for admin auth middleware (uses JWT_SECRET)
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
 
 const app = require('../server');
 

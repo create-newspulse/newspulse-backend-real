@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const request = require('supertest');
 
 process.env.NODE_ENV = 'test';
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
 
 const app = require('../server');
 const News = require('../models/News');

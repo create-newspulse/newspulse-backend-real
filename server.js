@@ -965,7 +965,7 @@ app.post('/admin/login', (req, res) => {
     const email = String(body.email || process.env.FOUNDER_EMAIL || 'founder@example.com');
     const password = String(body.password || '');
     const expectedEmail = String(process.env.FOUNDER_EMAIL || 'founder@example.com');
-    const expectedPass = String(process.env.FOUNDER_PASSWORD || 'test-password');
+    const expectedPass = String(process.env.FOUNDER_PASSWORD || '');
     if (!email || !password) return res.status(400).json({ success: false, message: 'Email and password required' });
     if (email !== expectedEmail || password !== expectedPass) return res.status(401).json({ success: false, message: 'Invalid credentials' });
     const accessToken = _makeToken('access');
