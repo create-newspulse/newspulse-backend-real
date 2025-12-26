@@ -4,6 +4,7 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs');
@@ -197,6 +198,7 @@ app.options('*', (req, res) => {
 });
 
 app.use(express.json());
+app.use(cookieParser());
 
 // Serve uploaded files publicly
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
