@@ -497,6 +497,10 @@ app.get('/', (req, res) => { res.send('🟢 News Pulse Admin Backend is Live'); 
 // API Routes
 app.use('/api/news', newsRoutes);
 app.use('/api/articles', publicArticlesRoutes);
+// Quick browser check: confirm auth route is deployed
+app.get('/api/auth/login', (_req, res) => {
+  return res.json({ ok: true, message: 'Auth route is live. Use POST to login.' });
+});
 // ✅ Founder/Admin Login (MVP)
 // Defined directly in server.js to avoid any router-mount confusion.
 app.post('/api/auth/login', (req, res) => {
@@ -1146,18 +1150,6 @@ app.get('/threat-stats', (req, res) => {
   });
 });
 
-// 404 (final handler returning requested shape)
-app.use((req, res) => {
-  res.status(404).json({
-    ok: false,
-    success: false,
-    status: 404,
-    message: 'Route not found',
-    data: null,
-    path: req.originalUrl,
-  });
-});
-
 // 500
 app.use((err, req, res, next) => {
   const status = Math.max(400, Math.min(599, parseInt(err?.status || err?.statusCode || 500, 10) || 500));
@@ -1174,6 +1166,18 @@ app.use((err, req, res, next) => {
     data: null,
     path: req.originalUrl,
     ...(err?.code ? { code: String(err.code) } : {}),
+  });
+});
+
+// 404 (final handler returning requested shape) — keep this LAST
+app.use((req, res) => {
+  res.status(404).json({
+    ok: false,
+    success: false,
+    status: 404,
+    message: 'Route not found',
+    data: null,
+    path: req.originalUrl,
   });
 });
 
