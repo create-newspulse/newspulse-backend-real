@@ -5,6 +5,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
+const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs');
@@ -496,6 +497,37 @@ app.get('/', (req, res) => { res.send('🟢 News Pulse Admin Backend is Live'); 
 // API Routes
 app.use('/api/news', newsRoutes);
 app.use('/api/articles', publicArticlesRoutes);
+// ✅ Founder/Admin Login (MVP)
+// Defined directly in server.js to avoid any router-mount confusion.
+app.post('/api/auth/login', (req, res) => {
+  const email = String(req.body?.email || req.body?.username || '').toLowerCase().trim();
+  const password = String(req.body?.password || '');
+
+  const adminEmail = String(process.env.ADMIN_EMAIL || '').toLowerCase().trim();
+  const adminPass = String(process.env.ADMIN_PASS || '');
+
+  const founderEmail = String(process.env.FOUNDER_EMAIL || '').toLowerCase().trim();
+  const founderPass = String(process.env.FOUNDER_PASSWORD || '');
+
+  if (!email || !password) {
+    return res.status(400).json({ success: false, message: 'Email and password required' });
+  }
+
+  let role = null;
+  if (email === adminEmail && password === adminPass) role = 'admin';
+  if (email === founderEmail && password === founderPass) role = 'founder';
+
+  if (!role) {
+    return res.status(401).json({ success: false, message: 'Invalid credentials' });
+  }
+
+  if (!process.env.JWT_SECRET) {
+    return res.status(500).json({ success: false, message: 'JWT_SECRET missing' });
+  }
+
+  const token = jwt.sign({ email, role }, process.env.JWT_SECRET, { expiresIn: '7d' });
+  return res.json({ success: true, token, user: { email, role } });
+});
 // Auth bootstrap endpoint for admin panel
 app.use('/api/auth', authRoutes);
 // Audit (founder-only)
