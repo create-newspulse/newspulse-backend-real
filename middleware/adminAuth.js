@@ -56,7 +56,7 @@ function requireAdminAuth(req, res, next) {
       const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
       const payload = jwt.verify(effectiveToken, secret);
       const role = payload.role;
-      if (role !== 'admin' && role !== 'founder') {
+      if (role !== 'admin' && role !== 'founder' && role !== 'staff' && role !== 'editor' && role !== 'legal') {
         console.warn('[ADMIN_AUTH][403][role] disallowed role', {
           path: req.originalUrl,
           method: req.method,

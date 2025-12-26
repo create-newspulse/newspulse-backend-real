@@ -19,6 +19,12 @@ const communityReporterSettingsRouter = require('./routes/adminSettings/communit
 const CommunitySubmission = require('./models/CommunitySubmission');
 const News = require('./models/News');
 const { requireAdminAuth } = require('../middleware/adminAuth');
+// Ads + Ad Settings (shared root-level routers)
+const publicAdsRouter = require('../routes/publicAds.routes');
+const adminAdsRouter = require('../routes/adminAds.routes');
+const publicAdSettingsRouter = require('../routes/publicAdSettings.routes');
+const adminAdSettingsRouter = require('../routes/adminAdSettings.routes');
+const publicRoutes = require('../routes/public.routes');
 // Broadcast Center (shared root-level router)
 const broadcastRoutes = require('../routes/broadcast.routes');
 // Shared system routes (health + monitor stubs)
@@ -223,6 +229,26 @@ app.get('/api/community-reporter/contacts', listReporterContacts);
 app.get('/api/admin/community/reporter-contacts', listReporterContacts);
 app.get('/admin-api/admin/community/reporter-contacts', listReporterContacts);
 app.use('/api/community-reporter', communityReporterRoutes);
+
+// Public sponsor ads + global ad slot settings
+app.use('/api/public', publicAdsRouter);
+
+// Public stories
+app.use('/api/public', publicRoutes);
+
+app.use('/api/public', publicAdSettingsRouter);
+app.use('/admin-api/public', publicAdSettingsRouter);
+app.use('/admin-api/api/public', publicAdSettingsRouter);
+
+// Global ad slot settings (mounted early so it cannot be shadowed by /api/admin)
+app.use('/api/admin', adminAdSettingsRouter);
+app.use('/admin-api/admin', adminAdSettingsRouter);
+app.use('/admin-api/api/admin', adminAdSettingsRouter);
+
+// Admin sponsor ads
+app.use('/api/admin', adminAdsRouter);
+app.use('/admin-api/admin', adminAdsRouter);
+app.use('/admin-api/api/admin', adminAdsRouter);
 // Admin routes mounted at both legacy root and new /api/admin paths where required.
 app.use('/admin', adminRoutes); // legacy POST /admin/login
 // Also mount admin router under /api for endpoints like /api/stats, /api/dashboard-stats
@@ -464,3 +490,5 @@ app.get('/_debug/routes', (req, res) => {
   }
   return res.json({ ok: true, total: list.length, reporter: list.filter(r => r.includes('reporter')), all: list });
 });
+
+module.exports = app;

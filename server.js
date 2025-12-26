@@ -1,13 +1,20 @@
+// Load environment variables as early as possible.
+// Many route/controller modules read process.env at import time.
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
-const dotenv = require('dotenv');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
 
 // Base dir for nested app code
 const BASE = './newspulse-backend-real-main';
 
 // Nested routes and modules
 const newsRoutes = require(`${BASE}/routes/news`);
+const publicArticlesRoutes = require(`${BASE}/routes/publicArticles`);
 const articlesRoutes = require('./routes/articles');
 const adminRoutes = require('./routes/admin');
 const adminAuthRoutes = require(`${BASE}/routes/adminAuth`);
@@ -44,6 +51,17 @@ try { publicHomeTopBarsRouter = require('./routes/publicHomeTopBars.routes'); } 
 const broadcastRoutes = require('./routes/broadcast.routes');
 const authRoutes = require('./routes/auth.routes');
 const auditRoutes = require('./routes/audit.routes');
+const publicAdsRouter = require('./routes/publicAds.routes');
+const adminAdsRouter = require('./routes/adminAds.routes');
+const publicAdSettingsRouter = require('./routes/publicAdSettings.routes');
+const adminAdSettingsRouter = require('./routes/adminAdSettings.routes');
+const publicRoutes = require('./routes/public.routes');
+let adminWorkflowApiRouter = null;
+let adminPushHistoryApiRouter = null;
+let adminWorkflowLegacyRouter = null;
+try { adminWorkflowApiRouter = require('./src/routes/admin/workflow.routes'); } catch (_) { console.warn('[init] optional src/routes/admin/workflow.routes not found; skipping'); }
+try { adminPushHistoryApiRouter = require('./src/routes/admin/pushHistory.routes'); } catch (_) { console.warn('[init] optional src/routes/admin/pushHistory.routes not found; skipping'); }
+try { adminWorkflowLegacyRouter = require('./routes/admin/workflow.routes'); } catch (_) { console.warn('[init] optional routes/admin/workflow.routes not found; skipping'); }
 const CommunitySubmission = require(`${BASE}/models/CommunitySubmission`);
 const News = require(`${BASE}/models/News`);
 const { requireAdminAuth } = require('./middleware/adminAuth');
@@ -55,8 +73,6 @@ let publicCommunitySettingsRouter = null;
 try { publicCommunitySettingsRouter = require(`${BASE}/routes/public/communitySettings`); } catch (_) { console.warn('[init] optional public community settings router not found; skipping'); }
 let publicFeatureTogglesRouter = null;
 try { publicFeatureTogglesRouter = require('./routes/publicFeatureToggles'); } catch (_) { console.warn('[init] optional public feature toggles router not found; skipping'); }
-
-dotenv.config();
 
 const app = express();
 
@@ -74,57 +90,187 @@ app.use((req, _res, next) => {
   return next();
 });
 
+// Debug: confirm ad-settings route hits
+app.use((req, _res, next) => {
+  try {
+    const p = String(req.originalUrl || req.url || '');
+    if (p.startsWith('/api/admin/ad-settings') || p.startsWith('/admin-api/admin/ad-settings') || p.startsWith('/admin-api/api/admin/ad-settings')) {
+      console.log('[ad-settings][hit]', {
+        method: req.method,
+        path: p,
+        hasAuthHeader: !!req.headers.authorization,
+        hasCookie: !!req.headers.cookie,
+      });
+    }
+  } catch (_) {}
+  return next();
+});
+
 // Global CORS (cors package) BEFORE any routes
-// Allow specific known origins plus Vercel preview URLs for the admin panel.
-const allowedOrigins = [
-  'http://localhost:5173',
-  'http://localhost:3000',
+// Strict allowlist.
+// Production allows only the official domains below.
+// Development also allows only the explicit localhost dev origins below.
+const _corsEnv = String(process.env.NODE_ENV || 'development').toLowerCase();
+const _corsIsProd = _corsEnv === 'production';
+const _corsIsDev = !_corsIsProd;
+
+function _parseCorsOriginsEnv(v) {
+  const raw = String(v || '').trim();
+  if (!raw) return [];
+  const parts = raw
+    .split(',')
+    .map(s => String(s || '').trim())
+    .filter(Boolean);
+
+  // Support values with or without scheme.
+  // If a value doesn't include a scheme, treat it as a host[:port] and allow both http and https.
+  const normalized = [];
+  for (const p of parts) {
+    if (p.includes('://')) {
+      normalized.push(p);
+    } else {
+      normalized.push(`https://${p}`);
+      normalized.push(`http://${p}`);
+    }
+  }
+  return normalized;
+}
+
+const allowedOrigins = new Set([
   'https://newspulse.co.in',
   'https://www.newspulse.co.in',
   'https://admin.newspulse.co.in',
-  'https://newspulse-admin-panel-real.vercel.app',
-];
-
-// Allow all Vercel preview URLs for the admin panel project
-const ADMIN_PANEL_VERCEL_REGEX = /^https:\/\/newspulse-admin-panel-real-.*\.vercel\.app$/;
+  'http://localhost:5173',
+  'http://localhost:3000',
+  // Comma-separated allowlist for the admin panel and local development.
+  // Preferred env var: CORS_ORIGIN (supports multiple values).
+  // Back-compat: CORS_ORIGINS.
+  ..._parseCorsOriginsEnv(process.env.CORS_ORIGIN),
+  ..._parseCorsOriginsEnv(process.env.CORS_ORIGINS),
+]);
 
 const corsOptions = {
   origin(origin, callback) {
     // Allow non-browser clients (no Origin header)
     if (!origin) return callback(null, true);
 
-    // In non-production, allow any localhost/127.0.0.1 dev origin (any port).
-    // This avoids CORS failures when the admin panel runs on 127.0.0.1 or a different Vite port.
-    const env = String(process.env.NODE_ENV || 'development').toLowerCase();
-    if (env !== 'production') {
-      const devOk = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(String(origin));
-      if (devOk) return callback(null, true);
-    }
+    if (allowedOrigins.has(String(origin))) return callback(null, true);
 
-    const isAllowed =
-      allowedOrigins.includes(origin) || ADMIN_PANEL_VERCEL_REGEX.test(origin);
-
-    if (isAllowed) return callback(null, true);
-    return callback(new Error('Not allowed by CORS: ' + origin));
+    const err = new Error('CORS origin blocked');
+    err.status = 403;
+    err.origin = origin;
+    return callback(err);
   },
   credentials: true,
+  preflightContinue: true,
+  optionsSuccessStatus: 204,
 };
 
-app.use(cors(corsOptions));
-// Handle CORS preflight for all routes with same options
-app.options('*', cors(corsOptions));
+const _corsMiddleware = cors(corsOptions);
+
+function _handleCorsError(err, req, res) {
+  if (_corsIsDev) {
+    console.warn('[cors] blocked', {
+      origin: String(req.headers.origin || ''),
+      method: req.method,
+      path: req.originalUrl,
+    });
+  }
+  const status = Number(err?.status) || 403;
+  return res.status(status).json({ ok: false, success: false, message: 'CORS origin blocked' });
+}
+
+app.use((req, res, next) => {
+  _corsMiddleware(req, res, (err) => {
+    if (err) return _handleCorsError(err, req, res);
+    return next();
+  });
+});
+
+// Ensure OPTIONS preflight works for all routes.
+app.options('*', (req, res) => {
+  _corsMiddleware(req, res, (err) => {
+    if (err) return _handleCorsError(err, req, res);
+    return res.sendStatus(204);
+  });
+});
 
 app.use(express.json());
+
+// Serve uploaded files publicly
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Upload handler (multipart/form-data)
+const _uploadsDir = path.join(__dirname, 'uploads');
+try { fs.mkdirSync(_uploadsDir, { recursive: true }); } catch (_) {}
+
+const _uploadStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    try { fs.mkdirSync(_uploadsDir, { recursive: true }); } catch (_) {}
+    cb(null, _uploadsDir);
+  },
+  filename: (_req, file, cb) => {
+    const ext = path.extname(String(file.originalname || '')).slice(0, 16);
+    const safeExt = ext && /^[a-zA-Z0-9.]+$/.test(ext) ? ext : '';
+    const rand = Math.random().toString(16).slice(2, 10);
+    cb(null, `${Date.now()}-${rand}${safeExt}`);
+  },
+});
+
+const _upload = multer({
+  storage: _uploadStorage,
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
+
+app.post('/api/uploads', _upload.any(), (req, res) => {
+  try {
+    const file = Array.isArray(req.files) ? req.files[0] : null;
+    if (!file) {
+      return res.status(400).json({ ok: false, success: false, message: 'No file uploaded' });
+    }
+
+    const filename = path.basename(String(file.filename || ''));
+    const host = req.get('host');
+    const base = `${req.protocol}://${host}`;
+    const url = `${base}/uploads/${encodeURIComponent(filename)}`;
+
+    return res.json({
+      ok: true,
+      success: true,
+      url,
+      filename,
+      size: file.size,
+      mime: file.mimetype,
+    });
+  } catch (e) {
+    console.error('[uploads] failed', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Upload failed' });
+  }
+});
 
 // Mount small system router for admin dashboard health + AI debug
 app.use('/system', systemRoutes);
 app.use('/api/system', systemRoutes);
+
+// Admin panel workflow + push history APIs (exact paths used by frontend)
+if (adminWorkflowApiRouter) {
+  app.use('/api/admin', adminWorkflowApiRouter);
+  app.use('/admin-api/admin', adminWorkflowApiRouter);
+  app.use('/admin', adminWorkflowApiRouter);
+}
+if (adminPushHistoryApiRouter) {
+  app.use('/api/admin', adminPushHistoryApiRouter);
+  app.use('/admin-api/admin', adminPushHistoryApiRouter);
+  app.use('/admin', adminPushHistoryApiRouter);
+}
 app.use('/api/admin/system', systemRoutes);
 
 // Health handler used by the admin panel's SystemHealthBadge
 // Returns a minimal, stable JSON schema.
 const pkg = require('./package.json');
 const healthHandler = async (req, res) => {
+  const mongoState = typeof mongoose?.connection?.readyState === 'number' ? mongoose.connection.readyState : -1;
+  const mongoConnected = mongoState === 1;
   res.status(200).json({
     ok: true,
     success: true,
@@ -135,11 +281,20 @@ const healthHandler = async (req, res) => {
       uptimeSeconds: Math.floor(process.uptime()),
       timestamp: new Date().toISOString(),
       env: process.env.NODE_ENV || 'development',
+      mongo: {
+        connected: mongoConnected,
+        state: mongoState,
+      },
     },
   });
 };
 app.get('/system/health', healthHandler);
 app.get('/api/system/health', healthHandler);
+
+// Simple base API health route (requested)
+app.get('/api/health', (_req, res) => {
+  return res.status(200).json({ ok: true });
+});
 app.get('/system/ai-training-info', (req, res) => {
   res.json({ success: true, status: 'online', lastUpdated: process.env.AI_TRAINING_LAST_UPDATED || new Date().toISOString() });
 });
@@ -148,12 +303,11 @@ app.get('/system/ai-training-info', (req, res) => {
 // These are defined directly on the app instance and must appear
 // before any 404/error handlers so they are always reachable.
 app.get('/health', (req, res) => {
-  return res.status(200).json({
-    ok: true,
-    status: 'ok',
-    service: 'newspulse-backend',
-    timestamp: new Date().toISOString(),
-  });
+  const readyState = typeof mongoose?.connection?.readyState === 'number' ? mongoose.connection.readyState : -1;
+  if (readyState === 1) {
+    return res.status(200).json({ ok: true, db: 'connected' });
+  }
+  return res.status(200).json({ ok: false, db: 'disconnected', readyState });
 });
 
 app.get('/stats', (req, res) => {
@@ -193,17 +347,51 @@ app.get('/dashboard-stats', async (req, res) => {
 });
 
 // Mongo
-const MONGO_URI = process.env.MONGO_URI;
+// Prefer MONGO_URI, but accept common platform env vars if present.
+// (Only treat DATABASE_URL as Mongo if it looks like a Mongo connection string.)
+const MONGO_URI =
+  process.env.MONGO_URI ||
+  process.env.MONGODB_URI ||
+  (String(process.env.DATABASE_URL || '').startsWith('mongodb') ? process.env.DATABASE_URL : undefined);
 const _isImported = require.main !== module;
+
+function _redactMongoUri(uri) {
+  const u = String(uri || '');
+  if (!u) return '';
+  // Mask user:pass if present (mongodb://user:pass@host)
+  return u.replace(/(mongodb(?:\+srv)?:\/\/)([^@/]+)@/i, '$1***:***@');
+}
+
+// Startup connection diagnostics
+mongoose.connection.on('error', (err) => {
+  console.error('[mongo] connection error', {
+    message: err?.message || String(err),
+    name: err?.name,
+    readyState: mongoose.connection.readyState,
+  });
+});
+mongoose.connection.on('disconnected', () => {
+  console.warn('[mongo] disconnected', { readyState: mongoose.connection.readyState });
+});
+mongoose.connection.on('connected', () => {
+  console.log('[mongo] connected', { readyState: mongoose.connection.readyState });
+});
+
 if (process.env.NODE_ENV === 'test' || _isImported) {
   console.warn('[init] Test/import mode: skipping MongoDB connection');
 } else if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
-  console.warn('⚠️ MONGO_URI is not set correctly; starting server without DB connection for now.');
+  const env = String(process.env.NODE_ENV || 'development').toLowerCase();
+  if (env === 'production') {
+    console.error('[startup] Missing Mongo connection string (MONGO_URI). Refusing to start without DB.');
+    console.error('[startup] Set MONGO_URI in your .env, e.g. MONGO_URI=mongodb://127.0.0.1:27017/newspulse');
+    process.exit(1);
+  }
+  console.warn('[startup] Missing MONGO_URI; starting without DB connection (non-production)');
 } else {
   mongoose
     .connect(MONGO_URI)
     .then(async () => {
-      console.log('✅ MongoDB connected');
+      console.log('[startup] MongoDB connected', { uri: _redactMongoUri(MONGO_URI) });
       // Ensure TTL index for Broadcast Center is present.
       try {
         const BroadcastItem = require('./models/BroadcastItem');
@@ -211,10 +399,92 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
       } catch (e) {
         console.warn('[startup] BroadcastItem index sync failed', e?.message || e);
       }
+
+      // Ensure ads indexes are present.
+      try {
+        const Ad = require('./models/Ad');
+        await Ad.syncIndexes();
+      } catch (e) {
+        console.warn('[startup] Ad index sync failed', e?.message || e);
+      }
     })
     .catch((err) => {
-      console.error('❌ MongoDB connection error:', err.message);
+      console.error('[startup] MongoDB connection failed', {
+        uri: _redactMongoUri(MONGO_URI),
+        message: err?.message || String(err),
+        name: err?.name,
+      });
     });
+}
+
+// Minimal scheduler: auto-publish scheduled articles (every minute)
+let _publishTickInFlight = false;
+async function _publishScheduledTick() {
+  if (_publishTickInFlight) return;
+  _publishTickInFlight = true;
+  try {
+    if (mongoose.connection.readyState !== 1) return;
+    const News = require('./models/News');
+    const PushHistory = require('./models/PushHistory');
+    const now = new Date();
+
+    const candidates = await News.find({
+      status: 'scheduled',
+      scheduledAt: { $lte: now },
+      $and: [
+        { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
+        { $or: [{ locked: { $ne: true } }, { locked: { $exists: false } }] },
+        { $or: [{ embargoUntil: null }, { embargoUntil: { $exists: false } }, { embargoUntil: { $lte: now } }] },
+      ],
+    }).limit(50);
+
+    for (const doc of candidates) {
+      try {
+        const fromStage = String(doc.workflowStage || 'SCHEDULED');
+        doc.status = 'published';
+        doc.publishedAt = now;
+        doc.publishAt = null;
+        doc.workflowStage = 'PUBLISHED';
+        doc.workflowUpdatedAt = now;
+        doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
+        doc.workflowHistory.push({
+          at: now,
+          byUserId: null,
+          byRole: 'SYSTEM',
+          action: 'PUBLISH',
+          fromStage,
+          toStage: 'PUBLISHED',
+          note: 'Auto-published by scheduler',
+        });
+        await doc.save();
+
+        try {
+          await PushHistory.create({
+            articleId: doc._id,
+            slug: doc.slug,
+            title: doc.title,
+            channel: 'SITE',
+            at: now,
+            byUserId: null,
+            status: 'SUCCESS',
+            meta: { source: 'scheduler' },
+          });
+        } catch (e) {
+          console.warn('[scheduler][pushHistory] create failed', e?.message || e);
+        }
+      } catch (e) {
+        console.warn('[scheduler] publish candidate failed', e?.message || e);
+      }
+    }
+  } catch (e) {
+    console.warn('[scheduler] tick failed', e?.message || e);
+  } finally {
+    _publishTickInFlight = false;
+  }
+}
+
+if (!_isImported && String(process.env.NODE_ENV || '').toLowerCase() !== 'test') {
+  setInterval(_publishScheduledTick, 60_000);
 }
 
 // Home
@@ -222,6 +492,7 @@ app.get('/', (req, res) => { res.send('🟢 News Pulse Admin Backend is Live'); 
 
 // API Routes
 app.use('/api/news', newsRoutes);
+app.use('/api/articles', publicArticlesRoutes);
 // Auth bootstrap endpoint for admin panel
 app.use('/api/auth', authRoutes);
 // Audit (founder-only)
@@ -264,6 +535,18 @@ if (publicFeatureTogglesRouter) {
   app.use('/api/public', publicFeatureTogglesRouter);
 }
 
+// Public sponsor ads
+app.use('/api/public', publicAdsRouter);
+
+// Public stories
+app.use('/api/public', publicRoutes);
+
+// Global ad slot settings
+app.use('/api/public', publicAdSettingsRouter);
+// Alias support
+app.use('/admin-api/public', publicAdSettingsRouter);
+app.use('/admin-api/api/public', publicAdSettingsRouter);
+
 // Public homepage bars (Breaking + Live Updates)
 if (publicHomeTopBarsRouter) app.use('/api/public', publicHomeTopBarsRouter);
 // Journalists public/apply + admin ops
@@ -273,9 +556,20 @@ try {
 } catch (e) {
   console.warn('[init] optional routes/journalists not found; skipping');
 }
+// Global ad slot settings (mounted early so it cannot be shadowed by /api/admin)
+app.use('/api/admin', adminAdSettingsRouter);
+// Alias support
+app.use('/admin-api/admin', adminAdSettingsRouter);
+app.use('/admin-api/api/admin', adminAdSettingsRouter);
+
 // Admin routes for legacy and new admin UI paths
 app.use('/api/admin', adminRoutes); // used by admin UI
 app.use('/admin', adminRoutes);     // legacy path
+// Admin sponsor ads
+app.use('/api/admin', adminAdsRouter);
+// IMPORTANT: Admin panel alias support
+app.use('/admin-api/admin', adminAdsRouter);
+app.use('/admin-api/api/admin', adminAdsRouter);
 // Settings Center > Team Management (founder-only)
 app.use('/api/admin/staff', adminStaffRouter);
 // Backward-compatible alias used by some admin panel builds
@@ -371,6 +665,14 @@ try {
   app.use('/api/admin', adminJournalists);
 } catch (e) {
   console.warn('[init] optional routes/admin/journalistsAdmin not found; skipping');
+}
+
+// Workflow board + actions (legacy/admin)
+if (adminWorkflowLegacyRouter) {
+  app.use('/api/admin/workflow', adminWorkflowLegacyRouter);
+  app.use('/admin/workflow', adminWorkflowLegacyRouter);
+  // Compatibility alias used by some frontends
+  app.use('/admin-api/api/workflow', adminWorkflowLegacyRouter);
 }
 
 // Lightweight health/status endpoint under /api
@@ -795,19 +1097,39 @@ app.get('/threat-stats', (req, res) => {
 
 // 404 (final handler returning requested shape)
 app.use((req, res) => {
-  res.status(404).json({ success: false, message: 'Route not found', path: req.originalUrl });
+  res.status(404).json({
+    ok: false,
+    success: false,
+    status: 404,
+    message: 'Route not found',
+    data: null,
+    path: req.originalUrl,
+  });
 });
 
 // 500
 app.use((err, req, res, next) => {
-  try { console.error('Error:', err && err.message ? err.message : err, 'path=', req.originalUrl); } catch (_) {}
-  res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal server error' });
+  const status = Math.max(400, Math.min(599, parseInt(err?.status || err?.statusCode || 500, 10) || 500));
+  const message = status < 500
+    ? (err?.message || 'Request failed')
+    : 'Internal server error';
+  try { console.error('Error:', err && err.message ? err.message : err, 'status=', status, 'path=', req.originalUrl); } catch (_) {}
+  if (res.headersSent) return next(err);
+  return res.status(status).json({
+    ok: false,
+    success: false,
+    status,
+    message,
+    data: null,
+    path: req.originalUrl,
+    ...(err?.code ? { code: String(err.code) } : {}),
+  });
 });
 
 // Start server only when invoked directly (not when imported by tests)
-const PORT = process.env.PORT || 5000;
+const PORT = parseInt(process.env.PORT || '5000', 10) || 5000;
 if (require.main === module) {
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
     try {
       const reporterRoutes = [];
@@ -827,6 +1149,14 @@ if (require.main === module) {
     } catch (e) {
       console.warn('[startup][reporter-routes] failed', e?.message || e);
     }
+  });
+
+  server.on('error', (err) => {
+    console.error('[startup] failed to listen', { port: PORT, code: err?.code, message: err?.message });
+    if (err && err.code === 'EADDRINUSE') {
+      console.error(`[startup] Port ${PORT} is already in use. Stop the other process or set PORT to a free port.`);
+    }
+    process.exit(1);
   });
 }
 

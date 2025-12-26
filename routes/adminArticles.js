@@ -103,6 +103,7 @@ router.post('/articles', requireAdminAuth, async (req, res) => {
       language,
       scheduledAt,
       imageURL,
+      coverImageUrl,
     } = body;
 
     if (!title) {
@@ -118,6 +119,7 @@ router.post('/articles', requireAdminAuth, async (req, res) => {
       if (!isNaN(dt)) scheduledAt = dt; else scheduledAt = undefined;
     }
 
+    const resolvedCoverImageUrl = coverImageUrl ?? imageURL;
     const article = new News({
       title,
       description: description ?? summary ?? '',
@@ -127,7 +129,8 @@ router.post('/articles', requireAdminAuth, async (req, res) => {
       status: status || 'draft',
       language: language || 'en',
       scheduledAt,
-      imageURL,
+      imageURL: imageURL ?? resolvedCoverImageUrl,
+      coverImageUrl: resolvedCoverImageUrl,
     });
 
     await article.save();
@@ -305,7 +308,11 @@ router.put('/articles/:id', requireAdminAuth, async (req, res) => {
       update.publishAt = isNaN(dt) ? undefined : dt;
     }
     if (body.slug !== undefined) update.slug = body.slug;
+
+    const resolvedCoverImageUrl = body.coverImageUrl ?? body.imageURL;
+    if (resolvedCoverImageUrl !== undefined) update.coverImageUrl = resolvedCoverImageUrl;
     if (body.imageURL !== undefined) update.imageURL = body.imageURL;
+    else if (resolvedCoverImageUrl !== undefined) update.imageURL = resolvedCoverImageUrl;
 
     const doc = await News.findByIdAndUpdate(id, update, { new: true });
     if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
@@ -347,7 +354,11 @@ router.patch('/articles/:id', requireAdminAuth, async (req, res) => {
       update.publishAt = isNaN(dt) ? undefined : dt;
     }
     if (body.slug !== undefined) update.slug = body.slug;
+
+    const resolvedCoverImageUrl = body.coverImageUrl ?? body.imageURL;
+    if (resolvedCoverImageUrl !== undefined) update.coverImageUrl = resolvedCoverImageUrl;
     if (body.imageURL !== undefined) update.imageURL = body.imageURL;
+    else if (resolvedCoverImageUrl !== undefined) update.imageURL = resolvedCoverImageUrl;
 
     const doc = await News.findByIdAndUpdate(id, update, { new: true });
     if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });

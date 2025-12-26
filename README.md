@@ -109,6 +109,73 @@ Unknown routes return:
 - Mongo connection retries every 30s if unreachable; server stays up.
 - Avoid using the nested folder for new changes; all future changes belong at repo root.
 
+## Public Articles API (Frontend Feeds)
+
+### Required env vars
+
+- `MONGO_URI`: MongoDB connection string.
+- `JWT_SECRET`: Used for admin JWT verification (only needed if you use Bearer tokens for admin).
+- `CORS_ORIGINS`: Comma-separated extra origins to allow in addition to the hardcoded allowlist.
+  - Example: `CORS_ORIGINS=https://staging.newspulse.co.in,http://localhost:5173`
+- `PORT`: Server listen port (defaults to 10000 with fallback behavior).
+- `NODE_ENV`: `development` or `production`.
+
+### Endpoints
+
+#### GET /api/articles
+Query params:
+- `status` (default `published`) — `published` or `draft` (draft requires admin auth)
+- `category` — one of: `breaking`, `regional`, `national`, `international`, `business`, `tech`, `sports`, `lifestyle`, `glamour`, `web-stories`, `viral-videos`, `editorial`, `youth-pulse`, `inspiration-hub`
+- `isBreaking` — `true|false`
+- `lang` — `en|hi|gu`
+- `state`, `district`, `city`
+- `limit` (default 20), `page` (default 1)
+- `q` (optional search)
+
+Example:
+```bash
+curl "http://localhost:10000/api/articles?category=national&lang=en&limit=10&page=1"
+```
+
+Response:
+```json
+{
+  "items": [
+    {
+      "_id": "676a7b0b0e2d2e5d9b7b1234",
+      "title": "Example headline",
+      "slug": "example-headline",
+      "summary": "Short summary",
+      "content": "Full content...",
+      "category": "national",
+      "language": "en",
+      "status": "published",
+      "publishedAt": "2025-12-24T10:00:00.000Z",
+      "isBreaking": false,
+      "coverImage": "https://cdn.example.com/image.jpg",
+      "tags": ["politics"],
+      "state": null,
+      "district": null,
+      "city": null,
+      "createdAt": "2025-12-24T10:00:00.000Z",
+      "updatedAt": "2025-12-24T10:00:00.000Z"
+    }
+  ],
+  "page": 1,
+  "limit": 10,
+  "total": 1,
+  "totalPages": 1
+}
+```
+
+#### GET /api/articles/:slug
+Example:
+```bash
+curl "http://localhost:10000/api/articles/example-headline"
+```
+
+Returns the article document (published only unless admin auth is present).
+
 ### Secret Rotation & Hygiene
 
 - If any credential is leaked (e.g., MongoDB Atlas `MONGO_URI`), immediately rotate the user/password in the provider (Atlas), then update `MONGO_URI` in deployment and local `.env`.
