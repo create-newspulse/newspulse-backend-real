@@ -56,6 +56,7 @@ const adminAdsRouter = require('./routes/adminAds.routes');
 const publicAdSettingsRouter = require('./routes/publicAdSettings.routes');
 const adminAdSettingsRouter = require('./routes/adminAdSettings.routes');
 const publicRoutes = require('./routes/public.routes');
+const siteSettingsRoutes = require('./routes/siteSettings.routes');
 let adminWorkflowApiRouter = null;
 let adminPushHistoryApiRouter = null;
 let adminWorkflowLegacyRouter = null;
@@ -503,6 +504,22 @@ app.use('/api/broadcast', broadcastRoutes);
 app.use('/admin-api/api/broadcast', broadcastRoutes);
 // Compatibility alias: some frontends call /admin-api/broadcast/*
 app.use('/admin-api/broadcast', broadcastRoutes);
+// Site settings: simple public endpoint (stub)
+// Placed here (before router mounts) to guarantee frontend never sees a 404.
+app.get('/api/site-settings/public', (req, res) => {
+  res.json({
+    success: true,
+    data: {
+      brandName: 'News Pulse',
+      liveTvEnabled: true,
+      liveTvUrl: '',
+      defaultLanguage: 'en',
+      maintenanceMode: false,
+    },
+  });
+});
+// Site Settings (public)
+app.use('/api/site-settings', siteSettingsRoutes);
 // Articles router mounted at /api and alias at root for /articles
 app.use('/api', articlesRoutes);
 app.use('/', articlesRoutes);
