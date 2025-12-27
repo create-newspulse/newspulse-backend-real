@@ -557,28 +557,32 @@ function requireAuth(req, res, next) {
 function requireAdmin(req, res, next) {
   const role = req.user?.role;
   if (role === 'admin' || role === 'founder') return next();
-  return res.status(403).json({ success: false, message: 'Forbidden' });
+  return res.status(403).json({ ok: false, success: false, status: 403, message: 'Forbidden' });
 }
 
-// ✅ ADMIN: list stories
-app.get('/api/admin/stories', requireAuth, requireAdmin, async (req, res) => {
+async function _adminListStories(req, res) {
   try {
     const stories = await Story.find().sort({ createdAt: -1 }).limit(200);
     return res.json({ success: true, data: stories });
   } catch (err) {
     return res.status(500).json({ success: false, message: err?.message || String(err) });
   }
-});
+}
 
-// ✅ ADMIN: create story
-app.post('/api/admin/stories', requireAuth, requireAdmin, async (req, res) => {
+async function _adminCreateStory(req, res) {
   try {
     const created = await Story.create(req.body);
     return res.json({ success: true, data: created });
   } catch (err) {
     return res.status(500).json({ success: false, message: err?.message || String(err) });
   }
-});
+}
+
+// ✅ ADMIN: stories (with /admin-api compatibility aliases)
+for (const p of ['/api/admin/stories', '/admin-api/admin/stories', '/admin-api/api/admin/stories']) {
+  app.get(p, requireAuth, requireAdmin, _adminListStories);
+  app.post(p, requireAuth, requireAdmin, _adminCreateStory);
+}
 // Auth bootstrap endpoint for admin panel
 app.use('/api/auth', authRoutes);
 // Audit (founder-only)
