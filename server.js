@@ -14,8 +14,8 @@ const multer = require('multer');
 // Base dir for nested app code
 const BASE = './newspulse-backend-real-main';
 
-// Nested routes and modules
-const newsRoutes = require(`${BASE}/routes/news`);
+// Public news feed routes (no auth; published-only)
+const newsRoutes = require('./routes/news');
 const publicArticlesRoutes = require(`${BASE}/routes/publicArticles`);
 const articlesRoutes = require('./routes/articles');
 const adminRoutes = require('./routes/admin');
@@ -59,6 +59,7 @@ const publicAdSettingsRouter = require('./routes/publicAdSettings.routes');
 const adminAdSettingsRouter = require('./routes/adminAdSettings.routes');
 const publicRoutes = require('./routes/public.routes');
 const siteSettingsRoutes = require('./routes/siteSettings.routes');
+const publicNewsRouter = require('./routes/publicNews.routes');
 let adminWorkflowApiRouter = null;
 let adminPushHistoryApiRouter = null;
 let adminWorkflowLegacyRouter = null;
@@ -609,6 +610,11 @@ app.get('/api/site-settings/public', (req, res) => {
 });
 // Site Settings (public)
 app.use('/api/site-settings', siteSettingsRoutes);
+
+// Public news feed (NO AUTH)
+// Mount early to avoid being shadowed by other /api routers.
+app.use('/api/public/news', publicNewsRouter);
+
 // Articles router mounted at /api and alias at root for /articles
 app.use('/api', articlesRoutes);
 app.use('/', articlesRoutes);
@@ -1274,5 +1280,6 @@ function extractPrefix(regexp) {
   } catch (_) {}
   return '';
 }
+
 
 module.exports = app;
