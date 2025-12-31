@@ -33,6 +33,11 @@ function normalizeLanguage(v) {
   return null;
 }
 
+function getRequestedLang(req) {
+  // Canonical param is `lang`, but accept `language` for backward compatibility.
+  return normalizeLanguage(req.query.lang) || normalizeLanguage(req.query.language) || null;
+}
+
 function buildPublicPublishedFilter({ category, q, founderOnly, type }) {
   const now = new Date();
 
@@ -105,6 +110,7 @@ const PUBLIC_SELECT = [
   'slug',
   'tags',
   'category',
+  'lang',
   'language',
   'translationGroupId',
   'imageURL',
@@ -118,7 +124,8 @@ const PUBLIC_SELECT = [
 function withCoverImageUrl(obj) {
   const out = { ...(obj || {}) };
   out.coverImageUrl = out.coverImageUrl || out.imageURL || null;
-  out.language = out.language || 'en';
+  out.lang = out.lang || out.language || 'en';
+  out.language = out.language || out.lang || 'en';
   return out;
 }
 
@@ -134,7 +141,7 @@ async function listPublicNews(req, res) {
     const founderOnly = parseTruthy(req.query.founderOnly);
     const type = String(req.query.type || '').trim().toLowerCase();
 
-    const language = normalizeLanguage(req.query.language);
+    const lang = getRequestedLang(req);
 
     let q = String(req.query.q || '').trim();
     // Keep keyword search safe and bounded
@@ -151,12 +158,21 @@ async function listPublicNews(req, res) {
       type,
     });
 
-    if (language) {
-      // Backward compatibility: treat missing language as "en".
-      if (language === 'en') {
-        filter.$and.push({ $or: [{ language: 'en' }, { language: null }, { language: { $exists: false } }] });
+    if (lang) {
+      // Backward compatibility: treat missing language/lang as "en".
+      if (lang === 'en') {
+        filter.$and.push({
+          $or: [
+            { lang: 'en' },
+            { language: 'en' },
+            { lang: null },
+            { language: null },
+            { lang: { $exists: false } },
+            { language: { $exists: false } },
+          ],
+        });
       } else {
-        filter.$and.push({ language });
+        filter.$and.push({ $or: [{ lang }, { language: lang }] });
       }
     }
 

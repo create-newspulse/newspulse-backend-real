@@ -7,6 +7,11 @@ function normalizeLanguage(v) {
   return null;
 }
 
+function getIncomingLang(body) {
+  // Prefer `lang` but accept legacy `language` too.
+  return normalizeLanguage(body?.lang) || normalizeLanguage(body?.language);
+}
+
 function normalizeTranslationGroupId(v) {
   const s = String(v ?? '').trim();
   return s ? s : null;
@@ -21,9 +26,14 @@ exports.createNews = async (req, res) => {
 
     // Multilingual publishing (Option A+)
     // Backward compatible: if invalid/missing, fall back to defaults.
-    const language = normalizeLanguage(body.language);
-    if (language) body.language = language;
-    else if (body.language !== undefined) delete body.language;
+    const lang = getIncomingLang(body);
+    if (lang) {
+      body.lang = lang;
+      body.language = lang;
+    } else {
+      if (body.lang !== undefined) delete body.lang;
+      if (body.language !== undefined) delete body.language;
+    }
 
     const translationGroupId = normalizeTranslationGroupId(body.translationGroupId);
     body.translationGroupId = translationGroupId || new mongoose.Types.ObjectId().toString();
@@ -42,7 +52,8 @@ exports.getNews = async (req, res) => {
     const items = (newsList || []).map(doc => {
       const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
       obj.coverImageUrl = obj.coverImageUrl || obj.imageURL || null;
-      obj.language = obj.language || 'en';
+      obj.lang = obj.lang || obj.language || 'en';
+      obj.language = obj.language || obj.lang || 'en';
       return obj;
     });
     res.json(items);
@@ -61,9 +72,14 @@ exports.updateNews = async (req, res) => {
       body.coverImageUrl = body.imageURL;
     }
 
-    const language = normalizeLanguage(body.language);
-    if (language) body.language = language;
-    else if (body.language !== undefined) delete body.language;
+    const lang = getIncomingLang(body);
+    if (lang) {
+      body.lang = lang;
+      body.language = lang;
+    } else {
+      if (body.lang !== undefined) delete body.lang;
+      if (body.language !== undefined) delete body.language;
+    }
 
     const translationGroupId = normalizeTranslationGroupId(body.translationGroupId);
     if (translationGroupId) body.translationGroupId = translationGroupId;

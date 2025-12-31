@@ -151,15 +151,20 @@ Returns **published** news stories (no auth required).
 
 Query params:
 - `category` (existing)
-- `language` (new) — `en|hi|gu` (missing language in DB is treated as `en`)
+- `lang` (new) — `en|hi|gu` (missing `lang` in DB is treated as `en`)
 - `q` (existing search)
 - `page` (default 1), `limit` (default 30)
 
 Examples:
 ```bash
-curl "http://localhost:10000/api/public/news?category=national&language=en&limit=5"
-curl "http://localhost:10000/api/public/news?category=national&language=hi&limit=5"
-curl "http://localhost:10000/api/public/news?q=budget&language=en&limit=5"
+curl "http://localhost:10000/api/public/news?category=national&lang=en&limit=5"
+curl "http://localhost:10000/api/public/news?category=national&lang=hi&limit=5"
+curl "http://localhost:10000/api/public/news?q=budget&lang=en&limit=5"
+```
+
+Backfill (one-time):
+```bash
+MONGO_URI="<your-mongo-uri>" node scripts/backfill-news-lang.js
 ```
 
 Response shape (unchanged):
