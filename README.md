@@ -101,24 +101,12 @@ Returns a simple JSON health indicator.
 ### 404 Handling
 Unknown routes return:
 ```json
-{ "ok": false, "success": false, "status": 404, "message": "Route not found", "path": "/missing" }
-```
-
 ## Development Notes
-- Socket.IO path: `/socket.io` (origins limited via CORS).
-- Mongo connection retries every 30s if unreachable; server stays up.
 - Avoid using the nested folder for new changes; all future changes belong at repo root.
 
 ## Public Articles API (Frontend Feeds)
 
 ### Required env vars
-
-- `MONGO_URI`: MongoDB connection string.
-- `JWT_SECRET`: Used for admin JWT verification (only needed if you use Bearer tokens for admin).
-- `CORS_ORIGINS`: Comma-separated extra origins to allow in addition to the hardcoded allowlist.
-  - Example: `CORS_ORIGINS=https://staging.newspulse.co.in,http://localhost:5173`
-- `PORT`: Server listen port (defaults to 10000 with fallback behavior).
-- `NODE_ENV`: `development` or `production`.
 
 ### Endpoints
 
@@ -155,6 +143,37 @@ Response:
       "coverImage": "https://cdn.example.com/image.jpg",
       "tags": ["politics"],
       "state": null,
+
+## Public News API (Multilingual)
+
+### GET /api/public/news
+Returns **published** news stories (no auth required).
+
+Query params:
+- `category` (existing)
+- `language` (new) — `en|hi|gu` (missing language in DB is treated as `en`)
+- `q` (existing search)
+- `page` (default 1), `limit` (default 30)
+
+Examples:
+```bash
+curl "http://localhost:10000/api/public/news?category=national&language=en&limit=5"
+curl "http://localhost:10000/api/public/news?category=national&language=hi&limit=5"
+curl "http://localhost:10000/api/public/news?q=budget&language=en&limit=5"
+```
+
+Response shape (unchanged):
+```json
+{ "items": [], "page": 1, "limit": 30, "total": 0, "totalPages": 1 }
+```
+
+### GET /api/public/news/translations/:translationGroupId
+Returns all published translations for a translation group (no auth required), sorted by `language`.
+
+Example:
+```bash
+curl "http://localhost:10000/api/public/news/translations/<translationGroupId>"
+```
       "district": null,
       "city": null,
       "createdAt": "2025-12-24T10:00:00.000Z",

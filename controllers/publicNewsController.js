@@ -18,12 +18,36 @@ function escapeRegExp(str) {
   return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function buildPublicPublishedFilter({ category, q }) {
+function normalizeCategorySlug(v) {
+  return String(v || '').trim().toLowerCase();
+}
+
+function parseTruthy(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  return s === 'true' || s === '1' || s === 'yes' || s === 'y';
+}
+
+function normalizeLanguage(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (s === 'en' || s === 'hi' || s === 'gu') return s;
+  return null;
+}
+
+function buildPublicPublishedFilter({ category, q, founderOnly, type }) {
   const now = new Date();
 
   const filter = {
-    status: 'published',
     $and: [
+      // Compatibility: some collections use status/workflowStage, others use a boolean.
+      {
+        $or: [
+          { published: true },
+          { status: 'published' },
+          { status: { $regex: '^published$', $options: 'i' } },
+          { workflowStage: 'published' },
+          { workflowStage: 'PUBLISHED' },
+        ],
+      },
       { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
       { $or: [{ locked: { $ne: true } }, { locked: { $exists: false } }] },
       { $or: [{ embargoUntil: null }, { embargoUntil: { $exists: false } }, { embargoUntil: { $lte: now } }] },
@@ -34,6 +58,28 @@ function buildPublicPublishedFilter({ category, q }) {
   };
 
   if (category) filter.category = category;
+
+  if (founderOnly) {
+    filter.$and.push({
+      $or: [
+        { isFounder: true },
+        { authorRole: { $regex: '^FOUNDER$', $options: 'i' } },
+        // Works for both string and array-valued fields.
+        { authorTag: { $regex: 'Founder', $options: 'i' } },
+      ],
+    });
+  }
+
+  if (type === 'video') {
+    filter.$and.push({
+      $or: [
+        { contentType: { $regex: '^video$', $options: 'i' } },
+        { mediaType: { $regex: '^video$', $options: 'i' } },
+        { postType: { $regex: '^video$', $options: 'i' } },
+        { videoUrl: { $exists: true, $ne: '' } },
+      ],
+    });
+  }
 
   if (q) {
     const safe = escapeRegExp(q);
@@ -60,6 +106,7 @@ const PUBLIC_SELECT = [
   'tags',
   'category',
   'language',
+  'translationGroupId',
   'imageURL',
   'coverImageUrl',
   'publishedAt',
@@ -71,10 +118,11 @@ const PUBLIC_SELECT = [
 function withCoverImageUrl(obj) {
   const out = { ...(obj || {}) };
   out.coverImageUrl = out.coverImageUrl || out.imageURL || null;
+  out.language = out.language || 'en';
   return out;
 }
 
-// GET /api/public/news?category=&q=&limit=30&page=1
+// GET /api/public/news?category=&type=video&founderOnly=true&limit=30&page=1
 async function listPublicNews(req, res) {
   try {
     res.set('Cache-Control', 'no-store');
@@ -82,7 +130,11 @@ async function listPublicNews(req, res) {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '30', 10), 1), 100);
 
-    const category = String(req.query.category || '').trim();
+    const category = normalizeCategorySlug(req.query.category);
+    const founderOnly = parseTruthy(req.query.founderOnly);
+    const type = String(req.query.type || '').trim().toLowerCase();
+
+    const language = normalizeLanguage(req.query.language);
 
     let q = String(req.query.q || '').trim();
     // Keep keyword search safe and bounded
@@ -95,7 +147,18 @@ async function listPublicNews(req, res) {
     const filter = buildPublicPublishedFilter({
       category: category || undefined,
       q: q || undefined,
+      founderOnly,
+      type,
     });
+
+    if (language) {
+      // Backward compatibility: treat missing language as "en".
+      if (language === 'en') {
+        filter.$and.push({ $or: [{ language: 'en' }, { language: null }, { language: { $exists: false } }] });
+      } else {
+        filter.$and.push({ language });
+      }
+    }
 
     const skip = (page - 1) * limit;
     const sort = { publishedAt: -1, createdAt: -1 };
@@ -111,6 +174,33 @@ async function listPublicNews(req, res) {
     return res.status(200).json({ items, page, limit, total, totalPages });
   } catch (e) {
     return res.status(500).json({ items: [], page: 1, limit: 30, total: 0, totalPages: 1, message: e?.message || String(e) });
+  }
+}
+
+// GET /api/public/news/translations/:translationGroupId
+async function listPublicNewsTranslations(req, res) {
+  try {
+    res.set('Cache-Control', 'no-store');
+
+    const translationGroupId = String(req.params.translationGroupId || '').trim();
+    if (!translationGroupId) return res.status(200).json([]);
+
+    if (!isDbReady()) {
+      return res.status(200).json([]);
+    }
+
+    const filter = buildPublicPublishedFilter({});
+    filter.$and.push({ translationGroupId });
+
+    const itemsRaw = await News.find(filter)
+      .select(PUBLIC_SELECT)
+      .sort({ language: 1, publishedAt: -1, createdAt: -1 })
+      .lean();
+
+    const items = (itemsRaw || []).map(withCoverImageUrl);
+    return res.status(200).json(items);
+  } catch (e) {
+    return res.status(500).json({ message: e?.message || String(e) });
   }
 }
 
@@ -150,5 +240,6 @@ async function getPublicNewsBySlugOrId(req, res) {
 
 module.exports = {
   listPublicNews,
+  listPublicNewsTranslations,
   getPublicNewsBySlugOrId,
 };
