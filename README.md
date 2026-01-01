@@ -151,7 +151,7 @@ Returns **published** news stories (no auth required).
 
 Query params:
 - `category` (existing)
-- `lang` (new) — `en|hi|gu` (missing `lang` in DB is treated as `en`)
+- `lang` (new) — `en|hi|gu` (default is `gu`; missing `lang` in DB is treated as `gu`)
 - `q` (existing search)
 - `page` (default 1), `limit` (default 30)
 

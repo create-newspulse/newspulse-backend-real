@@ -124,8 +124,8 @@ const PUBLIC_SELECT = [
 function withCoverImageUrl(obj) {
   const out = { ...(obj || {}) };
   out.coverImageUrl = out.coverImageUrl || out.imageURL || null;
-  out.lang = out.lang || out.language || 'en';
-  out.language = out.language || out.lang || 'en';
+  out.lang = out.lang || out.language || 'gu';
+  out.language = out.language || out.lang || 'gu';
   return out;
 }
 
@@ -141,7 +141,8 @@ async function listPublicNews(req, res) {
     const founderOnly = parseTruthy(req.query.founderOnly);
     const type = String(req.query.type || '').trim().toLowerCase();
 
-    const lang = getRequestedLang(req);
+    // Default language for public story feed is Gujarati.
+    const lang = getRequestedLang(req) || 'gu';
 
     let q = String(req.query.q || '').trim();
     // Keep keyword search safe and bounded
@@ -160,15 +161,18 @@ async function listPublicNews(req, res) {
 
     if (lang) {
       // Backward compatibility: treat missing language/lang as "en".
-      if (lang === 'en') {
+      if (lang === 'gu') {
         filter.$and.push({
           $or: [
-            { lang: 'en' },
-            { language: 'en' },
-            { lang: null },
-            { language: null },
-            { lang: { $exists: false } },
-            { language: { $exists: false } },
+            { lang: 'gu' },
+            { language: 'gu' },
+            // Default-to-gu ONLY when neither field provides a language.
+            {
+              $and: [
+                { $or: [{ lang: null }, { lang: { $exists: false } }] },
+                { $or: [{ language: null }, { language: { $exists: false } }] },
+              ],
+            },
           ],
         });
       } else {

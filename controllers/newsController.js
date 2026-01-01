@@ -52,8 +52,8 @@ exports.getNews = async (req, res) => {
     const items = (newsList || []).map(doc => {
       const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
       obj.coverImageUrl = obj.coverImageUrl || obj.imageURL || null;
-      obj.lang = obj.lang || obj.language || 'en';
-      obj.language = obj.language || obj.lang || 'en';
+      obj.lang = obj.lang || obj.language || 'gu';
+      obj.language = obj.language || obj.lang || 'gu';
       return obj;
     });
     res.json(items);

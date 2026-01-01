@@ -40,7 +40,7 @@ async function main() {
 
   const defaultRes = await News.updateMany(
     { lang: { $exists: false } },
-    { $set: { lang: 'en' } }
+    { $set: { lang: 'gu' } }
   );
 
   console.log('[backfill-news-lang] done', {
