@@ -21,7 +21,7 @@ function parseCookies(header) {
 
 function requireAdminAuth(req, res, next) {
   const authHeader = String(req.headers['authorization'] || '');
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice('Bearer '.length).trim() : '';
+  const token = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice('Bearer '.length).trim() : '';
   const cookies = parseCookies(req.headers.cookie || '');
   // Accept multiple legacy cookie keys for backward compatibility with older admin panel builds
   // Common variants observed in production/admin panel: np_admin, np_admin_email, np_admin_session

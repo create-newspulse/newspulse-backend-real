@@ -2,6 +2,23 @@
 // Many route/controller modules read process.env at import time.
 require('dotenv').config();
 
+// Validate critical environment early (fail fast in prod / when enforced)
+(() => {
+  const enforce = String(process.env.ENFORCE_REQUIRED_ENVS || '').trim() === '1'
+    || String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+  if (!enforce) return;
+
+  const missing = [];
+  if (!process.env.JWT_SECRET) missing.push('JWT_SECRET');
+  if (!process.env.MONGODB_URI) missing.push('MONGODB_URI');
+
+  if (missing.length) {
+    const msg = `[init] Missing required env var(s): ${missing.join(', ')}`;
+    console.error(msg);
+    throw new Error(msg);
+  }
+})();
+
 const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
@@ -206,6 +223,7 @@ app.options('*', (req, res) => {
 });
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // Serve uploaded files publicly
@@ -989,6 +1007,26 @@ app.get('/api/admin/me', optionalAdminAuth, (req, res) => {
   });
 });
 
+// Legacy admin auth probe for admin panels calling /admin/me
+// - 200 with user when token/cookie valid
+// - 401 when missing/invalid
+app.get('/admin/me', requireAdminAuth, (req, res) => {
+  try {
+    const a = req.admin || null;
+    if (!a) return res.status(401).json({ ok: false, success: false, message: 'Unauthorized' });
+    const role = (a.role === 'founder' || a.role === 'admin') ? a.role : 'admin';
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      authenticated: true,
+      admin: { id: a.id || 'unknown', email: a.email || '', role },
+    });
+  } catch (e) {
+    console.error('me failed:', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to load session' });
+  }
+});
+
 // Aliases expected by some UIs
 app.get('/admin/stats', async (req, res) => {
   try {
@@ -1065,6 +1103,7 @@ app.post('/admin/login', (req, res) => {
     _issuedTokens.refresh.add(refreshToken);
     return res.json({ success: true, accessToken, refreshToken, user: { email } });
   } catch (e) {
+    console.error('login failed:', e?.message || e);
     return res.status(500).json({ success: false, message: 'Login failed' });
   }
 });
