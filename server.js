@@ -60,6 +60,9 @@ const adminAdSettingsRouter = require('./routes/adminAdSettings.routes');
 const publicRoutes = require('./routes/public.routes');
 const siteSettingsRoutes = require('./routes/siteSettings.routes');
 const publicNewsRouter = require('./routes/publicNews.routes');
+const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');
+const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
+const adminPublicTickersSettingsRouter = require('./routes/adminPublicTickersSettings.routes');
 let adminWorkflowApiRouter = null;
 let adminPushHistoryApiRouter = null;
 let adminWorkflowLegacyRouter = null;
@@ -301,9 +304,6 @@ app.get('/api/system/health', healthHandler);
 // Simple base API health route (requested)
 app.get('/api/health', (_req, res) => {
   return res.status(200).json({ ok: true });
-});
-app.get('/system/ai-training-info', (req, res) => {
-  res.json({ success: true, status: 'online', lastUpdated: process.env.AI_TRAINING_LAST_UPDATED || new Date().toISOString() });
 });
 
 // Root-level health and stats (no /api prefix)
@@ -613,6 +613,7 @@ app.use('/api/site-settings', siteSettingsRoutes);
 
 // Public news feed (NO AUTH)
 // Mount early to avoid being shadowed by other /api routers.
+app.use('/api/public/trending-topics', publicTrendingTopicsRouter);
 app.use('/api/public/news', publicNewsRouter);
 
 // Articles router mounted at /api and alias at root for /articles
@@ -650,6 +651,14 @@ if (publicFeatureTogglesRouter) {
 // Public sponsor ads
 app.use('/api/public', publicAdsRouter);
 
+// Public site settings (tickers)
+app.use('/api/public', publicTickersSettingsRouter);
+// Legacy/website path support
+app.use('/public', publicTickersSettingsRouter);
+// Admin panel proxy basePath support
+app.use('/admin-api/public', publicTickersSettingsRouter);
+app.use('/admin-api/api/public', publicTickersSettingsRouter);
+
 // Public stories
 app.use('/api/public', publicRoutes);
 
@@ -679,11 +688,24 @@ app.use('/api/admin', adminRoutes); // used by admin UI
 app.use('/admin', adminRoutes);     // legacy path
 // Admin sponsor ads
 app.use('/api/admin', adminAdsRouter);
+
+// Admin public settings (tickers)
+app.use('/api/admin', adminPublicTickersSettingsRouter);
+// Legacy admin panel path support
+app.use('/admin', adminPublicTickersSettingsRouter);
+// Admin panel proxy basePath support
+app.use('/admin-api/admin', adminPublicTickersSettingsRouter);
+app.use('/admin-api/api/admin', adminPublicTickersSettingsRouter);
 // IMPORTANT: Admin panel alias support
 app.use('/admin-api/admin', adminAdsRouter);
 app.use('/admin-api/api/admin', adminAdsRouter);
 // Settings Center > Team Management (founder-only)
 app.use('/api/admin/staff', adminStaffRouter);
+// Legacy admin panel path support
+app.use('/admin/staff', adminStaffRouter);
+// Admin panel proxy basePath support
+app.use('/admin-api/admin/staff', adminStaffRouter);
+app.use('/admin-api/api/admin/staff', adminStaffRouter);
 // Backward-compatible alias used by some admin panel builds
 app.use('/api/admin/team', adminStaffRouter);
 // Admin site settings (Founder-only)
@@ -698,8 +720,23 @@ app.use('/admin-api', dashboardStatsRouter);
 // /api/admin -> explicit admin-prefixed endpoints
 app.use('/api/admin', dashboardStatsRouter);
 app.use('/admin-auth', adminAuthRoutes);
-app.use('/system/ai-training-info', aiTrainingInfoRoutes);
-app.use('/api/system/ai-training-info', aiTrainingInfoRoutes);
+// AI training info: public read endpoint (admin panel can read without login)
+for (const p of [
+  '/system/ai-training-info',
+  '/api/system/ai-training-info',
+  '/admin-api/system/ai-training-info',
+  '/admin-api/api/system/ai-training-info',
+]) {
+  app.use(p, aiTrainingInfoRoutes);
+}
+
+// AI training info: admin-only aliases (some admin builds use /admin-api/* base paths)
+for (const p of [
+  '/admin-api/admin/system/ai-training-info',
+  '/admin-api/api/admin/system/ai-training-info',
+]) {
+  app.use(p, requireAdminAuth, aiTrainingInfoRoutes);
+}
 // Admin-prefixed alias for system AI training info
 // Admin system endpoints mounted under /api/admin (handled by adminSystemRoutes)
 app.use('/api/admin', adminSystemRoutes);
@@ -976,20 +1013,6 @@ app.get('/api/system/ai-health', (req, res) => {
       status: 'offline',
       engines: [],
       notes: 'This is a placeholder response from newspulse-backend-real-main.',
-    },
-  });
-});
-
-app.get('/system/ai-training-info', (req, res) => {
-  return res.json({
-    ok: true,
-    success: true,
-    status: 200,
-    message: 'AI training info stub',
-    data: {
-      lastUpdated: null,
-      datasets: [],
-      notes: 'Training info not yet implemented.',
     },
   });
 });

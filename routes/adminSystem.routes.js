@@ -2,7 +2,7 @@ const express = require('express');
 
 const router = express.Router();
 
-const { requireFounderAuth } = require('../middleware/adminAuth');
+const { requireAdminAuth, requireFounderAuth } = require('../middleware/adminAuth');
 const { requireOwnerKey } = require('../middleware/requireOwnerKey');
 const { settingsService } = require('../services/settingsService');
 const mongoose = require('mongoose');
@@ -15,7 +15,7 @@ function isDbReady() {
 
 // GET /api/admin/system/ai-training-info
 // TODO: Replace placeholder with real training metadata from storage/DB.
-router.get('/system/ai-training-info', (_req, res) => {
+router.get('/system/ai-training-info', requireAdminAuth, (_req, res) => {
   return res.status(200).json({
     success: true,
     data: {
