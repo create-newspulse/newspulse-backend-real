@@ -74,6 +74,7 @@ const News = require(`${BASE}/models/News`);
 // Public /api/public/stories uses the root Article model; reuse it for admin stories.
 const Story = require('./models/Article');
 const { requireAdminAuth } = require('./middleware/adminAuth');
+const { optionalAdminAuth } = require('./middleware/optionalAdminAuth');
 let aiRoutes = null;
 let feedRoutes = null;
 try { aiRoutes = require(`${BASE}/routes/ai`); } catch (_) { console.warn('[init] optional routes/ai not found; skipping'); }
@@ -967,12 +968,22 @@ app.get('/api/admin/community/my-stories', requireAdminAuth, async (req, res) =>
   }
 });
 
-app.get('/api/admin/me', requireAdminAuth, (req, res) => {
-  const a = req.admin || {};
+app.get('/api/admin/me', optionalAdminAuth, (req, res) => {
+  const a = req.admin || null;
+  if (!a) {
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      authenticated: false,
+      admin: null,
+    });
+  }
+
   const role = (a.role === 'founder' || a.role === 'admin') ? a.role : 'admin';
-  return res.json({
+  return res.status(200).json({
     ok: true,
     success: true,
+    authenticated: true,
     role,
     admin: { id: a.id || 'unknown', email: a.email || '', role },
   });

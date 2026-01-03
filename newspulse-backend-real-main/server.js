@@ -19,6 +19,7 @@ const communityReporterSettingsRouter = require('./routes/adminSettings/communit
 const CommunitySubmission = require('./models/CommunitySubmission');
 const News = require('./models/News');
 const { requireAdminAuth } = require('../middleware/adminAuth');
+const { optionalAdminAuth } = require('../middleware/optionalAdminAuth');
 // Ads + Ad Settings (shared root-level routers)
 const publicAdsRouter = require('../routes/publicAds.routes');
 const adminAdsRouter = require('../routes/adminAds.routes');
@@ -352,14 +353,27 @@ app.get('/admin/community/reporter-stories', requireAdminAuth, async (req, res) 
   }
 });
 
-app.get('/api/admin/me', requireAdminAuth, (req, res) => {
-  const a = req.admin || {};
-  return res.json({
+app.get('/api/admin/me', optionalAdminAuth, (req, res) => {
+  const a = req.admin || null;
+  if (!a) {
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      authenticated: false,
+      admin: null,
+    });
+  }
+
+  const role = (a.role === 'founder' || a.role === 'admin') ? a.role : 'admin';
+  return res.status(200).json({
+    ok: true,
     success: true,
+    authenticated: true,
+    role,
     admin: {
       id: a.id || 'unknown',
       email: a.email || '',
-      role: a.role || 'admin',
+      role,
     },
   });
 });

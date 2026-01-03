@@ -11,7 +11,9 @@ const {
 
 const router = express.Router();
 
-router.use(requireAdminAuth);
+// Scope auth only to this router's paths so it doesn't block unrelated /api/admin/*
+// endpoints like /api/admin/me.
+router.use('/ads', requireAdminAuth);
 
 // GET /api/admin/ads?slot=HOME_728x90
 router.get('/ads', listAds);
