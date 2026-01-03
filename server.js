@@ -8,9 +8,14 @@ require('dotenv').config();
     || String(process.env.NODE_ENV || '').toLowerCase() === 'production';
   if (!enforce) return;
 
+  const mongoUri =
+    process.env.MONGO_URI ||
+    process.env.MONGODB_URI ||
+    (String(process.env.DATABASE_URL || '').startsWith('mongodb') ? process.env.DATABASE_URL : undefined);
+
   const missing = [];
   if (!process.env.JWT_SECRET) missing.push('JWT_SECRET');
-  if (!process.env.MONGODB_URI) missing.push('MONGODB_URI');
+  if (!mongoUri) missing.push('MONGO_URI (or MONGODB_URI)');
 
   if (missing.length) {
     const msg = `[init] Missing required env var(s): ${missing.join(', ')}`;
@@ -169,6 +174,11 @@ const allowedOrigins = new Set([
   'https://admin.newspulse.co.in',
   'http://localhost:5173',
   'http://localhost:3000',
+  // Vercel domains (set these in Render for LIVE frontend/admin deployments)
+  ..._parseCorsOriginsEnv(process.env.ADMIN_VERCEL_DOMAIN),
+  ..._parseCorsOriginsEnv(process.env.FRONTEND_VERCEL_DOMAIN),
+  // Common Vercel-provided host (no scheme). If present, allow both http/https.
+  ..._parseCorsOriginsEnv(process.env.VERCEL_URL),
   // Comma-separated allowlist for the admin panel and local development.
   // Preferred env var: CORS_ORIGIN (supports multiple values).
   // Back-compat: CORS_ORIGINS.
@@ -189,6 +199,8 @@ const corsOptions = {
     return callback(err);
   },
   credentials: true,
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Authorization', 'Content-Type'],
   preflightContinue: true,
   optionsSuccessStatus: 204,
 };
@@ -330,10 +342,10 @@ app.get('/api/health', (_req, res) => {
 // before any 404/error handlers so they are always reachable.
 app.get('/health', (req, res) => {
   const readyState = typeof mongoose?.connection?.readyState === 'number' ? mongoose.connection.readyState : -1;
-  if (readyState === 1) {
-    return res.status(200).json({ ok: true, db: 'connected' });
-  }
-  return res.status(200).json({ ok: false, db: 'disconnected', readyState });
+  const dbConnected = readyState === 1;
+  // Keep response minimal/stable for load balancers and uptime checks.
+  // (Spec requires: GET /health -> { ok: true })
+  return res.status(200).json({ ok: true, dbConnected, readyState });
 });
 
 app.get('/stats', (req, res) => {
