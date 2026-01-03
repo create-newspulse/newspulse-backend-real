@@ -134,4 +134,9 @@ router.get('/public-settings/tickers', requireAdminAuth, (_req, res) => {
   return res.status(200).json({ ok: true, success: true, status: 200, managedIn: 'broadcast-center' });
 });
 
+// Backward-compatible alias: some admin builds call /public-setting/* (singular)
+router.get('/public-setting/tickers', requireAdminAuth, (_req, res) => {
+  return res.status(200).json({ ok: true, success: true, status: 200, managedIn: 'broadcast-center' });
+});
+
 module.exports = router;

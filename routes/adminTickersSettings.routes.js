@@ -177,11 +177,11 @@ function broadcastSettingEnvelope(status, doc, { publishedAt } = {}) {
 // Admin panel legacy paths are /admin/settings/tickers*.
 // The newer API paths are /api/admin/public-settings/tickers*.
 const ADMIN_PATHS = {
-  base: ['/public-settings/tickers', '/settings/tickers', '/tickers'],
-  draft: ['/public-settings/tickers/draft', '/settings/tickers/draft', '/tickers/draft'],
-  publish: ['/public-settings/tickers/publish', '/settings/tickers/publish', '/tickers/publish'],
-  versions: ['/public-settings/tickers/versions', '/settings/tickers/versions', '/tickers/versions'],
-  previewToken: ['/public-settings/tickers/preview-token', '/settings/tickers/preview-token', '/tickers/preview-token'],
+  base: ['/public-settings/tickers', '/public-setting/tickers', '/settings/tickers', '/tickers'],
+  draft: ['/public-settings/tickers/draft', '/public-setting/tickers/draft', '/settings/tickers/draft', '/tickers/draft'],
+  publish: ['/public-settings/tickers/publish', '/public-setting/tickers/publish', '/settings/tickers/publish', '/tickers/publish'],
+  versions: ['/public-settings/tickers/versions', '/public-setting/tickers/versions', '/settings/tickers/versions', '/tickers/versions'],
+  previewToken: ['/public-settings/tickers/preview-token', '/public-setting/tickers/preview-token', '/settings/tickers/preview-token', '/tickers/preview-token'],
 };
 
 // Some admin builds call GET /api/admin/tickers/draft (path param) instead of
