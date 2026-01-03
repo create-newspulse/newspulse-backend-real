@@ -79,7 +79,7 @@ const siteSettingsRoutes = require('./routes/siteSettings.routes');
 const publicNewsRouter = require('./routes/publicNews.routes');
 const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');
 const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
-const adminPublicTickersSettingsRouter = require('./routes/adminPublicTickersSettings.routes');
+const adminTickersSettingsRouter = require('./routes/adminTickersSettings.routes');
 let adminWorkflowApiRouter = null;
 let adminPushHistoryApiRouter = null;
 let adminWorkflowLegacyRouter = null;
@@ -709,12 +709,12 @@ app.use('/admin', adminRoutes);     // legacy path
 app.use('/api/admin', adminAdsRouter);
 
 // Admin public settings (tickers)
-app.use('/api/admin', adminPublicTickersSettingsRouter);
+app.use('/api/admin', adminTickersSettingsRouter);
 // Legacy admin panel path support
-app.use('/admin', adminPublicTickersSettingsRouter);
+app.use('/admin', adminTickersSettingsRouter);
 // Admin panel proxy basePath support
-app.use('/admin-api/admin', adminPublicTickersSettingsRouter);
-app.use('/admin-api/api/admin', adminPublicTickersSettingsRouter);
+app.use('/admin-api/admin', adminTickersSettingsRouter);
+app.use('/admin-api/api/admin', adminTickersSettingsRouter);
 // IMPORTANT: Admin panel alias support
 app.use('/admin-api/admin', adminAdsRouter);
 app.use('/admin-api/api/admin', adminAdsRouter);

@@ -16,6 +16,10 @@ function isDbConnected() {
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
 
+function asyncHandler(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
 function shouldUseBroadcastAlias(req) {
   // Keep legacy /admin/* behavior intact (draft/publish versions backed by SiteSetting).
   // Use BroadcastSettings for /api/admin/* (and admin-api proxy mounts) to support
@@ -127,6 +131,49 @@ function formatZodError(zodError) {
   }
 }
 
+function sendSettingDbUnavailable(res, httpStatus = 200) {
+  return res.status(httpStatus).json({
+    ok: true,
+    success: true,
+    status: 200,
+    scope: SCOPE,
+    key: KEY,
+    setting: null,
+    message: 'Database unavailable',
+  });
+}
+
+function sendItemsDbUnavailable(res, httpStatus = 200) {
+  return res.status(httpStatus).json({
+    ok: true,
+    success: true,
+    status: 200,
+    items: [],
+    message: 'Database unavailable',
+  });
+}
+
+function broadcastSettingEnvelope(status, doc, { publishedAt } = {}) {
+  return {
+    ok: true,
+    success: true,
+    status: 200,
+    scope: SCOPE,
+    key: KEY,
+    setting: {
+      _id: 'broadcast-settings',
+      scope: SCOPE,
+      key: KEY,
+      status,
+      ...(typeof publishedAt !== 'undefined' ? { publishedAt } : {}),
+      ...(status === 'published' ? { version: 1 } : {}),
+      data: tickersConfigFromBroadcastSettings(doc),
+      updatedAt: doc?.updatedAt || null,
+    },
+    source: 'broadcast',
+  };
+}
+
 // Admin panel legacy paths are /admin/settings/tickers*.
 // The newer API paths are /api/admin/public-settings/tickers*.
 const ADMIN_PATHS = {
@@ -140,46 +187,21 @@ const ADMIN_PATHS = {
 // Some admin builds call GET /api/admin/tickers/draft (path param) instead of
 // GET /api/admin/tickers?status=draft (query param).
 // Provide an explicit GET route so /draft can never be interpreted as an id-like segment.
-router.get(ADMIN_PATHS.draft, requireAdminAuth, async (req, res, next) => {
-  try {
-    if (!isDbConnected()) {
-      return res.status(200).json({ ok: true, success: true, status: 200, scope: SCOPE, key: KEY, setting: null, message: 'Database unavailable' });
-    }
+router.get(ADMIN_PATHS.draft, requireAdminAuth, asyncHandler(async (req, res) => {
+    if (!isDbConnected()) return sendSettingDbUnavailable(res, 200);
 
     if (shouldUseBroadcastAlias(req)) {
       const doc = await getOrCreateBroadcastSettings();
-      const data = tickersConfigFromBroadcastSettings(doc);
-      return res.json({
-        ok: true,
-        success: true,
-        status: 200,
-        scope: SCOPE,
-        key: KEY,
-        setting: {
-          _id: 'broadcast-settings',
-          scope: SCOPE,
-          key: KEY,
-          status: 'draft',
-          data,
-          updatedAt: doc?.updatedAt || null,
-        },
-        source: 'broadcast',
-      });
+      return res.json(broadcastSettingEnvelope('draft', doc));
     }
 
     const doc = await SiteSetting.findOne({ scope: SCOPE, key: KEY, status: 'draft' });
     return res.json({ ok: true, success: true, status: 200, scope: SCOPE, key: KEY, setting: doc || null });
-  } catch (e) {
-    return next(e);
-  }
-});
+}));
 
 // GET /api/admin/public-settings/tickers?status=draft|published
-router.get(ADMIN_PATHS.base, requireAdminAuth, async (req, res, next) => {
-  try {
-    if (!isDbConnected()) {
-      return res.status(200).json({ ok: true, success: true, status: 200, scope: SCOPE, key: KEY, setting: null, message: 'Database unavailable' });
-    }
+router.get(ADMIN_PATHS.base, requireAdminAuth, asyncHandler(async (req, res) => {
+    if (!isDbConnected()) return sendSettingDbUnavailable(res, 200);
 
     const status = String(req.query.status || '').trim().toLowerCase();
     if (status !== 'draft' && status !== 'published') {
@@ -188,23 +210,7 @@ router.get(ADMIN_PATHS.base, requireAdminAuth, async (req, res, next) => {
 
     if (shouldUseBroadcastAlias(req)) {
       const doc = await getOrCreateBroadcastSettings();
-      const data = tickersConfigFromBroadcastSettings(doc);
-      return res.json({
-        ok: true,
-        success: true,
-        status: 200,
-        scope: SCOPE,
-        key: KEY,
-        setting: {
-          _id: 'broadcast-settings',
-          scope: SCOPE,
-          key: KEY,
-          status,
-          data,
-          updatedAt: doc?.updatedAt || null,
-        },
-        source: 'broadcast',
-      });
+      return res.json(broadcastSettingEnvelope(status, doc));
     }
 
     if (status === 'draft') {
@@ -214,15 +220,11 @@ router.get(ADMIN_PATHS.base, requireAdminAuth, async (req, res, next) => {
 
     const doc = await SiteSetting.findOne({ scope: SCOPE, key: KEY, status: 'published' }).sort({ version: -1, createdAt: -1 });
     return res.json({ ok: true, success: true, status: 200, scope: SCOPE, key: KEY, setting: doc || null });
-  } catch (e) {
-    return next(e);
-  }
-});
+}));
 
 // PUT /api/admin/public-settings/tickers?status=draft
 // Some admin panel builds autosave via PUT to the base path rather than /draft.
-router.put(ADMIN_PATHS.base, requireAdminAuth, async (req, res, next) => {
-  try {
+router.put(ADMIN_PATHS.base, requireAdminAuth, asyncHandler(async (req, res) => {
     if (!isDbConnected()) {
       return res.status(503).json({ ok: false, success: false, status: 503, message: 'Database unavailable' });
     }
@@ -239,20 +241,7 @@ router.put(ADMIN_PATHS.base, requireAdminAuth, async (req, res, next) => {
 
     if (shouldUseBroadcastAlias(req)) {
       const doc = await saveBroadcastSettingsFromTickersConfig(parsed.data);
-      return res.json({
-        ok: true,
-        success: true,
-        status: 200,
-        setting: {
-          _id: 'broadcast-settings',
-          scope: SCOPE,
-          key: KEY,
-          status: 'draft',
-          data: tickersConfigFromBroadcastSettings(doc),
-          updatedAt: doc?.updatedAt || null,
-        },
-        source: 'broadcast',
-      });
+      return res.json({ ok: true, success: true, status: 200, setting: broadcastSettingEnvelope('draft', doc).setting, source: 'broadcast' });
     }
 
     const admin = req.admin || {};
@@ -271,14 +260,10 @@ router.put(ADMIN_PATHS.base, requireAdminAuth, async (req, res, next) => {
     );
 
     return res.json({ ok: true, success: true, status: 200, setting: doc });
-  } catch (e) {
-    return next(e);
-  }
-});
+}));
 
 // PUT /api/admin/public-settings/tickers/draft (autosave)
-router.put(ADMIN_PATHS.draft, requireAdminAuth, async (req, res, next) => {
-  try {
+router.put(ADMIN_PATHS.draft, requireAdminAuth, asyncHandler(async (req, res) => {
     if (!isDbConnected()) {
       return res.status(503).json({ ok: false, success: false, status: 503, message: 'Database unavailable' });
     }
@@ -290,20 +275,7 @@ router.put(ADMIN_PATHS.draft, requireAdminAuth, async (req, res, next) => {
 
     if (shouldUseBroadcastAlias(req)) {
       const doc = await saveBroadcastSettingsFromTickersConfig(parsed.data);
-      return res.json({
-        ok: true,
-        success: true,
-        status: 200,
-        setting: {
-          _id: 'broadcast-settings',
-          scope: SCOPE,
-          key: KEY,
-          status: 'draft',
-          data: tickersConfigFromBroadcastSettings(doc),
-          updatedAt: doc?.updatedAt || null,
-        },
-        source: 'broadcast',
-      });
+      return res.json({ ok: true, success: true, status: 200, setting: broadcastSettingEnvelope('draft', doc).setting, source: 'broadcast' });
     }
 
     const admin = req.admin || {};
@@ -322,14 +294,10 @@ router.put(ADMIN_PATHS.draft, requireAdminAuth, async (req, res, next) => {
     );
 
     return res.json({ ok: true, success: true, status: 200, setting: doc });
-  } catch (e) {
-    return next(e);
-  }
-});
+}));
 
 // POST /api/admin/public-settings/tickers/publish (snapshot)
-router.post(ADMIN_PATHS.publish, requireAdminAuth, async (req, res, next) => {
-  try {
+router.post(ADMIN_PATHS.publish, requireAdminAuth, asyncHandler(async (req, res) => {
     if (!isDbConnected()) {
       return res.status(503).json({ ok: false, success: false, status: 503, message: 'Database unavailable' });
     }
@@ -338,22 +306,8 @@ router.post(ADMIN_PATHS.publish, requireAdminAuth, async (req, res, next) => {
       // BroadcastSettings is a single document (no draft/published versions).
       // For compatibility with older admin UIs, treat publish as a no-op success.
       const doc = await getOrCreateBroadcastSettings();
-      return res.json({
-        ok: true,
-        success: true,
-        status: 200,
-        setting: {
-          _id: 'broadcast-settings',
-          scope: SCOPE,
-          key: KEY,
-          status: 'published',
-          version: 1,
-          data: tickersConfigFromBroadcastSettings(doc),
-          publishedAt: new Date(),
-          updatedAt: doc?.updatedAt || null,
-        },
-        source: 'broadcast',
-      });
+      const publishedAt = new Date();
+      return res.json({ ok: true, success: true, status: 200, setting: broadcastSettingEnvelope('published', doc, { publishedAt }).setting, source: 'broadcast' });
     }
 
     const draft = await SiteSetting.findOne({ scope: SCOPE, key: KEY, status: 'draft' });
@@ -383,17 +337,11 @@ router.post(ADMIN_PATHS.publish, requireAdminAuth, async (req, res, next) => {
 
     // Note: return HTTP 200 for compatibility with existing admin UI expectations.
     return res.json({ ok: true, success: true, status: 200, setting: published });
-  } catch (e) {
-    return next(e);
-  }
-});
+}));
 
 // GET /api/admin/public-settings/tickers/versions (latest 30)
-router.get(ADMIN_PATHS.versions, requireAdminAuth, async (req, res, next) => {
-  try {
-    if (!isDbConnected()) {
-      return res.status(200).json({ ok: true, success: true, status: 200, items: [], message: 'Database unavailable' });
-    }
+router.get(ADMIN_PATHS.versions, requireAdminAuth, asyncHandler(async (req, res) => {
+    if (!isDbConnected()) return sendItemsDbUnavailable(res, 200);
 
     if (shouldUseBroadcastAlias(req)) {
       // No versions for single-doc BroadcastSettings.
@@ -405,14 +353,10 @@ router.get(ADMIN_PATHS.versions, requireAdminAuth, async (req, res, next) => {
       .limit(30);
 
     return res.json({ ok: true, success: true, status: 200, items: docs });
-  } catch (e) {
-    return next(e);
-  }
-});
+}));
 
 // POST /api/admin/public-settings/tickers/preview-token (15m JWT)
-router.post(ADMIN_PATHS.previewToken, requireAdminAuth, async (req, res, next) => {
-  try {
+router.post(ADMIN_PATHS.previewToken, requireAdminAuth, asyncHandler(async (req, res) => {
     const secret = getPreviewSecret();
     if (!secret) {
       return res.status(400).json({ ok: false, success: false, status: 400, message: 'UI_PREVIEW_SECRET missing' });
@@ -432,10 +376,7 @@ router.post(ADMIN_PATHS.previewToken, requireAdminAuth, async (req, res, next) =
     );
 
     return res.json({ ok: true, success: true, status: 200, token, expiresInSeconds: 15 * 60 });
-  } catch (e) {
-    return next(e);
-  }
-});
+}));
 
 module.exports = router;
 
