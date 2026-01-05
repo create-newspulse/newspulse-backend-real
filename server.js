@@ -168,10 +168,11 @@ function _parseCorsOriginsEnv(v) {
   return normalized;
 }
 
-const allowedOrigins = new Set([
+// Explicit allowlist (matches frontend expectations)
+const allowedOrigins = [
+  'https://admin.newspulse.co.in',
   'https://newspulse.co.in',
   'https://www.newspulse.co.in',
-  'https://admin.newspulse.co.in',
   'http://localhost:5173',
   'http://localhost:3000',
   // Vercel domains (set these in Render for LIVE frontend/admin deployments)
@@ -184,55 +185,28 @@ const allowedOrigins = new Set([
   // Back-compat: CORS_ORIGINS.
   ..._parseCorsOriginsEnv(process.env.CORS_ORIGIN),
   ..._parseCorsOriginsEnv(process.env.CORS_ORIGINS),
-]);
+].filter(Boolean);
 
 const corsOptions = {
   origin(origin, callback) {
     // Allow non-browser clients (no Origin header)
     if (!origin) return callback(null, true);
 
-    if (allowedOrigins.has(String(origin))) return callback(null, true);
+    if (allowedOrigins.includes(String(origin))) return callback(null, true);
 
-    const err = new Error('CORS origin blocked');
+    const err = new Error('CORS blocked: ' + origin);
     err.status = 403;
     err.origin = origin;
     return callback(err);
   },
   credentials: true,
-  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Authorization', 'Content-Type'],
-  preflightContinue: true,
-  optionsSuccessStatus: 204,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-action', 'X-Admin-Action'],
 };
 
-const _corsMiddleware = cors(corsOptions);
-
-function _handleCorsError(err, req, res) {
-  if (_corsIsDev) {
-    console.warn('[cors] blocked', {
-      origin: String(req.headers.origin || ''),
-      method: req.method,
-      path: req.originalUrl,
-    });
-  }
-  const status = Number(err?.status) || 403;
-  return res.status(status).json({ ok: false, success: false, message: 'CORS origin blocked' });
-}
-
-app.use((req, res, next) => {
-  _corsMiddleware(req, res, (err) => {
-    if (err) return _handleCorsError(err, req, res);
-    return next();
-  });
-});
-
+app.use(cors(corsOptions));
 // Ensure OPTIONS preflight works for all routes.
-app.options('*', (req, res) => {
-  _corsMiddleware(req, res, (err) => {
-    if (err) return _handleCorsError(err, req, res);
-    return res.sendStatus(204);
-  });
-});
+app.options('*', cors(corsOptions));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -751,6 +725,10 @@ app.use('/admin-api', dashboardStatsRouter);
 // /api/admin -> explicit admin-prefixed endpoints
 app.use('/api/admin', dashboardStatsRouter);
 app.use('/admin-auth', adminAuthRoutes);
+// Compatibility aliases: some admin builds call /api/admin-auth/* (or via /admin-api proxy)
+app.use('/api/admin-auth', adminAuthRoutes);
+app.use('/admin-api/admin-auth', adminAuthRoutes);
+app.use('/admin-api/api/admin-auth', adminAuthRoutes);
 // AI training info: public read endpoint (admin panel can read without login)
 for (const p of [
   '/system/ai-training-info',
