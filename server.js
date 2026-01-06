@@ -712,9 +712,6 @@ app.use('/admin-api/admin', adminPublicSettingsRouter);
 app.use('/admin-api/api/admin', adminPublicSettingsRouter);
 app.use('/api/admin', adminRoutes); // used by admin UI
 app.use('/admin', adminRoutes);     // legacy path
-// Admin panel proxy basePath support (some admin deployments call /admin-api/admin/*)
-app.use('/admin-api/admin', adminRoutes);
-app.use('/admin-api/api/admin', adminRoutes);
 // Admin sponsor ads
 app.use('/api/admin', adminAdsRouter);
 
