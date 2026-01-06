@@ -280,6 +280,9 @@ app.use('/admin', adminRoutes); // legacy POST /admin/login
 // To ensure final URL '/api/admin/reporters' works, also mount under '/api/admin'.
 app.use('/api', adminRoutes);
 app.use('/api/admin', adminRoutes);
+// Admin panel proxy basePath support (some admin deployments call /admin-api/admin/*)
+app.use('/admin-api/admin', adminRoutes);
+app.use('/admin-api/api/admin', adminRoutes);
 // Mount dashboard stats under /api and /admin-api to satisfy Admin Panel
 app.use('/api', dashboardStatsRoutes);
 app.use('/admin-api', dashboardStatsRoutes);
