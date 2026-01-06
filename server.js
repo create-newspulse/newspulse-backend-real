@@ -84,7 +84,9 @@ const siteSettingsRoutes = require('./routes/siteSettings.routes');
 const publicNewsRouter = require('./routes/publicNews.routes');
 const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');
 const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
+const publicSettingsRouter = require('./routes/publicSettings.routes');
 const adminTickersSettingsRouter = require('./routes/adminTickersSettings.routes');
+const adminPublicSettingsRouter = require('./routes/adminPublicSettings.routes');
 let adminWorkflowApiRouter = null;
 let adminPushHistoryApiRouter = null;
 let adminWorkflowLegacyRouter = null;
@@ -656,6 +658,11 @@ if (publicFeatureTogglesRouter) {
 // Public sponsor ads
 app.use('/api/public', publicAdsRouter);
 
+// Public settings bundle (published-only for frontend)
+app.use('/api/public', publicSettingsRouter);
+// Legacy/website path support (some frontends call /public/settings)
+app.use('/public', publicSettingsRouter);
+
 // Public site settings (tickers)
 app.use('/api/public', publicTickersSettingsRouter);
 // Legacy/website path support
@@ -666,6 +673,10 @@ app.use('/admin-api/api/public', publicTickersSettingsRouter);
 
 // Public stories
 app.use('/api/public', publicRoutes);
+
+// Compatibility aliases: some frontends call public APIs via /admin-api/* base paths
+app.use('/admin-api/public', publicSettingsRouter);
+app.use('/admin-api/api/public', publicSettingsRouter);
 
 // Global ad slot settings
 app.use('/api/public', publicAdSettingsRouter);
@@ -689,6 +700,16 @@ app.use('/admin-api/admin', adminAdSettingsRouter);
 app.use('/admin-api/api/admin', adminAdSettingsRouter);
 
 // Admin routes for legacy and new admin UI paths
+// IMPORTANT: mount /api/admin/settings/* endpoints BEFORE the generic /api/admin router.
+app.use('/api/admin/settings', adminPublicSettingsRouter);
+// Backward-compatible aliases: some admin builds call /api/admin/public-settings/*
+// (e.g. POST /api/admin/public-settings/publish) instead of /api/admin/settings/public/publish.
+app.use('/api/admin', adminPublicSettingsRouter);
+// Compatibility aliases: some admin builds call via /admin-api/* base paths
+app.use('/admin-api/admin/settings', adminPublicSettingsRouter);
+app.use('/admin-api/api/admin/settings', adminPublicSettingsRouter);
+app.use('/admin-api/admin', adminPublicSettingsRouter);
+app.use('/admin-api/api/admin', adminPublicSettingsRouter);
 app.use('/api/admin', adminRoutes); // used by admin UI
 app.use('/admin', adminRoutes);     // legacy path
 // Admin sponsor ads
@@ -1306,24 +1327,6 @@ const PORT = parseInt(process.env.PORT || '5000', 10) || 5000;
 if (require.main === module) {
   const server = app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
-    try {
-      const reporterRoutes = [];
-      app._router && app._router.stack && app._router.stack.forEach(layer => {
-        if (layer.route && layer.route.path && layer.route.path.includes('reporter')) {
-          reporterRoutes.push(layer.route.path);
-        } else if (layer.name === 'router' && layer.handle && layer.handle.stack) {
-          const prefix = layer.regexp && layer.regexp.fast_slash ? '' : extractPrefix(layer.regexp);
-          layer.handle.stack.forEach(rLayer => {
-            if (rLayer.route && rLayer.route.path && rLayer.route.path.includes('reporter')) {
-              reporterRoutes.push(prefix + rLayer.route.path);
-            }
-          });
-        }
-      });
-      console.log('[startup][reporter-routes]', reporterRoutes);
-    } catch (e) {
-      console.warn('[startup][reporter-routes] failed', e?.message || e);
-    }
   });
 
   server.on('error', (err) => {
@@ -1333,15 +1336,6 @@ if (require.main === module) {
     }
     process.exit(1);
   });
-}
-
-function extractPrefix(regexp) {
-  try {
-    const src = (regexp && regexp.source) || '';
-    const m = src.match(/\\\/(admin[^\\^]+|api[^\\^]+|system[^\\^]+)/i);
-    if (m && m[1]) return '/' + m[1];
-  } catch (_) {}
-  return '';
 }
 
 
