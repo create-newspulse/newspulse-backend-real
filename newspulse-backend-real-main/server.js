@@ -26,9 +26,6 @@ const adminAdsRouter = require('../routes/adminAds.routes');
 const publicAdSettingsRouter = require('../routes/publicAdSettings.routes');
 const adminAdSettingsRouter = require('../routes/adminAdSettings.routes');
 const publicRoutes = require('../routes/public.routes');
-// Public site settings bundle (draft + publish) + public published endpoint (shared root-level routers)
-const publicSettingsRouter = require('../routes/publicSettings.routes');
-const adminPublicSettingsRouter = require('../routes/adminPublicSettings.routes');
 // Broadcast Center (shared root-level router)
 const broadcastRoutes = require('../routes/broadcast.routes');
 // Shared system routes (health + monitor stubs)
@@ -237,15 +234,6 @@ app.use('/api/community-reporter', communityReporterRoutes);
 // Public sponsor ads + global ad slot settings
 app.use('/api/public', publicAdsRouter);
 
-// Public settings bundle (published-only for frontend)
-app.use('/api/public', publicSettingsRouter);
-// Legacy/website path support (some frontends call /public/settings)
-app.use('/public', publicSettingsRouter);
-
-// Compatibility aliases: some frontends call public APIs via /admin-api/* base paths
-app.use('/admin-api/public', publicSettingsRouter);
-app.use('/admin-api/api/public', publicSettingsRouter);
-
 // Public stories
 app.use('/api/public', publicRoutes);
 
@@ -262,17 +250,6 @@ app.use('/admin-api/api/admin', adminAdSettingsRouter);
 app.use('/api/admin', adminAdsRouter);
 app.use('/admin-api/admin', adminAdsRouter);
 app.use('/admin-api/api/admin', adminAdsRouter);
-
-// IMPORTANT: mount explicit /api/admin/settings/public* endpoints BEFORE generic /api admin routers.
-// This prevents older admin routers from swallowing /settings/* paths and returning 404.
-app.use('/api/admin/settings', adminPublicSettingsRouter);
-// Backward-compatible aliases: some admin builds call /api/admin/public-settings/*
-app.use('/api/admin', adminPublicSettingsRouter);
-// Compatibility aliases: some admin builds call via /admin-api/* base paths
-app.use('/admin-api/admin/settings', adminPublicSettingsRouter);
-app.use('/admin-api/api/admin/settings', adminPublicSettingsRouter);
-app.use('/admin-api/admin', adminPublicSettingsRouter);
-app.use('/admin-api/api/admin', adminPublicSettingsRouter);
 // Admin routes mounted at both legacy root and new /api/admin paths where required.
 app.use('/admin', adminRoutes); // legacy POST /admin/login
 // Also mount admin router under /api for endpoints like /api/stats, /api/dashboard-stats
