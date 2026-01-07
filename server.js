@@ -83,6 +83,7 @@ const publicRoutes = require('./routes/public.routes');
 const siteSettingsRoutes = require('./routes/siteSettings.routes');
 const publicSettingsRouter = require('./routes/publicSettings.routes');
 const adminPublicSettingsRouter = require('./routes/adminPublicSettings.routes');
+const adminPublicSiteAliasesRouter = require('./routes/adminPublicSiteAliases.routes');
 const publicNewsRouter = require('./routes/publicNews.routes');
 const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');
 const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
@@ -785,6 +786,11 @@ app.use('/admin', adminSettingsRoutes);
 app.use('/api/admin', adminPublicSettingsRouter);
 app.use('/admin-api/admin', adminPublicSettingsRouter);
 app.use('/admin-api/api/admin', adminPublicSettingsRouter);
+
+// Admin Public Site Settings aliases ("public-site" path variants)
+app.use('/api/admin', adminPublicSiteAliasesRouter);
+app.use('/admin-api/admin', adminPublicSiteAliasesRouter);
+app.use('/admin-api/api/admin', adminPublicSiteAliasesRouter);
 // Community Reporter Settings router (same mount /api/admin)
 app.use('/api/admin', communityReporterSettingsRouter);
 // Founder feature toggles (admin/founder protected)
