@@ -682,6 +682,11 @@ app.use('/api/public', publicRoutes);
 // Public site settings (published only, no auth)
 app.use('/api/public', publicSettingsRouter);
 
+// Startup confirmation (production): settings endpoints mounted under /api
+if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
+  console.log('Mounted: /api/public/settings and /api/admin/settings/public');
+}
+
 // Global ad slot settings
 app.use('/api/public', publicAdSettingsRouter);
 // Alias support
