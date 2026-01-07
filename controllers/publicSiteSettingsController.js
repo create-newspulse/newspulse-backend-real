@@ -1,5 +1,38 @@
 const PublicSiteSettings = require('../models/PublicSiteSettings');
 
+function ensureCategoryStripEnabled(settingsObj) {
+  const base = (settingsObj && typeof settingsObj === 'object') ? settingsObj : {};
+  if (!base.publicSite || typeof base.publicSite !== 'object') base.publicSite = {};
+  if (!base.publicSite.homepage || typeof base.publicSite.homepage !== 'object') base.publicSite.homepage = {};
+  if (typeof base.publicSite.homepage.categoryStripEnabled !== 'boolean') {
+    base.publicSite.homepage.categoryStripEnabled = true;
+  }
+  return base;
+}
+
+function deepMerge(target, source) {
+  const t = (target && typeof target === 'object') ? target : {};
+  const s = (source && typeof source === 'object') ? source : {};
+  for (const [key, value] of Object.entries(s)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      t[key] = deepMerge(t[key], value);
+    } else {
+      t[key] = value;
+    }
+  }
+  return t;
+}
+
+function getNested(obj, path) {
+  const parts = String(path || '').split('.').filter(Boolean);
+  let cur = obj;
+  for (const p of parts) {
+    if (!cur || typeof cur !== 'object' || !(p in cur)) return { exists: false, value: undefined };
+    cur = cur[p];
+  }
+  return { exists: true, value: cur };
+}
+
 /**
  * Get both draft and published settings
  * GET /api/admin/settings/public
@@ -7,8 +40,8 @@ const PublicSiteSettings = require('../models/PublicSiteSettings');
 async function getPublicSettings(req, res) {
   try {
     const settings = await PublicSiteSettings.getOrCreate();
-    const draft = settings.draft || PublicSiteSettings.getDefaultSettings();
-    const published = settings.published || PublicSiteSettings.getDefaultSettings();
+    const draft = ensureCategoryStripEnabled(settings.draft || PublicSiteSettings.getDefaultSettings());
+    const published = ensureCategoryStripEnabled(settings.published || PublicSiteSettings.getDefaultSettings());
 
     return res.status(200).json({
       ok: true,
@@ -32,7 +65,7 @@ async function getPublicSettings(req, res) {
 async function getDraftSettings(req, res) {
   try {
     const settings = await PublicSiteSettings.getOrCreate();
-    const draft = settings.draft || PublicSiteSettings.getDefaultSettings();
+    const draft = ensureCategoryStripEnabled(settings.draft || PublicSiteSettings.getDefaultSettings());
 
     return res.status(200).json({
       ok: true,
@@ -63,8 +96,21 @@ async function updateDraftSettings(req, res) {
       });
     }
 
+    // Strict validation for Category Strip flag if present
+    const cs = getNested(draftData, 'publicSite.homepage.categoryStripEnabled');
+    if (cs.exists && typeof cs.value !== 'boolean') {
+      return res.status(400).json({
+        ok: false,
+        message: 'Invalid value for publicSite.homepage.categoryStripEnabled: expected boolean',
+      });
+    }
+
     const settings = await PublicSiteSettings.getOrCreate();
-    settings.draft = draftData;
+
+    // Merge into existing draft to support partial updates without clobbering other keys
+    const baseDraft = ensureCategoryStripEnabled(settings.draft || PublicSiteSettings.getDefaultSettings());
+    const merged = deepMerge(baseDraft, draftData);
+    settings.draft = ensureCategoryStripEnabled(merged);
     await settings.save();
 
     return res.status(200).json({
@@ -92,11 +138,11 @@ async function publishSettings(req, res) {
 
     // If no draft exists, publish current published or defaults
     if (!settings.draft || Object.keys(settings.draft).length === 0) {
-      const currentPublished = settings.published || PublicSiteSettings.getDefaultSettings();
+      const currentPublished = ensureCategoryStripEnabled(settings.published || PublicSiteSettings.getDefaultSettings());
       settings.published = currentPublished;
     } else {
       // Copy draft to published
-      settings.published = JSON.parse(JSON.stringify(settings.draft));
+      settings.published = ensureCategoryStripEnabled(JSON.parse(JSON.stringify(settings.draft)));
     }
 
     await settings.save();
@@ -123,7 +169,7 @@ async function publishSettings(req, res) {
 async function getPublishedSettings(req, res) {
   try {
     const settings = await PublicSiteSettings.getOrCreate();
-    const published = settings.published || PublicSiteSettings.getDefaultSettings();
+    const published = ensureCategoryStripEnabled(settings.published || PublicSiteSettings.getDefaultSettings());
 
     return res.status(200).json({
       ok: true,

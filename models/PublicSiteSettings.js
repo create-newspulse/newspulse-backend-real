@@ -2,6 +2,13 @@ const mongoose = require('mongoose');
 
 // Default settings matching frontend module expectations
 const defaultSettings = {
+  // Public-site safe settings (consumed by frontend)
+  publicSite: {
+    homepage: {
+      // Top horizontal categories bar
+      categoryStripEnabled: true,
+    },
+  },
   // Homepage modules configuration
   homepage: {
     modules: {
