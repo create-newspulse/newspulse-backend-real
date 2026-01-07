@@ -81,6 +81,8 @@ const publicAdSettingsRouter = require('./routes/publicAdSettings.routes');
 const adminAdSettingsRouter = require('./routes/adminAdSettings.routes');
 const publicRoutes = require('./routes/public.routes');
 const siteSettingsRoutes = require('./routes/siteSettings.routes');
+const publicSettingsRouter = require('./routes/publicSettings.routes');
+const adminPublicSettingsRouter = require('./routes/adminPublicSettings.routes');
 const publicNewsRouter = require('./routes/publicNews.routes');
 const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');
 const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
@@ -521,6 +523,16 @@ app.post('/api/auth/login', (req, res) => {
   const founderEmail = String(process.env.FOUNDER_EMAIL || '').toLowerCase().trim();
   const founderPass = String(process.env.FOUNDER_PASSWORD || '');
 
+  // Helpful misconfiguration hint for local development.
+  // In production, these should always be configured via environment variables.
+  const hasAnyCreds = (adminEmail && adminPass) || (founderEmail && founderPass);
+  if (!hasAnyCreds) {
+    return res.status(500).json({
+      success: false,
+      message: 'Auth not configured. Set ADMIN_EMAIL/ADMIN_PASS or FOUNDER_EMAIL/FOUNDER_PASSWORD in your environment.',
+    });
+  }
+
   if (!email || !password) {
     return res.status(400).json({ success: false, message: 'Email and password required' });
   }
@@ -667,6 +679,9 @@ app.use('/admin-api/api/public', publicTickersSettingsRouter);
 // Public stories
 app.use('/api/public', publicRoutes);
 
+// Public site settings (published only, no auth)
+app.use('/api/public', publicSettingsRouter);
+
 // Global ad slot settings
 app.use('/api/public', publicAdSettingsRouter);
 // Alias support
@@ -761,6 +776,10 @@ app.use('/admin-api/admin', adminSettingsRoutes);
 app.use('/admin-api/api/admin', adminSettingsRoutes);
 // Legacy alias: expose admin settings under /admin as well
 app.use('/admin', adminSettingsRoutes);
+// Admin Public Site Settings (draft/publish)
+app.use('/api/admin', adminPublicSettingsRouter);
+app.use('/admin-api/admin', adminPublicSettingsRouter);
+app.use('/admin-api/api/admin', adminPublicSettingsRouter);
 // Community Reporter Settings router (same mount /api/admin)
 app.use('/api/admin', communityReporterSettingsRouter);
 // Founder feature toggles (admin/founder protected)
@@ -1129,6 +1148,48 @@ app.get('/admin/metrics', (req, res) => {
     tokens: { issuedAccess: _issuedTokens.access.size, issuedRefresh: _issuedTokens.refresh.size },
   });
 });
+
+// DEV-ONLY: Routes introspection for debugging
+// GET /api/routes-check -> lists all registered API routes
+if (_corsIsDev || process.env.ENABLE_ROUTES_CHECK === 'true') {
+  app.get('/api/routes-check', (req, res) => {
+    const routes = [];
+    function extractRoutes(stack, prefix = '') {
+      stack.forEach(middleware => {
+        if (middleware.route) {
+          // Direct route
+          const methods = Object.keys(middleware.route.methods).map(m => m.toUpperCase()).join(',');
+          routes.push({ path: prefix + middleware.route.path, methods });
+        } else if (middleware.name === 'router' && middleware.handle.stack) {
+          // Nested router - extract base path from regexp
+          let routePath = '';
+          try {
+            routePath = middleware.regexp.source
+              .replace(/\\\//g, '/')
+              .replace(/\^/g, '')
+              .replace(/\$/g, '')
+              .replace(/\?/g, '')
+              .split('(?=')[0]; // Take only the part before lookahead
+          } catch (e) {
+            routePath = '';
+          }
+          extractRoutes(middleware.handle.stack, prefix + routePath);
+        }
+      });
+    }
+    extractRoutes(app._router.stack);
+    
+    // Filter to /api routes only
+    const apiRoutes = routes.filter(r => r.path.includes('/api'));
+    
+    return res.json({
+      ok: true,
+      note: 'DEV-ONLY endpoint for debugging route registration',
+      apiRoutes: apiRoutes.sort((a, b) => a.path.localeCompare(b.path)),
+      total: apiRoutes.length,
+    });
+  });
+}
 
 // --- Vault stub ---
 app.get('/api/vault/list', requireFounderAuth, requireOwnerKey, (req, res) => {

@@ -221,8 +221,86 @@ Returns the article document (published only unless admin auth is present).
     ```
 - CI guardrails: gitleaks GitHub Action scans pushes/PRs to `main` and fails on potential secrets.
 
+
 ## Deployment (Render)
 Blueprint `render.yaml` sets rootDir to `.`. Build with `npm install`, start with `npm start` (which runs `node server.js`). Ensure the required env variables are configured.
+
+### Deployment Steps
+1. **Push to main branch**: Render auto-deploys from the main branch. Ensure your changes are committed and pushed.
+2. **Check Render dashboard**: Confirm the latest commit hash matches your pushed commit.
+3. **Environment variables**: In Render dashboard, set all required env vars (see `.env.example`).
+4. **CORS**: Ensure `CORS_ORIGIN` includes:
+  - `http://localhost:5173`
+  - `https://admin.newspulse.co.in`
+5. **Manual deploy**: If needed, trigger a manual deploy from the Render dashboard.
+6. **Verify endpoints**: After deploy, run the verification script below.
+
+### Endpoint Verification
+To verify that the public/admin site settings endpoints are live and returning correct codes:
+
+**Quick verification (Node.js):**
+```bash
+node verify-endpoints.js
+```
+
+**Comprehensive test (PowerShell) - Local:**
+```powershell
+.\test-all-endpoints.ps1
+```
+
+**Comprehensive test (PowerShell) - Production:**
+```powershell
+.\test-all-endpoints.ps1 https://newspulse-backend.onrender.com
+```
+
+Expected output:
+```
+=== Testing Public Site Settings API ===
+1. GET /api/public/settings (no auth)
+   ✅ PASS: HTTP 200, has 'ok' and 'published'
+2. GET /api/admin/settings/public (no auth, expect 401)
+   ✅ PASS: HTTP 401 (route exists, auth required)
+3. GET /api/admin/settings/public/draft (no auth, expect 401)
+   ✅ PASS: HTTP 401 (route exists, auth required)
+4. PUT /api/admin/settings/public/draft (no auth, expect 401)
+   ✅ PASS: HTTP 401 (route exists, auth required)
+5. POST /api/admin/settings/public/publish (no auth, expect 401)
+   ✅ PASS: HTTP 401 (route exists, auth required)
+✅ All tests passed! Routes are correctly implemented.
+```
+
+**Production verification (cURL):**
+
+Replace `<YOUR_DOMAIN>` with your Render backend URL (e.g., `newspulse-backend.onrender.com`):
+
+```bash
+# Test public endpoint (should return 200 with published settings)
+curl https://<YOUR_DOMAIN>/api/public/settings
+
+# Test admin endpoint without token (should return 401 Unauthorized)
+curl https://<YOUR_DOMAIN>/api/admin/settings/public
+
+# Test admin endpoint WITH token (should return 200 with draft + published)
+curl -H "Authorization: Bearer <YOUR_ACCESS_TOKEN>" \
+  https://<YOUR_DOMAIN>/api/admin/settings/public
+
+# Test publish endpoint (should return 401 without token, 200 with token)
+curl -X POST \
+  -H "Authorization: Bearer <YOUR_ACCESS_TOKEN>" \
+  https://<YOUR_DOMAIN>/api/admin/settings/public/publish
+```
+
+**Route inspection (dev only):**
+```bash
+# List all registered /api routes
+curl http://localhost:5000/api/routes-check
+```
+
+If any check fails:
+- Confirm backend is running and deployed
+- Check environment variables in Render dashboard
+- Verify CORS_ORIGIN includes your admin domain
+- Check Render logs for startup errors
 
 ## Security Recommendations
 - Set a strong `JWT_SECRET` (64+ random chars) in production.

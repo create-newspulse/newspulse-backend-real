@@ -38,11 +38,20 @@ router.post('/login', async (req, res) => {
 
 		const token = jwt.sign({ email, role }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
+		const isHttps = Boolean(req.secure) || String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
+		const cookieOpts = {
+			httpOnly: true,
+			secure: isHttps,
+			sameSite: isHttps ? 'none' : 'lax',
+			maxAge: 7 * 86400000,
+			path: '/',
+		};
+
 		// Set cookies with common names (so whatever your middleware expects, it works)
-		res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 7 * 86400000 });
-		res.cookie('np_token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 7 * 86400000 });
+		res.cookie('token', token, cookieOpts);
+		res.cookie('np_token', token, cookieOpts);
 		// Also set the cookie name supported by existing admin auth middleware
-		res.cookie('np_admin_token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 7 * 86400000 });
+		res.cookie('np_admin_token', token, cookieOpts);
 
 		return res.json({
 			success: true,
