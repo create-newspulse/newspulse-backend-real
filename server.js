@@ -83,6 +83,7 @@ const publicRoutes = require('./routes/public.routes');
 const siteSettingsRoutes = require('./routes/siteSettings.routes');
 const publicSettingsRouter = require('./routes/publicSettings.routes');
 const adminPublicSettingsRouter = require('./routes/adminPublicSettings.routes');
+const PublicSiteSettings = require('./models/PublicSiteSettings');
 const publicNewsRouter = require('./routes/publicNews.routes');
 const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');
 const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
@@ -681,6 +682,9 @@ app.use('/api/public', publicRoutes);
 
 // Public site settings (published only, no auth)
 app.use('/api/public', publicSettingsRouter);
+// Admin UI proxy basePath support (some frontends call /admin-api/* even for public reads)
+app.use('/admin-api/public', publicSettingsRouter);
+app.use('/admin-api/api/public', publicSettingsRouter);
 
 // Startup confirmation (production): settings endpoints mounted under /api
 if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
@@ -833,14 +837,34 @@ app.use('/api/admin/community', communityAdminContactsRoutes);
 app.use('/admin-api/admin/community', communityAdminContactsRoutes);
 app.use('/admin/community', communityAdminContactsRoutes);
 // Public website settings (safe keys only)
-app.get('/settings/public', (req, res) => {
-  return res.json({
-    ok: true,
-    version: 1,
-    public: {},
-    updatedAt: new Date().toISOString(),
-  });
-});
+async function _publicSettingsNoAuth(_req, res) {
+  try {
+    const doc = await PublicSiteSettings.getOrCreate();
+    const published = doc?.published || PublicSiteSettings.getDefaultSettings();
+    return res.json({
+      ok: true,
+      version: 1,
+      public: published,
+      published,
+      updatedAt: doc?.updatedAt ? new Date(doc.updatedAt).toISOString() : new Date().toISOString(),
+    });
+  } catch (e) {
+    const published = PublicSiteSettings.getDefaultSettings();
+    return res.json({
+      ok: true,
+      version: 1,
+      public: published,
+      published,
+      updatedAt: new Date().toISOString(),
+      source: 'default',
+    });
+  }
+}
+
+// Public settings (no auth). Kept for backward compatibility with older UIs.
+app.get('/settings/public', _publicSettingsNoAuth);
+// Public settings under /api as well (some UIs call /api/settings/public).
+app.get('/api/settings/public', _publicSettingsNoAuth);
 // Admin journalists endpoints
 try {
   const adminJournalists = require('./routes/admin/journalistsAdmin');
