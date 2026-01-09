@@ -163,6 +163,70 @@ async function publishSettings(req, res) {
 }
 
 /**
+ * Save public settings (admin)
+ * PATCH /api/admin/settings/public  -> merge into draft
+ * PUT   /api/admin/settings/public  -> replace draft
+ */
+async function savePublicSettings(req, res) {
+  try {
+    const newData = req.body;
+    if (!newData || typeof newData !== 'object') {
+      return res.status(400).json({ ok: false, message: 'Invalid settings payload: expected object' });
+    }
+
+    const settings = await PublicSiteSettings.getOrCreate();
+    const baseDraft = settings.draft || PublicSiteSettings.getDefaultSettings();
+    const basePublished = settings.published || PublicSiteSettings.getDefaultSettings();
+
+    // Validate types for fields that exist in current settings (booleans/numbers)
+    function _validate(obj, pathParts = []) {
+      for (const [k, v] of Object.entries(obj)) {
+        const parts = pathParts.concat(k);
+        const path = parts.join('.');
+        if (v && typeof v === 'object' && !Array.isArray(v)) {
+          const err = _validate(v, parts);
+          if (err) return err;
+          continue;
+        }
+
+        const existing = getNested(baseDraft, path);
+        const existingPub = getNested(basePublished, path);
+        const existingVal = existing.exists ? existing.value : (existingPub.exists ? existingPub.value : undefined);
+
+        if (existingVal !== undefined) {
+          if (typeof existingVal === 'boolean' && typeof v !== 'boolean') {
+            return { ok: false, message: `Invalid type for ${path}: expected boolean` };
+          }
+          if (typeof existingVal === 'number' && typeof v !== 'number') {
+            return { ok: false, message: `Invalid type for ${path}: expected number` };
+          }
+        }
+      }
+      return null;
+    }
+
+    const validationErr = _validate(newData);
+    if (validationErr) return res.status(400).json(validationErr);
+
+    if (String(req.method || '').toUpperCase() === 'PUT') {
+      // Replace draft entirely
+      settings.draft = ensureCategoryStripEnabled(newData);
+    } else {
+      // PATCH -> merge into existing draft
+      const merged = deepMerge(ensureCategoryStripEnabled(baseDraft), newData);
+      settings.draft = ensureCategoryStripEnabled(merged);
+    }
+
+    await settings.save();
+
+    return res.status(200).json({ ok: true, draft: settings.draft, published: settings.published });
+  } catch (error) {
+    console.error('[savePublicSettings] error:', error);
+    return res.status(500).json({ ok: false, message: 'Failed to save public settings', error: error.message });
+  }
+}
+
+/**
  * Get published settings (public endpoint, no auth)
  * GET /api/public/settings
  */
@@ -190,5 +254,6 @@ module.exports = {
   getDraftSettings,
   updateDraftSettings,
   publishSettings,
+  savePublicSettings,
   getPublishedSettings,
 };

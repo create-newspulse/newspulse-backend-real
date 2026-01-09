@@ -5,12 +5,18 @@ const {
   getDraftSettings,
   updateDraftSettings,
   publishSettings,
+  savePublicSettings,
 } = require('../controllers/publicSiteSettingsController');
 
 const router = express.Router();
 
 // GET /api/admin/settings/public - get both draft and published
 router.get('/settings/public', requireAdminAuth, getPublicSettings);
+
+// PATCH /api/admin/settings/public - partial update to draft (merge)
+router.patch('/settings/public', requireAdminAuth, savePublicSettings);
+// PUT /api/admin/settings/public - replace draft (compat)
+router.put('/settings/public', requireAdminAuth, savePublicSettings);
 
 // GET /api/admin/settings/public/draft - get draft only
 router.get('/settings/public/draft', requireAdminAuth, getDraftSettings);
