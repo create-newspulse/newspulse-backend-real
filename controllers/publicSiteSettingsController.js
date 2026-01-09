@@ -152,12 +152,15 @@ async function publishSettings(req, res) {
 
     // Bump version as part of the publish operation
     settings.version = settings.version + 1;
+    settings.publishedUpdatedAt = new Date();
     await settings.save();
 
     return res.status(200).json({
       ok: true,
       version: settings.version,
-      updatedAt: settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString(),
+      updatedAt: settings.publishedUpdatedAt
+        ? new Date(settings.publishedUpdatedAt).toISOString()
+        : (settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString()),
       published: settings.published,
       message: 'Settings published successfully',
     });
@@ -250,10 +253,14 @@ async function getPublishedSettings(req, res) {
     const settings = await PublicSiteSettings.getOrCreate();
     const published = ensureCategoryStripEnabled(settings.published || PublicSiteSettings.getDefaultSettings());
 
+    res.set('Cache-Control', 'no-store, max-age=0');
+
     return res.status(200).json({
       ok: true,
       version: typeof settings.version === 'number' ? settings.version : 1,
-      updatedAt: settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString(),
+      updatedAt: settings.publishedUpdatedAt
+        ? new Date(settings.publishedUpdatedAt).toISOString()
+        : (settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString()),
       published,
     });
   } catch (error) {

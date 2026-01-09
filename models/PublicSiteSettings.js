@@ -53,6 +53,10 @@ const PublicSiteSettingsSchema = new mongoose.Schema(
       type: Number,
       default: 1,
     },
+    publishedUpdatedAt: {
+      type: Date,
+      default: () => new Date(),
+    },
     draft: {
       type: mongoose.Schema.Types.Mixed,
       default: null,
@@ -71,12 +75,19 @@ PublicSiteSettingsSchema.statics.getOrCreate = async function () {
   if (!settings) {
     settings = await this.create({
       version: 1,
+      publishedUpdatedAt: new Date(),
       draft: null,
       published: JSON.parse(JSON.stringify(defaultSettings)),
     });
   } else if (typeof settings.version !== 'number') {
     // Backfill for older documents created before version existed
     settings.version = 1;
+    await settings.save();
+  }
+
+  // Backfill publishedUpdatedAt for older documents
+  if (!settings.publishedUpdatedAt) {
+    settings.publishedUpdatedAt = settings.updatedAt || settings.createdAt || new Date();
     await settings.save();
   }
   return settings;
