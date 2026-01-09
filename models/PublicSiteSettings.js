@@ -49,6 +49,10 @@ const defaultSettings = {
 
 const PublicSiteSettingsSchema = new mongoose.Schema(
   {
+    version: {
+      type: Number,
+      default: 1,
+    },
     draft: {
       type: mongoose.Schema.Types.Mixed,
       default: null,
@@ -66,9 +70,14 @@ PublicSiteSettingsSchema.statics.getOrCreate = async function () {
   let settings = await this.findOne();
   if (!settings) {
     settings = await this.create({
+      version: 1,
       draft: null,
       published: JSON.parse(JSON.stringify(defaultSettings)),
     });
+  } else if (typeof settings.version !== 'number') {
+    // Backfill for older documents created before version existed
+    settings.version = 1;
+    await settings.save();
   }
   return settings;
 };

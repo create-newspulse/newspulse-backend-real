@@ -843,7 +843,7 @@ async function _publicSettingsNoAuth(_req, res) {
     const published = doc?.published || PublicSiteSettings.getDefaultSettings();
     return res.json({
       ok: true,
-      version: 1,
+      version: typeof doc?.version === 'number' ? doc.version : 1,
       public: published,
       published,
       updatedAt: doc?.updatedAt ? new Date(doc.updatedAt).toISOString() : new Date().toISOString(),

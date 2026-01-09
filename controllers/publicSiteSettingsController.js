@@ -45,6 +45,8 @@ async function getPublicSettings(req, res) {
 
     return res.status(200).json({
       ok: true,
+      version: typeof settings.version === 'number' ? settings.version : 1,
+      updatedAt: settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString(),
       draft,
       published,
     });
@@ -136,6 +138,9 @@ async function publishSettings(req, res) {
   try {
     const settings = await PublicSiteSettings.getOrCreate();
 
+    // Ensure a numeric version exists
+    if (typeof settings.version !== 'number') settings.version = 1;
+
     // If no draft exists, publish current published or defaults
     if (!settings.draft || Object.keys(settings.draft).length === 0) {
       const currentPublished = ensureCategoryStripEnabled(settings.published || PublicSiteSettings.getDefaultSettings());
@@ -145,10 +150,14 @@ async function publishSettings(req, res) {
       settings.published = ensureCategoryStripEnabled(JSON.parse(JSON.stringify(settings.draft)));
     }
 
+    // Bump version as part of the publish operation
+    settings.version = settings.version + 1;
     await settings.save();
 
     return res.status(200).json({
       ok: true,
+      version: settings.version,
+      updatedAt: settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString(),
       published: settings.published,
       message: 'Settings published successfully',
     });
@@ -219,7 +228,13 @@ async function savePublicSettings(req, res) {
 
     await settings.save();
 
-    return res.status(200).json({ ok: true, draft: settings.draft, published: settings.published });
+    return res.status(200).json({
+      ok: true,
+      version: typeof settings.version === 'number' ? settings.version : 1,
+      updatedAt: settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString(),
+      draft: settings.draft,
+      published: settings.published,
+    });
   } catch (error) {
     console.error('[savePublicSettings] error:', error);
     return res.status(500).json({ ok: false, message: 'Failed to save public settings', error: error.message });
@@ -237,6 +252,8 @@ async function getPublishedSettings(req, res) {
 
     return res.status(200).json({
       ok: true,
+      version: typeof settings.version === 'number' ? settings.version : 1,
+      updatedAt: settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString(),
       published,
     });
   } catch (error) {
