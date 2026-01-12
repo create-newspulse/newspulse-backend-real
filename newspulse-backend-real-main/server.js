@@ -18,6 +18,11 @@ const adminSettingsRoutes = require('./routes/adminSettings');
 const communityReporterSettingsRouter = require('./routes/adminSettings/communityReporterSettings');
 const CommunitySubmission = require('./models/CommunitySubmission');
 const News = require('./models/News');
+// Team management endpoints (shared root-level router)
+let adminTeamRoutes = null;
+try { adminTeamRoutes = require('../routes/adminTeam.routes'); } catch (_) { console.warn('[init] optional ../routes/adminTeam.routes not found; skipping'); }
+let adminTeamRoutesV2 = null;
+try { adminTeamRoutesV2 = require('../src/routes/adminTeamRoutes'); } catch (_) { console.warn('[init] optional ../src/routes/adminTeamRoutes not found; skipping'); }
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const { optionalAdminAuth } = require('../middleware/optionalAdminAuth');
 // Ads + Ad Settings (shared root-level routers)
@@ -279,6 +284,10 @@ app.use('/api/admin', adminSettingsRoutes);
 app.use('/admin-api/admin', adminSettingsRoutes);
 // Community Reporter Settings (mount admin router)
 app.use('/api/admin', communityReporterSettingsRouter);
+
+// Team management (Admin Panel: /api/admin/team/users)
+if (adminTeamRoutes) app.use('/api/admin', adminTeamRoutes);
+if (adminTeamRoutesV2) app.use('/api/admin/team', adminTeamRoutesV2);
 // Optional feeds and AI routes
 if (aiRoutes) app.use('/api/ai', aiRoutes);
 if (feedRoutes) app.use('/api/feed', feedRoutes);

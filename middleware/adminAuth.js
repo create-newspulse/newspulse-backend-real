@@ -7,7 +7,13 @@
 // Designed to align with other working admin endpoints expecting Authorization Bearer access tokens.
 
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
+const User = require('../models/User');
 const { shouldLog } = require('../lib/logThrottle');
+
+function isDbReady() {
+  return mongoose.connection && mongoose.connection.readyState === 1;
+}
 
 function parseCookies(header) {
   const cookies = {};
@@ -19,7 +25,7 @@ function parseCookies(header) {
   return cookies;
 }
 
-function requireAdminAuth(req, res, next) {
+async function requireAdminAuth(req, res, next) {
   const authHeader = String(req.headers['authorization'] || '');
   const token = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice('Bearer '.length).trim() : '';
   const cookies = parseCookies(req.headers.cookie || '');
@@ -64,6 +70,44 @@ function requireAdminAuth(req, res, next) {
         });
         return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' });
       }
+      // If DB is ready and token is tied to a user, enforce account status + tokenVersion
+      // and enrich req.admin with persisted permissions/status fields.
+      if (isDbReady()) {
+        const sub = payload && payload.sub ? String(payload.sub) : '';
+        const email = payload && payload.email ? String(payload.email).toLowerCase() : '';
+        let user = null;
+        if (sub && mongoose.isValidObjectId(sub)) {
+          user = await User.findById(sub).lean();
+        }
+        if (!user && email) {
+          user = await User.findOne({ email }).lean();
+        }
+
+        if (user) {
+          if (user.status === 'suspended') {
+            return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Account suspended' });
+          }
+          const jwtTv = typeof payload.tokenVersion === 'number' ? payload.tokenVersion : 0;
+          const userTv = typeof user.tokenVersion === 'number' ? user.tokenVersion : 0;
+          if (jwtTv !== userTv) {
+            return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+          }
+
+          req.admin = {
+            id: payload.sub,
+            email: payload.email,
+            role,
+            name: payload.name,
+            permissions: Array.isArray(user.permissions) ? user.permissions : [],
+            status: user.status || 'active',
+            tokenVersion: userTv,
+            lastLoginAt: user.lastLoginAt || null,
+            mustChangePassword: Boolean(user.mustChangePassword || user.forceReset),
+          };
+          return next();
+        }
+      }
+
       req.admin = { id: payload.sub, email: payload.email, role, name: payload.name };
       return next();
     } catch (e) {

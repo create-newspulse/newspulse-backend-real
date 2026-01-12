@@ -29,6 +29,7 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const bcrypt = require('bcrypt');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
@@ -75,6 +76,11 @@ try { publicHomeTopBarsRouter = require('./routes/publicHomeTopBars.routes'); } 
 const broadcastRoutes = require('./routes/broadcast.routes');
 const authRoutes = require('./routes/auth.routes');
 const auditRoutes = require('./routes/audit.routes');
+const adminTeamRoutes = require('./routes/adminTeam.routes');
+let adminTeamRoutesV2 = null;
+try { adminTeamRoutesV2 = require('./src/routes/adminTeamRoutes'); } catch (_) { console.warn('[init] optional src/routes/adminTeamRoutes not found; skipping'); }
+const adminSecurityRoutes = require('./routes/adminSecurity.routes');
+const adminAuditRoutes = require('./routes/adminAudit.routes');
 const publicAdsRouter = require('./routes/publicAds.routes');
 const adminAdsRouter = require('./routes/adminAds.routes');
 const publicAdSettingsRouter = require('./routes/publicAdSettings.routes');
@@ -84,6 +90,7 @@ const siteSettingsRoutes = require('./routes/siteSettings.routes');
 const publicSettingsRouter = require('./routes/publicSettings.routes');
 const adminPublicSettingsRouter = require('./routes/adminPublicSettings.routes');
 const PublicSiteSettings = require('./models/PublicSiteSettings');
+const User = require('./models/User');
 const publicNewsRouter = require('./routes/publicNews.routes');
 const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');
 const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
@@ -110,6 +117,9 @@ let publicFeatureTogglesRouter = null;
 try { publicFeatureTogglesRouter = require('./routes/publicFeatureToggles'); } catch (_) { console.warn('[init] optional public feature toggles router not found; skipping'); }
 
 const app = express();
+
+// Avoid 304 responses / ETag-based caching issues (especially on public settings)
+app.disable('etag');
 
 // Normalize accidental double-prefixes from some clients
 // (e.g. baseURL '/api' + request '/api/...' => '/api/api/...').
@@ -515,43 +525,116 @@ app.get('/api/auth/login', (_req, res) => {
 // ✅ Founder/Admin Login (MVP)
 // Defined directly in server.js to avoid any router-mount confusion.
 app.post('/api/auth/login', (req, res) => {
-  const email = String(req.body?.email || req.body?.username || '').toLowerCase().trim();
-  const password = String(req.body?.password || '');
+  (async () => {
+    const email = String(req.body?.email || req.body?.username || '').toLowerCase().trim();
+    const password = String(req.body?.password || '');
 
-  const adminEmail = String(process.env.ADMIN_EMAIL || '').toLowerCase().trim();
-  const adminPass = String(process.env.ADMIN_PASS || '');
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: 'Email and password required' });
+    }
 
-  const founderEmail = String(process.env.FOUNDER_EMAIL || '').toLowerCase().trim();
-  const founderPass = String(process.env.FOUNDER_PASSWORD || '');
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ success: false, message: 'JWT_SECRET missing' });
+    }
 
-  // Helpful misconfiguration hint for local development.
-  // In production, these should always be configured via environment variables.
-  const hasAnyCreds = (adminEmail && adminPass) || (founderEmail && founderPass);
-  if (!hasAnyCreds) {
-    return res.status(500).json({
-      success: false,
-      message: 'Auth not configured. Set ADMIN_EMAIL/ADMIN_PASS or FOUNDER_EMAIL/FOUNDER_PASSWORD in your environment.',
-    });
-  }
+    // Prefer DB-backed users when DB is ready.
+    const dbReady = mongoose.connection && mongoose.connection.readyState === 1;
+    if (dbReady) {
+      const user = await User.findOne({ email });
+      if (user) {
+        if (user.status === 'suspended') {
+          return res.status(403).json({ success: false, message: 'Account suspended' });
+        }
+        const ok = await bcrypt.compare(password, user.passwordHash);
+        if (!ok) {
+          return res.status(401).json({ success: false, message: 'Invalid credentials' });
+        }
 
-  if (!email || !password) {
-    return res.status(400).json({ success: false, message: 'Email and password required' });
-  }
+        user.lastLoginAt = new Date();
+        await user.save();
 
-  let role = null;
-  if (email === adminEmail && password === adminPass) role = 'admin';
-  if (email === founderEmail && password === founderPass) role = 'founder';
+        const token = jwt.sign(
+          {
+            sub: String(user._id),
+            userId: String(user._id),
+            email: user.email,
+            name: user.name,
+            role: user.role,
+            tokenVersion: typeof user.tokenVersion === 'number' ? user.tokenVersion : 0,
+            type: 'access',
+          },
+          process.env.JWT_SECRET,
+          { expiresIn: '7d' },
+        );
 
-  if (!role) {
-    return res.status(401).json({ success: false, message: 'Invalid credentials' });
-  }
+        return res.json({ success: true, token, user: { id: String(user._id), email: user.email, role: user.role, name: user.name, mustChangePassword: Boolean(user.mustChangePassword || user.forceReset) } });
+      }
+    }
 
-  if (!process.env.JWT_SECRET) {
-    return res.status(500).json({ success: false, message: 'JWT_SECRET missing' });
-  }
+    // Env-based fallback (keeps local/test/dev setups working without DB).
+    const adminEmail = String(process.env.ADMIN_EMAIL || '').toLowerCase().trim();
+    const adminPass = String(process.env.ADMIN_PASS || '');
+    const founderEmail = String(process.env.FOUNDER_EMAIL || '').toLowerCase().trim();
+    const founderPass = String(process.env.FOUNDER_PASSWORD || '');
 
-  const token = jwt.sign({ email, role }, process.env.JWT_SECRET, { expiresIn: '7d' });
-  return res.json({ success: true, token, user: { email, role } });
+    const hasAnyCreds = (adminEmail && adminPass) || (founderEmail && founderPass);
+    if (!hasAnyCreds) {
+      return res.status(500).json({
+        success: false,
+        message: 'Auth not configured. Set ADMIN_EMAIL/ADMIN_PASS or FOUNDER_EMAIL/FOUNDER_PASSWORD in your environment.',
+      });
+    }
+
+    let role = null;
+    if (email === adminEmail && password === adminPass) role = 'admin';
+    if (email === founderEmail && password === founderPass) role = 'founder';
+    if (!role) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    }
+
+    // If DB is ready, create/ensure an account so token invalidation can work.
+    if (dbReady) {
+      const rounds = parseInt(process.env.PASSWORD_HASH_ROUNDS || '10', 10);
+      const created = await User.findOneAndUpdate(
+        { email },
+        {
+          $setOnInsert: {
+            email,
+            name: role === 'founder' ? (process.env.FOUNDER_NAME || 'Founder') : 'Admin',
+            passwordHash: await bcrypt.hash(password, rounds),
+            role,
+            status: 'active',
+            tokenVersion: 0,
+            mustChangePassword: false,
+            createdAt: new Date(),
+          },
+          $set: { role, lastLoginAt: new Date() },
+        },
+        { upsert: true, new: true },
+      );
+
+      const token = jwt.sign(
+        {
+          sub: String(created._id),
+          userId: String(created._id),
+          email,
+          name: created.name,
+          role,
+          tokenVersion: typeof created.tokenVersion === 'number' ? created.tokenVersion : 0,
+          type: 'access',
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: '7d' },
+      );
+      return res.json({ success: true, token, user: { id: String(created._id), email, role, name: created.name, mustChangePassword: Boolean(created.mustChangePassword || created.forceReset) } });
+    }
+
+    const token = jwt.sign({ email, role, tokenVersion: 0, type: 'access' }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    return res.json({ success: true, token, user: { email, role } });
+  })().catch((e) => {
+    console.error('[auth/login] failed:', e?.message || e);
+    return res.status(500).json({ success: false, message: 'Login failed' });
+  });
 });
 
 // ✅ Verify Bearer token (must be valid)
@@ -793,6 +876,12 @@ app.use('/admin-api/api/admin', adminPublicSettingsRouter);
 app.use('/api/admin', communityReporterSettingsRouter);
 // Founder feature toggles (admin/founder protected)
 app.use('/api/admin/founder', founderFeatureTogglesRouter);
+
+// New Admin Panel endpoints (Team/Security/Audit)
+app.use('/api/admin', adminTeamRoutes);
+if (adminTeamRoutesV2) app.use('/api/admin/team', adminTeamRoutesV2);
+app.use('/api/admin', adminSecurityRoutes);
+app.use('/api/admin', adminAuditRoutes);
 // Community Reporter Queue (admin protected)
 app.use('/api/admin', adminCommunityReporterQueueRouter);
 app.use('/admin-api/admin', adminCommunityReporterQueueRouter);

@@ -17,12 +17,14 @@ function isDbReady() {
 // TODO: Replace placeholder with real training metadata from storage/DB.
 router.get('/system/ai-training-info', requireAdminAuth, (_req, res) => {
   return res.status(200).json({
+    ok: true,
     success: true,
+    status: 200,
     data: {
       lastUpdatedAt: null,
       sources: [],
       notes: '',
-    },
+    }
   });
 });
 
