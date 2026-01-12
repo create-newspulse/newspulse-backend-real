@@ -81,7 +81,8 @@ let adminTeamRoutesV2 = null;
 try { adminTeamRoutesV2 = require('./src/routes/adminTeamRoutes'); } catch (_) { console.warn('[init] optional src/routes/adminTeamRoutes not found; skipping'); }
 const adminSecurityRoutes = require('./routes/adminSecurity.routes');
 const adminAuditRoutes = require('./routes/adminAudit.routes');
-const adminMetaRoutes = require('./routes/adminMeta.routes');
+let adminMetaRoutes = null;
+try { adminMetaRoutes = require('./routes/adminMeta.routes'); } catch (_) { console.warn('[init] optional routes/adminMeta.routes not found; skipping'); }
 const publicAdsRouter = require('./routes/publicAds.routes');
 const adminAdsRouter = require('./routes/adminAds.routes');
 const publicAdSettingsRouter = require('./routes/publicAdSettings.routes');
@@ -916,7 +917,7 @@ if (adminTeamRoutesV2) {
 }
 app.use('/api/admin', adminSecurityRoutes);
 app.use('/api/admin', adminAuditRoutes);
-app.use('/api/admin', adminMetaRoutes);
+if (adminMetaRoutes) app.use('/api/admin', adminMetaRoutes);
 app.use('/admin-api/admin', adminAuditRoutes);
 app.use('/admin-api/api/admin', adminAuditRoutes);
 // Community Reporter Queue (admin protected)
