@@ -774,7 +774,10 @@ app.use('/api/public', publicAdsRouter);
 // Public site settings (tickers)
 app.use('/api/public', publicTickersSettingsRouter);
 // Public Broadcast Center tickers (Breaking + Live Updates)
-app.use('/api/public', publicBroadcastRouter);
+app.use('/api/public/broadcast', publicBroadcastRouter);
+// Admin panel proxy basePath support (some frontends call /admin-api/* even for public reads)
+app.use('/admin-api/public/broadcast', publicBroadcastRouter);
+app.use('/admin-api/api/public/broadcast', publicBroadcastRouter);
 // Legacy/website path support
 app.use('/public', publicTickersSettingsRouter);
 // Admin panel proxy basePath support

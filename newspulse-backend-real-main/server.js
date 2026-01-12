@@ -33,6 +33,9 @@ const adminAdSettingsRouter = require('../routes/adminAdSettings.routes');
 const publicRoutes = require('../routes/public.routes');
 // Broadcast Center (shared root-level router)
 const broadcastRoutes = require('../routes/broadcast.routes');
+// Public Broadcast Center (shared root-level router)
+let publicBroadcastRouter = null;
+try { publicBroadcastRouter = require('../routes/publicBroadcast.routes'); } catch (_) { console.warn('[init] optional ../routes/publicBroadcast.routes not found; skipping'); }
 // Shared system routes (health + monitor stubs)
 const systemRoutes = require('../routes/system.routes');
 // Mount dashboard stats from root-level routes (shared across apps)
@@ -245,6 +248,14 @@ app.use('/api/public', publicAdsRouter);
 
 // Public stories
 app.use('/api/public', publicRoutes);
+
+// Public Broadcast Center tickers
+if (publicBroadcastRouter) {
+  app.use('/api/public/broadcast', publicBroadcastRouter);
+  // Admin panel proxy basePath support
+  app.use('/admin-api/public/broadcast', publicBroadcastRouter);
+  app.use('/admin-api/api/public/broadcast', publicBroadcastRouter);
+}
 
 app.use('/api/public', publicAdSettingsRouter);
 app.use('/admin-api/public', publicAdSettingsRouter);
