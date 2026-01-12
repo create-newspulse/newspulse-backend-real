@@ -187,7 +187,9 @@ const allowedOrigins = [
   'https://newspulse.co.in',
   'https://www.newspulse.co.in',
   'http://localhost:5173',
+  'http://127.0.0.1:5173',
   'http://localhost:3000',
+  'http://127.0.0.1:3000',
   // Vercel domains (set these in Render for LIVE frontend/admin deployments)
   ..._parseCorsOriginsEnv(process.env.ADMIN_VERCEL_DOMAIN),
   ..._parseCorsOriginsEnv(process.env.FRONTEND_VERCEL_DOMAIN),
@@ -799,6 +801,9 @@ app.use('/admin-api/api/admin', adminAdSettingsRouter);
 app.use('/api/admin', adminRoutes); // used by admin UI
 app.use('/admin', adminRoutes);     // legacy path
 // Admin sponsor ads
+// Admin API proxy aliases (some admin builds proxy via /admin-api/*)
+app.use('/admin-api/admin', adminRoutes);
+app.use('/admin-api/api/admin', adminRoutes);
 app.use('/api/admin', adminAdsRouter);
 
 // Admin public settings (tickers)
@@ -880,8 +885,17 @@ app.use('/api/admin/founder', founderFeatureTogglesRouter);
 // New Admin Panel endpoints (Team/Security/Audit)
 app.use('/api/admin', adminTeamRoutes);
 if (adminTeamRoutesV2) app.use('/api/admin/team', adminTeamRoutesV2);
+// Admin API proxy aliases (frontend often proxies /admin-api/*)
+app.use('/admin-api/admin', adminTeamRoutes);
+app.use('/admin-api/api/admin', adminTeamRoutes);
+if (adminTeamRoutesV2) {
+  app.use('/admin-api/admin/team', adminTeamRoutesV2);
+  app.use('/admin-api/api/admin/team', adminTeamRoutesV2);
+}
 app.use('/api/admin', adminSecurityRoutes);
 app.use('/api/admin', adminAuditRoutes);
+app.use('/admin-api/admin', adminAuditRoutes);
+app.use('/admin-api/api/admin', adminAuditRoutes);
 // Community Reporter Queue (admin protected)
 app.use('/api/admin', adminCommunityReporterQueueRouter);
 app.use('/admin-api/admin', adminCommunityReporterQueueRouter);

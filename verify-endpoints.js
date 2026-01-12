@@ -64,8 +64,12 @@ async function getAdminToken() {
   await check('/api/public/settings', 200, 'Public settings (should be 200)');
   await check('/api/admin/settings/public', 401, 'Admin settings (should be 401 w/o token)');
   await check('/api/admin/team/users', 401, 'Team users (should be 401 w/o token)');
-  await check('/api/admin/audit/logs', 401, 'Audit logs (should be 401 w/o token)');
+  await check('/admin-api/admin/team/users', 401, 'Team users alias (should be 401 w/o token)');
+  await check('/api/admin/audit?limit=1', 401, 'Audit (should be 401 w/o token)');
+  await check('/admin-api/admin/audit?limit=1', 401, 'Audit alias (should be 401 w/o token)');
+  await check('/api/admin/audit/logs', 401, 'Audit logs legacy (should be 401 w/o token)');
   await check('/api/admin/security/session', 401, 'Security session (should be 401 w/o token)');
+  await check('/api/admin/settings/admin-panel/preview?state=effective', 401, 'Admin panel preview (should be 401 w/o token)');
 
   const token = await getAdminToken();
   if (!token) {
@@ -74,6 +78,22 @@ async function getAdminToken() {
   }
 
   await check('/api/admin/team/users', 200, 'Team users (should be 200 w/ token)', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  await check('/admin-api/admin/team/users', 200, 'Team users alias (should be 200 w/ token)', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  await check('/api/admin/settings/admin-panel/preview?state=effective', 200, 'Admin panel preview (should be 200 w/ token)', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  await check('/api/admin/audit?limit=1', 200, 'Audit (should be 200 w/ token)', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  await check('/admin-api/admin/audit?limit=1', 200, 'Audit alias (should be 200 w/ token)', {
     headers: { Authorization: `Bearer ${token}` },
   });
 })();

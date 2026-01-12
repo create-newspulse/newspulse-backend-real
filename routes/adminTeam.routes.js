@@ -38,12 +38,16 @@ function requireFounderOrPermission(perm) {
 
 function teamUserSafeDto(u) {
   return {
+    _id: String(u._id),
     id: String(u._id),
     name: u.name || '',
     email: u.email || '',
     role: u.role || 'staff',
+    designation: u.designation || null,
+    permissions: Array.isArray(u.permissions) ? u.permissions : [],
     status: u.status || 'active',
     createdAt: u.createdAt || null,
+    updatedAt: u.updatedAt || null,
   };
 }
 

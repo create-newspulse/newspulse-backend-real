@@ -34,11 +34,19 @@ function requireFounderOrPermission(perm) {
 }
 
 // GET /api/admin/audit/logs?limit=50
-router.get('/audit/logs', requireAdminAuth, requireFounderOrPermission('audit:read'), async (req, res) => {
+router.get('/audit/logs', requireAdminAuth, async (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 200);
 
   if (!isDbReady()) {
-    return ok(res, { items: [] });
+    // Return both legacy and new admin UI shapes.
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: 200,
+      data: { items: [] },
+      items: [],
+      events: [],
+    });
   }
 
   const docs = await AuditLog.find({}).sort({ createdAt: -1 }).limit(limit).lean();
@@ -54,7 +62,55 @@ router.get('/audit/logs', requireAdminAuth, requireFounderOrPermission('audit:re
     createdAt: d.createdAt ?? null,
   }));
 
-  return ok(res, { items });
+  const events = (docs || []).map((d) => ({
+    _id: String(d._id),
+    at: d.createdAt ? new Date(d.createdAt).toISOString() : null,
+    actorEmail: d.actor && d.actor.email ? String(d.actor.email) : null,
+    action: d.action || null,
+    meta: d.meta ?? {},
+  }));
+
+  return res.status(200).json({
+    ok: true,
+    success: true,
+    status: 200,
+    data: { items },
+    items,
+    events,
+  });
+});
+
+// GET /api/admin/audit?limit=50
+// Admin Panel compatibility: older/newer UIs call /api/admin/audit (not /audit/logs)
+router.get('/audit', requireAdminAuth, async (req, res) => {
+  const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 200);
+
+  if (!isDbReady()) {
+    return res.status(200).json({ ok: true, events: [] });
+  }
+
+  const docs = await AuditLog.find({}).sort({ createdAt: -1 }).limit(limit).lean();
+  const events = (docs || []).map((d) => ({
+    _id: String(d._id),
+    at: d.createdAt ? new Date(d.createdAt).toISOString() : null,
+    actorEmail: d.actor && d.actor.email ? String(d.actor.email) : null,
+    action: d.action || null,
+    meta: d.meta ?? {},
+  }));
+
+  return res.status(200).json({ ok: true, events });
+});
+
+// Alias: some admin builds call /api/admin/audit-logs?limit=50
+router.get('/audit-logs', requireAdminAuth, async (req, res) => {
+  req.url = '/audit' + (req._parsedUrl && req._parsedUrl.search ? req._parsedUrl.search : '');
+  return router.handle(req, res);
+});
+
+// Alias: some admin builds call /api/admin/audit/events?limit=50
+router.get('/audit/events', requireAdminAuth, async (req, res) => {
+  req.url = '/audit' + (req._parsedUrl && req._parsedUrl.search ? req._parsedUrl.search : '');
+  return router.handle(req, res);
 });
 
 module.exports = router;

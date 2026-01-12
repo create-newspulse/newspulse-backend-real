@@ -37,6 +37,8 @@ const broadcastRoutes = require('../routes/broadcast.routes');
 const systemRoutes = require('../routes/system.routes');
 // Mount dashboard stats from root-level routes (shared across apps)
 const dashboardStatsRoutes = require('../routes/dashboardStats');
+let adminAuditRoutes = null;
+try { adminAuditRoutes = require('../routes/adminAudit.routes'); } catch (_) { console.warn('[init] optional ../routes/adminAudit.routes not found; skipping'); }
 let aiRoutes = null;
 let feedRoutes = null;
 try { aiRoutes = require('./routes/ai'); } catch (_) { console.warn('[init] optional routes/ai not found; skipping'); }
@@ -49,7 +51,9 @@ const app = express();
 // --- Global CORS: strict allowlist for prod + local dev ---
 const allowedOrigins = [
   'http://localhost:5173',
+  'http://127.0.0.1:5173',
   'http://localhost:3000',
+  'http://127.0.0.1:3000',
   'https://newspulse.co.in',
   'https://www.newspulse.co.in',
   'https://admin.newspulse.co.in',
@@ -262,6 +266,9 @@ app.use('/admin', adminRoutes); // legacy POST /admin/login
 // To ensure final URL '/api/admin/reporters' works, also mount under '/api/admin'.
 app.use('/api', adminRoutes);
 app.use('/api/admin', adminRoutes);
+// Admin API proxy aliases
+app.use('/admin-api/admin', adminRoutes);
+app.use('/admin-api/api/admin', adminRoutes);
 // Mount dashboard stats under /api and /admin-api to satisfy Admin Panel
 app.use('/api', dashboardStatsRoutes);
 app.use('/admin-api', dashboardStatsRoutes);
@@ -288,6 +295,22 @@ app.use('/api/admin', communityReporterSettingsRouter);
 // Team management (Admin Panel: /api/admin/team/users)
 if (adminTeamRoutes) app.use('/api/admin', adminTeamRoutes);
 if (adminTeamRoutesV2) app.use('/api/admin/team', adminTeamRoutesV2);
+// Admin API proxy aliases (frontend often proxies /admin-api/*)
+if (adminTeamRoutes) {
+  app.use('/admin-api/admin', adminTeamRoutes);
+  app.use('/admin-api/api/admin', adminTeamRoutes);
+}
+if (adminTeamRoutesV2) {
+  app.use('/admin-api/admin/team', adminTeamRoutesV2);
+  app.use('/admin-api/api/admin/team', adminTeamRoutesV2);
+}
+
+// Audit logs (Admin Panel: /api/admin/audit)
+if (adminAuditRoutes) {
+  app.use('/api/admin', adminAuditRoutes);
+  app.use('/admin-api/admin', adminAuditRoutes);
+  app.use('/admin-api/api/admin', adminAuditRoutes);
+}
 // Optional feeds and AI routes
 if (aiRoutes) app.use('/api/ai', aiRoutes);
 if (feedRoutes) app.use('/api/feed', feedRoutes);

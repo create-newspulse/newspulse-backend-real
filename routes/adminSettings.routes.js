@@ -25,6 +25,30 @@ function defaultAdminSettings() {
   };
 }
 
+function defaultAdminPanelPayload() {
+  return {};
+}
+
+function resolveAdminPanelPayloadForState(settingsValue, state) {
+  const root = settingsValue && typeof settingsValue === 'object' ? settingsValue : {};
+  const ap = root.adminPanel && typeof root.adminPanel === 'object' ? root.adminPanel : null;
+
+  // Supported shapes:
+  // - { adminPanel: { draft: {...}, published: {...}, version? } }
+  // - { adminPanelDraft: {...}, adminPanelPublished: {...} }
+  // - { adminPanel: {...} } (treat as published/effective)
+  const draft = (ap && ap.draft && typeof ap.draft === 'object') ? ap.draft : (root.adminPanelDraft || null);
+  const published = (ap && ap.published && typeof ap.published === 'object') ? ap.published : (root.adminPanelPublished || null);
+
+  if (state === 'draft') return draft && typeof draft === 'object' ? draft : (ap || defaultAdminPanelPayload());
+  if (state === 'published') return published && typeof published === 'object' ? published : (ap || defaultAdminPanelPayload());
+
+  // effective: defaults + published (no mutation)
+  const base = defaultAdminPanelPayload();
+  const pub = published && typeof published === 'object' ? published : (ap || {});
+  return { ...base, ...pub };
+}
+
 function defaultPublicSettings() {
   return {
     publicSite: {
@@ -74,6 +98,43 @@ router.get('/settings', requireAdminAuth, async (_req, res, next) => {
     const fallback = defaultAdminSettings();
     const { value, updatedAt } = await readSetting(ADMIN_SETTINGS_KEY, fallback);
     return res.status(200).json({ ok: true, success: true, status: 200, data: value, updatedAt });
+  } catch (e) {
+    return next(e);
+  }
+});
+
+// GET /api/admin/settings/admin-panel/preview?state=draft|published|effective
+// Read-only preview endpoint used by Admin Panel Settings → Preview tab.
+router.get('/settings/admin-panel/preview', requireAdminAuth, async (req, res, next) => {
+  try {
+    const stateRaw = String(req.query.state || 'effective').toLowerCase();
+    const allowed = new Set(['draft', 'published', 'effective']);
+    if (!allowed.has(stateRaw)) {
+      return res.status(400).json({
+        ok: false,
+        success: false,
+        status: 400,
+        message: 'Invalid state. Expected draft|published|effective',
+        path: req.originalUrl,
+      });
+    }
+
+    const fallback = defaultAdminSettings();
+    const { value, updatedAt } = await readSetting(ADMIN_SETTINGS_KEY, fallback);
+
+    const payload = resolveAdminPanelPayloadForState(value, stateRaw);
+    const version =
+      (value && typeof value === 'object' && typeof value.version === 'number' ? value.version : null)
+      ?? (value && value.adminPanel && typeof value.adminPanel.version === 'number' ? value.adminPanel.version : null)
+      ?? 1;
+
+    return res.status(200).json({
+      ok: true,
+      state: stateRaw,
+      version,
+      updatedAt: updatedAt ? new Date(updatedAt).toISOString() : null,
+      payload,
+    });
   } catch (e) {
     return next(e);
   }
