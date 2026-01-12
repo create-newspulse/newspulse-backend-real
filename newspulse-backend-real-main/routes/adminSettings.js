@@ -125,11 +125,37 @@ router.get('/settings/admin-panel/preview', requireAdminAuth, async (req, res, n
 
 		return res.status(200).json({
 			ok: true,
+			success: true,
+			status: 200,
+			message: 'OK',
 			state: stateRaw,
 			version,
 			updatedAt: updatedAt ? new Date(updatedAt).toISOString() : null,
 			payload,
+			data: {
+				state: stateRaw,
+				version,
+				updatedAt: updatedAt ? new Date(updatedAt).toISOString() : null,
+				payload,
+			},
 		});
+	} catch (e) {
+		return next(e);
+	}
+});
+
+/**
+ * GET /api/admin/settings/preview?state=draft|published|effective
+ * Alias for Admin Panel preview endpoint.
+ *
+ * Example:
+ *   curl -i "http://localhost:5000/api/admin/settings/preview?state=effective" \
+ *     -H "Authorization: Bearer <token>"
+ */
+router.get('/settings/preview', requireAdminAuth, async (req, res, next) => {
+	try {
+		req.url = '/settings/admin-panel/preview' + (req._parsedUrl && req._parsedUrl.search ? req._parsedUrl.search : '');
+		return router.handle(req, res, next);
 	} catch (e) {
 		return next(e);
 	}

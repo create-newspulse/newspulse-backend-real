@@ -95,7 +95,14 @@ function generateTempPassword() {
 // GET /api/admin/team/users
 router.get('/team/users', requireAdminAuth, async (_req, res) => {
   if (!isDbReady()) {
-    return res.status(200).json({ ok: true, success: true, status: 200, users: [] });
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: 200,
+      message: 'OK',
+      data: { users: [] },
+      users: [],
+    });
   }
 
   const docs = await User.find({ role: { $in: ['founder', 'admin', 'editor', 'staff'] } })
@@ -103,7 +110,14 @@ router.get('/team/users', requireAdminAuth, async (_req, res) => {
     .lean();
 
   const users = (docs || []).map(teamUserSafeDto);
-  return res.status(200).json({ ok: true, success: true, status: 200, users });
+  return res.status(200).json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'OK',
+    data: { users },
+    users,
+  });
 });
 
 // POST /api/admin/team/users

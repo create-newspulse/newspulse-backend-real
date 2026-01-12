@@ -15,7 +15,14 @@ function isDbReady() {
 // GET /api/admin/team/users
 router.get('/users', requireAdminAuth, async (_req, res) => {
   if (!isDbReady() || !User) {
-    return res.status(200).json({ ok: true, users: [] });
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: 200,
+      message: 'OK',
+      data: { users: [] },
+      users: [],
+    });
   }
 
   const docs = await User.find({ role: { $in: ['founder', 'admin', 'editor', 'staff'] } })
@@ -24,6 +31,7 @@ router.get('/users', requireAdminAuth, async (_req, res) => {
     .lean();
 
   const users = (docs || []).map((u) => ({
+    _id: String(u._id),
     id: String(u._id),
     name: u.name || '',
     email: u.email || '',
@@ -32,7 +40,14 @@ router.get('/users', requireAdminAuth, async (_req, res) => {
     createdAt: u.createdAt || null,
   }));
 
-  return res.status(200).json({ ok: true, users });
+  return res.status(200).json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'OK',
+    data: { users },
+    users,
+  });
 });
 
 module.exports = router;

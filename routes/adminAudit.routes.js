@@ -43,6 +43,7 @@ router.get('/audit/logs', requireAdminAuth, async (req, res) => {
       ok: true,
       success: true,
       status: 200,
+      message: 'OK',
       data: { items: [] },
       items: [],
       events: [],
@@ -74,6 +75,7 @@ router.get('/audit/logs', requireAdminAuth, async (req, res) => {
     ok: true,
     success: true,
     status: 200,
+    message: 'OK',
     data: { items },
     items,
     events,
@@ -86,7 +88,14 @@ router.get('/audit', requireAdminAuth, async (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 200);
 
   if (!isDbReady()) {
-    return res.status(200).json({ ok: true, events: [] });
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: 200,
+      message: 'OK',
+      data: { events: [] },
+      events: [],
+    });
   }
 
   const docs = await AuditLog.find({}).sort({ createdAt: -1 }).limit(limit).lean();
@@ -98,7 +107,14 @@ router.get('/audit', requireAdminAuth, async (req, res) => {
     meta: d.meta ?? {},
   }));
 
-  return res.status(200).json({ ok: true, events });
+  return res.status(200).json({
+    ok: true,
+    success: true,
+    status: 200,
+    message: 'OK',
+    data: { events },
+    events,
+  });
 });
 
 // Alias: some admin builds call /api/admin/audit-logs?limit=50
