@@ -61,6 +61,19 @@ router.get('/', requireAdminAuthIfAdminApi, async (req, res) => {
 	return res.status(200).json({ ok: true, settings, itemsLast24h });
 });
 
+// GET /admin-api/broadcast/settings
+router.get('/settings', requireAdminAuthIfAdminApi, async (req, res, next) => {
+	// For non-admin mounts, fall through to legacy /api/broadcast/settings behavior.
+	if (!_isAdminApiMount(req)) return next('route');
+
+	if (mongoose.connection.readyState !== 1) {
+		return res.status(503).json({ ok: false, message: 'Database unavailable' });
+	}
+
+	const settingsDoc = await getOrCreateSettingsV2();
+	return res.status(200).json({ ok: true, settings: adminSettingsResponse(settingsDoc) });
+});
+
 // PATCH /admin-api/broadcast/settings
 router.patch('/settings', requireAdminAuthIfAdminApi, async (req, res) => {
 	if (!_isAdminApiMount(req)) return res.status(404).json({ ok: false, message: 'Not found' });
@@ -71,6 +84,43 @@ router.patch('/settings', requireAdminAuthIfAdminApi, async (req, res) => {
 	}
 	const settingsDoc = await getOrCreateSettingsV2();
 	return res.status(200).json({ ok: true, settings: adminSettingsResponse(settingsDoc) });
+});
+
+// GET /admin-api/broadcast/items?type=breaking|live
+router.get('/items', requireAdminAuthIfAdminApi, async (req, res, next) => {
+	// For non-admin mounts, fall through to legacy /api/broadcast/items behavior.
+	if (!_isAdminApiMount(req)) return next('route');
+
+	if (mongoose.connection.readyState !== 1) {
+		return res.status(503).json({ ok: false, message: 'Database unavailable' });
+	}
+
+	const channel = normalizeChannel(req.query && req.query.type);
+	if (!channel) {
+		return res.status(400).json({ ok: false, message: 'Invalid type. Expected breaking|live' });
+	}
+
+	const itemsLast24h = await listItemsLast24hByChannel();
+	return res.status(200).json({ ok: true, items: itemsLast24h[channel] || [] });
+});
+
+// POST /admin-api/broadcast/items?type=breaking|live  body: { text }
+router.post('/items', requireAdminAuthIfAdminApi, async (req, res, next) => {
+	// For non-admin mounts, fall through to legacy /api/broadcast/items behavior.
+	if (!_isAdminApiMount(req)) return next('route');
+
+	const channel = normalizeChannel(req.query && req.query.type);
+	if (!channel) {
+		return res.status(400).json({ ok: false, message: 'Invalid type. Expected breaking|live' });
+	}
+
+	const text = req.body && typeof req.body === 'object' ? req.body.text : undefined;
+	const created = await createItem(channel, text);
+	if (!created.ok) {
+		return res.status(created.status).json({ ok: false, message: created.message });
+	}
+
+	return res.status(201).json({ ok: true, item: created.item });
 });
 
 // POST /admin-api/broadcast/:channel/items
