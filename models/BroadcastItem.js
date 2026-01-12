@@ -7,6 +7,8 @@ const BroadcastItemSchema = new mongoose.Schema(
       required: true,
       enum: ['breaking', 'live'],
       index: true,
+      // New API calls this field "channel"; keep DB field as "type" for backward compatibility.
+      alias: 'channel',
     },
     text: {
       type: String,
@@ -31,7 +33,7 @@ const BroadcastItemSchema = new mongoose.Schema(
     },
     expiresAt: {
       type: Date,
-      required: true,
+      required: false,
     },
   },
   { timestamps: true },

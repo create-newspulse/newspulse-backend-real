@@ -4,8 +4,104 @@ const mongoose = require('mongoose');
 const BroadcastItem = require('../models/BroadcastItem');
 const BroadcastSettings = require('../models/BroadcastSettings');
 const { requireAdminAuth } = require('../middleware/adminAuth');
+const {
+	normalizeChannel,
+	getOrCreateSettings: getOrCreateSettingsV2,
+	adminSettingsResponse,
+	listItemsLast24hByChannel,
+	createItem,
+	deleteItemById,
+	patchSettings,
+} = require('../services/broadcastCenter.service');
 
 const router = express.Router();
+
+function isProd() {
+	return String(process.env.NODE_ENV || 'development').toLowerCase() === 'production';
+}
+
+function _isAdminApiMount(req) {
+	// This router is mounted under both /api/broadcast and /admin-api/broadcast.
+	// New Broadcast Center endpoints must be admin-protected on /admin-api/*.
+	return String(req.baseUrl || '').startsWith('/admin-api');
+}
+
+function requireAdminAuthIfAdminApi(req, res, next) {
+	if (_isAdminApiMount(req)) return requireAdminAuth(req, res, next);
+	return next();
+}
+
+function blockLegacyBroadcastEndpointsInProd(req, res, next) {
+	// Production hardening: only /admin-api/broadcast* should expose admin/write endpoints.
+	// Keep legacy public endpoint /api/broadcast/public working.
+	if (!isProd()) return next();
+	if (_isAdminApiMount(req)) return next();
+	if (String(req.path || '') === '/public') return next();
+	return res.status(404).json({ ok: false, message: 'Not found' });
+}
+
+// ─────────────────────────────────────────────
+// NEW Broadcast Center Admin API (required)
+// Mounted at: /admin-api/broadcast
+// ─────────────────────────────────────────────
+
+// GET /admin-api/broadcast
+router.get('/', requireAdminAuthIfAdminApi, async (req, res) => {
+	// Only serve this contract from /admin-api mounts
+	if (!_isAdminApiMount(req)) return res.status(404).json({ ok: false, message: 'Not found' });
+
+	if (mongoose.connection.readyState !== 1) {
+		return res.status(503).json({ ok: false, message: 'Database unavailable' });
+	}
+
+	const settingsDoc = await getOrCreateSettingsV2();
+	const settings = adminSettingsResponse(settingsDoc);
+	const itemsLast24h = await listItemsLast24hByChannel();
+
+	return res.status(200).json({ ok: true, settings, itemsLast24h });
+});
+
+// PATCH /admin-api/broadcast/settings
+router.patch('/settings', requireAdminAuthIfAdminApi, async (req, res) => {
+	if (!_isAdminApiMount(req)) return res.status(404).json({ ok: false, message: 'Not found' });
+
+	const result = await patchSettings(req.body);
+	if (!result.ok) {
+		return res.status(result.status).json({ ok: false, message: result.message });
+	}
+	const settingsDoc = await getOrCreateSettingsV2();
+	return res.status(200).json({ ok: true, settings: adminSettingsResponse(settingsDoc) });
+});
+
+// POST /admin-api/broadcast/:channel/items
+router.post('/:channel/items', requireAdminAuthIfAdminApi, async (req, res) => {
+	if (!_isAdminApiMount(req)) return res.status(404).json({ ok: false, message: 'Not found' });
+
+	const channel = normalizeChannel(req.params.channel);
+	if (!channel) {
+		return res.status(400).json({ ok: false, message: 'Invalid channel. Expected breaking|live' });
+	}
+
+	const text = req.body && typeof req.body === 'object' ? req.body.text : undefined;
+	const created = await createItem(channel, text);
+	if (!created.ok) {
+		return res.status(created.status).json({ ok: false, message: created.message });
+	}
+
+	return res.status(201).json({ ok: true, item: created.item });
+});
+
+// DELETE /admin-api/broadcast/items/:id
+// Keep legacy DELETE /api/broadcast/items/:id behavior for non-admin mounts.
+router.delete('/items/:id', requireAdminAuthIfAdminApi, async (req, res, next) => {
+	if (!_isAdminApiMount(req)) return next('route');
+
+	const result = await deleteItemById(req.params.id);
+	if (!result.ok) {
+		return res.status(result.status).json({ ok: false, message: result.message });
+	}
+	return res.status(200).json({ ok: true });
+});
 
 function requireAdminAuthIfProd(req, res, next) {
 	const env = String(process.env.NODE_ENV || 'development').toLowerCase();
@@ -75,7 +171,7 @@ function pickSettingsResponse(s) {
 }
 
 // ADMIN: GET /api/broadcast/settings
-router.get('/settings', requireAdminAuthIfProd, async (_req, res) => {
+router.get('/settings', blockLegacyBroadcastEndpointsInProd, requireAdminAuthIfAdminApi, async (_req, res) => {
 	if (!isDbReady()) {
 		return res.status(200).json(defaultSettings());
 	}
@@ -84,7 +180,7 @@ router.get('/settings', requireAdminAuthIfProd, async (_req, res) => {
 });
 
 // ADMIN: PUT /api/broadcast/settings
-router.put('/settings', requireAdminAuthIfProd, async (req, res) => {
+router.put('/settings', blockLegacyBroadcastEndpointsInProd, requireAdminAuthIfAdminApi, async (req, res) => {
 	if (!ensureDbOr503(res)) return;
 
 	const s = await getOrCreateSettings();
@@ -104,7 +200,7 @@ router.put('/settings', requireAdminAuthIfProd, async (req, res) => {
 });
 
 // ADMIN: GET /api/broadcast/items?type=breaking|live&language=en|hi|gu
-router.get('/items', requireAdminAuthIfProd, async (req, res) => {
+router.get('/items', blockLegacyBroadcastEndpointsInProd, requireAdminAuthIfAdminApi, async (req, res) => {
 	if (!isDbReady()) {
 		return res.status(200).json([]);
 	}
@@ -130,7 +226,7 @@ router.get('/items', requireAdminAuthIfProd, async (req, res) => {
 });
 
 // ADMIN: POST /api/broadcast/items
-router.post('/items', requireAdminAuthIfProd, async (req, res) => {
+router.post('/items', blockLegacyBroadcastEndpointsInProd, requireAdminAuthIfAdminApi, async (req, res) => {
 	if (!ensureDbOr503(res)) return;
 
 	const body = req.body && typeof req.body === 'object' ? req.body : {};
@@ -161,7 +257,7 @@ router.post('/items', requireAdminAuthIfProd, async (req, res) => {
 });
 
 // ADMIN: PATCH /api/broadcast/items/:id
-router.patch('/items/:id', requireAdminAuthIfProd, async (req, res) => {
+router.patch('/items/:id', blockLegacyBroadcastEndpointsInProd, requireAdminAuthIfAdminApi, async (req, res) => {
 	if (!ensureDbOr503(res)) return;
 
 	const { id } = req.params;
@@ -188,7 +284,7 @@ router.patch('/items/:id', requireAdminAuthIfProd, async (req, res) => {
 });
 
 // ADMIN: DELETE /api/broadcast/items/:id
-router.delete('/items/:id', requireAdminAuthIfProd, async (req, res) => {
+router.delete('/items/:id', blockLegacyBroadcastEndpointsInProd, requireAdminAuthIfAdminApi, async (req, res) => {
 	if (!ensureDbOr503(res)) return;
 
 	const { id } = req.params;

@@ -172,6 +172,76 @@ Response shape (unchanged):
 { "items": [], "page": 1, "limit": 30, "total": 0, "totalPages": 1 }
 ```
 
+## Broadcast Center (Breaking + Live Updates)
+
+### Public
+
+#### GET /api/public/broadcast
+Returns a stable payload for the website ticker(s):
+```json
+{
+  "breaking": { "enabled": true, "speedSec": 8, "items": ["..."] },
+  "live":     { "enabled": false, "speedSec": 8, "items": [] }
+}
+```
+
+Example:
+```bash
+curl "http://localhost:10000/api/public/broadcast"
+```
+
+### Admin (via /admin-api)
+
+All admin endpoints require:
+- `Authorization: Bearer <ADMIN_JWT>` (or a compatible legacy admin cookie)
+
+#### POST /admin-api/broadcast/breaking/items
+Body:
+```json
+{ "text": "Breaking: Airport roads closed due to fog" }
+```
+
+Example:
+```bash
+curl -X POST "http://localhost:10000/admin-api/broadcast/breaking/items" \
+  -H "Authorization: Bearer <ADMIN_JWT>" \
+  -H "Content-Type: application/json" \
+  -d "{\"text\":\"Breaking: Airport roads closed due to fog\"}"
+```
+
+#### GET /admin-api/broadcast
+Returns `{ settings, itemsLast24h: { breaking:[], live:[] } }`.
+
+Example:
+```bash
+curl "http://localhost:10000/admin-api/broadcast" \
+  -H "Authorization: Bearer <ADMIN_JWT>"
+```
+
+#### PATCH /admin-api/broadcast/settings
+Body:
+```json
+{
+  "breaking": { "enabled": true, "mode": "auto", "speedSec": 8 },
+  "live": { "enabled": true, "mode": "force_off", "speedSec": 10 }
+}
+```
+
+Example:
+```bash
+curl -X PATCH "http://localhost:10000/admin-api/broadcast/settings" \
+  -H "Authorization: Bearer <ADMIN_JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{"breaking":{"enabled":true,"mode":"auto","speedSec":8},"live":{"enabled":true,"mode":"force_off","speedSec":10}}'
+```
+
+#### DELETE /admin-api/broadcast/items/:id
+Example:
+```bash
+curl -X DELETE "http://localhost:10000/admin-api/broadcast/items/<ITEM_ID>" \
+  -H "Authorization: Bearer <ADMIN_JWT>"
+```
+
 ### GET /api/public/news/translations/:translationGroupId
 Returns all published translations for a translation group (no auth required), sorted by `language`.
 

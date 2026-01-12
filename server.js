@@ -81,6 +81,7 @@ let adminTeamRoutesV2 = null;
 try { adminTeamRoutesV2 = require('./src/routes/adminTeamRoutes'); } catch (_) { console.warn('[init] optional src/routes/adminTeamRoutes not found; skipping'); }
 const adminSecurityRoutes = require('./routes/adminSecurity.routes');
 const adminAuditRoutes = require('./routes/adminAudit.routes');
+const adminMetaRoutes = require('./routes/adminMeta.routes');
 const publicAdsRouter = require('./routes/publicAds.routes');
 const adminAdsRouter = require('./routes/adminAds.routes');
 const publicAdSettingsRouter = require('./routes/publicAdSettings.routes');
@@ -95,6 +96,7 @@ const publicNewsRouter = require('./routes/publicNews.routes');
 const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');
 const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
 const adminTickersSettingsRouter = require('./routes/adminTickersSettings.routes');
+const publicBroadcastRouter = require('./routes/publicBroadcast.routes');
 let adminWorkflowApiRouter = null;
 let adminPushHistoryApiRouter = null;
 let adminWorkflowLegacyRouter = null;
@@ -181,25 +183,13 @@ function _parseCorsOriginsEnv(v) {
   return normalized;
 }
 
-// Explicit allowlist (matches frontend expectations)
+// Explicit allowlist (production-safe)
+// NOTE: Do NOT use '*' when credentials are enabled.
 const allowedOrigins = [
+  'http://localhost:5173',
   'https://admin.newspulse.co.in',
   'https://newspulse.co.in',
   'https://www.newspulse.co.in',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  // Vercel domains (set these in Render for LIVE frontend/admin deployments)
-  ..._parseCorsOriginsEnv(process.env.ADMIN_VERCEL_DOMAIN),
-  ..._parseCorsOriginsEnv(process.env.FRONTEND_VERCEL_DOMAIN),
-  // Common Vercel-provided host (no scheme). If present, allow both http/https.
-  ..._parseCorsOriginsEnv(process.env.VERCEL_URL),
-  // Comma-separated allowlist for the admin panel and local development.
-  // Preferred env var: CORS_ORIGIN (supports multiple values).
-  // Back-compat: CORS_ORIGINS.
-  ..._parseCorsOriginsEnv(process.env.CORS_ORIGIN),
-  ..._parseCorsOriginsEnv(process.env.CORS_ORIGINS),
 ].filter(Boolean);
 
 const corsOptions = {
@@ -222,6 +212,23 @@ const corsOptions = {
 app.use(cors(corsOptions));
 // Ensure OPTIONS preflight works for all routes.
 app.options('*', cors(corsOptions));
+
+// Minimal production request logging for Broadcast Center.
+app.use((req, res, next) => {
+  const env = String(process.env.NODE_ENV || 'development').toLowerCase();
+  if (env !== 'production') return next();
+
+  const path = String(req.originalUrl || req.url || '');
+  const shouldLog = path.startsWith('/admin-api/broadcast') || path.startsWith('/api/public/broadcast');
+  if (!shouldLog) return next();
+
+  res.on('finish', () => {
+    try {
+      console.log('[broadcast]', req.method, path.split('?')[0], res.statusCode);
+    } catch (_) {}
+  });
+  return next();
+});
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -427,6 +434,14 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
         console.warn('[startup] BroadcastItem index sync failed', e?.message || e);
       }
 
+		// Cleanup old Broadcast Center items (older than 24h)
+		try {
+			const { startBroadcastCleanupJob } = require('./services/broadcastCleanup');
+			startBroadcastCleanupJob();
+		} catch (e) {
+			console.warn('[startup] Broadcast cleanup job failed to start', e?.message || e);
+		}
+
       // Ensure ads indexes are present.
       try {
         const Ad = require('./models/Ad');
@@ -542,7 +557,7 @@ app.post('/api/auth/login', (req, res) => {
     // Prefer DB-backed users when DB is ready.
     const dbReady = mongoose.connection && mongoose.connection.readyState === 1;
     if (dbReady) {
-      const user = await User.findOne({ email });
+      const user = await User.findOne({ email }).select('+passwordHash');
       if (user) {
         if (user.status === 'suspended') {
           return res.status(403).json({ success: false, message: 'Account suspended' });
@@ -563,6 +578,7 @@ app.post('/api/auth/login', (req, res) => {
             name: user.name,
             role: user.role,
             tokenVersion: typeof user.tokenVersion === 'number' ? user.tokenVersion : 0,
+            sessionVersion: typeof user.sessionVersion === 'number' ? user.sessionVersion : 1,
             type: 'access',
           },
           process.env.JWT_SECRET,
@@ -623,6 +639,7 @@ app.post('/api/auth/login', (req, res) => {
           name: created.name,
           role,
           tokenVersion: typeof created.tokenVersion === 'number' ? created.tokenVersion : 0,
+          sessionVersion: typeof created.sessionVersion === 'number' ? created.sessionVersion : 1,
           type: 'access',
         },
         process.env.JWT_SECRET,
@@ -631,7 +648,7 @@ app.post('/api/auth/login', (req, res) => {
       return res.json({ success: true, token, user: { id: String(created._id), email, role, name: created.name, mustChangePassword: Boolean(created.mustChangePassword || created.forceReset) } });
     }
 
-    const token = jwt.sign({ email, role, tokenVersion: 0, type: 'access' }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ email, role, tokenVersion: 0, sessionVersion: 1, type: 'access' }, process.env.JWT_SECRET, { expiresIn: '7d' });
     return res.json({ success: true, token, user: { email, role } });
   })().catch((e) => {
     console.error('[auth/login] failed:', e?.message || e);
@@ -756,6 +773,8 @@ app.use('/api/public', publicAdsRouter);
 
 // Public site settings (tickers)
 app.use('/api/public', publicTickersSettingsRouter);
+// Public Broadcast Center tickers (Breaking + Live Updates)
+app.use('/api/public', publicBroadcastRouter);
 // Legacy/website path support
 app.use('/public', publicTickersSettingsRouter);
 // Admin panel proxy basePath support
@@ -894,6 +913,7 @@ if (adminTeamRoutesV2) {
 }
 app.use('/api/admin', adminSecurityRoutes);
 app.use('/api/admin', adminAuditRoutes);
+app.use('/api/admin', adminMetaRoutes);
 app.use('/admin-api/admin', adminAuditRoutes);
 app.use('/admin-api/api/admin', adminAuditRoutes);
 // Community Reporter Queue (admin protected)
