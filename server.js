@@ -3,6 +3,16 @@
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
+// Backward-compat: older setups used MONGO_URI.
+// Prefer MONGODB_URI, but if only MONGO_URI exists, alias it.
+if (!process.env.MONGODB_URI && process.env.MONGO_URI) {
+  process.env.MONGODB_URI = process.env.MONGO_URI;
+  if (require.main === module && String(process.env.NODE_ENV || 'development').toLowerCase() !== 'production') {
+    // eslint-disable-next-line no-console
+    console.warn('[startup] Using legacy MONGO_URI; please rename to MONGODB_URI in .env');
+  }
+}
+
 // One-time local-dev sanity log to confirm dotenv loaded.
 // (Avoids noisy logs in tests/import mode.)
 if (require.main === module && String(process.env.NODE_ENV || 'development').toLowerCase() !== 'production') {
