@@ -466,19 +466,51 @@ function _mongoDbNameFromUri(uri) {
 }
 
 // SAFETY GUARD: Never allow dev/staging to boot against prod DB.
+// Also enforce that production points at the production database name.
 (() => {
   const env = String(process.env.NODE_ENV || 'development').toLowerCase();
-  if (env === 'production') return;
+  if (env === 'test' || _isImported) return;
   const uri = String(MONGO_URI || '');
   if (!uri) return;
 
-  // Requirement: stop if URI contains "newspulse_prod".
-  if (uri.toLowerCase().includes('newspulse_prod')) {
-    const msg = 'SAFETY STOP: Dev server is pointing to PROD database!';
-    console.error(msg);
+  const dbName = String(_mongoDbNameFromUri(uri) || '').trim().toLowerCase();
+
+  // Enforce prod DB naming in production.
+  if (env === 'production') {
+    if (dbName !== 'newspulse_prod') {
+      console.error('SAFETY STOP: Production server must use newspulse_prod database!', {
+        dbName: dbName || '(missing - URI must include /newspulse_prod)',
+      });
+      process.exit(1);
+    }
+    return;
+  }
+
+  // Development/staging must NOT write to production and should explicitly use the dev DB.
+  // This avoids accidentally connecting to the default "test" DB on a shared cluster.
+  if (dbName !== 'newspulse_dev') {
+    if (dbName === 'newspulse_prod' || uri.toLowerCase().includes('newspulse_prod')) {
+      console.error('SAFETY STOP: Dev server is pointing to PROD database!');
+    } else {
+      console.error('SAFETY STOP: Dev server must use newspulse_dev database!', {
+        dbName: dbName || '(missing - URI must include /newspulse_dev)',
+      });
+    }
     process.exit(1);
   }
 })();
+
+// Dev-only debug endpoint to confirm environment and DB selection.
+// Returns { env, dbName } and is intentionally NOT available in production.
+app.get(['/admin-api/system/env', '/admin-api/api/system/env'], (_req, res) => {
+  const env = String(process.env.NODE_ENV || 'development');
+  if (String(env).toLowerCase() === 'production') return res.status(404).json({ message: 'Not found' });
+
+  const connectedName = (mongoose.connection && mongoose.connection.name) ? String(mongoose.connection.name) : '';
+  const dbFromUri = _mongoDbNameFromUri(process.env.MONGODB_URI);
+  const dbName = (connectedName || dbFromUri || null);
+  return res.status(200).json({ env, dbName });
+});
 
 function _redactMongoUri(uri) {
   const u = String(uri || '');

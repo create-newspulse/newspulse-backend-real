@@ -2,7 +2,7 @@
 One-time backfill for News language field.
 
 Usage:
-  MONGO_URI="..." node scripts/backfill-news-lang.js
+  MONGODB_URI="..." node scripts/backfill-news-lang.js
 
 Behavior:
   - If a doc has `language` (en/hi/gu) but missing `lang`, copy it into `lang`.
@@ -17,9 +17,9 @@ const mongoose = require('mongoose');
 const News = require('../models/News');
 
 async function main() {
-  const uri = process.env.MONGO_URI;
+  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
   if (!uri) {
-    throw new Error('MONGO_URI is required');
+    throw new Error('MONGODB_URI (or legacy MONGO_URI) is required');
   }
 
   await mongoose.connect(uri);

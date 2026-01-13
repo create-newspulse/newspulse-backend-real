@@ -5,9 +5,9 @@ const mongoose = require('mongoose');
 const CommunitySubmission = require('../models/CommunitySubmission');
 
 (async () => {
-  const uri = process.env.MONGO_URI;
+  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
   if (!uri) {
-    console.error('[inspectCommunity] Missing MONGO_URI in environment');
+    console.error('[inspectCommunity] Missing MONGODB_URI (or legacy MONGO_URI) in environment');
     process.exit(1);
   }
   try {

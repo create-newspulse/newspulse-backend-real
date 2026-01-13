@@ -5,16 +5,16 @@
  * - Does NOT modify story content except to set minimal placeholders if absolutely missing
  *
  * Usage:
- *   MONGO_URI="mongodb+srv://..." node scripts/migrate-normalize-community-submissions.js
+ *   MONGODB_URI="mongodb+srv://..." node scripts/migrate-normalize-community-submissions.js
  */
 require('dotenv').config();
 const mongoose = require('mongoose');
 const CommunitySubmission = require('../models/CommunitySubmission');
 
 async function run() {
-  const uri = process.env.MONGO_URI;
+  const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
   if (!uri || uri === 'YOUR_MONGO_URI_HERE') {
-    console.error('MONGO_URI not set. Aborting migration.');
+    console.error('MONGODB_URI (or legacy MONGO_URI) not set. Aborting migration.');
     process.exit(1);
   }
   await mongoose.connect(uri);

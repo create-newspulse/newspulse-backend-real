@@ -1,7 +1,7 @@
 // Quick manual smoke-test for Sponsor Ads.
 // Usage:
-//   MONGO_URI=mongodb://127.0.0.1:27017/newspulse node scripts/test-ads.js
-// Or set MONGO_URI in your .env.
+//   MONGODB_URI=mongodb://127.0.0.1:27017/newspulse_dev node scripts/test-ads.js
+// Or set MONGODB_URI in your .env (legacy: MONGO_URI).
 
 require('dotenv').config();
 
