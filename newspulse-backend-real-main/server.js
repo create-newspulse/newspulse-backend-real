@@ -1,6 +1,14 @@
 // Load environment variables as early as possible.
 // Some route/controller modules read process.env at import time.
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+
+// One-time local-dev sanity log to confirm dotenv loaded.
+// (Avoids noisy logs when this file is imported by tests.)
+if (require.main === module && String(process.env.NODE_ENV || 'development').toLowerCase() !== 'production') {
+  // eslint-disable-next-line no-console
+  console.log('[startup] MONGODB_URI exists?', !!process.env.MONGODB_URI);
+}
 
 const express = require('express');
 const cors = require('cors');

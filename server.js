@@ -1,6 +1,14 @@
 // Load environment variables as early as possible.
 // Many route/controller modules read process.env at import time.
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+
+// One-time local-dev sanity log to confirm dotenv loaded.
+// (Avoids noisy logs in tests/import mode.)
+if (require.main === module && String(process.env.NODE_ENV || 'development').toLowerCase() !== 'production') {
+  // eslint-disable-next-line no-console
+  console.log('[startup] MONGODB_URI exists?', !!process.env.MONGODB_URI);
+}
 
 // Validate critical environment early (fail fast in prod / when enforced)
 (() => {
@@ -27,7 +35,6 @@ const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
-const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 
