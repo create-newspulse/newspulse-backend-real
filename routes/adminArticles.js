@@ -61,19 +61,26 @@ function buildFilter(query) {
 // NOTE: mounted under /api/admin so path becomes /api/admin/articles
 router.get('/articles', requireAdminAuth, async (req, res) => {
   try {
-    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
-    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || req.query.limit || '20', 10), 1), 100);
+    const pageRaw = parseInt(String(req.query.page ?? '1'), 10);
+    const page = Number.isFinite(pageRaw) ? Math.max(pageRaw, 1) : 1;
+    const limitRaw = parseInt(String((req.query.pageSize ?? req.query.limit) ?? '20'), 10);
+    const pageSize = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 20;
     const skip = (page - 1) * pageSize;
 
     const filter = buildFilter(req.query);
 
-    const sortRaw = (req.query.sort || '-createdAt').toString();
+    const allowedSortFields = new Set(['updatedAt', 'createdAt', 'publishedAt']);
+    const sortRaw = String(req.query.sort || '-updatedAt');
     const sort = {};
-    sortRaw.split(',').forEach(part => {
-      part = part.trim();
-      if (!part) return;
-      if (part.startsWith('-')) sort[part.slice(1)] = -1; else sort[part] = 1;
-    });
+    for (const partRaw of sortRaw.split(',')) {
+      const part = String(partRaw || '').trim();
+      if (!part) continue;
+      const desc = part.startsWith('-');
+      const field = desc ? part.slice(1) : part;
+      if (!allowedSortFields.has(field)) continue;
+      sort[field] = desc ? -1 : 1;
+    }
+    if (!Object.keys(sort).length) sort.updatedAt = -1;
 
     const [items, total] = await Promise.all([
       News.find(filter).sort(sort).skip(skip).limit(pageSize).lean(),
@@ -82,8 +89,21 @@ router.get('/articles', requireAdminAuth, async (req, res) => {
 
     return res.json({ ok: true, success: true, items, total, page, pageSize });
   } catch (e) {
-    console.error('[ADMIN_ARTICLES][list-error]', e?.message || e);
-    return res.status(500).json({ ok: false, success: false, message: 'Failed to load articles' });
+    const isProd = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+    console.error('[ADMIN_ARTICLES][list-error]', {
+      path: req.originalUrl,
+      message: e?.message || String(e),
+      name: e?.name,
+      stack: isProd ? undefined : e?.stack,
+      query: req.query,
+    });
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      message: 'Failed to load articles',
+      path: req.originalUrl,
+      ...(isProd ? {} : { error: e?.message || String(e) }),
+    });
   }
 });
 

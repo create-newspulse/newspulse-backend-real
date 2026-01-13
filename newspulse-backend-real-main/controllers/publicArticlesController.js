@@ -18,8 +18,31 @@ function normalizeSlug(slug) {
   return String(slug || '').trim().toLowerCase();
 }
 
+function shouldDeferToAdminArticlesRouter(req) {
+  // If an authenticated admin calls /api/articles with CMS/admin params,
+  // let the CMS/admin router handle it (mounted separately).
+  if (!req.admin) return false;
+
+  const statusRaw = String(req.query.status || '').trim().toLowerCase();
+  if (statusRaw) {
+    const parts = statusRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const hasNonFeedStatus = parts.some(s => !['draft', 'published'].includes(s));
+    if (hasNonFeedStatus) return true;
+  }
+
+  // CMS/admin params
+  if (req.query.sort !== undefined) return true;
+  if (req.query.from !== undefined || req.query.to !== undefined) return true;
+  if (req.query.language !== undefined) return true;
+
+  return false;
+}
+
 async function listArticles(req, res, next) {
   try {
+    // If this request looks like an admin/CMS list request, defer to the CMS router.
+    if (shouldDeferToAdminArticlesRouter(req)) return next();
+
     if (mongoose.connection.readyState !== 1) {
       return res.status(503).json({ message: 'Database not connected' });
     }

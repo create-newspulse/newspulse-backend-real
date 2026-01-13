@@ -17,6 +17,36 @@ function parseTags(tags) {
     .filter(Boolean);
 }
 
+function _parseIntOrDefault(v, fallback) {
+  const n = parseInt(String(v ?? ''), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function _clampInt(n, min, max) {
+  if (!Number.isFinite(n)) return min;
+  return Math.min(Math.max(n, min), max);
+}
+
+function _parseSafeSort(raw, allowedFields, fallbackField = 'updatedAt', fallbackDir = -1) {
+  const out = {};
+  const s = String(raw || '').trim();
+  if (s) {
+    for (const partRaw of s.split(',')) {
+      const part = String(partRaw || '').trim();
+      if (!part) continue;
+      const desc = part.startsWith('-');
+      const field = desc ? part.slice(1) : part;
+      if (!allowedFields.has(field)) continue;
+      out[field] = desc ? -1 : 1;
+    }
+  }
+
+  if (!Object.keys(out).length) {
+    out[fallbackField] = fallbackDir;
+  }
+  return out;
+}
+
 function normalizeSlug(slug) {
   const s = String(slug || '').trim().toLowerCase();
   return s;
@@ -217,10 +247,14 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
 // GET /api/articles → list articles (CMS/admin Manage News)
 router.get('/articles', requireAdminAuth, async (req, res, next) => {
   try {
-    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
-    // Default to 'date' since legacy docs may not have createdAt
-    const sortParam = (req.query.sort || '-date').toString();
+    // Client may send page=0; clamp to >= 1
+    const page = Math.max(_parseIntOrDefault(req.query.page, 1), 1);
+    const limit = _clampInt(_parseIntOrDefault(req.query.limit, 20), 1, 100);
+
+    // Only allow safe sort fields.
+    // Support "-updatedAt" => { updatedAt: -1 }
+    const allowedSortFields = new Set(['updatedAt', 'createdAt', 'publishedAt']);
+    const sortParam = _parseSafeSort(req.query.sort, allowedSortFields, 'updatedAt', -1);
     const statusRaw = (req.query.status || '').toString();
     const languageRaw = (req.query.language || '').toString().trim();
     const categoryRaw = (req.query.category || '').toString().trim();
@@ -290,7 +324,22 @@ router.get('/articles', requireAdminAuth, async (req, res, next) => {
       sort: sortParam,
     });
   } catch (err) {
-    return next(err);
+    const isProd = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+    console.error('[ADMIN_ARTICLES][list] failed', {
+      path: req.originalUrl,
+      message: err?.message || String(err),
+      name: err?.name,
+      // Avoid logging stack in prod logs only if you prefer; leaving it helps debug.
+      stack: isProd ? undefined : err?.stack,
+      query: req.query,
+    });
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      message: 'Failed to load articles',
+      path: req.originalUrl,
+      ...(isProd ? {} : { error: err?.message || String(err) }),
+    });
   }
 });
 

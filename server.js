@@ -582,7 +582,8 @@ app.get('/', (req, res) => { res.send('🟢 News Pulse Admin Backend is Live'); 
 
 // API Routes
 app.use('/api/news', newsRoutes);
-app.use('/api/articles', publicArticlesRoutes);
+// Public articles feed (but allow optional admin auth so admin list requests can defer to CMS router)
+app.use('/api/articles', optionalAdminAuth, publicArticlesRoutes);
 // Quick browser check: confirm auth route is deployed
 app.get('/api/auth/login', (_req, res) => {
   return res.json({ ok: true, message: 'Auth route is live. Use POST to login.' });
