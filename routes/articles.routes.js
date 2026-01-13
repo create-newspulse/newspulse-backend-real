@@ -249,10 +249,14 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
 router.get('/articles', requireAdminAuth, async (req, res, next) => {
   try {
     if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      const readyState = (mongoose.connection && typeof mongoose.connection.readyState === 'number')
+        ? mongoose.connection.readyState
+        : -1;
       return res.status(503).json({
         ok: false,
         success: false,
         message: 'DB unavailable',
+        readyState,
         path: req.originalUrl,
       });
     }

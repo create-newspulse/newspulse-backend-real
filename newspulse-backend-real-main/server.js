@@ -206,16 +206,21 @@ function _mongoDbNameFromUri(uri) {
 })();
 
 if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
-  console.warn('[startup] Missing MONGODB_URI; starting without DB connection (non-production)');
+  console.error('[startup] Missing Mongo connection string (MONGODB_URI). Refusing to start without DB.');
+  console.error('[startup] Set MONGODB_URI in your environment, e.g. MONGODB_URI=mongodb://127.0.0.1:27017/newspulse_dev');
+  process.exit(1);
 } else {
   mongoose
     .connect(MONGO_URI)
     .then(() => {
       const db = _mongoDbNameFromUri(MONGO_URI) || mongoose.connection.name || undefined;
+      console.log('Mongo connected');
       console.log('[startup] MongoDB connected', { db });
     })
     .catch((err) => {
+      console.error('Mongo connection failed');
       console.error('[startup] MongoDB connection error', { message: err?.message || String(err), name: err?.name });
+      process.exit(1);
     });
 }
 

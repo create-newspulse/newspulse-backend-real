@@ -454,19 +454,16 @@ mongoose.connection.on('disconnected', () => {
   console.warn('[mongo] disconnected', { readyState: mongoose.connection.readyState });
 });
 mongoose.connection.on('connected', () => {
+  console.log('Mongo connected');
   console.log('[mongo] connected', { readyState: mongoose.connection.readyState, db: mongoose.connection.name || undefined });
 });
 
 if (process.env.NODE_ENV === 'test' || _isImported) {
   console.warn('[init] Test/import mode: skipping MongoDB connection');
 } else if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
-  const env = String(process.env.NODE_ENV || 'development').toLowerCase();
-  if (env === 'production') {
-    console.error('[startup] Missing Mongo connection string (MONGODB_URI). Refusing to start without DB.');
-    console.error('[startup] Set MONGODB_URI in your environment, e.g. MONGODB_URI=mongodb://127.0.0.1:27017/newspulse_prod');
-    process.exit(1);
-  }
-  console.warn('[startup] Missing MONGODB_URI; starting without DB connection (non-production)');
+  console.error('[startup] Missing Mongo connection string (MONGODB_URI). Refusing to start without DB.');
+  console.error('[startup] Set MONGODB_URI in your environment, e.g. MONGODB_URI=mongodb://127.0.0.1:27017/newspulse_dev');
+  process.exit(1);
 } else {
   mongoose
     .connect(MONGO_URI)
@@ -499,11 +496,13 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
       }
     })
     .catch((err) => {
+      console.error('Mongo connection failed');
       console.error('[startup] MongoDB connection failed', {
         uri: _redactMongoUri(MONGO_URI),
         message: err?.message || String(err),
         name: err?.name,
       });
+      process.exit(1);
     });
 }
 
