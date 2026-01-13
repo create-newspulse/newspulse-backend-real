@@ -29,6 +29,34 @@ This backend supports separate MongoDB databases for development and production.
 - Production: set `MONGODB_URI` to a DB named `newspulse_prod`.
 - Safety guard: if `NODE_ENV` is not `production` and `MONGODB_URI` contains `newspulse_prod`, the server will refuse to start with: `SAFETY STOP: Dev server is pointing to PROD database!`.
 
+## Public Site Settings: Dev/Prod Isolation
+
+To prevent local admin/public changes from affecting production (and vice-versa), Public Site Settings are **namespaced by scope**.
+
+- Default scope:
+  - `NODE_ENV=production` -> `scope=production`
+  - otherwise -> `scope=development`
+- Optional override: set `PUBLIC_SITE_SETTINGS_SCOPE` (e.g. `staging`) if you want additional isolated environments.
+
+This means even if a misconfiguration points dev and prod at the same MongoDB cluster, they will not share the same `PublicSiteSettings` document.
+
+### Quick verification (recommended)
+
+The backend includes safe debug headers so you can instantly tell which backend answered a request:
+
+- `X-Newspulse-Env`: the backend `NODE_ENV`
+- `X-Newspulse-Db`: connected DB name (or `connected`/`disconnected`)
+
+Example:
+
+```bash
+curl -i "http://localhost:5000/api/public/settings"
+```
+
+Look for:
+- `X-Newspulse-Env: development`
+- JSON contains `"scope":"development"`
+
 ### Production Environment Variables (example)
 
 ```env
