@@ -20,6 +20,22 @@ npm run dev
 ```
 Server will attempt to listen on `PORT` (default 10000) and auto-fallback up to 4 higher ports if occupied.
 
+## Dev vs Prod Database Safety
+
+This backend supports separate MongoDB databases for development and production.
+
+- Development: set `MONGODB_URI` to a DB named `newspulse_dev`.
+- Production: set `MONGODB_URI` to a DB named `newspulse_prod`.
+- Safety guard: if `NODE_ENV` is not `production` and `MONGODB_URI` contains `newspulse_prod`, the server will refuse to start with: `SAFETY STOP: Dev server is pointing to PROD database!`.
+
+### Production Environment Variables (example)
+
+```env
+NODE_ENV=production
+MONGODB_URI=mongodb+srv://USER:PASS@CLUSTER/newspulse_prod
+ALLOWED_ORIGINS=https://admin.newspulse.co.in,https://newspulse.co.in,https://www.newspulse.co.in
+```
+
 ## Environment Variables
 | Name | Purpose | Notes |
 |------|---------|-------|
@@ -164,7 +180,7 @@ curl "http://localhost:10000/api/public/news?q=budget&lang=en&limit=5"
 
 Backfill (one-time):
 ```bash
-MONGO_URI="<your-mongo-uri>" node scripts/backfill-news-lang.js
+MONGODB_URI="<your-mongo-uri>" node scripts/backfill-news-lang.js
 ```
 
 Response shape (unchanged):
@@ -272,7 +288,7 @@ Returns the article document (published only unless admin auth is present).
 
 ### Secret Rotation & Hygiene
 
-- If any credential is leaked (e.g., MongoDB Atlas `MONGO_URI`), immediately rotate the user/password in the provider (Atlas), then update `MONGO_URI` in deployment and local `.env`.
+- If any credential is leaked (e.g., MongoDB Atlas `MONGODB_URI`), immediately rotate the user/password in the provider (Atlas), then update `MONGODB_URI` in deployment and local `.env`.
 - Confirm `.gitignore` excludes all `.env*` files; only `.env.example` remains versioned with placeholders.
 - Optional history scrub (recommended if a real secret was committed):
   - Install `git-filter-repo` and run:

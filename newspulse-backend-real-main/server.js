@@ -176,16 +176,46 @@ app.get('/dashboard-stats', async (req, res) => {
   }
 });
 
-// MongoDB Connection (require explicit MONGO_URI, no localhost fallback)
-const MONGO_URI = process.env.MONGO_URI;
+// MongoDB Connection (single source of truth: MONGODB_URI)
+const MONGO_URI = process.env.MONGODB_URI;
+
+function _mongoDbNameFromUri(uri) {
+  const u = String(uri || '').trim();
+  if (!u) return null;
+
+  const afterSlash = u.split('/').slice(3).join('/');
+  if (!afterSlash) return null;
+  const dbPart = afterSlash.split('?')[0];
+  const dbName = String(dbPart || '').trim();
+  if (!dbName) return null;
+  return dbName.split('/')[0] || null;
+}
+
+// SAFETY GUARD: Never allow dev/staging to boot against prod DB.
+(() => {
+  const env = String(process.env.NODE_ENV || 'development').toLowerCase();
+  if (env === 'production') return;
+  const uri = String(MONGO_URI || '');
+  if (!uri) return;
+
+  if (uri.toLowerCase().includes('newspulse_prod')) {
+    const msg = 'SAFETY STOP: Dev server is pointing to PROD database!';
+    console.error(msg);
+    throw new Error(msg);
+  }
+})();
+
 if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
-  console.warn('⚠️ MONGO_URI is not set correctly; starting server without DB connection for now.');
+  console.warn('[startup] Missing MONGODB_URI; starting without DB connection (non-production)');
 } else {
   mongoose
     .connect(MONGO_URI)
-    .then(() => console.log('✅ MongoDB connected'))
+    .then(() => {
+      const db = _mongoDbNameFromUri(MONGO_URI) || mongoose.connection.name || undefined;
+      console.log('[startup] MongoDB connected', { db });
+    })
     .catch((err) => {
-      console.error('❌ MongoDB connection error:', err.message);
+      console.error('[startup] MongoDB connection error', { message: err?.message || String(err), name: err?.name });
     });
 }
 

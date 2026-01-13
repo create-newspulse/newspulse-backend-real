@@ -8,14 +8,11 @@ require('dotenv').config();
     || String(process.env.NODE_ENV || '').toLowerCase() === 'production';
   if (!enforce) return;
 
-  const mongoUri =
-    process.env.MONGO_URI ||
-    process.env.MONGODB_URI ||
-    (String(process.env.DATABASE_URL || '').startsWith('mongodb') ? process.env.DATABASE_URL : undefined);
+  const mongoUri = process.env.MONGODB_URI;
 
   const missing = [];
   if (!process.env.JWT_SECRET) missing.push('JWT_SECRET');
-  if (!mongoUri) missing.push('MONGO_URI (or MONGODB_URI)');
+  if (!mongoUri) missing.push('MONGODB_URI');
 
   if (missing.length) {
     const msg = `[init] Missing required env var(s): ${missing.join(', ')}`;
@@ -186,12 +183,22 @@ function _parseCorsOriginsEnv(v) {
 
 // Explicit allowlist (production-safe)
 // NOTE: Do NOT use '*' when credentials are enabled.
-const allowedOrigins = [
-  'http://localhost:5173',
-  'https://admin.newspulse.co.in',
-  'https://newspulse.co.in',
-  'https://www.newspulse.co.in',
-].filter(Boolean);
+const allowedOrigins = (() => {
+  // Preferred: ALLOWED_ORIGINS (comma-separated). Compatibility: CORS_ORIGIN.
+  const fromEnv = _parseCorsOriginsEnv(process.env.ALLOWED_ORIGINS || process.env.CORS_ORIGIN);
+  if (fromEnv.length) return fromEnv;
+
+  if (_corsIsProd) {
+    return [
+      'https://admin.newspulse.co.in',
+      'https://newspulse.co.in',
+      'https://www.newspulse.co.in',
+    ];
+  }
+
+  // Dev defaults
+  return ['http://localhost:5173', 'http://localhost:3000'];
+})();
 
 const corsOptions = {
   origin(origin, callback) {
@@ -205,10 +212,21 @@ const corsOptions = {
     err.origin = origin;
     return callback(err);
   },
+  // IMPORTANT: Do not use '*' when credentials are enabled.
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-action', 'X-Admin-Action'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 204,
 };
+
+// Ensure caches/proxies treat CORS responses correctly.
+app.use((req, res, next) => {
+  try {
+    // Express provides res.vary() via the 'vary' module.
+    res.vary('Origin');
+  } catch (_) {}
+  return next();
+});
 
 app.use(cors(corsOptions));
 // Ensure OPTIONS preflight works for all routes.
@@ -382,13 +400,40 @@ app.get('/dashboard-stats', async (req, res) => {
 });
 
 // Mongo
-// Prefer MONGO_URI, but accept common platform env vars if present.
-// (Only treat DATABASE_URL as Mongo if it looks like a Mongo connection string.)
-const MONGO_URI =
-  process.env.MONGO_URI ||
-  process.env.MONGODB_URI ||
-  (String(process.env.DATABASE_URL || '').startsWith('mongodb') ? process.env.DATABASE_URL : undefined);
+// Single source of truth: use MONGODB_URI for all environments.
+const MONGO_URI = process.env.MONGODB_URI;
 const _isImported = require.main !== module;
+
+function _mongoDbNameFromUri(uri) {
+  const u = String(uri || '').trim();
+  if (!u) return null;
+
+  // Typical forms:
+  // - mongodb://user:pass@host:27017/newspulse_dev?...
+  // - mongodb+srv://user:pass@cluster.mongodb.net/newspulse_prod?...
+  const afterSlash = u.split('/').slice(3).join('/');
+  if (!afterSlash) return null;
+  const dbPart = afterSlash.split('?')[0];
+  const dbName = String(dbPart || '').trim();
+  if (!dbName) return null;
+  // Some URIs may include extra path segments; keep only the first segment.
+  return dbName.split('/')[0] || null;
+}
+
+// SAFETY GUARD: Never allow dev/staging to boot against prod DB.
+(() => {
+  const env = String(process.env.NODE_ENV || 'development').toLowerCase();
+  if (env === 'production') return;
+  const uri = String(MONGO_URI || '');
+  if (!uri) return;
+
+  // Requirement: stop if URI contains "newspulse_prod".
+  if (uri.toLowerCase().includes('newspulse_prod')) {
+    const msg = 'SAFETY STOP: Dev server is pointing to PROD database!';
+    console.error(msg);
+    throw new Error(msg);
+  }
+})();
 
 function _redactMongoUri(uri) {
   const u = String(uri || '');
@@ -409,7 +454,7 @@ mongoose.connection.on('disconnected', () => {
   console.warn('[mongo] disconnected', { readyState: mongoose.connection.readyState });
 });
 mongoose.connection.on('connected', () => {
-  console.log('[mongo] connected', { readyState: mongoose.connection.readyState });
+  console.log('[mongo] connected', { readyState: mongoose.connection.readyState, db: mongoose.connection.name || undefined });
 });
 
 if (process.env.NODE_ENV === 'test' || _isImported) {
@@ -417,16 +462,18 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
 } else if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
   const env = String(process.env.NODE_ENV || 'development').toLowerCase();
   if (env === 'production') {
-    console.error('[startup] Missing Mongo connection string (MONGO_URI). Refusing to start without DB.');
-    console.error('[startup] Set MONGO_URI in your .env, e.g. MONGO_URI=mongodb://127.0.0.1:27017/newspulse');
+    console.error('[startup] Missing Mongo connection string (MONGODB_URI). Refusing to start without DB.');
+    console.error('[startup] Set MONGODB_URI in your environment, e.g. MONGODB_URI=mongodb://127.0.0.1:27017/newspulse_prod');
     process.exit(1);
   }
-  console.warn('[startup] Missing MONGO_URI; starting without DB connection (non-production)');
+  console.warn('[startup] Missing MONGODB_URI; starting without DB connection (non-production)');
 } else {
   mongoose
     .connect(MONGO_URI)
     .then(async () => {
-      console.log('[startup] MongoDB connected', { uri: _redactMongoUri(MONGO_URI) });
+      const dbFromUri = _mongoDbNameFromUri(MONGO_URI);
+      const db = dbFromUri || mongoose.connection.name || undefined;
+      console.log('[startup] MongoDB connected', { db });
       // Ensure TTL index for Broadcast Center is present.
       try {
         const BroadcastItem = require('./models/BroadcastItem');

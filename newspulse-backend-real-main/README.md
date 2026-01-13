@@ -17,7 +17,7 @@ npm install
 docker run --name newspulse-mongo -p 27017:27017 -d mongo:6
 
 # Update .env (or create from .env.example):
-MONGO_URI=mongodb://127.0.0.1:27017/newsdb
+MONGODB_URI=mongodb://127.0.0.1:27017/newsdb
 ```
 
 **Option B: MongoDB Atlas (recommended for production)**
@@ -26,7 +26,7 @@ MONGO_URI=mongodb://127.0.0.1:27017/newsdb
    - Copy the Node.js driver connection string
 2. Update `.env`:
    ```
-   MONGO_URI=mongodb+srv://<username>:<password>@<cluster>.mongodb.net/newsdb?retryWrites=true&w=majority
+   MONGODB_URI=mongodb+srv://<username>:<password>@<cluster>.mongodb.net/newsdb?retryWrites=true&w=majority
    ```
 
 ### 3. Run the Server
@@ -60,7 +60,7 @@ Service URL: https://newspulse-backend-real.onrender.com
    - `FOUNDER_PASSWORD`
    - `FOUNDER_NAME` (optional)
    - `FOUNDER_ID` (optional)
-   - `MONGO_URI` (production database connection string)
+   - `MONGODB_URI` (production database connection string)
 
 Admin UI (Vercel) calls these endpoints (no `/api` prefix):
 - `POST /admin/login`
@@ -97,7 +97,7 @@ curl -X POST -H "Content-Type: application/json" \
 **Server crashes on startup**
 - The app now continues running even if MongoDB fails to connect
 - Check logs for the specific error message
-- Verify your `.env` file exists and has a valid `MONGO_URI`
+- Verify your `.env` file exists and has a valid `MONGODB_URI`
 
 ### Module Not Found Errors
 
@@ -112,7 +112,7 @@ npm run dev
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MONGO_URI` | MongoDB connection string | `mongodb://127.0.0.1:27017/newsdb` |
+| `MONGODB_URI` | MongoDB connection string | `mongodb://127.0.0.1:27017/newsdb` |
 | `PORT` | Server port | `5000` |
 | `FOUNDER_EMAIL` | Admin login email | `founder@example.com` |
 | `FOUNDER_PASSWORD` | Admin login password | `replace-me` |
