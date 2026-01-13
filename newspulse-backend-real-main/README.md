@@ -95,7 +95,7 @@ curl -X POST -H "Content-Type: application/json" \
 - Or use local MongoDB as a fallback
 
 **Server crashes on startup**
-- The app now continues running even if MongoDB fails to connect
+- Local dev requires `MONGODB_URI` and a running MongoDB instance (local or Atlas)
 - Check logs for the specific error message
 - Verify your `.env` file exists and has a valid `MONGODB_URI`
 

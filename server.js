@@ -461,7 +461,7 @@ mongoose.connection.on('connected', () => {
 if (process.env.NODE_ENV === 'test' || _isImported) {
   console.warn('[init] Test/import mode: skipping MongoDB connection');
 } else if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
-  console.error('[startup] Missing Mongo connection string (MONGODB_URI). Refusing to start without DB.');
+  console.error('[startup] Missing MONGODB_URI (Mongo connection string). Refusing to start without DB.');
   console.error('[startup] Set MONGODB_URI in your environment, e.g. MONGODB_URI=mongodb://127.0.0.1:27017/newspulse_dev');
   process.exit(1);
 } else {

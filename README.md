@@ -18,6 +18,7 @@ cp .env.example .env
 npm install
 npm run dev
 ```
+Local dev requires `MONGODB_URI` and a running MongoDB instance (local or Atlas).
 Server will attempt to listen on `PORT` (default 10000) and auto-fallback up to 4 higher ports if occupied.
 
 ## Dev vs Prod Database Safety

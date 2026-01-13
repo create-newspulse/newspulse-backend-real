@@ -1,7 +1,10 @@
+// Load environment variables as early as possible.
+// Some route/controller modules read process.env at import time.
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
-const dotenv = require('dotenv');
 // Note: Avoiding external 'cors' package per request
 
 const newsRoutes = require('./routes/news');
@@ -46,8 +49,6 @@ let aiRoutes = null;
 let feedRoutes = null;
 try { aiRoutes = require('./routes/ai'); } catch (_) { console.warn('[init] optional routes/ai not found; skipping'); }
 try { feedRoutes = require('./routes/feed'); } catch (_) { console.warn('[init] optional routes/feed not found; skipping'); }
-
-dotenv.config(); // Load environment variables from .env file
 
 const app = express();
 
@@ -206,7 +207,7 @@ function _mongoDbNameFromUri(uri) {
 })();
 
 if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
-  console.error('[startup] Missing Mongo connection string (MONGODB_URI). Refusing to start without DB.');
+  console.error('[startup] Missing MONGODB_URI (Mongo connection string). Refusing to start without DB.');
   console.error('[startup] Set MONGODB_URI in your environment, e.g. MONGODB_URI=mongodb://127.0.0.1:27017/newspulse_dev');
   process.exit(1);
 } else {
