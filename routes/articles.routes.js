@@ -252,7 +252,7 @@ router.get('/articles', requireAdminAuth, async (req, res, next) => {
       return res.status(503).json({
         ok: false,
         success: false,
-        message: 'Database not connected',
+        message: 'DB unavailable',
         path: req.originalUrl,
       });
     }
@@ -336,7 +336,8 @@ router.get('/articles', requireAdminAuth, async (req, res, next) => {
   } catch (err) {
     const isProd = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
     console.error('[ADMIN_ARTICLES][list] failed', {
-      path: req.originalUrl,
+      method: req.method,
+      url: req.originalUrl,
       message: err?.message || String(err),
       name: err?.name,
       // Avoid logging stack in prod logs only if you prefer; leaving it helps debug.

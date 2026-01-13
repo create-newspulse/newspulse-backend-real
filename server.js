@@ -790,6 +790,9 @@ app.use('/api', articlesRoutes);
 app.use('/', articlesRoutes);
 // Admin panel compatibility: /api/admin/articles should behave like /api/articles
 app.use('/api/admin', articlesRoutes);
+// Admin panel proxy basePath support (some frontends call /admin-api/*)
+app.use('/admin-api/admin', articlesRoutes);
+app.use('/admin-api/api/admin', articlesRoutes);
 app.use('/api/community', communityRoutes);
 // Reporter portal: My Community Stories
 app.use('/api/community', communityStoriesRouter);

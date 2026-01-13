@@ -66,7 +66,7 @@ router.get('/articles', requireAdminAuth, async (req, res) => {
       return res.status(503).json({
         ok: false,
         success: false,
-        message: 'Database not connected',
+        message: 'DB unavailable',
         path: req.originalUrl,
       });
     }
@@ -101,7 +101,8 @@ router.get('/articles', requireAdminAuth, async (req, res) => {
   } catch (e) {
     const isProd = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
     console.error('[ADMIN_ARTICLES][list-error]', {
-      path: req.originalUrl,
+      method: req.method,
+      url: req.originalUrl,
       message: e?.message || String(e),
       name: e?.name,
       stack: isProd ? undefined : e?.stack,

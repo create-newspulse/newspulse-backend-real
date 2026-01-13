@@ -71,3 +71,38 @@ test('GET /api/articles supports page=0 and sort=-updatedAt (returns 200)', asyn
     News.countDocuments = prevCount;
   }
 });
+
+test('GET /admin-api/admin/articles supports page=0 and sort=-updatedAt (returns 200)', async () => {
+  const prevReadyState = mongoose.connection.readyState;
+  const prevFind = News.find;
+  const prevCount = News.countDocuments;
+
+  const capture = { sortArg: null, skip: null, limit: null };
+
+  try {
+    mongoose.connection.readyState = 1;
+
+    const dataset = [
+      { title: 'a', description: 'd', updatedAt: new Date('2025-01-02T00:00:00Z') },
+      { title: 'b', description: 'd', updatedAt: new Date('2025-01-01T00:00:00Z') },
+    ];
+
+    News.find = () => makeChainableQuery(dataset, capture);
+    News.countDocuments = async () => dataset.length;
+
+    const token = makeOpaqueAdminToken();
+    const res = await request(app)
+      .get('/admin-api/admin/articles?page=0&limit=20&sort=-updatedAt')
+      .set('Authorization', `Bearer ${token}`);
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.page, 1, 'page should clamp to 1');
+    assert.equal(res.body.limit, 20);
+    assert.deepEqual(capture.sortArg, { updatedAt: -1 });
+  } finally {
+    mongoose.connection.readyState = prevReadyState;
+    News.find = prevFind;
+    News.countDocuments = prevCount;
+  }
+});
