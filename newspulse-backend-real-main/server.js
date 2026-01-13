@@ -220,7 +220,7 @@ function _mongoDbNameFromUri(uri) {
   if (uri.toLowerCase().includes('newspulse_prod')) {
     const msg = 'SAFETY STOP: Dev server is pointing to PROD database!';
     console.error(msg);
-    throw new Error(msg);
+    process.exit(1);
   }
 })();
 
