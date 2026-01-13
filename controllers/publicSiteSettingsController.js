@@ -7,6 +7,34 @@ function ensureCategoryStripEnabled(settingsObj) {
   if (typeof base.publicSite.homepage.categoryStripEnabled !== 'boolean') {
     base.publicSite.homepage.categoryStripEnabled = true;
   }
+
+  // Backward/forward-compat normalization for homepage modules and tickers.
+  // Different frontend builds have used different key names over time.
+  if (!base.homepage || typeof base.homepage !== 'object') base.homepage = {};
+  if (!base.homepage.modules || typeof base.homepage.modules !== 'object') base.homepage.modules = {};
+  const modules = base.homepage.modules;
+
+  // trendingStrip <-> trending
+  if (modules.trending && !modules.trendingStrip) modules.trendingStrip = modules.trending;
+  if (modules.trendingStrip && !modules.trending) modules.trending = modules.trendingStrip;
+
+  // exploreCategories <-> explore
+  if (modules.explore && !modules.exploreCategories) modules.exploreCategories = modules.explore;
+  if (modules.exploreCategories && !modules.explore) modules.explore = modules.exploreCategories;
+
+  // liveTvCard <-> liveTv
+  if (modules.liveTv && !modules.liveTvCard) modules.liveTvCard = modules.liveTv;
+  if (modules.liveTvCard && !modules.liveTv) modules.liveTv = modules.liveTvCard;
+
+  // Ensure tickers object exists and normalize speed field names.
+  if (!base.tickers || typeof base.tickers !== 'object') base.tickers = {};
+  for (const k of ['breaking', 'live']) {
+    if (!base.tickers[k] || typeof base.tickers[k] !== 'object') continue;
+    const t = base.tickers[k];
+    if (t.speedSec !== undefined && t.speedSeconds === undefined) t.speedSeconds = t.speedSec;
+    if (t.speedSeconds !== undefined && t.speedSec === undefined) t.speedSec = t.speedSeconds;
+  }
+
   return base;
 }
 
