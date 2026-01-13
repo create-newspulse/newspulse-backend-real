@@ -95,9 +95,8 @@ async function listAds(req, res) {
   const slot = req.query && req.query.slot ? normalizeSlot(req.query.slot) : null;
   const activeOnly = String(req.query && req.query.activeOnly || '').trim();
 
-  // Stable shape for admin UI in local dev without DB
   if (!isDbReady()) {
-    return res.status(200).json({ ok: true, ads: [], message: 'Database unavailable' });
+    return res.status(503).json({ ok: false, message: 'Database unavailable' });
   }
 
   const filter = {};

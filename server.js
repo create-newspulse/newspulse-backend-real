@@ -163,6 +163,17 @@ app.use((req, res, next) => {
   next();
 });
 
+// Stable health route for admin-api proxies (no DB dependency)
+for (const p of ['/admin-api/system/health', '/admin-api/api/system/health']) {
+  app.get(p, (_req, res) => {
+    return res.status(200).json({
+      ok: true,
+      time: new Date().toISOString(),
+      uptimeSeconds: Math.floor(process.uptime()),
+    });
+  });
+}
+
 // Avoid 304 responses / ETag-based caching issues (especially on public settings)
 app.disable('etag');
 
@@ -1605,11 +1616,14 @@ app.get('/threat-stats', (req, res) => {
 // 500
 app.use((err, req, res, next) => {
   const status = Math.max(400, Math.min(599, parseInt(err?.status || err?.statusCode || 500, 10) || 500));
+  const env = String(process.env.NODE_ENV || 'development').toLowerCase();
+  const isProd = env === 'production';
   const message = status < 500
     ? (err?.message || 'Request failed')
-    : 'Internal server error';
+    : (isProd ? 'Internal server error' : (err?.message || 'Internal server error'));
   try { console.error('Error:', err && err.message ? err.message : err, 'status=', status, 'path=', req.originalUrl); } catch (_) {}
   if (res.headersSent) return next(err);
+  try { res.type('application/json'); } catch (_) {}
   return res.status(status).json({
     ok: false,
     success: false,
@@ -1618,6 +1632,7 @@ app.use((err, req, res, next) => {
     data: null,
     path: req.originalUrl,
     ...(err?.code ? { code: String(err.code) } : {}),
+    ...(!isProd && err?.stack ? { stack: String(err.stack) } : {}),
   });
 });
 

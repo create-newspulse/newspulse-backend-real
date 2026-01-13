@@ -1,4 +1,9 @@
+const mongoose = require('mongoose');
 const PublicSiteSettings = require('../models/PublicSiteSettings');
+
+function isDbReady() {
+  return mongoose.connection && mongoose.connection.readyState === 1;
+}
 
 function ensureCategoryStripEnabled(settingsObj) {
   const base = (settingsObj && typeof settingsObj === 'object') ? settingsObj : {};
@@ -67,6 +72,9 @@ function getNested(obj, path) {
  */
 async function getPublicSettings(req, res) {
   try {
+    if (!isDbReady()) {
+      return res.status(503).json({ ok: false, message: 'Database unavailable' });
+    }
     const settings = await PublicSiteSettings.getOrCreate();
     const draft = ensureCategoryStripEnabled(settings.draft || PublicSiteSettings.getDefaultSettings());
     const published = ensureCategoryStripEnabled(settings.published || PublicSiteSettings.getDefaultSettings());
@@ -95,6 +103,9 @@ async function getPublicSettings(req, res) {
  */
 async function getDraftSettings(req, res) {
   try {
+    if (!isDbReady()) {
+      return res.status(503).json({ ok: false, message: 'Database unavailable' });
+    }
     const settings = await PublicSiteSettings.getOrCreate();
     const draft = ensureCategoryStripEnabled(settings.draft || PublicSiteSettings.getDefaultSettings());
 
@@ -119,6 +130,9 @@ async function getDraftSettings(req, res) {
  */
 async function updateDraftSettings(req, res) {
   try {
+    if (!isDbReady()) {
+      return res.status(503).json({ ok: false, message: 'Database unavailable' });
+    }
     const draftData = req.body;
 
     if (!draftData || typeof draftData !== 'object') {
@@ -167,6 +181,9 @@ async function updateDraftSettings(req, res) {
  */
 async function publishSettings(req, res) {
   try {
+    if (!isDbReady()) {
+      return res.status(503).json({ ok: false, message: 'Database unavailable' });
+    }
     const settings = await PublicSiteSettings.getOrCreate();
 
     // Ensure a numeric version exists
@@ -213,6 +230,9 @@ async function publishSettings(req, res) {
  */
 async function savePublicSettings(req, res) {
   try {
+    if (!isDbReady()) {
+      return res.status(503).json({ ok: false, message: 'Database unavailable' });
+    }
     const newData = req.body;
     if (!newData || typeof newData !== 'object') {
       return res.status(400).json({ ok: false, message: 'Invalid settings payload: expected object' });
@@ -283,6 +303,18 @@ async function savePublicSettings(req, res) {
  */
 async function getPublishedSettings(req, res) {
   try {
+    // Public endpoint should stay stable even if DB is down.
+    if (!isDbReady()) {
+      const fallback = ensureCategoryStripEnabled(PublicSiteSettings.getDefaultSettings());
+      res.set('Cache-Control', 'no-store, max-age=0');
+      return res.status(200).json({
+        ok: true,
+        scope: String(process.env.PUBLIC_SITE_SETTINGS_SCOPE || '').trim() || (String(process.env.NODE_ENV || 'development').toLowerCase() === 'production' ? 'production' : 'development'),
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        published: fallback,
+      });
+    }
     const settings = await PublicSiteSettings.getOrCreate();
     const published = ensureCategoryStripEnabled(settings.published || PublicSiteSettings.getDefaultSettings());
 

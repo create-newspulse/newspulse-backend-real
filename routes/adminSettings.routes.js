@@ -95,6 +95,9 @@ async function writeSetting(key, value, admin) {
 // GET /api/admin/settings
 router.get('/settings', requireAdminAuth, async (_req, res, next) => {
   try {
+    if (!isDbReady()) {
+      return res.status(503).json({ ok: false, success: false, status: 503, message: 'Database unavailable', path: _req.originalUrl });
+    }
     const fallback = defaultAdminSettings();
     const { value, updatedAt } = await readSetting(ADMIN_SETTINGS_KEY, fallback);
     return res.status(200).json({ ok: true, success: true, status: 200, data: value, updatedAt });
@@ -117,6 +120,9 @@ router.get('/settings', requireAdminAuth, async (_req, res, next) => {
 // Read-only preview endpoint used by Admin Panel Settings → Preview tab.
 router.get('/settings/admin-panel/preview', requireAdminAuth, async (req, res, next) => {
   try {
+    if (!isDbReady()) {
+      return res.status(503).json({ ok: false, success: false, status: 503, message: 'Database unavailable', path: req.originalUrl });
+    }
     const stateRaw = String(req.query.state || 'effective').toLowerCase();
     const allowed = new Set(['draft', 'published', 'effective']);
     if (!allowed.has(stateRaw)) {
@@ -179,6 +185,9 @@ router.get('/settings/admin-panel/preview', requireAdminAuth, async (req, res, n
  */
 router.get('/settings/preview', requireAdminAuth, async (req, res, next) => {
   try {
+    if (!isDbReady()) {
+      return res.status(503).json({ ok: false, success: false, status: 503, message: 'Database unavailable', path: req.originalUrl });
+    }
     // Reuse the same behavior as /settings/admin-panel/preview
     req.url = '/settings/admin-panel/preview' + (req._parsedUrl && req._parsedUrl.search ? req._parsedUrl.search : '');
     return router.handle(req, res, next);
@@ -229,6 +238,9 @@ router.put('/settings', requireAdminAuth, async (req, res, next) => {
 // GET /api/admin/public-settings
 router.get('/public-settings', requireAdminAuth, async (_req, res, next) => {
   try {
+    if (!isDbReady()) {
+      return res.status(503).json({ ok: false, success: false, status: 503, message: 'Database unavailable', path: _req.originalUrl });
+    }
     const fallback = defaultPublicSettings();
     const { value, updatedAt } = await readSetting(PUBLIC_SETTINGS_KEY, fallback);
     return res.status(200).json({ ok: true, success: true, status: 200, data: value, updatedAt });

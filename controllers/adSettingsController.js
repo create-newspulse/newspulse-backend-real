@@ -53,6 +53,9 @@ function validateSlotEnabledPayload(slotEnabled) {
 
 async function getAdminAdSettings(req, res) {
   try {
+    if (!isDbReady()) {
+      return res.status(503).json({ ok: false, message: 'Database unavailable' });
+    }
     const slotEnabled = await getOrCreateSlotEnabled();
     return res.status(200).json({ ok: true, slotEnabled });
   } catch (e) {

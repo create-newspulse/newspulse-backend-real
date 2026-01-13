@@ -32,6 +32,38 @@ test('GET /api/system/ai-health returns 200 (no 404) with AI disabled stub', asy
   assert.equal(res.body.message, 'AI command not configured');
 });
 
+test('GET /admin-api/system/health returns 200 JSON (no DB dependency)', async () => {
+  const res = await request(app).get('/admin-api/system/health');
+  assert.equal(res.status, 200);
+  assert.equal(res.body.ok, true);
+  assert.ok(typeof res.body.time === 'string');
+  assert.ok(typeof res.body.uptimeSeconds === 'number');
+});
+
+test('GET /admin-api/admin/system/ai-training-info returns 200 JSON when AI not configured', async () => {
+  const token = makeOpaqueAdminToken();
+  const res = await request(app)
+    .get('/admin-api/admin/system/ai-training-info')
+    .set('Authorization', `Bearer ${token}`);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.enabled, false);
+  assert.equal(res.body.message, 'AI not configured');
+  assert.ok(String(res.headers['content-type'] || '').includes('application/json'));
+});
+
+test('GET /admin-api/admin/ads returns 503 JSON when DB unavailable', async () => {
+  const token = makeOpaqueAdminToken();
+  const res = await request(app)
+    .get('/admin-api/admin/ads')
+    .set('Authorization', `Bearer ${token}`);
+
+  assert.equal(res.status, 503);
+  assert.equal(res.body.ok, false);
+  assert.ok(String(res.headers['content-type'] || '').includes('application/json'));
+});
+
 test('GET /api/broadcast/settings returns 200 for admin', async () => {
   const token = makeOpaqueAdminToken();
   const res = await request(app)

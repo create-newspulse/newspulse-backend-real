@@ -30,12 +30,9 @@ test('GET /api/admin/ad-settings returns defaults with admin token', async () =>
     .get('/api/admin/ad-settings')
     .set('Authorization', `Bearer ${token}`);
 
-  assert.equal(res.status, 200);
-  assert.equal(res.body.ok, true);
-  assert.deepEqual(res.body.slotEnabled, {
-    HOME_728x90: true,
-    HOME_RIGHT_300x250: true,
-  });
+  // In test mode the server skips DB connection; admin endpoints should respond 503 JSON.
+  assert.equal(res.status, 503);
+  assert.equal(res.body.ok, false);
 });
 
 test('GET /admin-api/admin/ad-settings works as an alias (200 with admin token)', async () => {
@@ -44,10 +41,6 @@ test('GET /admin-api/admin/ad-settings works as an alias (200 with admin token)'
     .get('/admin-api/admin/ad-settings')
     .set('Authorization', `Bearer ${token}`);
 
-  assert.equal(res.status, 200);
-  assert.equal(res.body.ok, true);
-  assert.deepEqual(res.body.slotEnabled, {
-    HOME_728x90: true,
-    HOME_RIGHT_300x250: true,
-  });
+  assert.equal(res.status, 503);
+  assert.equal(res.body.ok, false);
 });
