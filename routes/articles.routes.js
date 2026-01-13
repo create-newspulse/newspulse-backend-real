@@ -1,6 +1,7 @@
 const express = require('express');
 const News = require('../models/News');
 const Article = require('../models/Article');
+const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const PushHistory = require('../models/PushHistory');
 
@@ -247,6 +248,15 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
 // GET /api/articles → list articles (CMS/admin Manage News)
 router.get('/articles', requireAdminAuth, async (req, res, next) => {
   try {
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      return res.status(503).json({
+        ok: false,
+        success: false,
+        message: 'Database not connected',
+        path: req.originalUrl,
+      });
+    }
+
     // Client may send page=0; clamp to >= 1
     const page = Math.max(_parseIntOrDefault(req.query.page, 1), 1);
     const limit = _clampInt(_parseIntOrDefault(req.query.limit, 20), 1, 100);

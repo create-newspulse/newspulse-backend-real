@@ -1,5 +1,6 @@
 const express = require('express');
 const News = require('../models/News');
+const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
 const router = express.Router();
@@ -61,6 +62,15 @@ function buildFilter(query) {
 // NOTE: mounted under /api/admin so path becomes /api/admin/articles
 router.get('/articles', requireAdminAuth, async (req, res) => {
   try {
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      return res.status(503).json({
+        ok: false,
+        success: false,
+        message: 'Database not connected',
+        path: req.originalUrl,
+      });
+    }
+
     const pageRaw = parseInt(String(req.query.page ?? '1'), 10);
     const page = Number.isFinite(pageRaw) ? Math.max(pageRaw, 1) : 1;
     const limitRaw = parseInt(String((req.query.pageSize ?? req.query.limit) ?? '20'), 10);
