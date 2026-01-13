@@ -111,7 +111,7 @@ router.get('/articles', requireAdminAuth, async (req, res) => {
     return res.status(500).json({
       ok: false,
       success: false,
-      message: 'Failed to load articles',
+      message: 'Internal error',
       path: req.originalUrl,
       ...(isProd ? {} : { error: e?.message || String(e) }),
     });

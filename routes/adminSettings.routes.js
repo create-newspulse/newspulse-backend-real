@@ -74,7 +74,7 @@ async function readSetting(key, fallbackValue) {
 
 async function writeSetting(key, value, admin) {
   if (!isDbReady()) {
-    return { ok: false, status: 503, message: 'Database unavailable' };
+    return { ok: false, status: 503, message: 'DB unavailable' };
   }
 
   const updatedBy = {
@@ -99,7 +99,17 @@ router.get('/settings', requireAdminAuth, async (_req, res, next) => {
     const { value, updatedAt } = await readSetting(ADMIN_SETTINGS_KEY, fallback);
     return res.status(200).json({ ok: true, success: true, status: 200, data: value, updatedAt });
   } catch (e) {
-    return next(e);
+    console.error('[ADMIN_SETTINGS][get] failed', {
+      message: e?.message || String(e),
+      name: e?.name,
+    });
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      status: 500,
+      message: 'Internal error',
+      path: _req.originalUrl,
+    });
   }
 });
 
@@ -145,7 +155,17 @@ router.get('/settings/admin-panel/preview', requireAdminAuth, async (req, res, n
       },
     });
   } catch (e) {
-    return next(e);
+    console.error('[ADMIN_SETTINGS][preview] failed', {
+      message: e?.message || String(e),
+      name: e?.name,
+    });
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      status: 500,
+      message: 'Internal error',
+      path: req.originalUrl,
+    });
   }
 });
 
@@ -163,7 +183,17 @@ router.get('/settings/preview', requireAdminAuth, async (req, res, next) => {
     req.url = '/settings/admin-panel/preview' + (req._parsedUrl && req._parsedUrl.search ? req._parsedUrl.search : '');
     return router.handle(req, res, next);
   } catch (e) {
-    return next(e);
+    console.error('[ADMIN_SETTINGS][preview-alias] failed', {
+      message: e?.message || String(e),
+      name: e?.name,
+    });
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      status: 500,
+      message: 'Internal error',
+      path: req.originalUrl,
+    });
   }
 });
 
@@ -182,7 +212,17 @@ router.put('/settings', requireAdminAuth, async (req, res, next) => {
 
     return res.status(200).json({ ok: true, success: true, status: 200, updatedAt: result.updatedAt });
   } catch (e) {
-    return next(e);
+    console.error('[ADMIN_SETTINGS][put] failed', {
+      message: e?.message || String(e),
+      name: e?.name,
+    });
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      status: 500,
+      message: 'Internal error',
+      path: req.originalUrl,
+    });
   }
 });
 
@@ -193,7 +233,17 @@ router.get('/public-settings', requireAdminAuth, async (_req, res, next) => {
     const { value, updatedAt } = await readSetting(PUBLIC_SETTINGS_KEY, fallback);
     return res.status(200).json({ ok: true, success: true, status: 200, data: value, updatedAt });
   } catch (e) {
-    return next(e);
+    console.error('[ADMIN_SETTINGS][get-public] failed', {
+      message: e?.message || String(e),
+      name: e?.name,
+    });
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      status: 500,
+      message: 'Internal error',
+      path: _req.originalUrl,
+    });
   }
 });
 
@@ -212,7 +262,17 @@ router.put('/public-settings', requireAdminAuth, async (req, res, next) => {
 
     return res.status(200).json({ ok: true, success: true, status: 200, updatedAt: result.updatedAt });
   } catch (e) {
-    return next(e);
+    console.error('[ADMIN_SETTINGS][put-public] failed', {
+      message: e?.message || String(e),
+      name: e?.name,
+    });
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      status: 500,
+      message: 'Internal error',
+      path: req.originalUrl,
+    });
   }
 });
 

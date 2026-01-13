@@ -793,6 +793,8 @@ app.use('/api/admin', articlesRoutes);
 // Admin panel proxy basePath support (some frontends call /admin-api/*)
 app.use('/admin-api/admin', articlesRoutes);
 app.use('/admin-api/api/admin', articlesRoutes);
+// Compatibility: some admin builds call /admin-api/articles directly
+app.use('/admin-api', articlesRoutes);
 app.use('/api/community', communityRoutes);
 // Reporter portal: My Community Stories
 app.use('/api/community', communityStoriesRouter);

@@ -15,6 +15,17 @@ test('GET /api/admin/settings returns 200 with defaults (no 404)', async () => {
   assert.equal(typeof res.body.data, 'object');
 });
 
+test('GET /admin-api/admin/settings returns 200 with defaults (alias)', async () => {
+  const res = await request(app)
+    .get('/admin-api/admin/settings')
+    .set('Cookie', 'np_admin=admin@newspulse.ai');
+
+  assert.equal(res.status, 200);
+  assert.ok(res.body && res.body.ok === true);
+  assert.ok(res.body.data);
+  assert.equal(typeof res.body.data, 'object');
+});
+
 test('GET /api/admin/public-settings returns 200 with defaults (no 404)', async () => {
   const res = await request(app)
     .get('/api/admin/public-settings')
