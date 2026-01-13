@@ -49,6 +49,12 @@ const defaultSettings = {
 
 const PublicSiteSettingsSchema = new mongoose.Schema(
   {
+    // Scope/namespace so dev/staging/prod can coexist safely even if they share a DB.
+    // Defaults to production for legacy compatibility.
+    scope: {
+      type: String,
+      default: 'production',
+    },
     version: {
       type: Number,
       default: 1,
@@ -69,11 +75,28 @@ const PublicSiteSettingsSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+function _desiredScopeFromEnv() {
+  const explicit = String(process.env.PUBLIC_SITE_SETTINGS_SCOPE || '').trim();
+  if (explicit) return explicit;
+
+  const env = String(process.env.NODE_ENV || 'development').toLowerCase();
+  return env === 'production' ? 'production' : 'development';
+}
+
 // Static method to get or create settings with defaults
-PublicSiteSettingsSchema.statics.getOrCreate = async function () {
-  let settings = await this.findOne();
+PublicSiteSettingsSchema.statics.getOrCreate = async function (opts = {}) {
+  const desiredScope = String(opts.scope || _desiredScopeFromEnv()).trim() || 'development';
+
+  // Production compatibility:
+  // - If an older doc exists with no scope, treat it as production and backfill scope.
+  const query = desiredScope === 'production'
+    ? { $or: [{ scope: 'production' }, { scope: { $exists: false } }] }
+    : { scope: desiredScope };
+
+  let settings = await this.findOne(query).sort({ updatedAt: -1, createdAt: -1 });
   if (!settings) {
     settings = await this.create({
+      scope: desiredScope,
       version: 1,
       publishedUpdatedAt: new Date(),
       draft: null,
@@ -82,6 +105,12 @@ PublicSiteSettingsSchema.statics.getOrCreate = async function () {
   } else if (typeof settings.version !== 'number') {
     // Backfill for older documents created before version existed
     settings.version = 1;
+    await settings.save();
+  }
+
+  // Backfill scope for older documents (especially important for production).
+  if (!settings.scope) {
+    settings.scope = desiredScope === 'production' ? 'production' : desiredScope;
     await settings.save();
   }
 

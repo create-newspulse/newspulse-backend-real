@@ -48,6 +48,19 @@ const bcrypt = require('bcrypt');
 const fs = require('fs');
 const multer = require('multer');
 
+// Identify which backend answered a request (safe: no secrets).
+// Useful to catch miswired frontends accidentally calling production from localhost.
+function _safeEnvLabel() {
+  return String(process.env.NODE_ENV || 'development');
+}
+
+function _safeDbLabel() {
+  // Prefer live connection name when available.
+  const name = (mongoose.connection && mongoose.connection.name) ? String(mongoose.connection.name) : '';
+  if (name) return name;
+  return mongoose.connection && mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+}
+
 // Base dir for nested app code
 const BASE = './newspulse-backend-real-main';
 
@@ -134,6 +147,12 @@ let publicFeatureTogglesRouter = null;
 try { publicFeatureTogglesRouter = require('./routes/publicFeatureToggles'); } catch (_) { console.warn('[init] optional public feature toggles router not found; skipping'); }
 
 const app = express();
+
+app.use((req, res, next) => {
+  res.setHeader('X-Newspulse-Env', _safeEnvLabel());
+  res.setHeader('X-Newspulse-Db', _safeDbLabel());
+  next();
+});
 
 // Avoid 304 responses / ETag-based caching issues (especially on public settings)
 app.disable('etag');

@@ -73,6 +73,7 @@ async function getPublicSettings(req, res) {
 
     return res.status(200).json({
       ok: true,
+      scope: settings.scope || undefined,
       version: typeof settings.version === 'number' ? settings.version : 1,
       updatedAt: settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString(),
       draft,
@@ -99,6 +100,7 @@ async function getDraftSettings(req, res) {
 
     return res.status(200).json({
       ok: true,
+      scope: settings.scope || undefined,
       draft,
     });
   } catch (error) {
@@ -145,6 +147,7 @@ async function updateDraftSettings(req, res) {
 
     return res.status(200).json({
       ok: true,
+      scope: settings.scope || undefined,
       draft: settings.draft,
       message: 'Draft settings saved successfully',
     });
@@ -185,6 +188,7 @@ async function publishSettings(req, res) {
 
     return res.status(200).json({
       ok: true,
+      scope: settings.scope || undefined,
       version: settings.version,
       updatedAt: settings.publishedUpdatedAt
         ? new Date(settings.publishedUpdatedAt).toISOString()
@@ -261,6 +265,7 @@ async function savePublicSettings(req, res) {
 
     return res.status(200).json({
       ok: true,
+      scope: settings.scope || undefined,
       version: typeof settings.version === 'number' ? settings.version : 1,
       updatedAt: settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString(),
       draft: settings.draft,
@@ -285,6 +290,7 @@ async function getPublishedSettings(req, res) {
 
     return res.status(200).json({
       ok: true,
+      scope: settings.scope || undefined,
       version: typeof settings.version === 'number' ? settings.version : 1,
       updatedAt: settings.publishedUpdatedAt
         ? new Date(settings.publishedUpdatedAt).toISOString()
