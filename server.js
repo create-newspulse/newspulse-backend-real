@@ -57,6 +57,28 @@ const bcrypt = require('bcrypt');
 const fs = require('fs');
 const multer = require('multer');
 
+function _logStartupDbStatus(label) {
+  try {
+    const env = String(process.env.NODE_ENV || 'development').toLowerCase();
+    if (env === 'production') return;
+    if (require.main !== module) return;
+
+    const hasMongoUri = !!String(process.env.MONGODB_URI || '').trim();
+    const readyState = typeof mongoose?.connection?.readyState === 'number' ? mongoose.connection.readyState : -1;
+    const dbName = (readyState === 1 && mongoose?.connection?.name) ? String(mongoose.connection.name) : null;
+
+    // eslint-disable-next-line no-console
+    console.log('[startup][db-status]', {
+      label,
+      hasMongoUri,
+      readyState,
+      ...(dbName ? { dbName } : {}),
+    });
+  } catch (_) {}
+}
+
+_logStartupDbStatus('boot');
+
 // Identify which backend answered a request (safe: no secrets).
 // Useful to catch miswired frontends accidentally calling production from localhost.
 function _safeEnvLabel() {
@@ -163,13 +185,26 @@ app.use((req, res, next) => {
   next();
 });
 
-// Stable health route for admin-api proxies (no DB dependency)
+// Stable health route for admin-api proxies (no auth/DB dependency)
+// Must ALWAYS return 200 JSON and include DB connection status.
 for (const p of ['/admin-api/system/health', '/admin-api/api/system/health']) {
   app.get(p, (_req, res) => {
+    const readyState = typeof mongoose?.connection?.readyState === 'number' ? mongoose.connection.readyState : -1;
+    const connected = readyState === 1;
+    const name = mongoose?.connection?.name ? String(mongoose.connection.name) : null;
+    const uptime = process.uptime();
+
     return res.status(200).json({
       ok: true,
       time: new Date().toISOString(),
-      uptimeSeconds: Math.floor(process.uptime()),
+      uptime,
+      // Backward-compat for older clients/tests.
+      uptimeSeconds: Math.floor(uptime),
+      db: {
+        connected,
+        readyState,
+        ...(name ? { name } : {}),
+      },
     });
   });
 }
@@ -553,19 +588,25 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
   console.error('[startup] Set MONGODB_URI in your environment, e.g. MONGODB_URI=mongodb://127.0.0.1:27017/newspulse_dev');
   process.exit(1);
 } else {
-  mongoose
-    .connect(MONGO_URI)
-    .then(async () => {
-      const dbFromUri = _mongoDbNameFromUri(MONGO_URI);
-      const db = dbFromUri || mongoose.connection.name || undefined;
-      console.log('[startup] MongoDB connected', { db });
-      // Ensure TTL index for Broadcast Center is present.
-      try {
-        const BroadcastItem = require('./models/BroadcastItem');
-        await BroadcastItem.syncIndexes();
-      } catch (e) {
-        console.warn('[startup] BroadcastItem index sync failed', e?.message || e);
-      }
+  // Important: keep the HTTP server running even if MongoDB is down.
+  // Admin/public endpoints will surface DB issues as 503 JSON instead of crashing.
+  // (Can be overridden by setting EXIT_ON_DB_CONNECT_FAIL=1.)
+  const _exitOnDbConnectFail = String(process.env.EXIT_ON_DB_CONNECT_FAIL || '').trim() === '1';
+  let _mongoConnectInFlight = false;
+  let _mongoRetryMs = 2000;
+  const _mongoRetryMaxMs = 30000;
+
+  async function _afterMongoConnected() {
+    const dbFromUri = _mongoDbNameFromUri(MONGO_URI);
+    const db = dbFromUri || mongoose.connection.name || undefined;
+    console.log('[startup] MongoDB connected', { db });
+    // Ensure TTL index for Broadcast Center is present.
+    try {
+      const BroadcastItem = require('./models/BroadcastItem');
+      await BroadcastItem.syncIndexes();
+    } catch (e) {
+      console.warn('[startup] BroadcastItem index sync failed', e?.message || e);
+    }
 
 		// Cleanup old Broadcast Center items (older than 24h)
 		try {
@@ -575,23 +616,56 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
 			console.warn('[startup] Broadcast cleanup job failed to start', e?.message || e);
 		}
 
-      // Ensure ads indexes are present.
-      try {
-        const Ad = require('./models/Ad');
-        await Ad.syncIndexes();
-      } catch (e) {
-        console.warn('[startup] Ad index sync failed', e?.message || e);
-      }
-    })
-    .catch((err) => {
-      console.error('Mongo connection failed');
+    // Ensure ads indexes are present.
+    try {
+      const Ad = require('./models/Ad');
+      await Ad.syncIndexes();
+    } catch (e) {
+      console.warn('[startup] Ad index sync failed', e?.message || e);
+    }
+  }
+
+  async function _connectMongoOnce() {
+    if (_mongoConnectInFlight) return;
+    _mongoConnectInFlight = true;
+    try {
+      await mongoose.connect(MONGO_URI);
+      _mongoRetryMs = 2000;
+      await _afterMongoConnected();
+    } catch (err) {
       console.error('[startup] MongoDB connection failed', {
         uri: _redactMongoUri(MONGO_URI),
         message: err?.message || String(err),
         name: err?.name,
       });
-      process.exit(1);
-    });
+      if (_exitOnDbConnectFail) {
+        console.error('[startup] EXIT_ON_DB_CONNECT_FAIL=1 set; exiting due to MongoDB connection failure');
+        process.exit(1);
+      }
+
+      const delay = Math.min(_mongoRetryMaxMs, _mongoRetryMs);
+      _mongoRetryMs = Math.min(_mongoRetryMaxMs, Math.floor(_mongoRetryMs * 1.5));
+      console.warn('[startup] Will retry MongoDB connection', { inMs: delay });
+      setTimeout(() => {
+        _mongoConnectInFlight = false;
+        _connectMongoOnce();
+      }, delay);
+      return;
+    } finally {
+      // If we succeeded, we want to allow future reconnect attempts only if a disconnect occurs.
+      if (mongoose.connection.readyState === 1) {
+        _mongoConnectInFlight = true;
+      }
+    }
+  }
+
+  // When Mongo drops after having been connected, try to reconnect.
+  mongoose.connection.on('disconnected', () => {
+    _mongoConnectInFlight = false;
+    try { _connectMongoOnce(); } catch (_) {}
+  });
+
+  _connectMongoOnce();
 }
 
 // Minimal scheduler: auto-publish scheduled articles (every minute)
@@ -1653,6 +1727,7 @@ const PORT = parseInt(process.env.PORT || '5000', 10) || 5000;
 if (require.main === module) {
   const server = app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
+    _logStartupDbStatus('listening');
     try {
       const reporterRoutes = [];
       app._router && app._router.stack && app._router.stack.forEach(layer => {

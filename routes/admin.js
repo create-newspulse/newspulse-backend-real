@@ -4,6 +4,7 @@
 
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 
 const router = express.Router();
 
@@ -149,6 +150,16 @@ router.get('/system/health', (req, res) => {
 
 // GET /api/admin/stats
 router.get('/stats', (req, res) => {
+  if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+    return res.status(503).json({
+      ok: false,
+      success: false,
+      status: 503,
+      message: 'DB unavailable',
+      data: null,
+      path: req.originalUrl,
+    });
+  }
   const systemHealth = {
     uptime: parseFloat(process.uptime().toFixed(2)),
     timestamp: new Date().toISOString(),

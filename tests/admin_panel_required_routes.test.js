@@ -37,7 +37,11 @@ test('GET /admin-api/system/health returns 200 JSON (no DB dependency)', async (
   assert.equal(res.status, 200);
   assert.equal(res.body.ok, true);
   assert.ok(typeof res.body.time === 'string');
+  assert.ok(typeof res.body.uptime === 'number');
   assert.ok(typeof res.body.uptimeSeconds === 'number');
+  assert.ok(typeof res.body.db === 'object');
+  assert.ok(typeof res.body.db.connected === 'boolean');
+  assert.ok(typeof res.body.db.readyState === 'number');
 });
 
 test('GET /admin-api/admin/system/ai-training-info returns 200 JSON when AI not configured', async () => {
