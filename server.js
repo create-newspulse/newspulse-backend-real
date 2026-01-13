@@ -20,6 +20,15 @@ if (require.main === module && String(process.env.NODE_ENV || 'development').toL
   console.log('[startup] MONGODB_URI exists?', !!process.env.MONGODB_URI);
 }
 
+// Fail-fast for auth misconfiguration when running the server directly.
+// Tests/imports should not crash due to missing secrets.
+if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() !== 'test') {
+  if (!String(process.env.JWT_SECRET || '').trim()) {
+    console.error('[startup] Missing JWT_SECRET. Refusing to start (auth requires JWT_SECRET).');
+    process.exit(1);
+  }
+}
+
 // Validate critical environment early (fail fast in prod / when enforced)
 (() => {
   const enforce = String(process.env.ENFORCE_REQUIRED_ENVS || '').trim() === '1'
@@ -135,7 +144,7 @@ const CommunitySubmission = require(`${BASE}/models/CommunitySubmission`);
 const News = require(`${BASE}/models/News`);
 // Public /api/public/stories uses the root Article model; reuse it for admin stories.
 const Story = require('./models/Article');
-const { requireAdminAuth } = require('./middleware/adminAuth');
+const { requireAdminAuth, requireAdminJwt } = require('./middleware/adminAuth');
 const { optionalAdminAuth } = require('./middleware/optionalAdminAuth');
 let aiRoutes = null;
 let feedRoutes = null;
@@ -1239,46 +1248,32 @@ app.get('/api/admin/community/my-stories', requireAdminAuth, async (req, res) =>
   }
 });
 
-app.get('/api/admin/me', optionalAdminAuth, (req, res) => {
+function _adminMeResponse(req, res) {
   const a = req.admin || null;
-  if (!a) {
-    return res.status(200).json({
-      ok: true,
-      success: true,
-      authenticated: false,
-      admin: null,
-    });
-  }
+  if (!a) return res.status(401).json({ ok: false, message: 'Unauthorized' });
 
-  const role = (a.role === 'founder' || a.role === 'admin') ? a.role : 'admin';
+  const role = String(a.role || '').toLowerCase();
   return res.status(200).json({
     ok: true,
-    success: true,
     authenticated: true,
-    role,
-    admin: { id: a.id || 'unknown', email: a.email || '', role },
+    admin: {
+      id: a.id || 'unknown',
+      email: a.email || '',
+      role,
+    },
   });
-});
+}
+
+// Session probe used by admin UI AuthContext.
+// Must return 200 if logged in, 401 if not logged in (never 500 for auth failures).
+for (const p of ['/api/admin/me', '/admin-api/admin/me', '/admin-api/api/admin/me']) {
+  app.get(p, requireAdminJwt, _adminMeResponse);
+}
 
 // Legacy admin auth probe for admin panels calling /admin/me
 // - 200 with user when token/cookie valid
 // - 401 when missing/invalid
-app.get('/admin/me', requireAdminAuth, (req, res) => {
-  try {
-    const a = req.admin || null;
-    if (!a) return res.status(401).json({ ok: false, success: false, message: 'Unauthorized' });
-    const role = (a.role === 'founder' || a.role === 'admin') ? a.role : 'admin';
-    return res.status(200).json({
-      ok: true,
-      success: true,
-      authenticated: true,
-      admin: { id: a.id || 'unknown', email: a.email || '', role },
-    });
-  } catch (e) {
-    console.error('me failed:', e?.message || e);
-    return res.status(500).json({ ok: false, success: false, message: 'Failed to load session' });
-  }
-});
+app.get('/admin/me', requireAdminJwt, _adminMeResponse);
 
 // Aliases expected by some UIs
 app.get('/admin/stats', async (req, res) => {

@@ -44,7 +44,7 @@ let adminTeamRoutes = null;
 try { adminTeamRoutes = require('../routes/adminTeam.routes'); } catch (_) { console.warn('[init] optional ../routes/adminTeam.routes not found; skipping'); }
 let adminTeamRoutesV2 = null;
 try { adminTeamRoutesV2 = require('../src/routes/adminTeamRoutes'); } catch (_) { console.warn('[init] optional ../src/routes/adminTeamRoutes not found; skipping'); }
-const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireAdminAuth, requireAdminJwt } = require('../middleware/adminAuth');
 const { optionalAdminAuth } = require('../middleware/optionalAdminAuth');
 // Ads + Ad Settings (shared root-level routers)
 const publicAdsRouter = require('../routes/publicAds.routes');
@@ -450,30 +450,27 @@ app.get('/admin/community/reporter-stories', requireAdminAuth, async (req, res) 
   }
 });
 
-app.get('/api/admin/me', optionalAdminAuth, (req, res) => {
+function _adminMeResponse(req, res) {
   const a = req.admin || null;
-  if (!a) {
-    return res.status(200).json({
-      ok: true,
-      success: true,
-      authenticated: false,
-      admin: null,
-    });
-  }
-
-  const role = (a.role === 'founder' || a.role === 'admin') ? a.role : 'admin';
+  if (!a) return res.status(401).json({ ok: false, message: 'Unauthorized' });
+  const role = String(a.role || '').toLowerCase();
   return res.status(200).json({
     ok: true,
-    success: true,
     authenticated: true,
-    role,
-    admin: {
-      id: a.id || 'unknown',
-      email: a.email || '',
-      role,
-    },
+    admin: { id: a.id || 'unknown', email: a.email || '', role },
   });
-});
+}
+
+// Session probe used by admin UI AuthContext.
+// Must return 200 if logged in, 401 if not logged in (never 500 for auth failures).
+for (const p of ['/api/admin/me', '/admin-api/admin/me', '/admin-api/api/admin/me']) {
+  app.get(p, requireAdminJwt, _adminMeResponse);
+}
+
+// Legacy admin auth probe for admin panels calling /admin/me
+// - 200 with user when token valid
+// - 401 when missing/invalid
+app.get('/admin/me', requireAdminJwt, _adminMeResponse);
 
 // Aliases expected by some UIs
 app.get('/admin/stats', async (req, res) => {
