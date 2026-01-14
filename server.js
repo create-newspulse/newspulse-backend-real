@@ -518,6 +518,15 @@ function _mongoDbNameFromUri(uri) {
   return dbName.split('/')[0] || null;
 }
 
+function _mongoDbNameFromEnv() {
+  const fromEnv = String(process.env.MONGODB_DBNAME || process.env.MONGO_DBNAME || '').trim();
+  return fromEnv ? fromEnv : null;
+}
+
+function _mongoDbNameEffective(uri) {
+  return _mongoDbNameFromUri(uri) || _mongoDbNameFromEnv();
+}
+
 // SAFETY GUARD: Never allow dev/staging to boot against prod DB.
 // Also enforce that production points at the production database name.
 (() => {
@@ -526,13 +535,13 @@ function _mongoDbNameFromUri(uri) {
   const uri = String(MONGO_URI || '');
   if (!uri) return;
 
-  const dbName = String(_mongoDbNameFromUri(uri) || '').trim().toLowerCase();
+  const dbName = String(_mongoDbNameEffective(uri) || '').trim().toLowerCase();
 
   // Enforce prod DB naming in production.
   if (env === 'production') {
     if (dbName !== 'newspulse_prod') {
       console.error('SAFETY STOP: Production server must use newspulse_prod database!', {
-        dbName: dbName || '(missing - URI must include /newspulse_prod)',
+        dbName: dbName || '(missing - set MONGODB_DBNAME=newspulse_prod or include /newspulse_prod in MONGODB_URI)',
       });
       process.exit(1);
     }
@@ -546,7 +555,7 @@ function _mongoDbNameFromUri(uri) {
       console.error('SAFETY STOP: Dev server is pointing to PROD database!');
     } else {
       console.error('SAFETY STOP: Dev server must use newspulse_dev database!', {
-        dbName: dbName || '(missing - URI must include /newspulse_dev)',
+        dbName: dbName || '(missing - set MONGODB_DBNAME=newspulse_dev or include /newspulse_dev in MONGODB_URI)',
       });
     }
     process.exit(1);
@@ -561,7 +570,8 @@ app.get(['/admin-api/system/env', '/admin-api/api/system/env'], (_req, res) => {
 
   const connectedName = (mongoose.connection && mongoose.connection.name) ? String(mongoose.connection.name) : '';
   const dbFromUri = _mongoDbNameFromUri(process.env.MONGODB_URI);
-  const dbName = (connectedName || dbFromUri || null);
+  const dbFromEnv = _mongoDbNameFromEnv();
+  const dbName = (connectedName || dbFromUri || dbFromEnv || null);
   return res.status(200).json({ env, dbName });
 });
 
@@ -636,7 +646,11 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
     if (_mongoConnectInFlight) return;
     _mongoConnectInFlight = true;
     try {
-      await mongoose.connect(MONGO_URI);
+      const dbFromUri = _mongoDbNameFromUri(MONGO_URI);
+      const dbFromEnv = _mongoDbNameFromEnv();
+      const connectOptions = (!dbFromUri && dbFromEnv) ? { dbName: dbFromEnv } : undefined;
+
+      await mongoose.connect(MONGO_URI, connectOptions);
       _mongoRetryMs = 2000;
       await _afterMongoConnected();
     } catch (err) {
