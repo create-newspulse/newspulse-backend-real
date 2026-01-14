@@ -1395,18 +1395,42 @@ app.get('/admin/me', requireAdminJwt, _adminMeResponse);
 // Aliases expected by some UIs
 app.get('/admin/stats', async (req, res) => {
   try {
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      return res.status(503).json({
+        ok: false,
+        success: false,
+        status: 503,
+        message: 'DB unavailable',
+        data: null,
+        path: req.originalUrl,
+      });
+    }
+
     const totalArticles = await News.countDocuments({});
-    return res.json({ ok: true, stats: { totalArticles, timestamp: new Date().toISOString() } });
+    return res.json({ ok: true, success: true, status: 200, stats: { totalArticles, timestamp: new Date().toISOString() } });
   } catch (e) {
-    return res.status(500).json({ ok: false, message: 'Failed to load admin stats' });
+    console.error('[ADMIN][stats][alias:/admin/stats] failed', { message: e?.message || String(e) });
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load admin stats', path: req.originalUrl });
   }
 });
 app.get('/api/admin/stats', async (req, res) => {
   try {
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      return res.status(503).json({
+        ok: false,
+        success: false,
+        status: 503,
+        message: 'DB unavailable',
+        data: null,
+        path: req.originalUrl,
+      });
+    }
+
     const totalArticles = await News.countDocuments({});
-    return res.json({ ok: true, stats: { totalArticles, timestamp: new Date().toISOString() } });
+    return res.json({ ok: true, success: true, status: 200, stats: { totalArticles, timestamp: new Date().toISOString() } });
   } catch (e) {
-    return res.status(500).json({ ok: false, message: 'Failed to load admin stats' });
+    console.error('[ADMIN][stats][alias:/api/admin/stats] failed', { message: e?.message || String(e) });
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load admin stats', path: req.originalUrl });
   }
 });
 
