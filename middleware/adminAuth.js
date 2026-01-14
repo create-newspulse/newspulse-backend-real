@@ -165,13 +165,13 @@ async function requireAdminAuth(req, res, next) {
 async function requireAdminJwt(req, res, next) {
   try {
     const authHeader = String(req.headers['authorization'] || '');
-    if (!authHeader.toLowerCase().startsWith('bearer ')) {
-      return res.status(401).json({ ok: false, message: 'Unauthorized' });
-    }
-    const token = authHeader.slice(7).trim();
-    if (!token) {
-      return res.status(401).json({ ok: false, message: 'Unauthorized' });
-    }
+    const cookies = parseCookies(req.headers.cookie || '');
+    const headerToken = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
+    // Accept httpOnly cookie tokens for Vercel-proxied admin sessions.
+    const cookieToken = cookies['np_admin_token'] || cookies['np_token'] || cookies['token'] || '';
+
+    const token = headerToken || cookieToken;
+    if (!token) return res.status(401).json({ ok: false, message: 'Unauthorized' });
 
     const secret = String(process.env.JWT_SECRET || '').trim();
     if (!secret) {
@@ -187,14 +187,21 @@ async function requireAdminJwt(req, res, next) {
     }
 
     const role = payload && payload.role ? String(payload.role) : '';
-    if (!role) {
+    const normalizedRole = String(role).toLowerCase();
+    if (!normalizedRole) {
       return res.status(401).json({ ok: false, message: 'Unauthorized' });
+    }
+
+    // Keep this aligned with requireAdminAuth.
+    if (normalizedRole !== 'admin' && normalizedRole !== 'founder' && normalizedRole !== 'staff' && normalizedRole !== 'editor' && normalizedRole !== 'legal') {
+      return res.status(403).json({ ok: false, message: 'Forbidden' });
     }
 
     const userId = payload.sub || payload.userId || null;
     const email = payload.email || null;
 
-    // If DB is ready, require a real user record.
+    // If DB is ready, enrich from a user record when available.
+    // Do NOT require a DB record for env-based admin login flows.
     if (isDbReady()) {
       let user = null;
       if (userId && mongoose.isValidObjectId(String(userId))) {
@@ -204,36 +211,35 @@ async function requireAdminJwt(req, res, next) {
         user = await User.findOne({ email: String(email).toLowerCase() }).lean();
       }
 
-      if (!user) {
-        return res.status(401).json({ ok: false, message: 'Unauthorized' });
-      }
-      if (user.status === 'suspended') {
-        return res.status(403).json({ ok: false, message: 'Forbidden' });
-      }
+      if (user) {
+        if (user.status === 'suspended') {
+          return res.status(403).json({ ok: false, message: 'Forbidden' });
+        }
 
-      const jwtTv = typeof payload.tokenVersion === 'number' ? payload.tokenVersion : 0;
-      const userTv = typeof user.tokenVersion === 'number' ? user.tokenVersion : 0;
-      if (jwtTv !== userTv) {
-        return res.status(401).json({ ok: false, message: 'Unauthorized' });
-      }
+        const jwtTv = typeof payload.tokenVersion === 'number' ? payload.tokenVersion : 0;
+        const userTv = typeof user.tokenVersion === 'number' ? user.tokenVersion : 0;
+        if (jwtTv !== userTv) {
+          return res.status(401).json({ ok: false, message: 'Unauthorized' });
+        }
 
-      req.admin = {
-        id: String(user._id),
-        email: user.email,
-        role: user.role,
-        name: user.name,
-        permissions: Array.isArray(user.permissions) ? user.permissions : [],
-        status: user.status || 'active',
-        tokenVersion: userTv,
-      };
-      return next();
+        req.admin = {
+          id: String(user._id),
+          email: user.email,
+          role: user.role,
+          name: user.name,
+          permissions: Array.isArray(user.permissions) ? user.permissions : [],
+          status: user.status || 'active',
+          tokenVersion: userTv,
+        };
+        return next();
+      }
     }
 
     // DB not ready: fall back to token-only identity.
     req.admin = {
       id: userId ? String(userId) : 'unknown',
       email: email ? String(email) : '',
-      role: String(role).toLowerCase(),
+      role: normalizedRole,
       name: payload.name ? String(payload.name) : undefined,
     };
     return next();
