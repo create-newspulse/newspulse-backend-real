@@ -81,6 +81,17 @@ ALLOWED_ORIGINS=https://admin.newspulse.co.in,https://newspulse.co.in,https://ww
 
 ## Auth Endpoints
 ### POST /admin/login 
+Requires these env vars to be set (official naming):
+- `ADMIN_EMAIL`
+- `ADMIN_PASSWORD`
+- `JWT_SECRET`
+
+Backward compatibility:
+- If `ADMIN_EMAIL`/`ADMIN_PASSWORD` are not set, the server will fall back to `FOUNDER_EMAIL`/`FOUNDER_PASSWORD`.
+
+If credentials are missing, the admin login endpoints return HTTP 500 JSON:
+`{ "ok": false, "message": "Admin credentials not configured" }`
+
 Body:
 ```json
 { "email": "<FOUNDER_EMAIL>", "password": "<FOUNDER_PASSWORD>" }

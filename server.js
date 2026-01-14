@@ -18,6 +18,13 @@ if (!process.env.MONGODB_URI && process.env.MONGO_URI) {
 if (require.main === module && String(process.env.NODE_ENV || 'development').toLowerCase() !== 'production') {
   // eslint-disable-next-line no-console
   console.log('[startup] MONGODB_URI exists?', !!process.env.MONGODB_URI);
+
+  // eslint-disable-next-line no-console
+  console.log('[startup] admin login envs present?', {
+    ADMIN_EMAIL: !!String(process.env.ADMIN_EMAIL || '').trim(),
+    ADMIN_PASSWORD: !!String(process.env.ADMIN_PASSWORD || '').trim(),
+    JWT_SECRET: !!String(process.env.JWT_SECRET || '').trim(),
+  });
 }
 
 // Fail-fast for auth misconfiguration when running the server directly.

@@ -77,23 +77,28 @@ router.post('/login', (req, res, next) => {
 
   recordAttempt(ip);
 
-  const founderEmail = process.env.FOUNDER_EMAIL || '';
-  const founderPassword = process.env.FOUNDER_PASSWORD || '';
+  // Official env vars for admin login:
+  // - ADMIN_EMAIL / ADMIN_PASSWORD / JWT_SECRET
+  // Backward-compat:
+  // - FOUNDER_EMAIL / FOUNDER_PASSWORD
+  // - ADMIN_PASS (legacy naming)
+  const adminEmail = String(process.env.ADMIN_EMAIL || process.env.FOUNDER_EMAIL || '').trim();
+  const adminPassword = String(process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS || process.env.FOUNDER_PASSWORD || '').trim();
   const founderName = process.env.FOUNDER_NAME || 'Founder';
   const founderId = process.env.FOUNDER_ID || 'founder-001';
+  const jwtSecret = String(process.env.JWT_SECRET || '').trim();
 
-  if (!founderEmail || !founderPassword) {
+  if (!adminEmail || !adminPassword || !jwtSecret) {
     console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=not-configured`);
     return res.status(500).json({ ok: false, message: 'Admin credentials not configured' });
   }
 
-  if (email.toLowerCase() === founderEmail.toLowerCase() && password === founderPassword) {
+  if (email.toLowerCase() === adminEmail.toLowerCase() && password === adminPassword) {
     console.info(`ADMIN LOGIN SUCCESS email=${email} ip=${ip}`);
 
-    const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
     const token = jwt.sign(
-      { sub: founderId, email: founderEmail, name: founderName, role: 'founder' },
-      secret,
+      { sub: founderId, email: adminEmail, name: founderName, role: 'founder' },
+      jwtSecret,
       { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' },
     );
 
@@ -104,7 +109,7 @@ router.post('/login', (req, res, next) => {
 
     res.setHeader(
       'Set-Cookie',
-      `np_admin=${encodeURIComponent(founderEmail)}; Path=/; SameSite=${sameSite}${secureAttr}`
+      `np_admin=${encodeURIComponent(adminEmail)}; Path=/; SameSite=${sameSite}${secureAttr}`
     );
 
     return res.json({
@@ -112,7 +117,7 @@ router.post('/login', (req, res, next) => {
       token,
       user: {
         id: founderId,
-        email: founderEmail,
+        email: adminEmail,
         name: founderName,
         role: 'founder',
       },
