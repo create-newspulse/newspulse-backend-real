@@ -119,11 +119,15 @@ router.post('/login', (req, res, next) => {
       || !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
     const cookieSameSite = isProd ? 'none' : (process.env.ADMIN_COOKIE_SAMESITE || 'lax');
     const cookieSecure = isProd ? true : (String(process.env.ADMIN_COOKIE_SECURE || '').trim() === '1');
+    // In production, set an explicit cookie domain so auth survives subdomain/proxy differences
+    // (e.g. admin.newspulse.co.in UI talking to www.newspulse.co.in/admin-api, or Vercel rewrites).
+    const cookieDomain = isProd ? (process.env.ADMIN_COOKIE_DOMAIN || '.newspulse.co.in') : undefined;
     try {
       res.cookie('np_admin', adminEmail, {
         path: '/',
         sameSite: cookieSameSite,
         secure: cookieSecure,
+        ...(cookieDomain ? { domain: cookieDomain } : {}),
         maxAge: 7 * 24 * 60 * 60 * 1000,
       });
 
@@ -132,13 +136,15 @@ router.post('/login', (req, res, next) => {
         path: '/',
         sameSite: cookieSameSite,
         secure: cookieSecure,
+        ...(cookieDomain ? { domain: cookieDomain } : {}),
         maxAge: 2 * 60 * 60 * 1000,
       });
     } catch (_) {
       // Fallback header if res.cookie isn't available for any reason.
       const sameSiteHdr = isProd ? 'None' : String(cookieSameSite).toLowerCase() === 'none' ? 'None' : 'Lax';
       const secureHdr = cookieSecure ? '; Secure' : '';
-      res.setHeader('Set-Cookie', `np_admin=${encodeURIComponent(adminEmail)}; Path=/; SameSite=${sameSiteHdr}${secureHdr}`);
+      const domainHdr = cookieDomain ? `; Domain=${cookieDomain}` : '';
+      res.setHeader('Set-Cookie', `np_admin=${encodeURIComponent(adminEmail)}; Path=/; SameSite=${sameSiteHdr}${secureHdr}${domainHdr}`);
     }
 
     return res.json({
@@ -160,10 +166,14 @@ router.post('/login', (req, res, next) => {
 // POST /api/admin/logout
 router.post('/logout', (_req, res) => {
   try {
-    res.clearCookie('np_admin', { path: '/' });
-    res.clearCookie('np_admin_token', { path: '/' });
-    res.clearCookie('np_admin_email', { path: '/' });
-    res.clearCookie('np_admin_session', { path: '/' });
+    const isProd = String(process.env.NODE_ENV || 'development').toLowerCase() === 'production'
+      || !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
+    const cookieDomain = isProd ? (process.env.ADMIN_COOKIE_DOMAIN || '.newspulse.co.in') : undefined;
+    const opts = cookieDomain ? { path: '/', domain: cookieDomain } : { path: '/' };
+    res.clearCookie('np_admin', opts);
+    res.clearCookie('np_admin_token', opts);
+    res.clearCookie('np_admin_email', opts);
+    res.clearCookie('np_admin_session', opts);
   } catch (_) {}
   return res.status(200).json({ ok: true });
 });
