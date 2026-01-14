@@ -1205,6 +1205,14 @@ app.use('/api/admin', adminAuditRoutes);
 if (adminMetaRoutes) app.use('/api/admin', adminMetaRoutes);
 app.use('/admin-api/admin', adminAuditRoutes);
 app.use('/admin-api/api/admin', adminAuditRoutes);
+if (adminMetaRoutes) {
+  // Admin meta (some admin builds call /admin-api/admin/meta)
+  app.use('/admin-api/admin', adminMetaRoutes);
+  app.use('/admin-api/api/admin', adminMetaRoutes);
+  // Public-ish meta (some admin builds call /admin-api/meta/languages)
+  app.use('/admin-api', adminMetaRoutes);
+  app.use('/admin-api/api', adminMetaRoutes);
+}
 // Community Reporter Queue (admin protected)
 app.use('/api/admin', adminCommunityReporterQueueRouter);
 app.use('/admin-api/admin', adminCommunityReporterQueueRouter);
