@@ -1,7 +1,19 @@
 // Load environment variables as early as possible.
 // Many route/controller modules read process.env at import time.
 const path = require('path');
-require('dotenv').config({ path: path.join(__dirname, '.env') });
+const _isImportedEarly = require.main !== module;
+const _nodeEnvEarly = String(process.env.NODE_ENV || 'development').toLowerCase();
+const _isRenderEarly = !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
+const _isProdEarly = _nodeEnvEarly === 'production' || _isRenderEarly;
+
+// IMPORTANT:
+// - Local dev: allow .env to override any stale shell environment vars.
+// - Production (Render): NEVER override Render-provided env vars from the repo's .env.
+//   A committed .env would otherwise clobber the real Render config.
+require('dotenv').config({
+  path: path.join(__dirname, '.env'),
+  override: !_isProdEarly,
+});
 
 // Backward-compat: older setups used MONGO_URI.
 // Prefer MONGODB_URI, but if only MONGO_URI exists, alias it.
@@ -20,10 +32,9 @@ if (require.main === module && String(process.env.NODE_ENV || 'development').toL
   console.log('[startup] MONGODB_URI exists?', !!process.env.MONGODB_URI);
 
   // eslint-disable-next-line no-console
-  console.log('[startup] admin login envs present?', {
-    ADMIN_EMAIL: !!String(process.env.ADMIN_EMAIL || '').trim(),
-    ADMIN_PASSWORD: !!String(process.env.ADMIN_PASSWORD || '').trim(),
-    JWT_SECRET: !!String(process.env.JWT_SECRET || '').trim(),
+  console.log('[startup] adminCreds', {
+    hasEmail: !!String(process.env.ADMIN_EMAIL || '').trim(),
+    hasPassword: !!String(process.env.ADMIN_PASSWORD || '').trim(),
   });
 }
 
@@ -39,8 +50,10 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
 // Validate critical environment early (fail fast in prod / when enforced)
 (() => {
   const enforce = String(process.env.ENFORCE_REQUIRED_ENVS || '').trim() === '1'
-    || String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+    || String(process.env.NODE_ENV || '').toLowerCase() === 'production'
+    || !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
   if (!enforce) return;
+  if (_isImportedEarly) return;
 
   const mongoUri = process.env.MONGODB_URI;
 
@@ -49,11 +62,25 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
   if (!mongoUri) missing.push('MONGODB_URI');
 
   if (missing.length) {
-    const msg = `[init] Missing required env var(s): ${missing.join(', ')}`;
-    console.error(msg);
-    throw new Error(msg);
+    console.error('[init] Missing required env var(s). Refusing to start.', {
+      missing,
+      env: String(process.env.NODE_ENV || 'development'),
+      requiredMongoFormat: {
+        prod: 'MONGODB_URI=mongodb+srv://USER:PASS@HOST/newspulse_prod?retryWrites=true&w=majority',
+        dev: 'MONGODB_URI=mongodb://127.0.0.1:27017/newspulse_dev',
+        alternateDbNameVar: 'MONGODB_DBNAME=newspulse_prod (or newspulse_dev)',
+      },
+    });
+    process.exit(1);
   }
 })();
+
+function _redactMongoUri(uri) {
+  const u = String(uri || '');
+  if (!u) return '';
+  // Mask user:pass if present (mongodb://user:pass@host)
+  return u.replace(/(mongodb(?:\+srv)?:\/\/)([^@/]+)@/i, '$1***:***@');
+}
 
 const express = require('express');
 const cors = require('cors');
@@ -284,18 +311,19 @@ function _parseCorsOriginsEnv(v) {
 const allowedOrigins = (() => {
   // Preferred: ALLOWED_ORIGINS (comma-separated). Compatibility: CORS_ORIGIN.
   const fromEnv = _parseCorsOriginsEnv(process.env.ALLOWED_ORIGINS || process.env.CORS_ORIGIN);
-  if (fromEnv.length) return fromEnv;
+  // Always allow the official origins + local dev UIs.
+  // This supports the intended workflow: backend runs on Render, local UIs call Render.
+  const defaults = [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'https://www.newspulse.co.in',
+    'https://newspulse.co.in',
+    'https://admin.newspulse.co.in',
+  ];
 
-  if (_corsIsProd) {
-    return [
-      'https://admin.newspulse.co.in',
-      'https://newspulse.co.in',
-      'https://www.newspulse.co.in',
-    ];
-  }
-
-  // Dev defaults
-  return ['http://localhost:5173', 'http://localhost:3000'];
+  // Env can extend/override without breaking the required defaults.
+  const merged = [...defaults, ...fromEnv];
+  return Array.from(new Set(merged.map(s => String(s))));
 })();
 
 const corsOptions = {
@@ -530,18 +558,40 @@ function _mongoDbNameEffective(uri) {
 // SAFETY GUARD: Never allow dev/staging to boot against prod DB.
 // Also enforce that production points at the production database name.
 (() => {
-  const env = String(process.env.NODE_ENV || 'development').toLowerCase();
+  const envRaw = String(process.env.NODE_ENV || 'development').toLowerCase();
+  const isRender = !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
+  const env = (envRaw === 'production' || isRender) ? 'production' : envRaw;
   if (env === 'test' || _isImported) return;
   const uri = String(MONGO_URI || '');
   if (!uri) return;
 
-  const dbName = String(_mongoDbNameEffective(uri) || '').trim().toLowerCase();
+  const desiredDb = env === 'production' ? 'newspulse_prod' : 'newspulse_dev';
+  let dbName = String(_mongoDbNameEffective(uri) || '').trim().toLowerCase();
+
+  // If the URI does not specify a DB and no env DB override exists, default safely.
+  // This avoids connecting to the MongoDB driver's default "test" database.
+  if (!dbName) {
+    if (!String(process.env.MONGODB_DBNAME || process.env.MONGO_DBNAME || '').trim()) {
+      process.env.MONGODB_DBNAME = desiredDb;
+    }
+    dbName = desiredDb;
+    try {
+      console.warn('[startup] No DB name in MONGODB_URI; defaulting via MONGODB_DBNAME', {
+        env,
+        dbName: desiredDb,
+        uri: _redactMongoUri(uri),
+      });
+    } catch (_) {}
+  }
 
   // Enforce prod DB naming in production.
   if (env === 'production') {
     if (dbName !== 'newspulse_prod') {
       console.error('SAFETY STOP: Production server must use newspulse_prod database!', {
-        dbName: dbName || '(missing - set MONGODB_DBNAME=newspulse_prod or include /newspulse_prod in MONGODB_URI)',
+        effectiveDbName: dbName || '(missing)',
+        uri: _redactMongoUri(uri),
+        hint: 'Include /newspulse_prod in MONGODB_URI or set MONGODB_DBNAME=newspulse_prod',
+        requiredFormat: 'MONGODB_URI=mongodb+srv://USER:PASS@HOST/newspulse_prod?retryWrites=true&w=majority',
       });
       process.exit(1);
     }
@@ -574,13 +624,6 @@ app.get(['/admin-api/system/env', '/admin-api/api/system/env'], (_req, res) => {
   const dbName = (connectedName || dbFromUri || dbFromEnv || null);
   return res.status(200).json({ env, dbName });
 });
-
-function _redactMongoUri(uri) {
-  const u = String(uri || '');
-  if (!u) return '';
-  // Mask user:pass if present (mongodb://user:pass@host)
-  return u.replace(/(mongodb(?:\+srv)?:\/\/)([^@/]+)@/i, '$1***:***@');
-}
 
 // Startup connection diagnostics
 mongoose.connection.on('error', (err) => {
@@ -1770,7 +1813,13 @@ app.use((req, res) => {
 // Start server only when invoked directly (not when imported by tests)
 const PORT = parseInt(process.env.PORT || '5000', 10) || 5000;
 if (require.main === module) {
-  const server = app.listen(PORT, () => {
+  // On Windows, Node may bind IPv6-only by default when no host is provided.
+  // That breaks callers/proxies that target 127.0.0.1. Prefer dual-stack there.
+  const listenArg = process.platform === 'win32'
+    ? ({ port: PORT, host: '::', ipv6Only: false })
+    : PORT;
+
+  const server = app.listen(listenArg, () => {
     console.log(`✅ Server running on port ${PORT}`);
     _logStartupDbStatus('listening');
     try {
