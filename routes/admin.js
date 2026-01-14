@@ -69,7 +69,10 @@ router.post('/login', (req, res, next) => {
   if (req.baseUrl === '/admin') return next();
 
   const ip = req.ip || req.connection?.remoteAddress || 'unknown';
-  const { email = '', password = '' } = req.body || {};
+  const body = req.body || {};
+  // Some admin builds send `username` instead of `email`.
+  const email = String(body.email || body.username || '').trim();
+  const password = String(body.password || body.pass || '').trim();
 
   if (isRateLimited(ip)) {
     console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=rate-limit`);
@@ -87,14 +90,35 @@ router.post('/login', (req, res, next) => {
   // - ADMIN_PASS (legacy naming)
   // - FOUNDER_EMAIL / FOUNDER_PASSWORD (older deployments)
   const adminEmail = String(process.env.ADMIN_EMAIL || process.env.FOUNDER_EMAIL || '').trim();
-  const adminPassword = String(process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS || process.env.FOUNDER_PASSWORD || '').trim();
+  const adminPassword = String(
+    process.env.ADMIN_PASSWORD
+    || process.env.ADMIN_PASS
+    || process.env.FOUNDER_PASSWORD
+    || process.env.FOUNDER_PASS
+    || ''
+  ).trim();
   const founderName = process.env.FOUNDER_NAME || 'Founder';
   const founderId = process.env.FOUNDER_ID || 'founder-001';
   const jwtSecret = String(process.env.JWT_SECRET || '').trim();
 
+  const debugLogin = String(process.env.ADMIN_LOGIN_DEBUG || '').trim() === '1';
+
   if (!adminEmail || !adminPassword) {
     console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=not-configured`);
-    return res.status(500).json({ ok: false, message: 'Admin credentials not configured' });
+    return res.status(500).json({
+      ok: false,
+      message: 'Admin credentials not configured',
+      ...(debugLogin ? {
+        debug: {
+          hasAdminEmail: !!String(process.env.ADMIN_EMAIL || '').trim(),
+          hasFounderEmail: !!String(process.env.FOUNDER_EMAIL || '').trim(),
+          hasAdminPassword: !!String(process.env.ADMIN_PASSWORD || '').trim(),
+          hasAdminPass: !!String(process.env.ADMIN_PASS || '').trim(),
+          hasFounderPassword: !!String(process.env.FOUNDER_PASSWORD || '').trim(),
+          hasFounderPass: !!String(process.env.FOUNDER_PASS || '').trim(),
+        },
+      } : {}),
+    });
   }
 
   if (!jwtSecret) {
@@ -160,7 +184,16 @@ router.post('/login', (req, res, next) => {
   }
 
   console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=invalid-credentials`);
-  return res.status(401).json({ ok: false, message: 'Invalid admin credentials' });
+  return res.status(401).json({
+    ok: false,
+    message: 'Invalid admin credentials',
+    ...(debugLogin ? {
+      debug: {
+        configuredEmailDomain: adminEmail.includes('@') ? adminEmail.split('@')[1] : null,
+        receivedEmailDomain: email.includes('@') ? email.split('@')[1] : null,
+      },
+    } : {}),
+  });
 });
 
 // POST /api/admin/logout

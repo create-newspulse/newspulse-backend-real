@@ -1147,6 +1147,9 @@ app.use('/admin-api/api/admin-auth', adminAuthRoutes);
 // OTP routes: admin UI calls /admin-api/auth/otp/*
 app.use('/admin-api', authOtpRoutes);
 app.use('/admin-api/api', authOtpRoutes);
+// Some proxies rewrite /admin-api/* -> /api/*
+app.use('/api', authOtpRoutes);
+app.use('/api/api', authOtpRoutes);
 // Documented/legacy admin path support: /api/admin/auth/otp/*
 app.use('/api/admin', authOtpRoutes);
 // AI training info: public read endpoint (admin panel can read without login)
@@ -1212,6 +1215,9 @@ if (adminMetaRoutes) {
   // Public-ish meta (some admin builds call /admin-api/meta/languages)
   app.use('/admin-api', adminMetaRoutes);
   app.use('/admin-api/api', adminMetaRoutes);
+  // Some proxies rewrite /admin-api/* -> /api/*
+  app.use('/api', adminMetaRoutes);
+  app.use('/api/api', adminMetaRoutes);
 }
 // Community Reporter Queue (admin protected)
 app.use('/api/admin', adminCommunityReporterQueueRouter);
