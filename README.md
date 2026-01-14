@@ -27,7 +27,6 @@ This backend supports separate MongoDB databases for development and production.
 
 - Development: set `MONGODB_URI` to a DB named `newspulse_dev`.
 - Production: set `MONGODB_URI` to a DB named `newspulse_prod`.
-- If your provider gives you a Mongo URI without a `/<db>` segment (e.g. it ends with `.mongodb.net/?retryWrites=...`), you can instead set `MONGODB_DBNAME` to `newspulse_dev` or `newspulse_prod` and the server will pass it to Mongoose as `dbName`.
 - Safety guard: if `NODE_ENV` is not `production` and `MONGODB_URI` contains `newspulse_prod`, the server will refuse to start with: `SAFETY STOP: Dev server is pointing to PROD database!`.
 
 ## Public Site Settings: Dev/Prod Isolation
