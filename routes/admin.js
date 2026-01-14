@@ -80,10 +80,14 @@ router.post('/login', (req, res, next) => {
 
   recordAttempt(ip);
 
-  // Official env vars for admin login (Vercel uses this endpoint):
+  // Supported env vars for admin login:
+  // Preferred:
   // - ADMIN_EMAIL / ADMIN_PASSWORD / JWT_SECRET
-  const adminEmail = String(process.env.ADMIN_EMAIL || '').trim();
-  const adminPassword = String(process.env.ADMIN_PASSWORD || '').trim();
+  // Backward-compat:
+  // - ADMIN_PASS (legacy naming)
+  // - FOUNDER_EMAIL / FOUNDER_PASSWORD (older deployments)
+  const adminEmail = String(process.env.ADMIN_EMAIL || process.env.FOUNDER_EMAIL || '').trim();
+  const adminPassword = String(process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS || process.env.FOUNDER_PASSWORD || '').trim();
   const founderName = process.env.FOUNDER_NAME || 'Founder';
   const founderId = process.env.FOUNDER_ID || 'founder-001';
   const jwtSecret = String(process.env.JWT_SECRET || '').trim();
