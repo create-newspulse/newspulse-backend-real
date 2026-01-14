@@ -157,6 +157,7 @@ const founderFeatureTogglesRouter = require('./routes/admin/founderFeatureToggle
 const alertsRouter = require('./routes/alerts');
 const securityRouter = require('./routes/security');
 const adminThreatRouter = require('./routes/adminThreatRoutes');
+const authOtpRoutes = require('./routes/authOtp');
 const ownerPasskeyRouter = require('./routes/ownerPasskey');
 const { requireOwnerKey } = require('./middleware/requireOwnerKey');
 const { requireFounderAuth } = require('./middleware/adminAuth');
@@ -1142,6 +1143,12 @@ app.use('/admin-auth', adminAuthRoutes);
 app.use('/api/admin-auth', adminAuthRoutes);
 app.use('/admin-api/admin-auth', adminAuthRoutes);
 app.use('/admin-api/api/admin-auth', adminAuthRoutes);
+
+// OTP routes: admin UI calls /admin-api/auth/otp/*
+app.use('/admin-api', authOtpRoutes);
+app.use('/admin-api/api', authOtpRoutes);
+// Documented/legacy admin path support: /api/admin/auth/otp/*
+app.use('/api/admin', authOtpRoutes);
 // AI training info: public read endpoint (admin panel can read without login)
 for (const p of [
   '/system/ai-training-info',
