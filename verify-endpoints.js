@@ -44,20 +44,25 @@ function check(path, expectedStatus, label, { headers } = {}) {
 }
 
 async function getAdminToken() {
-  if (process.env.ADMIN_TOKEN) return String(process.env.ADMIN_TOKEN);
+  if (process.env.ADMIN_TOKEN) return { token: String(process.env.ADMIN_TOKEN), role: 'unknown' };
 
-  const email = process.env.ADMIN_EMAIL || process.env.FOUNDER_EMAIL;
-  const password = process.env.ADMIN_PASSWORD || process.env.FOUNDER_PASSWORD;
+  const email = process.env.FOUNDER_EMAIL || process.env.ADMIN_EMAIL;
+  const password = process.env.FOUNDER_PASSWORD || process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS;
   if (!email || !password) return null;
 
-  const res = await requestJson({
-    method: 'POST',
-    path: '/api/admin/login',
-    body: { email, password },
-  });
+  // Prefer DB-backed JWT login.
+  const authRes = await requestJson({ method: 'POST', path: '/api/auth/login', body: { email, password } });
+  const authToken = authRes && authRes.json && authRes.json.token ? String(authRes.json.token) : null;
+  const authRole = authRes && authRes.json && authRes.json.user && authRes.json.user.role ? String(authRes.json.user.role) : null;
+  if (authToken) return { token: authToken, role: authRole || 'unknown' };
 
-  const token = res && res.json && res.json.token ? String(res.json.token) : null;
-  return token || null;
+  // Fallback: legacy founder login endpoint used by some admin panels.
+  const adminRes = await requestJson({ method: 'POST', path: '/api/admin/login', body: { email, password } });
+  const adminToken = adminRes && adminRes.json && adminRes.json.token ? String(adminRes.json.token) : null;
+  const adminRole = adminRes && adminRes.json && adminRes.json.user && adminRes.json.user.role ? String(adminRes.json.user.role) : null;
+  if (adminToken) return { token: adminToken, role: adminRole || 'unknown' };
+
+  return null;
 }
 
 (async () => {
@@ -72,11 +77,18 @@ async function getAdminToken() {
   await check('/api/admin/settings/preview?state=effective', 401, 'Settings preview (should be 401 w/o token)');
   await check('/api/admin/settings/admin-panel/preview?state=effective', 401, 'Admin panel preview (should be 401 w/o token)');
 
-  const token = await getAdminToken();
-  if (!token) {
+  const auth = await getAdminToken();
+  if (!auth || !auth.token) {
     console.log('Team users (should be 200 w/ token): ⏭️  (skipped) Set ADMIN_TOKEN or ADMIN_EMAIL+ADMIN_PASSWORD');
     return;
   }
+
+  if (String(auth.role || '').toLowerCase() !== 'founder') {
+    console.log(`Founder-only checks: ⏭️  (skipped) Logged in as role=${auth.role}`);
+    return;
+  }
+
+  const token = auth.token;
 
   await check('/api/admin/team/users', 200, 'Team users (should be 200 w/ token)', {
     headers: { Authorization: `Bearer ${token}` },

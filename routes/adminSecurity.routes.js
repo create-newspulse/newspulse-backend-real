@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 
 const User = require('../models/User');
-const { requireAdminAuth, requireFounderAuth } = require('../middleware/adminAuth');
+const { requireAuth, requireFounder } = require('../middleware/requireAuth');
 const { logAudit } = require('../lib/audit');
 
 const router = express.Router();
@@ -29,19 +29,19 @@ function getBearerToken(req) {
 
 async function loadUser(req) {
   if (!isDbReady()) return null;
-  const admin = req.admin || {};
-  const sub = admin.id && mongoose.isValidObjectId(admin.id) ? String(admin.id) : null;
+  if (req._authUserDoc && req._authUserDoc._id) return req._authUserDoc;
+  const sub = req.user && req.user.id && mongoose.isValidObjectId(req.user.id) ? String(req.user.id) : null;
   if (sub) {
     const byId = await User.findById(sub).lean();
     if (byId) return byId;
   }
-  const email = admin.email ? String(admin.email).toLowerCase() : '';
+  const email = req.user && req.user.email ? String(req.user.email).toLowerCase() : '';
   if (!email) return null;
   return User.findOne({ email }).lean();
 }
 
 // GET /api/admin/security/session
-router.get('/security/session', requireAdminAuth, async (req, res) => {
+router.get('/security/session', requireAuth, async (req, res) => {
   const token = getBearerToken(req);
   let issuedAt = null;
   let expiresAt = null;
@@ -59,8 +59,8 @@ router.get('/security/session', requireAdminAuth, async (req, res) => {
   const user = await loadUser(req);
 
   return ok(res, {
-    email: req.admin?.email || null,
-    role: req.admin?.role || null,
+    email: req.user?.email || null,
+    role: req.user?.role || null,
     status: user?.status || null,
     issuedAt,
     expiresAt,
@@ -70,7 +70,7 @@ router.get('/security/session', requireAdminAuth, async (req, res) => {
 
 // POST /api/admin/security/logout
 // Clears cookies and invalidates current JWT session (tokenVersion++) when possible.
-router.post('/security/logout', requireAdminAuth, async (req, res) => {
+router.post('/security/logout', requireAuth, async (req, res) => {
   try {
     try { res.clearCookie('token'); } catch {}
     try { res.clearCookie('np_token'); } catch {}
@@ -83,7 +83,7 @@ router.post('/security/logout', requireAdminAuth, async (req, res) => {
       }
     }
 
-    await logAudit(req, 'LOGOUT', req.admin?.id || null, null);
+    await logAudit(req, 'LOGOUT', req.user?.id || null, null);
     return ok(res, { ok: true });
   } catch (_e) {
     return ok(res, { ok: true });
@@ -92,11 +92,11 @@ router.post('/security/logout', requireAdminAuth, async (req, res) => {
 
 // POST /api/admin/security/logout-all
 // Founder-only (can target self or another user via body.userId)
-router.post('/security/logout-all', requireFounderAuth, async (req, res) => {
+router.post('/security/logout-all', requireAuth, requireFounder, async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  const targetUserId = body.userId ? String(body.userId) : (mongoose.isValidObjectId(req.admin?.id) ? String(req.admin.id) : null);
+  const targetUserId = body.userId ? String(body.userId) : (mongoose.isValidObjectId(req.user?.id) ? String(req.user.id) : null);
 
   if (!targetUserId || !mongoose.isValidObjectId(targetUserId)) {
     return bad(res, 400, 'Invalid userId');

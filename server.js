@@ -170,6 +170,7 @@ const broadcastRoutes = require('./routes/broadcast.routes');
 const authRoutes = require('./routes/auth.routes');
 const auditRoutes = require('./routes/audit.routes');
 const adminTeamRoutes = require('./routes/adminTeam.routes');
+const adminAuthV2Routes = require('./routes/adminAuthV2.routes');
 let adminTeamRoutesV2 = null;
 try { adminTeamRoutesV2 = require('./src/routes/adminTeamRoutes'); } catch (_) { console.warn('[init] optional src/routes/adminTeamRoutes not found; skipping'); }
 const adminSecurityRoutes = require('./routes/adminSecurity.routes');
@@ -285,6 +286,14 @@ const _corsEnv = String(process.env.NODE_ENV || 'development').toLowerCase();
 const _corsIsProd = _corsEnv === 'production';
 const _corsIsDev = !_corsIsProd;
 
+// Allow specific Vercel apps (including preview deploys) without opening CORS broadly.
+// Examples:
+// - https://newspulse-admin-panel-real.vercel.app
+// - https://newspulse-admin-panel-real-git-xyz.vercel.app
+// - https://newspulse-frontend-main.vercel.app
+const _ADMIN_PANEL_VERCEL_REGEX = /^https:\/\/newspulse-admin-panel-real(?:-[a-z0-9-]+)?\.vercel\.app$/i;
+const _FRONTEND_MAIN_VERCEL_REGEX = /^https:\/\/newspulse-frontend-main(?:-[a-z0-9-]+)?\.vercel\.app$/i;
+
 function _parseCorsOriginsEnv(v) {
   const raw = String(v || '').trim();
   if (!raw) return [];
@@ -317,9 +326,13 @@ const allowedOrigins = (() => {
   const defaults = [
     'http://localhost:3000',
     'http://localhost:5173',
+    'http://localhost:5174',
     'https://www.newspulse.co.in',
     'https://newspulse.co.in',
     'https://admin.newspulse.co.in',
+    // Known Vercel deployments (prod)
+    'https://newspulse-admin-panel-real.vercel.app',
+    'https://newspulse-frontend-main.vercel.app',
   ];
 
   // Env can extend/override without breaking the required defaults.
@@ -333,6 +346,10 @@ const corsOptions = {
     if (!origin) return callback(null, true);
 
     if (allowedOrigins.includes(String(origin))) return callback(null, true);
+
+    // Allow specific Vercel apps (and their preview deploys)
+    if (_ADMIN_PANEL_VERCEL_REGEX.test(String(origin))) return callback(null, true);
+    if (_FRONTEND_MAIN_VERCEL_REGEX.test(String(origin))) return callback(null, true);
 
     const err = new Error('CORS blocked: ' + origin);
     err.status = 403;
@@ -1152,6 +1169,14 @@ app.use('/api', authOtpRoutes);
 app.use('/api/api', authOtpRoutes);
 // Documented/legacy admin path support: /api/admin/auth/otp/*
 app.use('/api/admin', authOtpRoutes);
+
+// JWT-based admin auth (Founder-only security endpoints)
+// Provides:
+// - POST /api/admin/auth/logout-all
+// - POST /api/admin/auth/change-password
+app.use('/api/admin', adminAuthV2Routes);
+app.use('/admin-api/admin', adminAuthV2Routes);
+app.use('/admin-api/api/admin', adminAuthV2Routes);
 // AI training info: public read endpoint (admin panel can read without login)
 for (const p of [
   '/system/ai-training-info',

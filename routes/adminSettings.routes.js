@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const { z } = require('zod');
 
 const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireAuth, requireFounder } = require('../middleware/requireAuth');
 const SystemSetting = require('../models/SystemSetting');
 
 const router = express.Router();
@@ -16,6 +17,17 @@ function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
 
+function dbStatusPayload() {
+  const readyState = typeof mongoose?.connection?.readyState === 'number' ? mongoose.connection.readyState : -1;
+  const connected = readyState === 1;
+  const name = connected && mongoose?.connection?.name ? String(mongoose.connection.name) : null;
+  return {
+    connected,
+    readyState,
+    ...(name ? { name } : {}),
+  };
+}
+
 function defaultAdminSettings() {
   return {
     // Keep the legacy placeholder key so older UIs don't break.
@@ -27,6 +39,45 @@ function defaultAdminSettings() {
 
 function defaultAdminPanelPayload() {
   return {};
+}
+
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+function deepMerge(...objs) {
+  const out = {};
+  for (const src of objs) {
+    if (!isPlainObject(src)) continue;
+    for (const [k, v] of Object.entries(src)) {
+      if (isPlainObject(v) && isPlainObject(out[k])) {
+        out[k] = deepMerge(out[k], v);
+      } else if (isPlainObject(v)) {
+        out[k] = deepMerge(v);
+      } else if (Array.isArray(v)) {
+        out[k] = v.slice();
+      } else {
+        out[k] = v;
+      }
+    }
+  }
+  return out;
+}
+
+function extractAdminPanelDraftPublished(settingsValue) {
+  const root = settingsValue && typeof settingsValue === 'object' ? settingsValue : {};
+  const ap = root.adminPanel && typeof root.adminPanel === 'object' ? root.adminPanel : null;
+
+  const draft = (ap && ap.draft && typeof ap.draft === 'object') ? ap.draft : (root.adminPanelDraft || null);
+  const published = (ap && ap.published && typeof ap.published === 'object') ? ap.published : (root.adminPanelPublished || null);
+
+  // If adminPanel is a flat object, treat it as published.
+  const fallbackPublished = (ap && !ap.draft && !ap.published && typeof ap === 'object') ? ap : {};
+
+  return {
+    draft: (draft && typeof draft === 'object') ? draft : {},
+    published: (published && typeof published === 'object') ? published : fallbackPublished,
+  };
 }
 
 function resolveAdminPanelPayloadForState(settingsValue, state) {
@@ -95,12 +146,18 @@ async function writeSetting(key, value, admin) {
 // GET /api/admin/settings
 router.get('/settings', requireAdminAuth, async (_req, res, next) => {
   try {
-    if (!isDbReady()) {
-      return res.status(503).json({ ok: false, success: false, status: 503, message: 'DB unavailable', path: _req.originalUrl });
-    }
     const fallback = defaultAdminSettings();
     const { value, updatedAt } = await readSetting(ADMIN_SETTINGS_KEY, fallback);
-    return res.status(200).json({ ok: true, success: true, status: 200, data: value, updatedAt });
+    const db = dbStatusPayload();
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: 200,
+      message: db.connected ? 'OK' : 'OK (DB unavailable)',
+      data: value,
+      updatedAt,
+      db,
+    });
   } catch (e) {
     console.error('[ADMIN_SETTINGS][get] failed', {
       message: e?.message || String(e),
@@ -118,11 +175,8 @@ router.get('/settings', requireAdminAuth, async (_req, res, next) => {
 
 // GET /api/admin/settings/admin-panel/preview?state=draft|published|effective
 // Read-only preview endpoint used by Admin Panel Settings → Preview tab.
-router.get('/settings/admin-panel/preview', requireAdminAuth, async (req, res, next) => {
+router.get('/settings/admin-panel/preview', requireAuth, requireFounder, async (req, res, next) => {
   try {
-    if (!isDbReady()) {
-      return res.status(503).json({ ok: false, success: false, status: 503, message: 'DB unavailable', path: req.originalUrl });
-    }
     const stateRaw = String(req.query.state || 'effective').toLowerCase();
     const allowed = new Set(['draft', 'published', 'effective']);
     if (!allowed.has(stateRaw)) {
@@ -138,25 +192,36 @@ router.get('/settings/admin-panel/preview', requireAdminAuth, async (req, res, n
     const fallback = defaultAdminSettings();
     const { value, updatedAt } = await readSetting(ADMIN_SETTINGS_KEY, fallback);
 
-    const payload = resolveAdminPanelPayloadForState(value, stateRaw);
+    const { draft, published } = extractAdminPanelDraftPublished(value);
+    const effective = deepMerge(defaultAdminPanelPayload(), published, draft);
+
+    const payload = stateRaw === 'draft' ? draft : (stateRaw === 'published' ? published : effective);
     const version =
       (value && typeof value === 'object' && typeof value.version === 'number' ? value.version : null)
       ?? (value && value.adminPanel && typeof value.adminPanel.version === 'number' ? value.adminPanel.version : null)
       ?? 1;
 
+    const db = dbStatusPayload();
     return res.status(200).json({
       ok: true,
       success: true,
       status: 200,
-      message: 'OK',
+      message: db.connected ? 'OK' : 'OK (DB unavailable)',
       state: stateRaw,
       version,
       updatedAt: updatedAt ? new Date(updatedAt).toISOString() : null,
+      draft,
+      published,
+      effective,
       payload,
+      db,
       data: {
         state: stateRaw,
         version,
         updatedAt: updatedAt ? new Date(updatedAt).toISOString() : null,
+        draft,
+        published,
+        effective,
         payload,
       },
     });
@@ -183,11 +248,8 @@ router.get('/settings/admin-panel/preview', requireAdminAuth, async (req, res, n
  *   curl -i "http://localhost:5000/api/admin/settings/preview?state=effective" \
  *     -H "Authorization: Bearer <token>"
  */
-router.get('/settings/preview', requireAdminAuth, async (req, res, next) => {
+router.get('/settings/preview', requireAuth, requireFounder, async (req, res, next) => {
   try {
-    if (!isDbReady()) {
-      return res.status(503).json({ ok: false, success: false, status: 503, message: 'DB unavailable', path: req.originalUrl });
-    }
     // Reuse the same behavior as /settings/admin-panel/preview
     req.url = '/settings/admin-panel/preview' + (req._parsedUrl && req._parsedUrl.search ? req._parsedUrl.search : '');
     return router.handle(req, res, next);
@@ -238,12 +300,18 @@ router.put('/settings', requireAdminAuth, async (req, res, next) => {
 // GET /api/admin/public-settings
 router.get('/public-settings', requireAdminAuth, async (_req, res, next) => {
   try {
-    if (!isDbReady()) {
-      return res.status(503).json({ ok: false, success: false, status: 503, message: 'DB unavailable', path: _req.originalUrl });
-    }
     const fallback = defaultPublicSettings();
     const { value, updatedAt } = await readSetting(PUBLIC_SETTINGS_KEY, fallback);
-    return res.status(200).json({ ok: true, success: true, status: 200, data: value, updatedAt });
+    const db = dbStatusPayload();
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: 200,
+      message: db.connected ? 'OK' : 'OK (DB unavailable)',
+      data: value,
+      updatedAt,
+      db,
+    });
   } catch (e) {
     console.error('[ADMIN_SETTINGS][get-public] failed', {
       message: e?.message || String(e),

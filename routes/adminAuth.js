@@ -50,14 +50,8 @@ router.post('/login', (req, res) => {
       ...(altEmail && altPass ? [{ email: altEmail, pass: altPass }] : []),
     ];
 
-    // Temporary hard-coded founder fallback (requested): newspulse.team@gmail.com / News@123
-    // This allows local + direct backend login even if env vars not yet configured.
-    // Remove once FOUNDER_EMAIL/FOUNDER_PASSWORD or FOUNDER_ALT_* are properly set in Render.
-    const staticFounderEmail = 'newspulse.team@gmail.com';
-    const staticFounderPass = 'News@123';
-    if (!allowedCombos.find(c => c.email === staticFounderEmail.toLowerCase())) {
-      allowedCombos.push({ email: staticFounderEmail.toLowerCase(), pass: staticFounderPass });
-    }
+    // Security note: do not hard-code credentials.
+    // Configure FOUNDER_EMAIL/FOUNDER_PASSWORD (and optionally FOUNDER_ALT_*) via environment variables.
 
     console.log('[admin/login] attempt', {
       origin,

@@ -2,7 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 
 const AuditLog = require('../models/AuditLog');
-const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireAuth, requireFounder } = require('../middleware/requireAuth');
 
 const router = express.Router();
 
@@ -16,6 +16,13 @@ function bad(res, status, message, code = null) {
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
+}
+
+function extractTargetUserId(d) {
+  if (d && d.meta && typeof d.meta === 'object' && d.meta.targetUserId) return String(d.meta.targetUserId);
+  const key = d && d.key ? String(d.key) : '';
+  if (key.startsWith('user:')) return key.slice(5) || null;
+  return null;
 }
 
 function hasPermission(req, perm) {
@@ -34,7 +41,7 @@ function requireFounderOrPermission(perm) {
 }
 
 // GET /api/admin/audit/logs?limit=50
-router.get('/audit/logs', requireAdminAuth, async (req, res) => {
+router.get('/audit/logs', requireAuth, requireFounder, async (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 200);
 
   if (!isDbReady()) {
@@ -57,6 +64,9 @@ router.get('/audit/logs', requireAdminAuth, async (req, res) => {
     action: d.action,
     key: d.key ?? null,
     actor: d.actor ?? null,
+    actorUserId: d.actor && d.actor.id ? String(d.actor.id) : null,
+    actorEmail: d.actor && d.actor.email ? String(d.actor.email) : null,
+    targetUserId: extractTargetUserId(d),
     ip: d.ip ?? null,
     userAgent: d.userAgent ?? null,
     meta: d.meta ?? null,
@@ -66,8 +76,10 @@ router.get('/audit/logs', requireAdminAuth, async (req, res) => {
   const events = (docs || []).map((d) => ({
     _id: String(d._id),
     at: d.createdAt ? new Date(d.createdAt).toISOString() : null,
+    actorUserId: d.actor && d.actor.id ? String(d.actor.id) : null,
     actorEmail: d.actor && d.actor.email ? String(d.actor.email) : null,
     action: d.action || null,
+    targetUserId: extractTargetUserId(d),
     meta: d.meta ?? {},
   }));
 
@@ -84,7 +96,7 @@ router.get('/audit/logs', requireAdminAuth, async (req, res) => {
 
 // GET /api/admin/audit?limit=50
 // Admin Panel compatibility: older/newer UIs call /api/admin/audit (not /audit/logs)
-router.get('/audit', requireAdminAuth, async (req, res) => {
+router.get('/audit', requireAuth, requireFounder, async (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 200);
 
   if (!isDbReady()) {
@@ -102,8 +114,10 @@ router.get('/audit', requireAdminAuth, async (req, res) => {
   const events = (docs || []).map((d) => ({
     _id: String(d._id),
     at: d.createdAt ? new Date(d.createdAt).toISOString() : null,
+    actorUserId: d.actor && d.actor.id ? String(d.actor.id) : null,
     actorEmail: d.actor && d.actor.email ? String(d.actor.email) : null,
     action: d.action || null,
+    targetUserId: extractTargetUserId(d),
     meta: d.meta ?? {},
   }));
 
@@ -118,13 +132,13 @@ router.get('/audit', requireAdminAuth, async (req, res) => {
 });
 
 // Alias: some admin builds call /api/admin/audit-logs?limit=50
-router.get('/audit-logs', requireAdminAuth, async (req, res) => {
+router.get('/audit-logs', requireAuth, requireFounder, async (req, res) => {
   req.url = '/audit' + (req._parsedUrl && req._parsedUrl.search ? req._parsedUrl.search : '');
   return router.handle(req, res);
 });
 
 // Alias: some admin builds call /api/admin/audit/events?limit=50
-router.get('/audit/events', requireAdminAuth, async (req, res) => {
+router.get('/audit/events', requireAuth, requireFounder, async (req, res) => {
   req.url = '/audit' + (req._parsedUrl && req._parsedUrl.search ? req._parsedUrl.search : '');
   return router.handle(req, res);
 });

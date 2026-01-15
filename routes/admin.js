@@ -5,6 +5,9 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const bcrypt = require('bcrypt');
+
+const User = require('../models/User');
 
 const router = express.Router();
 
@@ -129,58 +132,114 @@ router.post('/login', (req, res, next) => {
   if (email.toLowerCase() === adminEmail.toLowerCase() && password === adminPassword) {
     console.info(`ADMIN LOGIN SUCCESS email=${email} ip=${ip}`);
 
-    const token = jwt.sign(
-      { sub: founderId, email: adminEmail, name: founderName, role: 'founder' },
-      jwtSecret,
-      { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' },
-    );
+    const dbReady = mongoose.connection && mongoose.connection.readyState === 1;
+    const issueToken = async () => {
+      // If DB is available, ensure a real User document exists so JWT-based auth
+      // (requireAuth + tokenVersion checks) works for founder-only admin endpoints.
+      if (dbReady) {
+        const rounds = parseInt(process.env.PASSWORD_HASH_ROUNDS || '10', 10);
+        const ensured = await User.findOneAndUpdate(
+          { email: adminEmail.toLowerCase() },
+          {
+            $setOnInsert: {
+              email: adminEmail.toLowerCase(),
+              name: founderName,
+              passwordHash: await bcrypt.hash(adminPassword, rounds),
+              role: 'founder',
+              status: 'active',
+              tokenVersion: 0,
+              mustChangePassword: false,
+              createdAt: new Date(),
+            },
+            $set: {
+              role: 'founder',
+              status: 'active',
+              lastLoginAt: new Date(),
+            },
+          },
+          { upsert: true, new: true },
+        );
 
-    // Cookies:
-    // - `np_admin` is a legacy identifier cookie (email) for older admin builds.
-    // - `np_admin_token` is an httpOnly JWT cookie so session probes like GET /admin-api/admin/me
-    //   can work behind Vercel without the client explicitly attaching Authorization headers.
-    const isProd = String(process.env.NODE_ENV || 'development').toLowerCase() === 'production'
-      || !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
-    const cookieSameSite = isProd ? 'none' : (process.env.ADMIN_COOKIE_SAMESITE || 'lax');
-    const cookieSecure = isProd ? true : (String(process.env.ADMIN_COOKIE_SECURE || '').trim() === '1');
-    // In production, set an explicit cookie domain so auth survives subdomain/proxy differences
-    // (e.g. admin.newspulse.co.in UI talking to www.newspulse.co.in/admin-api, or Vercel rewrites).
-    const cookieDomain = isProd ? (process.env.ADMIN_COOKIE_DOMAIN || '.newspulse.co.in') : undefined;
-    try {
-      res.cookie('np_admin', adminEmail, {
-        path: '/',
-        sameSite: cookieSameSite,
-        secure: cookieSecure,
-        ...(cookieDomain ? { domain: cookieDomain } : {}),
-        maxAge: 7 * 24 * 60 * 60 * 1000,
+        return jwt.sign(
+          {
+            sub: String(ensured._id),
+            userId: String(ensured._id),
+            email: ensured.email,
+            name: ensured.name,
+            role: 'founder',
+            tokenVersion: typeof ensured.tokenVersion === 'number' ? ensured.tokenVersion : 0,
+            type: 'access',
+          },
+          jwtSecret,
+          { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' },
+        );
+      }
+
+      // DB unavailable: fall back to payload-only auth.
+      // requireAuth is designed to accept payload-only when DB is down.
+      return jwt.sign(
+        { sub: founderId, email: adminEmail, name: founderName, role: 'founder', tokenVersion: 0, type: 'access' },
+        jwtSecret,
+        { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' },
+      );
+    };
+
+    Promise.resolve()
+      .then(issueToken)
+      .then((token) => {
+        // Cookies:
+        // - `np_admin` is a legacy identifier cookie (email) for older admin builds.
+        // - `np_admin_token` is an httpOnly JWT cookie so session probes like GET /admin-api/admin/me
+        //   can work behind Vercel without the client explicitly attaching Authorization headers.
+        const isProd = String(process.env.NODE_ENV || 'development').toLowerCase() === 'production'
+          || !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
+        const cookieSameSite = isProd ? 'none' : (process.env.ADMIN_COOKIE_SAMESITE || 'lax');
+        const cookieSecure = isProd ? true : (String(process.env.ADMIN_COOKIE_SECURE || '').trim() === '1');
+        // In production, set an explicit cookie domain so auth survives subdomain/proxy differences
+        // (e.g. admin.newspulse.co.in UI talking to www.newspulse.co.in/admin-api, or Vercel rewrites).
+        const cookieDomain = isProd ? (process.env.ADMIN_COOKIE_DOMAIN || '.newspulse.co.in') : undefined;
+        try {
+          res.cookie('np_admin', adminEmail, {
+            path: '/',
+            sameSite: cookieSameSite,
+            secure: cookieSecure,
+            ...(cookieDomain ? { domain: cookieDomain } : {}),
+            maxAge: 7 * 24 * 60 * 60 * 1000,
+          });
+
+          res.cookie('np_admin_token', token, {
+            httpOnly: true,
+            path: '/',
+            sameSite: cookieSameSite,
+            secure: cookieSecure,
+            ...(cookieDomain ? { domain: cookieDomain } : {}),
+            maxAge: 2 * 60 * 60 * 1000,
+          });
+        } catch (_) {
+          // Fallback header if res.cookie isn't available for any reason.
+          const sameSiteHdr = isProd ? 'None' : String(cookieSameSite).toLowerCase() === 'none' ? 'None' : 'Lax';
+          const secureHdr = cookieSecure ? '; Secure' : '';
+          const domainHdr = cookieDomain ? `; Domain=${cookieDomain}` : '';
+          res.setHeader('Set-Cookie', `np_admin=${encodeURIComponent(adminEmail)}; Path=/; SameSite=${sameSiteHdr}${secureHdr}${domainHdr}`);
+        }
+
+        return res.json({
+          ok: true,
+          token,
+          user: {
+            id: 'founder',
+            email: adminEmail,
+            name: founderName,
+            role: 'founder',
+          },
+        });
+      })
+      .catch((e) => {
+        console.error('[admin/login] failed to issue token', e?.message || e);
+        return res.status(500).json({ ok: false, message: 'Login failed' });
       });
 
-      res.cookie('np_admin_token', token, {
-        httpOnly: true,
-        path: '/',
-        sameSite: cookieSameSite,
-        secure: cookieSecure,
-        ...(cookieDomain ? { domain: cookieDomain } : {}),
-        maxAge: 2 * 60 * 60 * 1000,
-      });
-    } catch (_) {
-      // Fallback header if res.cookie isn't available for any reason.
-      const sameSiteHdr = isProd ? 'None' : String(cookieSameSite).toLowerCase() === 'none' ? 'None' : 'Lax';
-      const secureHdr = cookieSecure ? '; Secure' : '';
-      const domainHdr = cookieDomain ? `; Domain=${cookieDomain}` : '';
-      res.setHeader('Set-Cookie', `np_admin=${encodeURIComponent(adminEmail)}; Path=/; SameSite=${sameSiteHdr}${secureHdr}${domainHdr}`);
-    }
-
-    return res.json({
-      ok: true,
-      token,
-      user: {
-        id: founderId,
-        email: adminEmail,
-        name: founderName,
-        role: 'founder',
-      },
-    });
+    return;
   }
 
   console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=invalid-credentials`);

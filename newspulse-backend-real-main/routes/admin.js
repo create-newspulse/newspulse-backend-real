@@ -65,37 +65,34 @@ router.post('/login', (req, res) => {
 
   recordAttempt(ip);
 
-  const founderEmail = process.env.FOUNDER_EMAIL || '';
-  const founderPassword = process.env.FOUNDER_PASSWORD || '';
+  const adminEmail = String(process.env.ADMIN_EMAIL || '').trim();
+  const adminPassword = String(process.env.ADMIN_PASSWORD || '').trim();
   const founderName = process.env.FOUNDER_NAME || 'Founder';
   const founderId = process.env.FOUNDER_ID || 'founder-001';
+  const jwtSecret = String(process.env.JWT_SECRET || '').trim();
 
-  if (!founderEmail || !founderPassword) {
+  if (!adminEmail || !adminPassword || !jwtSecret) {
     console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=not-configured`);
-    return res
-      .status(500)
-      .json({ ok: false, message: 'Admin credentials not configured' });
+    return res.status(500).json({ ok: false, message: 'Admin credentials not configured' });
   }
 
-  if (email.toLowerCase() === founderEmail.toLowerCase() && password === founderPassword) {
+  if (email.toLowerCase() === adminEmail.toLowerCase() && password === adminPassword) {
     console.info(`ADMIN LOGIN SUCCESS email=${email} ip=${ip}`);
-
-    const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
     const token = jwt.sign(
-      { sub: founderId, email: founderEmail, name: founderName, role: 'founder' },
-      secret,
+      { sub: founderId, email: adminEmail, name: founderName, role: 'founder' },
+      jwtSecret,
       { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' },
     );
 
     // Optional legacy cookie
-    res.setHeader('Set-Cookie', `np_admin=${encodeURIComponent(founderEmail)}; Path=/; SameSite=Lax`);
+    res.setHeader('Set-Cookie', `np_admin=${encodeURIComponent(adminEmail)}; Path=/; SameSite=Lax`);
 
     return res.json({
       ok: true,
       token,
       user: {
         id: founderId,
-        email: founderEmail,
+        email: adminEmail,
         name: founderName,
         role: 'founder',
       },
@@ -103,7 +100,18 @@ router.post('/login', (req, res) => {
   }
 
   console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=invalid-credentials`);
-  return res.status(401).json({ ok: false, message: 'Invalid credentials' });
+  return res.status(401).json({ ok: false, message: 'Invalid admin credentials' });
+});
+
+// POST /api/admin/logout
+router.post('/logout', (_req, res) => {
+  try {
+    res.clearCookie('np_admin', { path: '/' });
+    res.clearCookie('np_admin_token', { path: '/' });
+    res.clearCookie('np_admin_email', { path: '/' });
+    res.clearCookie('np_admin_session', { path: '/' });
+  } catch (_) {}
+  return res.status(200).json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -116,6 +124,24 @@ router.get('/health', (req, res) => {
     uptime: parseFloat(process.uptime().toFixed(2)),
     timestamp: new Date().toISOString(),
     env: process.env.NODE_ENV || 'development',
+  });
+});
+
+// Protect everything below
+router.use(requireAdminAuth);
+
+// GET /api/admin/me
+router.get('/me', (req, res) => {
+  const a = req.admin || null;
+  if (!a) return res.status(401).json({ ok: false, message: 'Unauthorized' });
+  return res.status(200).json({
+    ok: true,
+    authenticated: true,
+    admin: {
+      id: a.id || 'unknown',
+      email: a.email || '',
+      role: String(a.role || '').toLowerCase(),
+    },
   });
 });
 

@@ -4,7 +4,7 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 
 const User = require('../models/User');
-const { requireAdminAuth, requireFounderAuth } = require('../middleware/adminAuth');
+const { requireAuth, requireFounder } = require('../middleware/requireAuth');
 const { logAudit } = require('../lib/audit');
 
 const router = express.Router();
@@ -21,21 +21,6 @@ function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
 
-function hasPermission(req, perm) {
-  const role = String(req.admin?.role || '').toLowerCase();
-  if (role === 'founder') return true;
-  const permissions = Array.isArray(req.admin?.permissions) ? req.admin.permissions : [];
-  return permissions.includes(perm);
-}
-
-function requireFounderOrPermission(perm) {
-  return (req, res, next) => {
-    if (!req.admin) return bad(res, 401, 'Unauthorized', 'UNAUTHORIZED');
-    if (!hasPermission(req, perm)) return bad(res, 403, 'Forbidden', 'FORBIDDEN');
-    return next();
-  };
-}
-
 function teamUserSafeDto(u) {
   return {
     _id: String(u._id),
@@ -47,7 +32,8 @@ function teamUserSafeDto(u) {
     permissions: Array.isArray(u.permissions) ? u.permissions : [],
     status: u.status || 'active',
     createdAt: u.createdAt || null,
-    updatedAt: u.updatedAt || null,
+    lastLoginAt: u.lastLoginAt || null,
+    mustChangePassword: Boolean(u.mustChangePassword || u.mustResetPassword || u.forceReset),
   };
 }
 
@@ -62,7 +48,7 @@ function userDto(u) {
     permissions: Array.isArray(u.permissions) ? u.permissions : [],
     createdAt: u.createdAt || null,
     lastLoginAt: u.lastLoginAt || null,
-    mustResetPassword: Boolean(u.mustResetPassword || u.mustChangePassword || u.forceReset),
+    mustChangePassword: Boolean(u.mustChangePassword || u.mustResetPassword || u.forceReset),
   };
 }
 
@@ -92,14 +78,36 @@ function generateTempPassword() {
   return crypto.randomBytes(18).toString('base64url');
 }
 
+async function setTempPasswordAndForceChange(userId) {
+  const tempPassword = generateTempPassword();
+  const rounds = parseInt(process.env.PASSWORD_HASH_ROUNDS || '10', 10);
+  const passwordHash = await bcrypt.hash(tempPassword, rounds);
+
+  const updated = await User.findByIdAndUpdate(
+    userId,
+    {
+      $set: {
+        passwordHash,
+        mustResetPassword: true,
+        mustChangePassword: true,
+        forceReset: true,
+      },
+      $inc: { tokenVersion: 1 },
+    },
+    { new: true },
+  );
+
+  return { updated, tempPassword };
+}
+
 // GET /api/admin/team/users
-router.get('/team/users', requireAdminAuth, async (_req, res) => {
+router.get('/team/users', requireAuth, requireFounder, async (_req, res) => {
   if (!isDbReady()) {
     return res.status(200).json({
       ok: true,
       success: true,
       status: 200,
-      message: 'OK',
+      message: 'OK (DB unavailable)',
       data: { users: [] },
       users: [],
     });
@@ -122,7 +130,7 @@ router.get('/team/users', requireAdminAuth, async (_req, res) => {
 
 // POST /api/admin/team/users
 // Founder-only: creates user and returns one-time tempPassword
-router.post('/team/users', requireFounderAuth, async (req, res) => {
+router.post('/team/users', requireAuth, requireFounder, async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
@@ -154,12 +162,12 @@ router.post('/team/users', requireFounderAuth, async (req, res) => {
     mustChangePassword: true,
     forceReset: true,
     tokenVersion: 0,
-    createdBy: mongoose.isValidObjectId(req.admin?.id) ? req.admin.id : null,
-    updatedBy: mongoose.isValidObjectId(req.admin?.id) ? req.admin.id : null,
+    createdBy: mongoose.isValidObjectId(req.user?.id) ? req.user.id : null,
+    updatedBy: mongoose.isValidObjectId(req.user?.id) ? req.user.id : null,
     createdAt: new Date(),
   });
 
-  await logAudit(req, 'TEAM_CREATE', String(created._id), { email, role });
+  await logAudit(req, 'TEAM_CREATE_USER', String(created._id), { email, role });
 
   return res.status(201).json({
     ok: true,
@@ -167,6 +175,43 @@ router.post('/team/users', requireFounderAuth, async (req, res) => {
     status: 201,
     data: { user: userDto(created), tempPassword },
   });
+});
+
+// PATCH /api/admin/team/users/:id
+// Founder-only: updates role/designation/permissions/fullName
+router.patch('/team/users/:id', requireAuth, requireFounder, async (req, res) => {
+  if (!isDbReady()) return bad(res, 503, 'Database unavailable');
+
+  const { id } = req.params;
+  if (!mongoose.isValidObjectId(id)) return bad(res, 400, 'Invalid id');
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+
+  const patch = {};
+  if (body.fullName != null || body.name != null) {
+    const fullName = String(body.fullName || body.name || '').trim();
+    if (!fullName) return bad(res, 400, 'fullName is required');
+    patch.name = fullName;
+  }
+  if (body.role != null) {
+    const role = normalizeRole(body.role);
+    if (!role) return bad(res, 400, 'Invalid role');
+    patch.role = role;
+  }
+  if (body.designation !== undefined) {
+    patch.designation = body.designation != null ? String(body.designation || '').trim() : null;
+  }
+  if (body.permissions !== undefined) {
+    patch.permissions = normalizePermissions(body.permissions);
+  }
+
+  patch.updatedBy = mongoose.isValidObjectId(req.user?.id) ? req.user.id : null;
+
+  const updated = await User.findByIdAndUpdate(id, { $set: patch }, { new: true });
+  if (!updated) return bad(res, 404, 'Not found');
+
+  await logAudit(req, 'TEAM_UPDATE_USER', id, { fields: Object.keys(patch).filter(k => k !== 'updatedBy') });
+  return ok(res, { user: userDto(updated) });
 });
 
 function normalizeStatus(value) {
@@ -177,7 +222,7 @@ function normalizeStatus(value) {
 
 // PATCH /api/admin/team/users/:id/status  body: { status: 'active'|'suspended' }
 // Founder-only
-router.patch('/team/users/:id/status', requireFounderAuth, async (req, res) => {
+router.patch('/team/users/:id/status', requireAuth, requireFounder, async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
@@ -195,12 +240,12 @@ router.patch('/team/users/:id/status', requireFounderAuth, async (req, res) => {
 
   if (!updated) return bad(res, 404, 'Not found');
 
-  await logAudit(req, status === 'active' ? 'TEAM_ACTIVATE' : 'TEAM_SUSPEND', id, null);
+  await logAudit(req, status === 'active' ? 'TEAM_ACTIVATE_USER' : 'TEAM_SUSPEND_USER', id, null);
   return ok(res, { user: userDto(updated) });
 });
 
-// PATCH /api/admin/team/users/:id/activate
-router.patch('/team/users/:id/activate', requireFounderAuth, async (req, res) => {
+// POST /api/admin/team/users/:id/activate
+router.post('/team/users/:id/activate', requireAuth, requireFounder, async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
@@ -213,12 +258,12 @@ router.patch('/team/users/:id/activate', requireFounderAuth, async (req, res) =>
   );
 
   if (!updated) return bad(res, 404, 'Not found');
-  await logAudit(req, 'TEAM_ACTIVATE', id, null);
+  await logAudit(req, 'TEAM_ACTIVATE_USER', id, null);
   return ok(res, { user: userDto(updated) });
 });
 
-// PATCH /api/admin/team/users/:id/suspend
-router.patch('/team/users/:id/suspend', requireFounderAuth, async (req, res) => {
+// POST /api/admin/team/users/:id/suspend
+router.post('/team/users/:id/suspend', requireAuth, requireFounder, async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
@@ -231,27 +276,35 @@ router.patch('/team/users/:id/suspend', requireFounderAuth, async (req, res) => 
   );
 
   if (!updated) return bad(res, 404, 'Not found');
-  await logAudit(req, 'TEAM_SUSPEND', id, null);
+  await logAudit(req, 'TEAM_SUSPEND_USER', id, null);
   return ok(res, { user: userDto(updated) });
 });
 
 // POST /api/admin/team/users/:id/force-reset
-router.post('/team/users/:id/force-reset', requireFounderAuth, async (req, res) => {
+router.post('/team/users/:id/force-reset', requireAuth, requireFounder, async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
   if (!mongoose.isValidObjectId(id)) return bad(res, 400, 'Invalid id');
 
-  const updated = await User.findByIdAndUpdate(
-    id,
-    { $set: { mustResetPassword: true, mustChangePassword: true, forceReset: true }, $inc: { tokenVersion: 1 } },
-    { new: true },
-  );
-
+  const { updated, tempPassword } = await setTempPasswordAndForceChange(id);
   if (!updated) return bad(res, 404, 'Not found');
-  await logAudit(req, 'TEAM_FORCE_RESET', id, null);
 
-  return ok(res, { ok: true });
+  await logAudit(req, 'TEAM_FORCE_RESET', id, null);
+  return ok(res, { user: userDto(updated), tempPassword });
+});
+
+// Backward-compat aliases (older UIs used PATCH instead of POST)
+router.patch('/team/users/:id/activate', requireAuth, requireFounder, (req, res) => {
+  req.method = 'POST';
+  req.url = `/team/users/${req.params.id}/activate`;
+  return router.handle(req, res);
+});
+
+router.patch('/team/users/:id/suspend', requireAuth, requireFounder, (req, res) => {
+  req.method = 'POST';
+  req.url = `/team/users/${req.params.id}/suspend`;
+  return router.handle(req, res);
 });
 
 module.exports = router;
