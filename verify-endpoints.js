@@ -77,6 +77,28 @@ async function getAdminToken() {
   await check('/api/admin/settings/preview?state=effective', 401, 'Settings preview (should be 401 w/o token)');
   await check('/api/admin/settings/admin-panel/preview?state=effective', 401, 'Admin panel preview (should be 401 w/o token)');
 
+  // Owner bootstrap endpoint (should be 401 without key, 200 with key)
+  const ownerKey = String(process.env.OWNER_BOOTSTRAP_KEY || '').trim();
+  if (ownerKey) {
+    const noKeyRes = await requestJson({
+      method: 'POST',
+      path: '/api/admin/bootstrap-founder',
+      body: { email: 'bootstrap@example.com', password: 'Password123!', fullName: 'Bootstrap Founder' },
+    });
+    console.log(`Bootstrap founder (no key): ${noKeyRes.status === 401 ? '✅' : '❌'} (HTTP ${noKeyRes.status})`);
+
+    const withKeyRes = await requestJson({
+      method: 'POST',
+      path: '/api/admin/bootstrap-founder',
+      headers: { 'x-owner-key': ownerKey },
+      body: { email: 'bootstrap@example.com', password: 'Password123!', fullName: 'Bootstrap Founder' },
+    });
+    console.log(`Bootstrap founder (with key): ${withKeyRes.status === 200 ? '✅' : '❌'} (HTTP ${withKeyRes.status})`);
+    if (withKeyRes.status !== 200) console.log('  Response:', withKeyRes.raw);
+  } else {
+    console.log('[SKIP] OWNER_BOOTSTRAP_KEY not set; skipping bootstrap-founder checks');
+  }
+
   const auth = await getAdminToken();
   if (!auth || !auth.token) {
     console.log('Team users (should be 200 w/ token): ⏭️  (skipped) Set ADMIN_TOKEN or ADMIN_EMAIL+ADMIN_PASSWORD');

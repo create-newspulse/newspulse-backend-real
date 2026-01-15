@@ -8,6 +8,21 @@ const SystemSetting = require('../models/SystemSetting');
 
 const router = express.Router();
 
+function hasPermission(req, perm) {
+  const role = String(req.user?.role || '').toLowerCase();
+  if (role === 'founder') return true;
+  const permissions = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
+  return permissions.includes(perm);
+}
+
+function requireFounderOrPermission(perm) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+    if (!hasPermission(req, perm)) return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' });
+    return next();
+  };
+}
+
 const AnyObjectSchema = z.record(z.any());
 
 const ADMIN_SETTINGS_KEY = 'settings_center_admin';
@@ -175,7 +190,7 @@ router.get('/settings', requireAdminAuth, async (_req, res, next) => {
 
 // GET /api/admin/settings/admin-panel/preview?state=draft|published|effective
 // Read-only preview endpoint used by Admin Panel Settings → Preview tab.
-router.get('/settings/admin-panel/preview', requireAuth, requireFounder, async (req, res, next) => {
+router.get('/settings/admin-panel/preview', requireAuth, requireFounderOrPermission('settings.read'), async (req, res, next) => {
   try {
     const stateRaw = String(req.query.state || 'effective').toLowerCase();
     const allowed = new Set(['draft', 'published', 'effective']);
@@ -248,7 +263,7 @@ router.get('/settings/admin-panel/preview', requireAuth, requireFounder, async (
  *   curl -i "http://localhost:5000/api/admin/settings/preview?state=effective" \
  *     -H "Authorization: Bearer <token>"
  */
-router.get('/settings/preview', requireAuth, requireFounder, async (req, res, next) => {
+router.get('/settings/preview', requireAuth, requireFounderOrPermission('settings.read'), async (req, res, next) => {
   try {
     // Reuse the same behavior as /settings/admin-panel/preview
     req.url = '/settings/admin-panel/preview' + (req._parsedUrl && req._parsedUrl.search ? req._parsedUrl.search : '');

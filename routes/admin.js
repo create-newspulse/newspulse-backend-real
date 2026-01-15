@@ -65,7 +65,7 @@ function recordAttempt(ip) {
 // ─────────────────────────────────────────────
 
 // POST /api/admin/login
-router.post('/login', (req, res, next) => {
+router.post('/login', async (req, res, next) => {
   // IMPORTANT: this router is also mounted at /admin in server.js.
   // /admin/login is handled by a dedicated legacy handler in server.js for tests.
   // We must allow this request to fall through without being blocked by auth middleware.
@@ -86,7 +86,7 @@ router.post('/login', (req, res, next) => {
 
   recordAttempt(ip);
 
-  // Supported env vars for admin login:
+  // Supported env vars for admin login (fallback when DB auth is unavailable):
   // Preferred:
   // - ADMIN_EMAIL / ADMIN_PASSWORD / JWT_SECRET
   // Backward-compat:
@@ -106,33 +106,95 @@ router.post('/login', (req, res, next) => {
 
   const debugLogin = String(process.env.ADMIN_LOGIN_DEBUG || '').trim() === '1';
 
-  if (!adminEmail || !adminPassword) {
-    console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=not-configured`);
-    return res.status(500).json({
-      ok: false,
-      message: 'Admin credentials not configured',
-      ...(debugLogin ? {
-        debug: {
-          hasAdminEmail: !!String(process.env.ADMIN_EMAIL || '').trim(),
-          hasFounderEmail: !!String(process.env.FOUNDER_EMAIL || '').trim(),
-          hasAdminPassword: !!String(process.env.ADMIN_PASSWORD || '').trim(),
-          hasAdminPass: !!String(process.env.ADMIN_PASS || '').trim(),
-          hasFounderPassword: !!String(process.env.FOUNDER_PASSWORD || '').trim(),
-          hasFounderPass: !!String(process.env.FOUNDER_PASS || '').trim(),
-        },
-      } : {}),
-    });
-  }
-
   if (!jwtSecret) {
     console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=missing-jwt-secret`);
     return res.status(500).json({ ok: false, message: 'JWT_SECRET missing' });
   }
 
-  if (email.toLowerCase() === adminEmail.toLowerCase() && password === adminPassword) {
-    console.info(`ADMIN LOGIN SUCCESS email=${email} ip=${ip}`);
+  const dbReady = mongoose.connection && mongoose.connection.readyState === 1;
 
-    const dbReady = mongoose.connection && mongoose.connection.readyState === 1;
+  const signForUser = (u) => {
+    const tokenVersion = typeof u.tokenVersion === 'number' ? u.tokenVersion : 0;
+    return jwt.sign(
+      {
+        sub: String(u._id),
+        userId: String(u._id),
+        email: u.email,
+        name: u.name,
+        role: String(u.role || 'staff').toLowerCase(),
+        tokenVersion,
+        type: 'access',
+      },
+      jwtSecret,
+      { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' },
+    );
+  };
+
+  const setLoginCookies = (token, effectiveEmail) => {
+    const isProd = String(process.env.NODE_ENV || 'development').toLowerCase() === 'production'
+      || !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
+    const cookieSameSite = isProd ? 'none' : (process.env.ADMIN_COOKIE_SAMESITE || 'lax');
+    const cookieSecure = isProd ? true : (String(process.env.ADMIN_COOKIE_SECURE || '').trim() === '1');
+    const cookieDomain = isProd ? (process.env.ADMIN_COOKIE_DOMAIN || '.newspulse.co.in') : undefined;
+    try {
+      res.cookie('np_admin', effectiveEmail, {
+        path: '/',
+        sameSite: cookieSameSite,
+        secure: cookieSecure,
+        ...(cookieDomain ? { domain: cookieDomain } : {}),
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+      });
+
+      res.cookie('np_admin_token', token, {
+        httpOnly: true,
+        path: '/',
+        sameSite: cookieSameSite,
+        secure: cookieSecure,
+        ...(cookieDomain ? { domain: cookieDomain } : {}),
+        maxAge: 2 * 60 * 60 * 1000,
+      });
+    } catch (_) {
+      const sameSiteHdr = isProd ? 'None' : String(cookieSameSite).toLowerCase() === 'none' ? 'None' : 'Lax';
+      const secureHdr = cookieSecure ? '; Secure' : '';
+      const domainHdr = cookieDomain ? `; Domain=${cookieDomain}` : '';
+      res.setHeader('Set-Cookie', `np_admin=${encodeURIComponent(effectiveEmail)}; Path=/; SameSite=${sameSiteHdr}${secureHdr}${domainHdr}`);
+    }
+  };
+
+  // Primary path: DB-backed user login (works with bootstrap-founder).
+  if (dbReady) {
+    try {
+      const u = await User.findOne({ email: email.toLowerCase() });
+      if (u) {
+        if (u.status === 'suspended') {
+          return res.status(403).json({ ok: false, message: 'Account suspended' });
+        }
+        if (u.passwordHash) {
+          const okPw = await bcrypt.compare(password, u.passwordHash);
+          if (okPw) {
+            u.lastLoginAt = new Date();
+            await u.save();
+
+            const token = signForUser(u);
+            setLoginCookies(token, u.email);
+            return res.json({
+              ok: true,
+              token,
+              user: { id: String(u._id), email: u.email, name: u.name || '', role: String(u.role || 'staff').toLowerCase() },
+            });
+          }
+        }
+      }
+      // Fall through to env login check.
+    } catch (e) {
+      console.error('[admin/login] db auth failed', e?.message || e);
+      return res.status(500).json({ ok: false, message: 'Login failed' });
+    }
+  }
+
+  // Fallback path: env-based founder login (DB down / maintenance).
+  if (adminEmail && adminPassword && email.toLowerCase() === adminEmail.toLowerCase() && password === adminPassword) {
+    console.info(`ADMIN LOGIN SUCCESS email=${email} ip=${ip}`);
     const issueToken = async () => {
       // If DB is available, ensure a real User document exists so JWT-based auth
       // (requireAuth + tokenVersion checks) works for founder-only admin endpoints.
@@ -190,41 +252,7 @@ router.post('/login', (req, res, next) => {
     Promise.resolve()
       .then(issueToken)
       .then((token) => {
-        // Cookies:
-        // - `np_admin` is a legacy identifier cookie (email) for older admin builds.
-        // - `np_admin_token` is an httpOnly JWT cookie so session probes like GET /admin-api/admin/me
-        //   can work behind Vercel without the client explicitly attaching Authorization headers.
-        const isProd = String(process.env.NODE_ENV || 'development').toLowerCase() === 'production'
-          || !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
-        const cookieSameSite = isProd ? 'none' : (process.env.ADMIN_COOKIE_SAMESITE || 'lax');
-        const cookieSecure = isProd ? true : (String(process.env.ADMIN_COOKIE_SECURE || '').trim() === '1');
-        // In production, set an explicit cookie domain so auth survives subdomain/proxy differences
-        // (e.g. admin.newspulse.co.in UI talking to www.newspulse.co.in/admin-api, or Vercel rewrites).
-        const cookieDomain = isProd ? (process.env.ADMIN_COOKIE_DOMAIN || '.newspulse.co.in') : undefined;
-        try {
-          res.cookie('np_admin', adminEmail, {
-            path: '/',
-            sameSite: cookieSameSite,
-            secure: cookieSecure,
-            ...(cookieDomain ? { domain: cookieDomain } : {}),
-            maxAge: 7 * 24 * 60 * 60 * 1000,
-          });
-
-          res.cookie('np_admin_token', token, {
-            httpOnly: true,
-            path: '/',
-            sameSite: cookieSameSite,
-            secure: cookieSecure,
-            ...(cookieDomain ? { domain: cookieDomain } : {}),
-            maxAge: 2 * 60 * 60 * 1000,
-          });
-        } catch (_) {
-          // Fallback header if res.cookie isn't available for any reason.
-          const sameSiteHdr = isProd ? 'None' : String(cookieSameSite).toLowerCase() === 'none' ? 'None' : 'Lax';
-          const secureHdr = cookieSecure ? '; Secure' : '';
-          const domainHdr = cookieDomain ? `; Domain=${cookieDomain}` : '';
-          res.setHeader('Set-Cookie', `np_admin=${encodeURIComponent(adminEmail)}; Path=/; SameSite=${sameSiteHdr}${secureHdr}${domainHdr}`);
-        }
+        setLoginCookies(token, adminEmail);
 
         return res.json({
           ok: true,

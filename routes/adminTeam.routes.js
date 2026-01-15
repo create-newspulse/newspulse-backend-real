@@ -9,6 +9,21 @@ const { logAudit } = require('../lib/audit');
 
 const router = express.Router();
 
+function hasPermission(req, perm) {
+  const role = String(req.user?.role || '').toLowerCase();
+  if (role === 'founder') return true;
+  const permissions = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
+  return permissions.includes(perm);
+}
+
+function requireFounderOrPermission(perm) {
+  return (req, res, next) => {
+    if (!req.user) return bad(res, 401, 'Unauthorized', 'UNAUTHORIZED');
+    if (!hasPermission(req, perm)) return bad(res, 403, 'Forbidden', 'FORBIDDEN');
+    return next();
+  };
+}
+
 function ok(res, data) {
   return res.status(200).json({ ok: true, success: true, status: 200, data });
 }
@@ -101,7 +116,7 @@ async function setTempPasswordAndForceChange(userId) {
 }
 
 // GET /api/admin/team/users
-router.get('/team/users', requireAuth, requireFounder, async (_req, res) => {
+router.get('/team/users', requireAuth, requireFounderOrPermission('team.manage'), async (_req, res) => {
   if (!isDbReady()) {
     return res.status(200).json({
       ok: true,
@@ -130,7 +145,7 @@ router.get('/team/users', requireAuth, requireFounder, async (_req, res) => {
 
 // POST /api/admin/team/users
 // Founder-only: creates user and returns one-time tempPassword
-router.post('/team/users', requireAuth, requireFounder, async (req, res) => {
+router.post('/team/users', requireAuth, requireFounderOrPermission('team.manage'), async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
@@ -179,7 +194,7 @@ router.post('/team/users', requireAuth, requireFounder, async (req, res) => {
 
 // PATCH /api/admin/team/users/:id
 // Founder-only: updates role/designation/permissions/fullName
-router.patch('/team/users/:id', requireAuth, requireFounder, async (req, res) => {
+router.patch('/team/users/:id', requireAuth, requireFounderOrPermission('team.manage'), async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
@@ -222,7 +237,7 @@ function normalizeStatus(value) {
 
 // PATCH /api/admin/team/users/:id/status  body: { status: 'active'|'suspended' }
 // Founder-only
-router.patch('/team/users/:id/status', requireAuth, requireFounder, async (req, res) => {
+router.patch('/team/users/:id/status', requireAuth, requireFounderOrPermission('team.manage'), async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
@@ -245,7 +260,7 @@ router.patch('/team/users/:id/status', requireAuth, requireFounder, async (req, 
 });
 
 // POST /api/admin/team/users/:id/activate
-router.post('/team/users/:id/activate', requireAuth, requireFounder, async (req, res) => {
+router.post('/team/users/:id/activate', requireAuth, requireFounderOrPermission('team.manage'), async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
@@ -263,7 +278,7 @@ router.post('/team/users/:id/activate', requireAuth, requireFounder, async (req,
 });
 
 // POST /api/admin/team/users/:id/suspend
-router.post('/team/users/:id/suspend', requireAuth, requireFounder, async (req, res) => {
+router.post('/team/users/:id/suspend', requireAuth, requireFounderOrPermission('team.manage'), async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
@@ -281,7 +296,7 @@ router.post('/team/users/:id/suspend', requireAuth, requireFounder, async (req, 
 });
 
 // POST /api/admin/team/users/:id/force-reset
-router.post('/team/users/:id/force-reset', requireAuth, requireFounder, async (req, res) => {
+router.post('/team/users/:id/force-reset', requireAuth, requireFounderOrPermission('team.manage'), async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
@@ -295,13 +310,13 @@ router.post('/team/users/:id/force-reset', requireAuth, requireFounder, async (r
 });
 
 // Backward-compat aliases (older UIs used PATCH instead of POST)
-router.patch('/team/users/:id/activate', requireAuth, requireFounder, (req, res) => {
+router.patch('/team/users/:id/activate', requireAuth, requireFounderOrPermission('team.manage'), (req, res) => {
   req.method = 'POST';
   req.url = `/team/users/${req.params.id}/activate`;
   return router.handle(req, res);
 });
 
-router.patch('/team/users/:id/suspend', requireAuth, requireFounder, (req, res) => {
+router.patch('/team/users/:id/suspend', requireAuth, requireFounderOrPermission('team.manage'), (req, res) => {
   req.method = 'POST';
   req.url = `/team/users/${req.params.id}/suspend`;
   return router.handle(req, res);

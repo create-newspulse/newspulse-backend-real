@@ -26,22 +26,22 @@ function extractTargetUserId(d) {
 }
 
 function hasPermission(req, perm) {
-  const role = String(req.admin?.role || '').toLowerCase();
+  const role = String(req.user?.role || '').toLowerCase();
   if (role === 'founder') return true;
-  const permissions = Array.isArray(req.admin?.permissions) ? req.admin.permissions : [];
+  const permissions = Array.isArray(req.user?.permissions) ? req.user.permissions : [];
   return permissions.includes(perm);
 }
 
 function requireFounderOrPermission(perm) {
   return (req, res, next) => {
-    if (!req.admin) return bad(res, 401, 'Unauthorized', 'UNAUTHORIZED');
+    if (!req.user) return bad(res, 401, 'Unauthorized', 'UNAUTHORIZED');
     if (!hasPermission(req, perm)) return bad(res, 403, 'Forbidden', 'FORBIDDEN');
     return next();
   };
 }
 
 // GET /api/admin/audit/logs?limit=50
-router.get('/audit/logs', requireAuth, requireFounder, async (req, res) => {
+router.get('/audit/logs', requireAuth, requireFounderOrPermission('audit.read'), async (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 200);
 
   if (!isDbReady()) {
@@ -96,7 +96,7 @@ router.get('/audit/logs', requireAuth, requireFounder, async (req, res) => {
 
 // GET /api/admin/audit?limit=50
 // Admin Panel compatibility: older/newer UIs call /api/admin/audit (not /audit/logs)
-router.get('/audit', requireAuth, requireFounder, async (req, res) => {
+router.get('/audit', requireAuth, requireFounderOrPermission('audit.read'), async (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 200);
 
   if (!isDbReady()) {
@@ -132,13 +132,13 @@ router.get('/audit', requireAuth, requireFounder, async (req, res) => {
 });
 
 // Alias: some admin builds call /api/admin/audit-logs?limit=50
-router.get('/audit-logs', requireAuth, requireFounder, async (req, res) => {
+router.get('/audit-logs', requireAuth, requireFounderOrPermission('audit.read'), async (req, res) => {
   req.url = '/audit' + (req._parsedUrl && req._parsedUrl.search ? req._parsedUrl.search : '');
   return router.handle(req, res);
 });
 
 // Alias: some admin builds call /api/admin/audit/events?limit=50
-router.get('/audit/events', requireAuth, requireFounder, async (req, res) => {
+router.get('/audit/events', requireAuth, requireFounderOrPermission('audit.read'), async (req, res) => {
   req.url = '/audit' + (req._parsedUrl && req._parsedUrl.search ? req._parsedUrl.search : '');
   return router.handle(req, res);
 });

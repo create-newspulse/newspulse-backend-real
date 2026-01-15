@@ -171,6 +171,7 @@ const authRoutes = require('./routes/auth.routes');
 const auditRoutes = require('./routes/audit.routes');
 const adminTeamRoutes = require('./routes/adminTeam.routes');
 const adminAuthV2Routes = require('./routes/adminAuthV2.routes');
+const adminBootstrapRoutes = require('./routes/adminBootstrap.routes');
 let adminTeamRoutesV2 = null;
 try { adminTeamRoutesV2 = require('./src/routes/adminTeamRoutes'); } catch (_) { console.warn('[init] optional src/routes/adminTeamRoutes not found; skipping'); }
 const adminSecurityRoutes = require('./routes/adminSecurity.routes');
@@ -327,6 +328,7 @@ const allowedOrigins = (() => {
     'http://localhost:3000',
     'http://localhost:5173',
     'http://localhost:5174',
+    'http://10.46.255.143:5173',
     'https://www.newspulse.co.in',
     'https://newspulse.co.in',
     'https://admin.newspulse.co.in',
@@ -359,7 +361,7 @@ const corsOptions = {
   // IMPORTANT: Do not use '*' when credentials are enabled.
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-owner-key'],
   optionsSuccessStatus: 204,
 };
 
@@ -586,13 +588,18 @@ function _mongoDbNameEffective(uri) {
   const desiredDb = env === 'production' ? 'newspulse_prod' : 'newspulse_dev';
   let dbName = String(_mongoDbNameEffective(uri) || '').trim().toLowerCase();
 
-  // If the URI does not specify a DB and no env DB override exists, do not force a default.
-  // This preserves legacy behavior for clusters where the client chooses the default database.
-  // Recommended: include /newspulse_dev or /newspulse_prod in MONGODB_URI (or set MONGODB_DBNAME).
+  // If the URI does not specify a DB and no env DB override exists:
+  // - Production: force newspulse_prod to avoid defaulting to Mongo's "test" database.
+  // - Non-production: preserve legacy behavior.
   if (!dbName) {
+    if (env === 'production' && !String(process.env.MONGODB_DBNAME || process.env.MONGO_DBNAME || '').trim()) {
+      process.env.MONGODB_DBNAME = desiredDb;
+      dbName = desiredDb;
+    }
     try {
-      console.warn('[startup] No DB name in MONGODB_URI and no MONGODB_DBNAME override; proceeding without enforced dbName', {
+      console.warn('[startup] No DB name in MONGODB_URI and no MONGODB_DBNAME override; proceeding with default dbName policy', {
         env,
+        ...(dbName ? { effectiveDbName: dbName } : {}),
         uri: _redactMongoUri(uri),
       });
     } catch (_) {}
@@ -1167,6 +1174,13 @@ app.use('/api/admin', authOtpRoutes);
 app.use('/api/admin', adminAuthV2Routes);
 app.use('/admin-api/admin', adminAuthV2Routes);
 app.use('/admin-api/api/admin', adminAuthV2Routes);
+
+// Owner-key protected founder bootstrap/reset
+// - POST /api/admin/bootstrap-founder
+// - POST /api/admin/seed-founder
+app.use('/api/admin', adminBootstrapRoutes);
+app.use('/admin-api/admin', adminBootstrapRoutes);
+app.use('/admin-api/api/admin', adminBootstrapRoutes);
 // AI training info: public read endpoint (admin panel can read without login)
 for (const p of [
   '/system/ai-training-info',
