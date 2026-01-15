@@ -138,27 +138,30 @@ router.post('/login', (req, res, next) => {
       // (requireAuth + tokenVersion checks) works for founder-only admin endpoints.
       if (dbReady) {
         const rounds = parseInt(process.env.PASSWORD_HASH_ROUNDS || '10', 10);
-        const ensured = await User.findOneAndUpdate(
-          { email: adminEmail.toLowerCase() },
-          {
-            $setOnInsert: {
-              email: adminEmail.toLowerCase(),
-              name: founderName,
-              passwordHash: await bcrypt.hash(adminPassword, rounds),
-              role: 'founder',
-              status: 'active',
-              tokenVersion: 0,
-              mustChangePassword: false,
-              createdAt: new Date(),
-            },
-            $set: {
-              role: 'founder',
-              status: 'active',
-              lastLoginAt: new Date(),
-            },
-          },
-          { upsert: true, new: true },
-        );
+        const lowerEmail = adminEmail.toLowerCase();
+        let ensured = await User.findOne({ email: lowerEmail });
+
+        if (!ensured) {
+          ensured = await User.create({
+            email: lowerEmail,
+            name: founderName,
+            passwordHash: await bcrypt.hash(adminPassword, rounds),
+            role: 'founder',
+            status: 'active',
+            tokenVersion: 0,
+            mustChangePassword: false,
+            createdAt: new Date(),
+            lastLoginAt: new Date(),
+          });
+        } else {
+          // Ensure required fields exist and enforce founder role.
+          ensured.role = 'founder';
+          ensured.status = 'active';
+          ensured.lastLoginAt = new Date();
+          if (!ensured.name) ensured.name = founderName;
+          if (!ensured.passwordHash) ensured.passwordHash = await bcrypt.hash(adminPassword, rounds);
+          await ensured.save();
+        }
 
         return jwt.sign(
           {

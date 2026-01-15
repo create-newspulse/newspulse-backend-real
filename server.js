@@ -586,17 +586,13 @@ function _mongoDbNameEffective(uri) {
   const desiredDb = env === 'production' ? 'newspulse_prod' : 'newspulse_dev';
   let dbName = String(_mongoDbNameEffective(uri) || '').trim().toLowerCase();
 
-  // If the URI does not specify a DB and no env DB override exists, default safely.
-  // This avoids connecting to the MongoDB driver's default "test" database.
+  // If the URI does not specify a DB and no env DB override exists, do not force a default.
+  // This preserves legacy behavior for clusters where the client chooses the default database.
+  // Recommended: include /newspulse_dev or /newspulse_prod in MONGODB_URI (or set MONGODB_DBNAME).
   if (!dbName) {
-    if (!String(process.env.MONGODB_DBNAME || process.env.MONGO_DBNAME || '').trim()) {
-      process.env.MONGODB_DBNAME = desiredDb;
-    }
-    dbName = desiredDb;
     try {
-      console.warn('[startup] No DB name in MONGODB_URI; defaulting via MONGODB_DBNAME', {
+      console.warn('[startup] No DB name in MONGODB_URI and no MONGODB_DBNAME override; proceeding without enforced dbName', {
         env,
-        dbName: desiredDb,
         uri: _redactMongoUri(uri),
       });
     } catch (_) {}
@@ -616,16 +612,10 @@ function _mongoDbNameEffective(uri) {
     return;
   }
 
-  // Development/staging must NOT write to production and should explicitly use the dev DB.
-  // This avoids accidentally connecting to the default "test" DB on a shared cluster.
-  if (dbName !== 'newspulse_dev') {
-    if (dbName === 'newspulse_prod' || uri.toLowerCase().includes('newspulse_prod')) {
-      console.error('SAFETY STOP: Dev server is pointing to PROD database!');
-    } else {
-      console.error('SAFETY STOP: Dev server must use newspulse_dev database!', {
-        dbName: dbName || '(missing - set MONGODB_DBNAME=newspulse_dev or include /newspulse_dev in MONGODB_URI)',
-      });
-    }
+  // Development/staging must NOT write to production.
+  // Allow any non-prod database name except newspulse_prod.
+  if (dbName === 'newspulse_prod' || uri.toLowerCase().includes('newspulse_prod')) {
+    console.error('SAFETY STOP: Non-production server is pointing to PROD database!');
     process.exit(1);
   }
 })();
