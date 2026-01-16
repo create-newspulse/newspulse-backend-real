@@ -1037,6 +1037,41 @@ app.use('/api/auth', authRoutes);
 // Audit (founder-only)
 app.use('/api/audit', auditRoutes);
 // Broadcast Center (mount early so it cannot be shadowed by other /api routers)
+
+// Compatibility shim:
+// Some admin deployments proxy /admin-api/* -> /api/* on the backend.
+// If the admin UI calls /admin-api/broadcast/*, the backend may receive /api/broadcast/*.
+// To prevent 404s for Save/Add/Delete, route authenticated write-style requests to the
+// standardized admin router (which is always admin-protected).
+app.use('/api/broadcast', (req, res, next) => {
+  try {
+    const hasAuth = Boolean(req.headers.authorization) || String(req.headers.cookie || '').includes('np_admin');
+    if (!hasAuth) return next();
+
+    const p = String(req.path || '');
+    const m = String(req.method || '').toUpperCase();
+
+    // Only intercept write operations; keep legacy GET behavior intact.
+    if (m === 'GET') return next();
+
+    // Only intercept the endpoints that overlap the admin UI write surface.
+    // Keep /settings and /public on the legacy router.
+    const isAdminCompatPath =
+      p === '/' ||
+      p === '' ||
+      p === '/items' ||
+      p.startsWith('/items/');
+
+    if (!isAdminCompatPath) return next();
+
+    if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(m)) return next();
+
+    return adminBroadcastRouter(req, res, next);
+  } catch (_) {
+    return next();
+  }
+});
+
 app.use('/api/broadcast', broadcastRoutes);
 // Compatibility alias: some frontends call /admin-api/api/broadcast/*
 app.use('/admin-api/api/broadcast', broadcastRoutes);

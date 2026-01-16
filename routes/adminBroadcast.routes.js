@@ -102,7 +102,7 @@ router.get('/', requireAdminAuth, async (_req, res) => {
 });
 
 // PUT /api/admin/broadcast
-router.put('/', requireAdminAuth, async (req, res) => {
+async function _updateBroadcastSettings(req, res) {
   if (!ensureDbOr503(res)) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
@@ -116,7 +116,12 @@ router.put('/', requireAdminAuth, async (req, res) => {
   const doc = await getOrCreateSettings();
   const settings = adminSettingsResponse(doc);
   return ok(res, toAdminContract(settings));
-});
+}
+
+router.put('/', requireAdminAuth, _updateBroadcastSettings);
+
+// Some admin UIs use PATCH for settings updates.
+router.patch('/', requireAdminAuth, _updateBroadcastSettings);
 
 // GET /api/admin/broadcast/items?type=breaking|live
 router.get('/items', requireAdminAuth, async (req, res) => {
@@ -180,6 +185,11 @@ router.patch('/items/:id', requireAdminAuth, async (req, res) => {
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const next = {};
+
+  // Support both `isLive` and legacy `live` naming.
+  if (Object.prototype.hasOwnProperty.call(body, 'live')) {
+    next.isLive = Boolean(body.live);
+  }
 
   if (Object.prototype.hasOwnProperty.call(body, 'isLive')) {
     next.isLive = Boolean(body.isLive);
