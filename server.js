@@ -346,7 +346,53 @@ app.use((req, res, next) => {
   return next();
 });
 
+// Public Ads Slot CORS
+// - Keep admin CORS strict (global middleware below)
+// - Ensure the public website can fetch ad slot JSON from Render
+// - Do not require credentials/cookies for public ads
+const _PUBLIC_ADS_CORS_ORIGINS = new Set([
+  'https://www.newspulse.co.in',
+  'https://newspulse.co.in',
+]);
+
+const _publicAdsCorsOptions = {
+  origin(origin, callback) {
+    // Allow non-browser clients (no Origin header)
+    if (!origin) return callback(null, true);
+    if (_PUBLIC_ADS_CORS_ORIGINS.has(String(origin))) return callback(null, true);
+    return callback(null, false);
+  },
+  credentials: false,
+  methods: ['GET', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 204,
+};
+
+// Ensure OPTIONS preflight for public ads slot does not get handled by the global
+// CORS middleware (which enables credentials for admin UIs).
+app.options('/api/public/ads/slot/:slot', cors(_publicAdsCorsOptions));
+
 app.use(cors(corsOptions));
+
+// Ensure GET responses for public ads slot include the required CORS headers.
+// (Also strips any Access-Control-Allow-Credentials header set by global CORS.)
+app.use('/api/public/ads/slot', (req, res, next) => {
+  // Keep this override minimal: only handle GET/OPTIONS for the public website.
+  if (req.method !== 'GET' && req.method !== 'OPTIONS') return next();
+
+  const origin = req.get('Origin');
+  if (!origin) return next();
+  if (!_PUBLIC_ADS_CORS_ORIGINS.has(String(origin))) return next();
+
+  try {
+    res.removeHeader('Access-Control-Allow-Credentials');
+  } catch (_) {}
+
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  return next();
+});
 // Ensure OPTIONS preflight works for all routes.
 app.options('*', cors(corsOptions));
 
