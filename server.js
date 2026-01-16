@@ -1045,6 +1045,10 @@ app.use('/api/audit', auditRoutes);
 // standardized admin router (which is always admin-protected).
 app.use('/api/broadcast', (req, res, next) => {
   try {
+    const env = String(process.env.NODE_ENV || 'development').toLowerCase();
+    // This shim is only needed in production deployments where proxies/rewrites exist.
+    if (env !== 'production') return next();
+
     const hasAuth = Boolean(req.headers.authorization) || String(req.headers.cookie || '').includes('np_admin');
     if (!hasAuth) return next();
 
@@ -1055,16 +1059,24 @@ app.use('/api/broadcast', (req, res, next) => {
     if (m === 'GET') return next();
 
     // Only intercept the endpoints that overlap the admin UI write surface.
-    // Keep /settings and /public on the legacy router.
+    // These are typically reached when a frontend proxies /admin-api/* -> /api/*.
     const isAdminCompatPath =
       p === '/' ||
       p === '' ||
+      p === '/settings' ||
       p === '/items' ||
       p.startsWith('/items/');
 
     if (!isAdminCompatPath) return next();
 
     if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(m)) return next();
+
+    // If a legacy UI hits /api/broadcast/settings, map it to the standardized
+    // settings endpoint /api/admin/broadcast (mounted as '/').
+    if (p === '/settings') {
+      const originalUrl = req.url;
+      req.url = '/' + String(originalUrl || '').replace(/^\/settings\/?/, '').replace(/^\//, '');
+    }
 
     return adminBroadcastRouter(req, res, next);
   } catch (_) {
