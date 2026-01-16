@@ -364,13 +364,47 @@ const _publicAdsCorsOptions = {
   },
   credentials: false,
   methods: ['GET', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
   optionsSuccessStatus: 204,
 };
 
 // Ensure OPTIONS preflight for public ads slot does not get handled by the global
 // CORS middleware (which enables credentials for admin UIs).
-app.options('/api/public/ads/slot/:slot', cors(_publicAdsCorsOptions));
+app.options('/api/public/ads/slot/:slot', (req, res) => {
+  const origin = req.get('Origin');
+  if (origin && _PUBLIC_ADS_CORS_ORIGINS.has(String(origin))) {
+    const requested = String(req.get('Access-Control-Request-Headers') || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    const base = ['Content-Type', 'Authorization'];
+    const allowHeaders = Array.from(new Set([...base, ...requested]));
+
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', allowHeaders.join(', '));
+  }
+  return res.sendStatus(204);
+});
+
+// Also support preflight for the querystring variant: GET /api/public/ads?slot=...
+app.options('/api/public/ads', (req, res) => {
+  const origin = req.get('Origin');
+  if (origin && _PUBLIC_ADS_CORS_ORIGINS.has(String(origin))) {
+    const requested = String(req.get('Access-Control-Request-Headers') || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    const base = ['Content-Type', 'Authorization'];
+    const allowHeaders = Array.from(new Set([...base, ...requested]));
+
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', allowHeaders.join(', '));
+  }
+  return res.sendStatus(204);
+});
 
 app.use(cors(corsOptions));
 
