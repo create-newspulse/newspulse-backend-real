@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 
+const BroadcastItem = require('../models/BroadcastItem');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const {
   getOrCreateSettings,
@@ -83,6 +84,13 @@ function mapItem(doc) {
   };
 }
 
+function normalizeText(v) {
+  const s = typeof v === 'string' ? v.trim() : '';
+  if (!s) return null;
+  if (s.length > 160) return null;
+  return s;
+}
+
 // Admin APIs (protected)
 // GET /api/admin/broadcast
 router.get('/', requireAdminAuth, async (_req, res) => {
@@ -114,14 +122,29 @@ router.put('/', requireAdminAuth, async (req, res) => {
 router.get('/items', requireAdminAuth, async (req, res) => {
   if (!ensureDbOr503(res)) return;
 
-  const type = normalizeChannel(req.query && req.query.type);
-  if (!type) {
+  const type = Object.prototype.hasOwnProperty.call(req.query || {}, 'type')
+    ? normalizeChannel(req.query && req.query.type)
+    : null;
+  if (Object.prototype.hasOwnProperty.call(req.query || {}, 'type') && !type) {
     return fail(res, 400, 'INVALID_TYPE', 'Invalid type. Expected breaking|live');
   }
 
   const itemsBy = await listItemsLast24hByChannel();
-  const items = (itemsBy && itemsBy[type]) || [];
-  return ok(res, items.map(mapItem));
+  if (type) {
+    const items = (itemsBy && itemsBy[type]) || [];
+    return ok(res, items.map(mapItem));
+  }
+
+  const all = []
+    .concat((itemsBy && itemsBy.breaking) || [])
+    .concat((itemsBy && itemsBy.live) || [])
+    .sort((a, b) => {
+      const at = a && a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const bt = b && b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return bt - at;
+    });
+
+  return ok(res, all.map(mapItem));
 });
 
 // POST /api/admin/broadcast/items  body { type, text }
@@ -129,7 +152,8 @@ router.post('/items', requireAdminAuth, async (req, res) => {
   if (!ensureDbOr503(res)) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  const type = normalizeChannel(body.type);
+  // Support both body.type (new) and query.type (legacy UIs)
+  const type = normalizeChannel(body.type) || normalizeChannel(req.query && req.query.type);
   if (!type) {
     return fail(res, 400, 'INVALID_TYPE', 'Invalid type. Expected breaking|live');
   }
@@ -142,6 +166,43 @@ router.post('/items', requireAdminAuth, async (req, res) => {
   }
 
   return res.status(201).json({ ok: true, success: true, data: mapItem(created.item) });
+});
+
+// PATCH /api/admin/broadcast/items/:id
+// Supports updating item live state and/or text.
+router.patch('/items/:id', requireAdminAuth, async (req, res) => {
+  if (!ensureDbOr503(res)) return;
+
+  const { id } = req.params;
+  if (!mongoose.isValidObjectId(id)) {
+    return fail(res, 404, 'NOT_FOUND', 'Not found');
+  }
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const next = {};
+
+  if (Object.prototype.hasOwnProperty.call(body, 'isLive')) {
+    next.isLive = Boolean(body.isLive);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, 'text')) {
+    const t = normalizeText(body.text);
+    if (!t) {
+      return fail(res, 400, 'INVALID_TEXT', 'Invalid text. Must be non-empty and <= 160 chars');
+    }
+    next.text = t;
+  }
+
+  if (Object.keys(next).length === 0) {
+    return fail(res, 400, 'BAD_REQUEST', 'No supported fields to update');
+  }
+
+  const updated = await BroadcastItem.findByIdAndUpdate(id, { $set: next }, { new: true }).lean();
+  if (!updated) {
+    return fail(res, 404, 'NOT_FOUND', 'Not found');
+  }
+
+  return ok(res, mapItem(updated));
 });
 
 // DELETE /api/admin/broadcast/items/:id
