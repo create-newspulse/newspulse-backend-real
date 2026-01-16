@@ -40,7 +40,8 @@ router.post('/login', (req, res) => {
     const origin = String(req.headers.origin || req.headers.referer || '').trim();
 
     const primaryEmail = (process.env.FOUNDER_EMAIL || process.env.ADMIN_EMAIL || 'admin@newspulse.ai').toLowerCase();
-    const primaryPass = process.env.FOUNDER_PASSWORD || process.env.ADMIN_PASS || 'Safe!2025@News';
+    // Support both ADMIN_PASSWORD (common) and legacy ADMIN_PASS (older deployments)
+    const primaryPass = process.env.FOUNDER_PASSWORD || process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS || 'Safe!2025@News';
     const altEmailRaw = (process.env.FOUNDER_ALT_EMAIL || process.env.ADMIN_ALT_EMAIL || '').trim();
     const altPass = process.env.FOUNDER_ALT_PASSWORD || process.env.ADMIN_ALT_PASS || '';
     const altEmail = altEmailRaw.toLowerCase();

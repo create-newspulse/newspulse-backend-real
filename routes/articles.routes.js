@@ -423,7 +423,8 @@ router.get('/articles/:id', async (req, res, next) => {
     }
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
     const out = withCoverImageUrl(obj);
-    return res.json({ ok: true, success: true, article: out });
+    // Compatibility: some admin frontends expect `data.article` (while others expect `article`).
+    return res.json({ ok: true, success: true, status: 200, article: out, data: { article: out } });
   } catch (err) {
     return next(err);
   }
