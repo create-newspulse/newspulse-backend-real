@@ -8,7 +8,6 @@ const {
   adminSettingsResponse,
   patchSettings,
   listItemsLast24hByChannel,
-  createItem,
   deleteItemById,
   normalizeChannel,
 } = require('../services/broadcastCenter.service');
@@ -75,12 +74,14 @@ function buildPatchPayload(body) {
 
 function mapItem(doc) {
   const d = doc && typeof doc === 'object' ? doc : {};
-  const id = d._id ? String(d._id) : undefined;
+  const _id = d._id ? String(d._id) : undefined;
   return {
-    id,
+    _id,
+    id: _id,
     type: d.type === 'breaking' || d.type === 'live' ? d.type : undefined,
     text: typeof d.text === 'string' ? d.text : '',
     createdAt: d.createdAt || null,
+    isLive: Boolean(d.isLive),
   };
 }
 
@@ -163,14 +164,20 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     return fail(res, 400, 'INVALID_TYPE', 'Invalid type. Expected breaking|live');
   }
 
-  const created = await createItem(type, body.text);
-  if (!created.ok) {
-    const status = typeof created.status === 'number' ? created.status : 400;
-    const code = status === 503 ? 'DB_UNAVAILABLE' : 'BAD_REQUEST';
-    return fail(res, status, code, created.message || 'Invalid request');
+  const text = normalizeText(body.text);
+  if (!text) {
+    return fail(res, 400, 'INVALID_TEXT', 'Invalid text. Must be non-empty and <= 160 chars');
   }
 
-  return res.status(201).json({ ok: true, success: true, data: mapItem(created.item) });
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const created = await BroadcastItem.create({
+    type,
+    text,
+    isLive: true,
+    expiresAt,
+  });
+
+  return res.status(201).json({ ok: true, success: true, data: mapItem(created) });
 });
 
 // PATCH /api/admin/broadcast/items/:id

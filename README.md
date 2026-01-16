@@ -248,6 +248,40 @@ curl "http://localhost:10000/api/public/broadcast"
 All admin endpoints require:
 - `Authorization: Bearer <ADMIN_JWT>` (or a compatible legacy admin cookie)
 
+### Admin (standardized)
+
+Primary admin API (recommended):
+- Base: `GET/PUT/PATCH /api/admin/broadcast`
+- Items: `GET/POST /api/admin/broadcast/items`
+- Item updates: `PATCH /api/admin/broadcast/items/:id`
+- Item delete: `DELETE /api/admin/broadcast/items/:id`
+
+Notes:
+- Success envelope: `{ ok: true, success: true, data: ... }`
+- Each item includes both `_id` and `id` (same value), plus `type`, `text`, `isLive`, `createdAt`.
+
+Example: list items
+```bash
+curl "http://localhost:10000/api/admin/broadcast/items?type=breaking" \
+  -H "Authorization: Bearer <ADMIN_JWT>"
+```
+
+Example: create item (defaults to `isLive: true`)
+```bash
+curl -X POST "http://localhost:10000/api/admin/broadcast/items" \
+  -H "Authorization: Bearer <ADMIN_JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"breaking","text":"Breaking: Airport roads closed due to fog"}'
+```
+
+Example: update item
+```bash
+curl -X PATCH "http://localhost:10000/api/admin/broadcast/items/<ITEM_ID>" \
+  -H "Authorization: Bearer <ADMIN_JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{"isLive":false,"text":"Updated text"}'
+```
+
 #### POST /admin-api/broadcast/breaking/items
 Body:
 ```json
