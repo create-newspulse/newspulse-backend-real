@@ -453,10 +453,6 @@ app.use('/api/public/ads/slot', (req, res, next) => {
   if (!origin) return next();
   if (!_PUBLIC_ADS_CORS_ORIGINS.has(String(origin))) return next();
 
-  try {
-    res.removeHeader('Access-Control-Allow-Credentials');
-  } catch (_) {}
-
   res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -471,10 +467,6 @@ function _publicBroadcastCorsOverride(req, res, next) {
   const origin = req.get('Origin');
   if (!origin) return next();
   if (!_PUBLIC_BROADCAST_CORS_ORIGINS.has(String(origin))) return next();
-
-  try {
-    res.removeHeader('Access-Control-Allow-Credentials');
-  } catch (_) {}
 
   res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');

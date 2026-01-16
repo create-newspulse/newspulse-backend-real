@@ -14,9 +14,13 @@ const {
 
 const router = express.Router();
 
+function fail(res, status, code, message) {
+  return res.status(status).json({ ok: false, success: false, status, code, message });
+}
+
 function ensureDbOr503(res) {
   if (mongoose.connection.readyState !== 1) {
-    res.status(503).json({ ok: false, message: 'Database unavailable' });
+    fail(res, 503, 'DB_UNAVAILABLE', 'Database unavailable');
     return false;
   }
   return true;
@@ -96,7 +100,9 @@ router.put('/', requireAdminAuth, async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const result = await patchSettings(buildPatchPayload(body));
   if (!result.ok) {
-    return res.status(result.status).json({ ok: false, message: result.message });
+    const status = typeof result.status === 'number' ? result.status : 400;
+    const code = status === 503 ? 'DB_UNAVAILABLE' : 'BAD_REQUEST';
+    return fail(res, status, code, result.message || 'Invalid request');
   }
 
   const doc = await getOrCreateSettings();
@@ -110,7 +116,7 @@ router.get('/items', requireAdminAuth, async (req, res) => {
 
   const type = normalizeChannel(req.query && req.query.type);
   if (!type) {
-    return res.status(400).json({ ok: false, message: 'Invalid type. Expected breaking|live' });
+    return fail(res, 400, 'INVALID_TYPE', 'Invalid type. Expected breaking|live');
   }
 
   const itemsBy = await listItemsLast24hByChannel();
@@ -125,12 +131,14 @@ router.post('/items', requireAdminAuth, async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const type = normalizeChannel(body.type);
   if (!type) {
-    return res.status(400).json({ ok: false, message: 'Invalid type. Expected breaking|live' });
+    return fail(res, 400, 'INVALID_TYPE', 'Invalid type. Expected breaking|live');
   }
 
   const created = await createItem(type, body.text);
   if (!created.ok) {
-    return res.status(created.status).json({ ok: false, message: created.message });
+    const status = typeof created.status === 'number' ? created.status : 400;
+    const code = status === 503 ? 'DB_UNAVAILABLE' : 'BAD_REQUEST';
+    return fail(res, status, code, created.message || 'Invalid request');
   }
 
   return res.status(201).json({ ok: true, success: true, data: mapItem(created.item) });
@@ -142,7 +150,9 @@ router.delete('/items/:id', requireAdminAuth, async (req, res) => {
 
   const result = await deleteItemById(req.params.id);
   if (!result.ok) {
-    return res.status(result.status).json({ ok: false, message: result.message });
+    const status = typeof result.status === 'number' ? result.status : 404;
+    const code = status === 503 ? 'DB_UNAVAILABLE' : status === 404 ? 'NOT_FOUND' : 'BAD_REQUEST';
+    return fail(res, status, code, result.message || 'Failed');
   }
 
   return res.status(200).json({ ok: true, success: true });
