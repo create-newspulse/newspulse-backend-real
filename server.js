@@ -139,6 +139,7 @@ let publicHomeTopBarsRouter = null;
 try { adminSiteSettingsHomeTopBarsRouter = require('./routes/adminSiteSettings.homeTopBars.routes'); } catch (_) { console.warn('[init] optional routes/adminSiteSettings.homeTopBars.routes not found; skipping'); }
 try { publicHomeTopBarsRouter = require('./routes/publicHomeTopBars.routes'); } catch (_) { console.warn('[init] optional routes/publicHomeTopBars.routes not found; skipping'); }
 const broadcastRoutes = require('./routes/broadcast.routes');
+const adminBroadcastRouter = require('./routes/adminBroadcast.routes');
 const authRoutes = require('./routes/auth.routes');
 const auditRoutes = require('./routes/audit.routes');
 const adminTeamRoutes = require('./routes/adminTeam.routes');
@@ -355,6 +356,13 @@ const _PUBLIC_ADS_CORS_ORIGINS = new Set([
   'https://newspulse.co.in',
 ]);
 
+// Public Broadcast Center CORS
+// Ensure the public website can fetch broadcast JSON from Render without cookies.
+const _PUBLIC_BROADCAST_CORS_ORIGINS = new Set([
+  'https://www.newspulse.co.in',
+  'https://newspulse.co.in',
+]);
+
 const _publicAdsCorsOptions = {
   origin(origin, callback) {
     // Allow non-browser clients (no Origin header)
@@ -406,6 +414,33 @@ app.options('/api/public/ads', (req, res) => {
   return res.sendStatus(204);
 });
 
+function _handlePublicBroadcastPreflight(req, res) {
+  const origin = req.get('Origin');
+  if (origin && _PUBLIC_BROADCAST_CORS_ORIGINS.has(String(origin))) {
+    const requested = String(req.get('Access-Control-Request-Headers') || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    const base = ['Content-Type', 'Authorization'];
+    const allowHeaders = Array.from(new Set([...base, ...requested]));
+
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', allowHeaders.join(', '));
+  }
+  return res.sendStatus(204);
+}
+
+// Ensure OPTIONS preflight for public broadcast endpoints does not get handled by the global
+// CORS middleware (which enables credentials for admin UIs).
+app.options('/api/public/broadcast', _handlePublicBroadcastPreflight);
+app.options('/api/public/broadcast/*', _handlePublicBroadcastPreflight);
+app.options('/admin-api/public/broadcast', _handlePublicBroadcastPreflight);
+app.options('/admin-api/public/broadcast/*', _handlePublicBroadcastPreflight);
+app.options('/admin-api/api/public/broadcast', _handlePublicBroadcastPreflight);
+app.options('/admin-api/api/public/broadcast/*', _handlePublicBroadcastPreflight);
+
 app.use(cors(corsOptions));
 
 // Ensure GET responses for public ads slot include the required CORS headers.
@@ -427,6 +462,29 @@ app.use('/api/public/ads/slot', (req, res, next) => {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   return next();
 });
+
+// Ensure GET responses for public broadcast include the required CORS headers.
+// (Also strips any Access-Control-Allow-Credentials header set by global CORS.)
+function _publicBroadcastCorsOverride(req, res, next) {
+  if (req.method !== 'GET' && req.method !== 'OPTIONS') return next();
+
+  const origin = req.get('Origin');
+  if (!origin) return next();
+  if (!_PUBLIC_BROADCAST_CORS_ORIGINS.has(String(origin))) return next();
+
+  try {
+    res.removeHeader('Access-Control-Allow-Credentials');
+  } catch (_) {}
+
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  return next();
+}
+
+app.use('/api/public/broadcast', _publicBroadcastCorsOverride);
+app.use('/admin-api/public/broadcast', _publicBroadcastCorsOverride);
+app.use('/admin-api/api/public/broadcast', _publicBroadcastCorsOverride);
 // Ensure OPTIONS preflight works for all routes.
 app.options('*', cors(corsOptions));
 
@@ -436,7 +494,11 @@ app.use((req, res, next) => {
   if (env !== 'production') return next();
 
   const path = String(req.originalUrl || req.url || '');
-  const shouldLog = path.startsWith('/admin-api/broadcast') || path.startsWith('/api/public/broadcast');
+  const shouldLog =
+    path.startsWith('/admin-api/broadcast') ||
+    path.startsWith('/api/admin/broadcast') ||
+    path.startsWith('/admin-api/admin/broadcast') ||
+    path.startsWith('/api/public/broadcast');
   if (!shouldLog) return next();
 
   res.on('finish', () => {
@@ -988,6 +1050,13 @@ app.use('/api/broadcast', broadcastRoutes);
 app.use('/admin-api/api/broadcast', broadcastRoutes);
 // Compatibility alias: some frontends call /admin-api/broadcast/*
 app.use('/admin-api/broadcast', broadcastRoutes);
+
+// Standard Admin Broadcast Center API
+// - Primary: /api/admin/broadcast
+// - Admin panel proxy aliases: /admin-api/admin/broadcast and /admin-api/api/admin/broadcast
+app.use('/api/admin/broadcast', adminBroadcastRouter);
+app.use('/admin-api/admin/broadcast', adminBroadcastRouter);
+app.use('/admin-api/api/admin/broadcast', adminBroadcastRouter);
 // Site settings: simple public endpoint (stub)
 // Placed here (before router mounts) to guarantee frontend never sees a 404.
 app.get('/api/site-settings/public', (req, res) => {
