@@ -282,6 +282,22 @@ curl -X PATCH "http://localhost:10000/api/admin/broadcast/items/<ITEM_ID>" \
   -d '{"isLive":false,"text":"Updated text"}'
 ```
 
+Alias note: some admin UIs send `{ "enabled": true|false }` instead of `isLive`.
+
+Example: delete item
+```bash
+curl -X DELETE "http://localhost:10000/api/admin/broadcast/items/<ITEM_ID>" \
+  -H "Authorization: Bearer <ADMIN_JWT>"
+```
+
+Example: update settings
+```bash
+curl -X PUT "http://localhost:10000/api/admin/broadcast" \
+  -H "Authorization: Bearer <ADMIN_JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{"breaking":{"enabled":true,"mode":"auto","speedSec":8},"live":{"enabled":true,"mode":"auto","speedSec":10}}'
+```
+
 #### POST /admin-api/broadcast/breaking/items
 Body:
 ```json

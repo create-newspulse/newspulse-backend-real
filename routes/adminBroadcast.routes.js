@@ -193,6 +193,11 @@ router.patch('/items/:id', requireAdminAuth, async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const next = {};
 
+  // Some admin UIs use `enabled` for item state.
+  if (Object.prototype.hasOwnProperty.call(body, 'enabled')) {
+    next.isLive = Boolean(body.enabled);
+  }
+
   // Support both `isLive` and legacy `live` naming.
   if (Object.prototype.hasOwnProperty.call(body, 'live')) {
     next.isLive = Boolean(body.live);
