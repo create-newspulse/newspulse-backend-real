@@ -210,24 +210,8 @@ function _mongoDbNameFromUri(uri) {
   return dbName.split('/')[0] || null;
 }
 
-// SAFETY GUARD: Never allow dev/staging to boot against prod DB.
-(() => {
-  const env = String(process.env.NODE_ENV || 'development').toLowerCase();
-  if (env === 'production') return;
-  const uri = String(MONGO_URI || '');
-  if (!uri) return;
-
-  if (uri.toLowerCase().includes('newspulse_prod')) {
-    const msg = 'SAFETY STOP: Dev server is pointing to PROD database!';
-    console.error(msg);
-    process.exit(1);
-  }
-})();
-
 if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
-  console.error('[startup] Missing MONGODB_URI (Mongo connection string). Refusing to start without DB.');
-  console.error('[startup] Set MONGODB_URI in your environment, e.g. MONGODB_URI=mongodb://127.0.0.1:27017/newspulse_dev');
-  process.exit(1);
+  console.warn('[startup] MONGODB_URI is not set; starting without a MongoDB connection.');
 } else {
   mongoose
     .connect(MONGO_URI)
@@ -239,7 +223,7 @@ if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
     .catch((err) => {
       console.error('Mongo connection failed');
       console.error('[startup] MongoDB connection error', { message: err?.message || String(err), name: err?.name });
-      process.exit(1);
+      // Do not exit; allow server to boot without DB.
     });
 }
 

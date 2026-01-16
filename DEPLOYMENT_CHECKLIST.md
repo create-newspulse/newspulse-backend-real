@@ -57,8 +57,7 @@ Server allows these origins (via `CORS_ORIGIN` env var or hardcoded):
 
 1. **Environment Variables** (set in Render dashboard):
     - [ ] `MONGODB_URI` - MongoDB connection string
-       - Dev should use DB name `newspulse_dev`
-       - Production must use DB name `newspulse_prod`
+   - Provide the full URI exactly as the backend should connect
    - [ ] `JWT_SECRET` - Token signing secret
    - [ ] `FOUNDER_EMAIL` - Admin email
    - [ ] `FOUNDER_PASSWORD` - Admin password
@@ -167,7 +166,7 @@ curl https://<YOUR_DOMAIN>/api/admin/settings/public
 
 **Solutions:**
 1. Check Render logs for error details
-2. Verify `MONGODB_URI` is correct and points to `newspulse_prod`
+2. Verify `MONGODB_URI` is correct and points to the intended database
 3. Check model imports in controllers
 
 ## 📝 Testing Commands

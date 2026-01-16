@@ -38,42 +38,15 @@ if (require.main === module && String(process.env.NODE_ENV || 'development').toL
   });
 }
 
-// Fail-fast for auth misconfiguration when running the server directly.
-// Tests/imports should not crash due to missing secrets.
+// Note: Do not fail-fast on missing env vars.
+// The server should boot even if MongoDB or JWT env vars are not set; endpoints that
+// require them will return errors at request time.
 if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() !== 'test') {
   if (!String(process.env.JWT_SECRET || '').trim()) {
-    console.error('[startup] Missing JWT_SECRET. Refusing to start (auth requires JWT_SECRET).');
-    process.exit(1);
+    // eslint-disable-next-line no-console
+    console.warn('[startup] JWT_SECRET is not set; auth endpoints may fail until configured.');
   }
 }
-
-// Validate critical environment early (fail fast in prod / when enforced)
-(() => {
-  const enforce = String(process.env.ENFORCE_REQUIRED_ENVS || '').trim() === '1'
-    || String(process.env.NODE_ENV || '').toLowerCase() === 'production'
-    || !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
-  if (!enforce) return;
-  if (_isImportedEarly) return;
-
-  const mongoUri = process.env.MONGODB_URI;
-
-  const missing = [];
-  if (!process.env.JWT_SECRET) missing.push('JWT_SECRET');
-  if (!mongoUri) missing.push('MONGODB_URI');
-
-  if (missing.length) {
-    console.error('[init] Missing required env var(s). Refusing to start.', {
-      missing,
-      env: String(process.env.NODE_ENV || 'development'),
-      requiredMongoFormat: {
-        prod: 'MONGODB_URI=mongodb+srv://USER:PASS@HOST/newspulse_prod?retryWrites=true&w=majority',
-        dev: 'MONGODB_URI=mongodb://127.0.0.1:27017/newspulse_dev',
-        alternateDbNameVar: 'MONGODB_DBNAME=newspulse_prod (or newspulse_dev)',
-      },
-    });
-    process.exit(1);
-  }
-})();
 
 function _redactMongoUri(uri) {
   const u = String(uri || '');
@@ -546,7 +519,7 @@ app.get('/dashboard-stats', async (req, res) => {
 });
 
 // Mongo
-// Single source of truth: use MONGODB_URI for all environments.
+// Single source of truth: use MONGODB_URI exactly as provided.
 const MONGO_URI = process.env.MONGODB_URI;
 const _isImported = require.main !== module;
 
@@ -566,67 +539,6 @@ function _mongoDbNameFromUri(uri) {
   return dbName.split('/')[0] || null;
 }
 
-function _mongoDbNameFromEnv() {
-  const fromEnv = String(process.env.MONGODB_DBNAME || process.env.MONGO_DBNAME || '').trim();
-  return fromEnv ? fromEnv : null;
-}
-
-function _mongoDbNameEffective(uri) {
-  return _mongoDbNameFromUri(uri) || _mongoDbNameFromEnv();
-}
-
-// SAFETY GUARD: Never allow dev/staging to boot against prod DB.
-// Also enforce that production points at the production database name.
-(() => {
-  const envRaw = String(process.env.NODE_ENV || 'development').toLowerCase();
-  const isRender = !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
-  const env = (envRaw === 'production' || isRender) ? 'production' : envRaw;
-  if (env === 'test' || _isImported) return;
-  const uri = String(MONGO_URI || '');
-  if (!uri) return;
-
-  const desiredDb = env === 'production' ? 'newspulse_prod' : 'newspulse_dev';
-  let dbName = String(_mongoDbNameEffective(uri) || '').trim().toLowerCase();
-
-  // If the URI does not specify a DB and no env DB override exists:
-  // - Production: force newspulse_prod to avoid defaulting to Mongo's "test" database.
-  // - Non-production: preserve legacy behavior.
-  if (!dbName) {
-    if (env === 'production' && !String(process.env.MONGODB_DBNAME || process.env.MONGO_DBNAME || '').trim()) {
-      process.env.MONGODB_DBNAME = desiredDb;
-      dbName = desiredDb;
-    }
-    try {
-      console.warn('[startup] No DB name in MONGODB_URI and no MONGODB_DBNAME override; proceeding with default dbName policy', {
-        env,
-        ...(dbName ? { effectiveDbName: dbName } : {}),
-        uri: _redactMongoUri(uri),
-      });
-    } catch (_) {}
-  }
-
-  // Enforce prod DB naming in production.
-  if (env === 'production') {
-    if (dbName !== 'newspulse_prod') {
-      console.error('SAFETY STOP: Production server must use newspulse_prod database!', {
-        effectiveDbName: dbName || '(missing)',
-        uri: _redactMongoUri(uri),
-        hint: 'Include /newspulse_prod in MONGODB_URI or set MONGODB_DBNAME=newspulse_prod',
-        requiredFormat: 'MONGODB_URI=mongodb+srv://USER:PASS@HOST/newspulse_prod?retryWrites=true&w=majority',
-      });
-      process.exit(1);
-    }
-    return;
-  }
-
-  // Development/staging must NOT write to production.
-  // Allow any non-prod database name except newspulse_prod.
-  if (dbName === 'newspulse_prod' || uri.toLowerCase().includes('newspulse_prod')) {
-    console.error('SAFETY STOP: Non-production server is pointing to PROD database!');
-    process.exit(1);
-  }
-})();
-
 // Dev-only debug endpoint to confirm environment and DB selection.
 // Returns { env, dbName } and is intentionally NOT available in production.
 app.get(['/admin-api/system/env', '/admin-api/api/system/env'], (_req, res) => {
@@ -635,8 +547,7 @@ app.get(['/admin-api/system/env', '/admin-api/api/system/env'], (_req, res) => {
 
   const connectedName = (mongoose.connection && mongoose.connection.name) ? String(mongoose.connection.name) : '';
   const dbFromUri = _mongoDbNameFromUri(process.env.MONGODB_URI);
-  const dbFromEnv = _mongoDbNameFromEnv();
-  const dbName = (connectedName || dbFromUri || dbFromEnv || null);
+  const dbName = (connectedName || dbFromUri || null);
   return res.status(200).json({ env, dbName });
 });
 
@@ -659,9 +570,7 @@ mongoose.connection.on('connected', () => {
 if (process.env.NODE_ENV === 'test' || _isImported) {
   console.warn('[init] Test/import mode: skipping MongoDB connection');
 } else if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
-  console.error('[startup] Missing MONGODB_URI (Mongo connection string). Refusing to start without DB.');
-  console.error('[startup] Set MONGODB_URI in your environment, e.g. MONGODB_URI=mongodb://127.0.0.1:27017/newspulse_dev');
-  process.exit(1);
+  console.warn('[startup] MONGODB_URI is not set; starting without a MongoDB connection.');
 } else {
   // Important: keep the HTTP server running even if MongoDB is down.
   // Admin/public endpoints will surface DB issues as 503 JSON instead of crashing.
@@ -704,11 +613,7 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
     if (_mongoConnectInFlight) return;
     _mongoConnectInFlight = true;
     try {
-      const dbFromUri = _mongoDbNameFromUri(MONGO_URI);
-      const dbFromEnv = _mongoDbNameFromEnv();
-      const connectOptions = (!dbFromUri && dbFromEnv) ? { dbName: dbFromEnv } : undefined;
-
-      await mongoose.connect(MONGO_URI, connectOptions);
+      await mongoose.connect(MONGO_URI);
       _mongoRetryMs = 2000;
       await _afterMongoConnected();
     } catch (err) {

@@ -21,13 +21,10 @@ npm run dev
 Local dev requires `MONGODB_URI` and a running MongoDB instance (local or Atlas).
 Server will attempt to listen on `PORT` (default 10000) and auto-fallback up to 4 higher ports if occupied.
 
-## Dev vs Prod Database Safety
+## MongoDB
 
-This backend supports separate MongoDB databases for development and production.
-
-- Development: set `MONGODB_URI` to a DB named `newspulse_dev`.
-- Production: set `MONGODB_URI` to a DB named `newspulse_prod`.
-- Safety guard: if `NODE_ENV` is not `production` and `MONGODB_URI` contains `newspulse_prod`, the server will refuse to start with: `SAFETY STOP: Dev server is pointing to PROD database!`.
+This backend connects using a single variable: `MONGODB_URI`.
+Provide the full connection string exactly as you want Mongoose to connect.
 
 ## Public Site Settings: Dev/Prod Isolation
 
@@ -61,7 +58,7 @@ Look for:
 
 ```env
 NODE_ENV=production
-MONGODB_URI=mongodb+srv://USER:PASS@CLUSTER/newspulse_prod
+MONGODB_URI=mongodb+srv://USER:PASS@CLUSTER/YOUR_DB_NAME
 ALLOWED_ORIGINS=https://admin.newspulse.co.in,https://newspulse.co.in,https://www.newspulse.co.in
 ```
 
