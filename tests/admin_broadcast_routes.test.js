@@ -35,6 +35,15 @@ test('Admin Broadcast (aliases): /admin-api/admin/broadcast is mounted and requi
     { method: 'post', path: '/admin-api/admin/broadcast/items' },
     { method: 'patch', path: '/admin-api/admin/broadcast/items/64b64c2f2f2f2f2f2f2f2f2f' },
     { method: 'delete', path: '/admin-api/admin/broadcast/items/64b64c2f2f2f2f2f2f2f2f2f' },
+
+    // Some admin panels proxy through /admin-api/api/*
+    { method: 'get', path: '/admin-api/api/admin/broadcast' },
+    { method: 'put', path: '/admin-api/api/admin/broadcast' },
+    { method: 'patch', path: '/admin-api/api/admin/broadcast' },
+    { method: 'get', path: '/admin-api/api/admin/broadcast/items?type=live' },
+    { method: 'post', path: '/admin-api/api/admin/broadcast/items' },
+    { method: 'patch', path: '/admin-api/api/admin/broadcast/items/64b64c2f2f2f2f2f2f2f2f2f' },
+    { method: 'delete', path: '/admin-api/api/admin/broadcast/items/64b64c2f2f2f2f2f2f2f2f2f' },
   ];
 
   for (const ep of endpoints) {
