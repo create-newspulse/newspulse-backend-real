@@ -104,7 +104,6 @@ const BASE = './newspulse-backend-real-main';
 
 // Public news feed routes (no auth; published-only)
 const newsRoutes = require('./routes/news');
-const publicArticlesRoutes = require(`${BASE}/routes/publicArticles`);
 const articlesRoutes = require('./routes/articles');
 const adminRoutes = require('./routes/admin');
 const adminAuthRoutes = require(`${BASE}/routes/adminAuth`);
@@ -728,7 +727,8 @@ app.get('/', (req, res) => { res.send('🟢 News Pulse Admin Backend is Live'); 
 // API Routes
 app.use('/api/news', newsRoutes);
 // Public articles feed (but allow optional admin auth so admin list requests can defer to CMS router)
-app.use('/api/articles', optionalAdminAuth, publicArticlesRoutes);
+// NOTE: Do not mount the legacy nested public articles router under /api/articles.
+// The CMS/admin router (articlesRoutes) is mounted under /api later and should own /api/articles/*.
 // Quick browser check: confirm auth route is deployed
 app.get('/api/auth/login', (_req, res) => {
   return res.json({ ok: true, message: 'Auth route is live. Use POST to login.' });
