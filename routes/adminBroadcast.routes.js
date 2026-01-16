@@ -22,6 +22,10 @@ function ensureDbOr503(res) {
   return true;
 }
 
+function ok(res, data) {
+  return res.status(200).json({ ok: true, success: true, data });
+}
+
 function toAdminContract(settings) {
   return {
     breaking: {
@@ -82,7 +86,7 @@ router.get('/', requireAdminAuth, async (_req, res) => {
 
   const doc = await getOrCreateSettings();
   const settings = adminSettingsResponse(doc);
-  return res.status(200).json(toAdminContract(settings));
+  return ok(res, toAdminContract(settings));
 });
 
 // PUT /api/admin/broadcast
@@ -97,7 +101,7 @@ router.put('/', requireAdminAuth, async (req, res) => {
 
   const doc = await getOrCreateSettings();
   const settings = adminSettingsResponse(doc);
-  return res.status(200).json(toAdminContract(settings));
+  return ok(res, toAdminContract(settings));
 });
 
 // GET /api/admin/broadcast/items?type=breaking|live
@@ -111,7 +115,7 @@ router.get('/items', requireAdminAuth, async (req, res) => {
 
   const itemsBy = await listItemsLast24hByChannel();
   const items = (itemsBy && itemsBy[type]) || [];
-  return res.status(200).json(items.map(mapItem));
+  return ok(res, items.map(mapItem));
 });
 
 // POST /api/admin/broadcast/items  body { type, text }
@@ -129,7 +133,7 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     return res.status(created.status).json({ ok: false, message: created.message });
   }
 
-  return res.status(201).json(mapItem(created.item));
+  return res.status(201).json({ ok: true, success: true, data: mapItem(created.item) });
 });
 
 // DELETE /api/admin/broadcast/items/:id
@@ -141,7 +145,7 @@ router.delete('/items/:id', requireAdminAuth, async (req, res) => {
     return res.status(result.status).json({ ok: false, message: result.message });
   }
 
-  return res.status(200).json({ ok: true });
+  return res.status(200).json({ ok: true, success: true });
 });
 
 module.exports = router;
