@@ -4,7 +4,7 @@ const BroadcastItem = require('../models/BroadcastItem');
 const BroadcastSettings = require('../models/BroadcastSettings');
 
 const CHANNELS = new Set(['breaking', 'live']);
-const MODES = new Set(['auto', 'force_on', 'force_off']);
+const MODES = new Set(['auto', 'force_on', 'force_off', 'off']);
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -34,14 +34,18 @@ function normalizeChannel(v) {
 
 function normalizeMode(v) {
   const s = String(v || '').trim().toLowerCase();
-  return MODES.has(s) ? s : null;
+  if (!MODES.has(s)) return null;
+  // Compatibility alias from tickers settings UI.
+  if (s === 'off') return 'force_off';
+  return s;
 }
 
 function normalizeSpeedSec(v) {
   const n = typeof v === 'number' ? v : Number(v);
   if (!Number.isFinite(n)) return null;
   const rounded = Math.round(n);
-  if (rounded < 2 || rounded > 30) return null;
+  // Tickers settings UI supports up to 120s.
+  if (rounded < 2 || rounded > 120) return null;
   return rounded;
 }
 
@@ -100,9 +104,13 @@ async function getOrCreateSettings() {
   return doc;
 }
 
-function computeChannelEnabled(mode, itemsCount) {
-  if (mode === 'force_off') return false;
-  if (mode === 'force_on') return true;
+function computeEffectiveEnabled(explicitEnabled, mode, itemsCount) {
+  // If explicitly disabled, always stay off.
+  if (explicitEnabled === false) return false;
+
+  const m = normalizeMode(mode) || 'auto';
+  if (m === 'force_off') return false;
+  if (m === 'force_on') return true;
   // auto
   return itemsCount > 0;
 }
@@ -226,8 +234,8 @@ async function computePublicPayload() {
   const breakingItems = Array.isArray(itemsByChannel.breaking) ? itemsByChannel.breaking : [];
   const liveItems = Array.isArray(itemsByChannel.live) ? itemsByChannel.live : [];
 
-  const breakingEnabled = computeChannelEnabled(settings.breaking.mode, breakingItems.length);
-  const liveEnabled = computeChannelEnabled(settings.live.mode, liveItems.length);
+  const breakingEnabled = computeEffectiveEnabled(settings.breaking.enabled, settings.breaking.mode, breakingItems.length);
+  const liveEnabled = computeEffectiveEnabled(settings.live.enabled, settings.live.mode, liveItems.length);
 
   return {
     breaking: {
@@ -252,4 +260,5 @@ module.exports = {
   deleteItemById,
   patchSettings,
   computePublicPayload,
+  computeEffectiveEnabled,
 };

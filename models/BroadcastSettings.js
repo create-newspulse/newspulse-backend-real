@@ -6,12 +6,12 @@ const BroadcastSettingsSchema = new mongoose.Schema(
     breaking: {
       enabled: { type: Boolean, default: false },
       mode: { type: String, enum: ['auto', 'force_on', 'force_off'], default: 'auto' },
-      speedSec: { type: Number, default: 8, min: 2, max: 30 },
+      speedSec: { type: Number, default: 8, min: 2, max: 120 },
     },
     live: {
       enabled: { type: Boolean, default: false },
       mode: { type: String, enum: ['auto', 'force_on', 'force_off'], default: 'auto' },
-      speedSec: { type: Number, default: 8, min: 2, max: 30 },
+      speedSec: { type: Number, default: 8, min: 2, max: 120 },
     },
 
     // Legacy fields used by older routes/UIs (kept for backward compatibility)

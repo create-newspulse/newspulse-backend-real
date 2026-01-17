@@ -6,6 +6,7 @@ const {
   normalizeChannel,
   getOrCreateSettings,
   adminSettingsResponse,
+  computeEffectiveEnabled,
 } = require('../services/broadcastCenter.service');
 
 const router = express.Router();
@@ -50,16 +51,19 @@ router.get('/', async (req, res) => {
       const breakingItems = Array.isArray(itemsBy.breaking) ? itemsBy.breaking : [];
       const liveItems = Array.isArray(itemsBy.live) ? itemsBy.live : [];
 
+      const breakingEnabled = computeEffectiveEnabled(settings.breaking.enabled, settings.breaking.mode, breakingItems.length);
+      const liveEnabled = computeEffectiveEnabled(settings.live.enabled, settings.live.mode, liveItems.length);
+
       return res.status(200).json({
         breaking: {
-          enabled: Boolean(settings.breaking.enabled),
+          enabled: breakingEnabled,
           mode: settings.breaking.mode,
           speed: settings.breaking.speedSec,
           speedSec: settings.breaking.speedSec,
           items: breakingItems.map(_mapPublicItem),
         },
         live: {
-          enabled: Boolean(settings.live.enabled),
+          enabled: liveEnabled,
           mode: settings.live.mode,
           speed: settings.live.speedSec,
           speedSec: settings.live.speedSec,

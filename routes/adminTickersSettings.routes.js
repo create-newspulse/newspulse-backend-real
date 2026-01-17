@@ -95,9 +95,13 @@ async function saveBroadcastSettingsFromTickersConfig(config) {
   };
 
   if (breaking) {
+    const breakingModeRaw = String(breaking.mode || '').trim().toLowerCase();
+    const breakingMode =
+      breakingModeRaw === 'off' ? 'force_off'
+      : (breakingModeRaw === 'force_on' ? 'force_on' : 'auto');
     update.breaking = {
-      enabled: breaking.mode !== 'off',
-      mode: breaking.mode,
+      enabled: breakingMode !== 'force_off',
+      mode: breakingMode,
       showWhenEmpty: breaking.showWhenEmpty,
       speedSec: breaking.speedSec,
       freshnessMin: breaking.freshnessMinutes,
@@ -106,8 +110,11 @@ async function saveBroadcastSettingsFromTickersConfig(config) {
   }
 
   if (live) {
+    const liveEnabled = !!live.enabled;
     update.live = {
-      enabled: live.enabled,
+      enabled: liveEnabled,
+      // Preserve existing behavior: when explicitly disabled, force off at the mode layer too.
+      mode: liveEnabled ? 'auto' : 'force_off',
       speedSec: live.speedSec,
       refreshIntervalSec: live.refreshSec,
       maxItems: live.maxItems,
