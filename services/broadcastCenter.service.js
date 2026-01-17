@@ -40,6 +40,16 @@ function normalizeMode(v) {
   return s;
 }
 
+function normalizeModeForDoc(rawMode, explicitEnabled) {
+  const s = String(rawMode || '').trim().toLowerCase();
+
+  // Historical values seen in older deployments.
+  if (s === 'off') return 'force_off';
+  if (s === 'manual') return explicitEnabled ? 'force_on' : 'force_off';
+
+  return normalizeMode(s) || 'auto';
+}
+
 function normalizeSpeedSec(v) {
   const n = typeof v === 'number' ? v : Number(v);
   if (!Number.isFinite(n)) return null;
@@ -93,6 +103,17 @@ async function getOrCreateSettings() {
   if (changed) {
     doc.breaking = doc.breaking && typeof doc.breaking === 'object' ? doc.breaking : { enabled: Boolean(doc.breakingEnabled), mode: 'auto', speedSec: 8 };
     doc.live = doc.live && typeof doc.live === 'object' ? doc.live : { enabled: Boolean(doc.liveEnabled), mode: 'auto', speedSec: 8 };
+  }
+
+  // Normalize to schema-valid values to avoid enum validation errors on future saves.
+  // Note: existing DBs may contain legacy values like "off" or "manual".
+  const normalizedBreakingMode = normalizeModeForDoc(doc.breaking?.mode, Boolean(doc.breaking?.enabled));
+  const normalizedLiveMode = normalizeModeForDoc(doc.live?.mode, Boolean(doc.live?.enabled));
+  if (doc.breaking?.mode !== normalizedBreakingMode) {
+    doc.breaking.mode = normalizedBreakingMode;
+  }
+  if (doc.live?.mode !== normalizedLiveMode) {
+    doc.live.mode = normalizedLiveMode;
   }
 
   applyLegacyMirrors(doc);
