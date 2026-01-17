@@ -258,7 +258,36 @@ async function computePublicPayload() {
   const breakingEnabled = computeEffectiveEnabled(settings.breaking.enabled, settings.breaking.mode, breakingItems.length);
   const liveEnabled = computeEffectiveEnabled(settings.live.enabled, settings.live.mode, liveItems.length);
 
+  const mapPublicItem = (doc) => {
+    const d = doc && typeof doc === 'object' ? doc : {};
+    const id = d._id ? String(d._id) : undefined;
+    return {
+      id,
+      _id: id,
+      type: d.type === 'breaking' || d.type === 'live' ? d.type : undefined,
+      text: typeof d.text === 'string' ? d.text : '',
+      createdAt: d.createdAt || null,
+      expiresAt: d.expiresAt || null,
+    };
+  };
+
   return {
+    ok: true,
+    _meta: {
+      hasSettings: true,
+    },
+    settings,
+    items: {
+      breaking: breakingItems.map(mapPublicItem),
+      live: liveItems.map(mapPublicItem),
+    },
+    data: {
+      settings,
+      items: {
+        breaking: breakingItems.map(mapPublicItem),
+        live: liveItems.map(mapPublicItem),
+      },
+    },
     breaking: {
       enabled: breakingEnabled,
       speedSec: settings.breaking.speedSec,
