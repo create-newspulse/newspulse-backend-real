@@ -14,8 +14,16 @@ const {
 
 const router = express.Router();
 
-function fail(res, status, code, message) {
-  return res.status(status).json({ ok: false, success: false, status, code, message });
+function fail(res, status, code, message, details) {
+  return res.status(status).json({
+    ok: false,
+    code: String(code || 'SERVER_ERROR'),
+    message: String(message || 'Request failed'),
+    ...(details !== undefined ? { details } : {}),
+    // Backward-compat for existing admin clients
+    success: false,
+    status,
+  });
 }
 
 function ensureDbOr503(res) {

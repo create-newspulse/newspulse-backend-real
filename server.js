@@ -361,6 +361,9 @@ const _PUBLIC_ADS_CORS_ORIGINS = new Set([
 const _PUBLIC_BROADCAST_CORS_ORIGINS = new Set([
   'https://www.newspulse.co.in',
   'https://newspulse.co.in',
+  'https://admin.newspulse.co.in',
+  'http://localhost:5173',
+  'http://localhost:3000',
 ]);
 
 const _publicAdsCorsOptions = {
@@ -426,7 +429,9 @@ function _handlePublicBroadcastPreflight(req, res) {
 
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    // Keep this permissive so browser preflights succeed for any CRUD request
+    // (even though public broadcast endpoints are GET-only).
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', allowHeaders.join(', '));
   }
   return res.sendStatus(204);
@@ -462,15 +467,20 @@ app.use('/api/public/ads/slot', (req, res, next) => {
 // Ensure GET responses for public broadcast include the required CORS headers.
 // (Also strips any Access-Control-Allow-Credentials header set by global CORS.)
 function _publicBroadcastCorsOverride(req, res, next) {
-  if (req.method !== 'GET' && req.method !== 'OPTIONS') return next();
+  // Allow overriding CORS for any method on the public broadcast namespace.
+  // This prevents the global CORS middleware (credentials=true) from interfering.
+  // Public endpoints should not require cookies.
+  if (req.method === 'HEAD') return next();
 
   const origin = req.get('Origin');
   if (!origin) return next();
   if (!_PUBLIC_BROADCAST_CORS_ORIGINS.has(String(origin))) return next();
 
   res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  // Ensure we don't accidentally advertise credentialed CORS on public endpoints.
+  try { res.removeHeader('Access-Control-Allow-Credentials'); } catch (_) {}
   return next();
 }
 

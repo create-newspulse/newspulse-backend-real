@@ -11,6 +11,16 @@ const {
 
 const router = express.Router();
 
+function sendError(res, status, code, message, details) {
+  const payload = {
+    ok: false,
+    code: String(code || 'SERVER_ERROR'),
+    message: String(message || 'Request failed'),
+  };
+  if (details !== undefined) payload.details = details;
+  return res.status(status).json(payload);
+}
+
 function _noStore(res) {
   try {
     res.setHeader('Cache-Control', 'no-store');
@@ -72,7 +82,7 @@ router.get('/', async (req, res) => {
       });
     } catch (_) {
       _noStore(res);
-      return res.status(500).json({ ok: false, message: 'Failed to load broadcast' });
+      return sendError(res, 500, 'SERVER_ERROR', 'Failed to load broadcast');
     }
   }
 
@@ -82,7 +92,7 @@ router.get('/', async (req, res) => {
     return res.status(200).json(payload);
   } catch (e) {
     _noStore(res);
-    return res.status(500).json({ ok: false, message: 'Failed to load broadcast' });
+    return sendError(res, 500, 'SERVER_ERROR', 'Failed to load broadcast');
   }
 });
 
@@ -92,7 +102,7 @@ router.get('/items', async (req, res) => {
     _noStore(res);
     const type = normalizeChannel(req.query && req.query.type);
     if (!type) {
-      return res.status(400).json({ ok: false, message: 'Invalid type. Expected breaking|live' });
+      return sendError(res, 400, 'BAD_REQUEST', 'Invalid type. Expected breaking|live');
     }
 
     const itemsBy = await listItemsLast24hByChannel();
@@ -103,7 +113,7 @@ router.get('/items', async (req, res) => {
     return res.status(200).json({ ok: true, items: items.map(i => String(i.text || '')).filter(Boolean) });
   } catch (_) {
     _noStore(res);
-    return res.status(500).json({ ok: false, message: 'Failed to load broadcast items' });
+    return sendError(res, 500, 'SERVER_ERROR', 'Failed to load broadcast items');
   }
 });
 
@@ -116,7 +126,7 @@ router.get('/settings', async (_req, res) => {
     return res.status(200).json({ ok: true, settings });
   } catch (_) {
     _noStore(res);
-    return res.status(500).json({ ok: false, message: 'Failed to load broadcast settings' });
+    return sendError(res, 500, 'SERVER_ERROR', 'Failed to load broadcast settings');
   }
 });
 
