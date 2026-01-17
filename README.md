@@ -250,25 +250,30 @@ All admin endpoints require:
 
 ### Admin (standardized)
 
-Primary admin API (recommended):
-- Base: `GET/PUT/PATCH /api/admin/broadcast`
-- Items: `GET/POST /api/admin/broadcast/items`
-- Item updates: `PATCH /api/admin/broadcast/items/:id`
-- Item delete: `DELETE /api/admin/broadcast/items/:id`
+Admin Panel contract (preferred for production; same-origin via Vercel `/admin-api/*` rewrite):
+- Base: `GET/PUT /admin-api/admin/broadcast`
+- Items: `GET/POST /admin-api/admin/broadcast/items`
+- Item delete: `DELETE /admin-api/admin/broadcast/items/:id`
+
+Proxy alias (some admin builds):
+- `GET/PUT /admin-api/api/admin/broadcast` (same endpoints under `/items`)
+
+Backend direct (no proxy):
+- Base: `GET/PUT/PATCH /api/admin/broadcast` (same endpoints under `/items`)
 
 Notes:
 - Success envelope: `{ ok: true, success: true, data: ... }`
-- Each item includes both `_id` and `id` (same value), plus `type`, `text`, `isLive`, `createdAt`.
+- Each item includes `id` (string) and `_id` (string), plus `type`, `text`, `createdAt` (and `expiresAt` when present).
 
 Example: list items
 ```bash
-curl "http://localhost:10000/api/admin/broadcast/items?type=breaking" \
+curl "http://localhost:10000/admin-api/admin/broadcast/items?type=breaking" \
   -H "Authorization: Bearer <ADMIN_JWT>"
 ```
 
 Example: create item (defaults to `isLive: true`)
 ```bash
-curl -X POST "http://localhost:10000/api/admin/broadcast/items" \
+curl -X POST "http://localhost:10000/admin-api/admin/broadcast/items" \
   -H "Authorization: Bearer <ADMIN_JWT>" \
   -H "Content-Type: application/json" \
   -d '{"type":"breaking","text":"Breaking: Airport roads closed due to fog"}'
@@ -276,7 +281,7 @@ curl -X POST "http://localhost:10000/api/admin/broadcast/items" \
 
 Example: update item
 ```bash
-curl -X PATCH "http://localhost:10000/api/admin/broadcast/items/<ITEM_ID>" \
+curl -X PATCH "http://localhost:10000/admin-api/admin/broadcast/items/<ITEM_ID>" \
   -H "Authorization: Bearer <ADMIN_JWT>" \
   -H "Content-Type: application/json" \
   -d '{"isLive":false,"text":"Updated text"}'
@@ -286,13 +291,13 @@ Alias note: some admin UIs send `{ "enabled": true|false }` instead of `isLive`.
 
 Example: delete item
 ```bash
-curl -X DELETE "http://localhost:10000/api/admin/broadcast/items/<ITEM_ID>" \
+curl -X DELETE "http://localhost:10000/admin-api/admin/broadcast/items/<ITEM_ID>" \
   -H "Authorization: Bearer <ADMIN_JWT>"
 ```
 
 Example: update settings
 ```bash
-curl -X PUT "http://localhost:10000/api/admin/broadcast" \
+curl -X PUT "http://localhost:10000/admin-api/admin/broadcast" \
   -H "Authorization: Bearer <ADMIN_JWT>" \
   -H "Content-Type: application/json" \
   -d '{"breaking":{"enabled":true,"mode":"auto","speedSec":8},"live":{"enabled":true,"mode":"auto","speedSec":10}}'

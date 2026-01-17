@@ -81,6 +81,7 @@ function mapItem(doc) {
     type: d.type === 'breaking' || d.type === 'live' ? d.type : undefined,
     text: typeof d.text === 'string' ? d.text : '',
     createdAt: d.createdAt || null,
+    expiresAt: d.expiresAt || null,
     isLive: Boolean(d.isLive),
   };
 }
