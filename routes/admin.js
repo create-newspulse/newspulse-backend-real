@@ -113,6 +113,13 @@ router.post('/login', async (req, res, next) => {
 
   const dbReady = mongoose.connection && mongoose.connection.readyState === 1;
 
+  // In environments where DB auth is unavailable, we require env-based admin creds.
+  // Returning 500 here makes misconfiguration explicit (and keeps tests deterministic).
+  if (!dbReady && (!adminEmail || !adminPassword)) {
+    console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=missing-admin-creds`);
+    return res.status(500).json({ ok: false, message: 'Admin credentials not configured' });
+  }
+
   const signForUser = (u) => {
     const tokenVersion = typeof u.tokenVersion === 'number' ? u.tokenVersion : 0;
     return jwt.sign(

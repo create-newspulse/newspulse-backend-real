@@ -162,13 +162,26 @@ async function writeSetting(key, value, admin) {
 router.get('/settings', requireAdminAuth, async (_req, res, next) => {
   try {
     const fallback = defaultAdminSettings();
-    const { value, updatedAt } = await readSetting(ADMIN_SETTINGS_KEY, fallback);
     const db = dbStatusPayload();
+
+    if (!db.connected) {
+      return res.status(503).json({
+        ok: false,
+        success: false,
+        status: 503,
+        message: 'DB unavailable',
+        data: fallback,
+        updatedAt: null,
+        db,
+      });
+    }
+
+    const { value, updatedAt } = await readSetting(ADMIN_SETTINGS_KEY, fallback);
     return res.status(200).json({
       ok: true,
       success: true,
       status: 200,
-      message: db.connected ? 'OK' : 'OK (DB unavailable)',
+      message: 'OK',
       data: value,
       updatedAt,
       db,
@@ -316,13 +329,26 @@ router.put('/settings', requireAdminAuth, async (req, res, next) => {
 router.get('/public-settings', requireAdminAuth, async (_req, res, next) => {
   try {
     const fallback = defaultPublicSettings();
-    const { value, updatedAt } = await readSetting(PUBLIC_SETTINGS_KEY, fallback);
     const db = dbStatusPayload();
+
+    if (!db.connected) {
+      return res.status(503).json({
+        ok: false,
+        success: false,
+        status: 503,
+        message: 'DB unavailable',
+        data: fallback,
+        updatedAt: null,
+        db,
+      });
+    }
+
+    const { value, updatedAt } = await readSetting(PUBLIC_SETTINGS_KEY, fallback);
     return res.status(200).json({
       ok: true,
       success: true,
       status: 200,
-      message: db.connected ? 'OK' : 'OK (DB unavailable)',
+      message: 'OK',
       data: value,
       updatedAt,
       db,
