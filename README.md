@@ -238,9 +238,25 @@ Returns a stable payload for the website ticker(s):
 }
 ```
 
+No-cache: public broadcast responses include `Cache-Control: no-store`.
+
+#### GET /api/public/broadcast?detailed=1
+Returns a detailed payload (items include stable `id` field):
+```json
+{
+  "breaking": { "enabled": true, "mode": "auto", "speed": 8, "items": [{"id":"...","type":"breaking","text":"...","createdAt":"...","expiresAt":"..."}] },
+  "live":     { "enabled": false, "mode": "auto", "speed": 8, "items": [] }
+}
+```
+
 Example:
 ```bash
 curl "http://localhost:10000/api/public/broadcast"
+```
+
+Detailed example:
+```bash
+curl -i "http://localhost:10000/api/public/broadcast?detailed=1"
 ```
 
 ### Admin (via /admin-api)

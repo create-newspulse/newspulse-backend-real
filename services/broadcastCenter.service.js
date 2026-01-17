@@ -113,9 +113,17 @@ async function listItemsLast24hByChannel() {
   }
 
   const since = nowMinus24h();
+  const now = new Date();
+  const notExpired = {
+    $or: [
+      { expiresAt: { $exists: false } },
+      { expiresAt: null },
+      { expiresAt: { $gte: now } },
+    ],
+  };
   const [breaking, live] = await Promise.all([
-    BroadcastItem.find({ type: 'breaking', createdAt: { $gte: since } }).sort({ createdAt: -1 }).lean(),
-    BroadcastItem.find({ type: 'live', createdAt: { $gte: since } }).sort({ createdAt: -1 }).lean(),
+    BroadcastItem.find({ type: 'breaking', createdAt: { $gte: since }, ...notExpired }).sort({ createdAt: -1 }).lean(),
+    BroadcastItem.find({ type: 'live', createdAt: { $gte: since }, ...notExpired }).sort({ createdAt: -1 }).lean(),
   ]);
 
   return { breaking, live };
