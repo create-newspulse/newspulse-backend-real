@@ -1,4 +1,5 @@
 const express = require('express');
+const jwt = require('jsonwebtoken');
 const router = express.Router();
 
 function parseCookies(req) {
@@ -27,7 +28,19 @@ router.get('/session', (req, res) => {
   // Tests issue access tokens like "access.*" from the legacy /admin/login handler.
   const ok = token.startsWith('access.') || token.startsWith('np.');
   if (!ok) {
-    return res.status(200).json({ success: false, user: null });
+    // Also accept real JWT access tokens when JWT_SECRET is configured.
+    try {
+      const secret = String(process.env.JWT_SECRET || '').trim();
+      if (!secret) throw new Error('missing secret');
+      const payload = jwt.verify(token, secret);
+      const role = String(payload?.role || '').toLowerCase();
+      if (!role) throw new Error('missing role');
+      // Keep this aligned with requireAdminAuth.
+      const allowed = new Set(['admin', 'founder', 'staff', 'editor', 'legal']);
+      if (!allowed.has(role)) throw new Error('forbidden');
+    } catch (_e) {
+      return res.status(200).json({ success: false, user: null });
+    }
   }
 
   const email = process.env.FOUNDER_EMAIL || 'founder@example.com';

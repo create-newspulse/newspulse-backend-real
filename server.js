@@ -1683,6 +1683,21 @@ function _makeToken(prefix) {
   return `${prefix}.${Buffer.from(String(Date.now())).toString('base64')}`;
 }
 
+function _isTestEnv() {
+  return String(process.env.NODE_ENV || '').toLowerCase() === 'test';
+}
+
+function _issueJwt(payload, expiresIn) {
+  const secret = String(process.env.JWT_SECRET || '').trim();
+  if (!secret) return null;
+  try {
+    const jwt = require('jsonwebtoken');
+    return jwt.sign(payload, secret, { expiresIn });
+  } catch (_) {
+    return null;
+  }
+}
+
 // POST /admin/login -> returns success + access/refresh tokens
 app.post('/admin/login', (req, res) => {
   try {
@@ -1693,10 +1708,31 @@ app.post('/admin/login', (req, res) => {
     const expectedPass = String(process.env.FOUNDER_PASSWORD || '');
     if (!email || !password) return res.status(400).json({ success: false, message: 'Email and password required' });
     if (email !== expectedEmail || password !== expectedPass) return res.status(401).json({ success: false, message: 'Invalid credentials' });
-    const accessToken = _makeToken('access');
-    const refreshToken = _makeToken('refresh');
-    _issuedTokens.access.add(accessToken);
-    _issuedTokens.refresh.add(refreshToken);
+
+    // In tests, keep the historical access.* tokens that /admin-auth/session accepts.
+    if (_isTestEnv()) {
+      const accessToken = _makeToken('access');
+      const refreshToken = _makeToken('refresh');
+      _issuedTokens.access.add(accessToken);
+      _issuedTokens.refresh.add(refreshToken);
+      return res.json({ success: true, accessToken, refreshToken, user: { email } });
+    }
+
+    // In production/dev, issue real JWTs so protected endpoints (requireAdminAuth) accept them.
+    const role = 'founder';
+    const accessToken = _issueJwt(
+      { sub: 'founder-1', email, role, name: 'Founder', tokenVersion: 0, typ: 'access' },
+      '15m'
+    );
+    const refreshToken = _issueJwt(
+      { sub: 'founder-1', email, role, name: 'Founder', tokenVersion: 0, typ: 'refresh' },
+      '30d'
+    );
+
+    if (!accessToken || !refreshToken) {
+      return res.status(500).json({ success: false, message: 'Server misconfigured' });
+    }
+
     return res.json({ success: true, accessToken, refreshToken, user: { email } });
   } catch (e) {
     console.error('login failed:', e?.message || e);
@@ -1720,10 +1756,34 @@ app.get('/admin-auth/session', (req, res) => {
 app.post('/admin/refresh', (req, res) => {
   const body = req.body || {};
   const rt = String(body.refreshToken || '');
-  if (!_issuedTokens.refresh.has(rt)) return res.status(401).json({ success: false, message: 'Invalid refresh token' });
-  const accessToken = _makeToken('access');
-  _issuedTokens.access.add(accessToken);
-  return res.json({ success: true, accessToken });
+
+  if (_isTestEnv()) {
+    if (!_issuedTokens.refresh.has(rt)) return res.status(401).json({ success: false, message: 'Invalid refresh token' });
+    const accessToken = _makeToken('access');
+    _issuedTokens.access.add(accessToken);
+    return res.json({ success: true, accessToken });
+  }
+
+  // Production/dev: accept a signed JWT refresh token.
+  const secret = String(process.env.JWT_SECRET || '').trim();
+  if (!secret) return res.status(500).json({ success: false, message: 'Server misconfigured' });
+  try {
+    const jwt = require('jsonwebtoken');
+    const payload = jwt.verify(rt, secret);
+    if (!payload || String(payload.typ || '') !== 'refresh') {
+      return res.status(401).json({ success: false, message: 'Invalid refresh token' });
+    }
+    const email = payload.email || process.env.FOUNDER_EMAIL || 'founder@example.com';
+    const role = payload.role || 'founder';
+    const accessToken = _issueJwt(
+      { sub: payload.sub || 'founder-1', email, role, name: payload.name || 'Founder', tokenVersion: payload.tokenVersion || 0, typ: 'access' },
+      '15m'
+    );
+    if (!accessToken) return res.status(500).json({ success: false, message: 'Server misconfigured' });
+    return res.json({ success: true, accessToken });
+  } catch (_e) {
+    return res.status(401).json({ success: false, message: 'Invalid refresh token' });
+  }
 });
 
 // GET /admin/metrics -> simple structure for tests
