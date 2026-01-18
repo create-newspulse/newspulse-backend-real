@@ -5,12 +5,6 @@ const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const PushHistory = require('../models/PushHistory');
 
-let translationWorker = null;
-try {
-  translationWorker = require('../services/translationWorker');
-} catch (_) {
-  translationWorker = null;
-}
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
 const router = express.Router();
@@ -112,20 +106,6 @@ function ensureTranslationGroupIdForDoc(doc) {
   const id = new mongoose.Types.ObjectId().toString();
   doc.translationGroupId = id;
   return id;
-}
-
-function enqueueNewsTranslationsBestEffort(doc) {
-  try {
-    if (!translationWorker || !translationWorker.isEnabled || !translationWorker.isEnabled()) return;
-    if (!translationWorker.enqueueNewsArticleJob) return;
-
-    const sourceLang = String(doc.lang || doc.language || 'gu').trim().toLowerCase();
-    const all = ['en', 'hi', 'gu'];
-    const targetLangs = all.filter(l => l !== sourceLang);
-    translationWorker.enqueueNewsArticleJob({ newsId: doc._id, targetLangs }).catch(() => {});
-  } catch (_) {
-    // ignore
-  }
 }
 
 function getActor(req) {
@@ -264,7 +244,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
 
     if (String(doc.status || '').toLowerCase() === 'published') {
-      enqueueNewsTranslationsBestEffort(doc);
+      // Translation queue/review system removed.
     }
 
     return res.status(201).json({
@@ -573,7 +553,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         doc.lang = doc.lang || doc.language;
         doc.language = doc.language || doc.lang;
         await doc.save();
-        enqueueNewsTranslationsBestEffort(doc);
+        // Translation queue/review system removed.
       }
     } catch (_) {}
 
@@ -640,7 +620,7 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     await syncArticleFromNews(doc);
 
     // Phase 2: enqueue translations on publish.
-    enqueueNewsTranslationsBestEffort(doc);
+    // Translation queue/review system removed.
 
     try {
       await PushHistory.create({

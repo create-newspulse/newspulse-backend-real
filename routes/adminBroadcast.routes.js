@@ -3,13 +3,7 @@ const mongoose = require('mongoose');
 
 const BroadcastItem = require('../models/BroadcastItem');
 const { requireAdminAuth } = require('../middleware/adminAuth');
-const { normalizeLang } = require('../services/translationGuard');
-let translationWorker;
-try {
-  translationWorker = require('../services/translationWorker');
-} catch (_) {
-  translationWorker = null;
-}
+
 const {
   getOrCreateSettings,
   adminSettingsResponse,
@@ -331,7 +325,7 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     console.log('[broadcast] create item', `type=${type}`, `lang=${lang}`, `expiresInHours=${expiresInHours}`);
   } catch (_) {}
 
-  const resolvedLang = normalizeLang(lang, 'en');
+  const resolvedLang = String(lang || 'gu').trim().toLowerCase();
 
   const createPayload = {
     type,
@@ -343,30 +337,13 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     language: resolvedLang,
     sourceLang: resolvedLang,
     textByLang: { [resolvedLang]: text },
-    statusByLang: {
-      [resolvedLang]: 'APPROVED',
-      ...(resolvedLang !== 'en' ? { en: 'PROCESSING' } : {}),
-      ...(resolvedLang !== 'hi' ? { hi: 'PROCESSING' } : {}),
-      ...(resolvedLang !== 'gu' ? { gu: 'PROCESSING' } : {}),
-    },
+    statusByLang: { [resolvedLang]: 'APPROVED' },
     qualityByLang: { [resolvedLang]: 100 },
   };
 
   const created = await BroadcastItem.create(createPayload);
 
-  // Translation enqueue: only when the DB queue is enabled.
-  try {
-    if (translationWorker && translationWorker.isEnabled && translationWorker.isEnabled()) {
-      const all = ['en', 'hi', 'gu'];
-      const targetLangs = all.filter(l => l !== resolvedLang);
-      if (targetLangs.length) {
-        translationWorker.enqueueBroadcastItemJob({ itemId: created._id, targetLangs }).catch(() => {});
-        try {
-          console.log('[translate] enqueued broadcast item', String(created._id), '->', targetLangs.join(','));
-        } catch (_) {}
-      }
-    }
-  } catch (_) {}
+  // Translation queue/worker removed: no background jobs enqueued.
 
   // Phase 1 contract: 201 + created item.
   return res.status(201).json({ ok: true, success: true, item: mapItem(created, { lang: resolvedLang }) });

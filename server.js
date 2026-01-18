@@ -141,11 +141,7 @@ try { publicHomeTopBarsRouter = require('./routes/publicHomeTopBars.routes'); } 
 const broadcastRoutes = require('./routes/broadcast.routes');
 const adminBroadcastRouter = require('./routes/adminBroadcast.routes');
 const adminGlossaryRouter = require('./routes/adminGlossary.routes');
-let adminTranslationRouter = null;
-try { adminTranslationRouter = require('./routes/adminTranslation.routes'); } catch (_) { console.warn('[init] optional routes/adminTranslation.routes not found; skipping'); }
 
-let translationWorker = null;
-try { translationWorker = require('./services/translationWorker'); } catch (_) { console.warn('[init] optional services/translationWorker not found; skipping'); }
 const authRoutes = require('./routes/auth.routes');
 const auditRoutes = require('./routes/audit.routes');
 const adminTeamRoutes = require('./routes/adminTeam.routes');
@@ -225,38 +221,7 @@ for (const p of ['/admin-api/system/health', '/admin-api/api/system/health']) {
   });
 }
 
-// Translation health (no auth/DB dependency)
-for (const p of ['/admin-api/system/translation/health', '/admin-api/api/system/translation/health']) {
-  app.get(p, (_req, res) => {
-    const providersRaw = String(process.env.TRANSLATE_PROVIDERS || '').trim() || 'GOOGLE';
-    const strictMode = String(process.env.TRANSLATE_STRICT_MODE || 'AUTO').trim().toUpperCase();
-    const strictTopics = String(process.env.TRANSLATE_STRICT_TOPICS || '').trim() || 'politics,crime,legal,communal,health';
-    const workerEnabled = String(process.env.TRANSLATION_QUEUE_ENABLED || '').trim() === '1';
-    const intervalMs = Number(process.env.TRANSLATION_WORKER_INTERVAL_MS || 2000);
 
-    const hasGoogleKey = !!String(process.env.GOOGLE_TRANSLATE_API_KEY || '').trim();
-    const hasMicrosoftKey = !!String(process.env.MICROSOFT_TRANSLATOR_KEY || '').trim();
-    const hasAwsKey = !!String(process.env.AWS_ACCESS_KEY_ID || '').trim();
-
-    return res.status(200).json({
-      ok: true,
-      providers: providersRaw,
-      configured: {
-        GOOGLE: hasGoogleKey,
-        MICROSOFT: hasMicrosoftKey,
-        AWS: hasAwsKey,
-      },
-      worker: {
-        enabled: workerEnabled,
-        intervalMs: Number.isFinite(intervalMs) ? intervalMs : 2000,
-      },
-      strict: {
-        mode: strictMode === 'REVIEW' ? 'REVIEW' : 'AUTO',
-        topics: strictTopics,
-      },
-    });
-  });
-}
 
 // Avoid 304 responses / ETag-based caching issues (especially on public settings)
 app.disable('etag');
@@ -790,14 +755,6 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
       // optional
     }
 
-    // Ensure TranslationJob indexes are present.
-    try {
-      const TranslationJob = require('./models/TranslationJob');
-      await TranslationJob.syncIndexes();
-    } catch (_) {
-      // optional
-    }
-
 		// Cleanup old Broadcast Center items (older than 24h)
 		try {
 			const { startBroadcastCleanupJob } = require('./services/broadcastCleanup');
@@ -814,12 +771,7 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
       console.warn('[startup] Ad index sync failed', e?.message || e);
     }
 
-    // Start translation worker (DB-backed queue). Safe: does nothing unless enabled.
-    try {
-      if (translationWorker && translationWorker.startWorker) translationWorker.startWorker();
-    } catch (e) {
-      console.warn('[startup] Translation worker failed to start', e?.message || e);
-    }
+    // Translation queue/worker removed.
   }
 
   async function _connectMongoOnce() {
@@ -1181,13 +1133,6 @@ app.use('/admin-api/api/admin/broadcast', adminBroadcastRouter);
 app.use('/api/admin/glossary', adminGlossaryRouter);
 app.use('/admin-api/admin/glossary', adminGlossaryRouter);
 app.use('/admin-api/api/admin/glossary', adminGlossaryRouter);
-
-// Admin Translation Jobs/Review (Phase 2)
-if (adminTranslationRouter) {
-  app.use('/api/admin/translations', adminTranslationRouter);
-  app.use('/admin-api/admin/translations', adminTranslationRouter);
-  app.use('/admin-api/api/admin/translations', adminTranslationRouter);
-}
 // Site settings: simple public endpoint (stub)
 // Placed here (before router mounts) to guarantee frontend never sees a 404.
 app.get('/api/site-settings/public', (req, res) => {
