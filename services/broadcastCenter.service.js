@@ -16,8 +16,8 @@ function nowMinus24h() {
 
 function defaultSettingsDocShape() {
   return {
-    breaking: { enabled: false, mode: 'auto', speedSec: 8 },
-    live: { enabled: false, mode: 'auto', speedSec: 8 },
+    breaking: { enabled: false, mode: 'auto', tickerSpeedSeconds: 8, speedSec: 8 },
+    live: { enabled: false, mode: 'auto', tickerSpeedSeconds: 8, speedSec: 8 },
     // Keep legacy fields initialized for older callers
     breakingEnabled: false,
     liveEnabled: false,
@@ -57,6 +57,14 @@ function normalizeSpeedSec(v) {
   // Tickers settings UI supports up to 120s.
   if (rounded < 2 || rounded > 120) return null;
   return rounded;
+}
+
+function clampTickerSpeedSeconds(v) {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return null;
+  const rounded = Math.round(n);
+  // Broadcast Center requirement: 4..60 seconds.
+  return Math.min(60, Math.max(4, rounded));
 }
 
 function normalizeText(v) {
@@ -101,8 +109,25 @@ async function getOrCreateSettings() {
     !doc.live || typeof doc.live !== 'object';
 
   if (changed) {
-    doc.breaking = doc.breaking && typeof doc.breaking === 'object' ? doc.breaking : { enabled: Boolean(doc.breakingEnabled), mode: 'auto', speedSec: 8 };
-    doc.live = doc.live && typeof doc.live === 'object' ? doc.live : { enabled: Boolean(doc.liveEnabled), mode: 'auto', speedSec: 8 };
+    doc.breaking = doc.breaking && typeof doc.breaking === 'object' ? doc.breaking : { enabled: Boolean(doc.breakingEnabled), mode: 'auto', tickerSpeedSeconds: 8, speedSec: 8 };
+    doc.live = doc.live && typeof doc.live === 'object' ? doc.live : { enabled: Boolean(doc.liveEnabled), mode: 'auto', tickerSpeedSeconds: 8, speedSec: 8 };
+  }
+
+  // Backfill tickerSpeedSeconds from legacy speedSec if missing.
+  if (doc.breaking && typeof doc.breaking === 'object') {
+    if (typeof doc.breaking.tickerSpeedSeconds !== 'number' || !Number.isFinite(doc.breaking.tickerSpeedSeconds)) {
+      const legacy = normalizeSpeedSec(doc.breaking.speedSec) ?? 8;
+      doc.breaking.tickerSpeedSeconds = Math.min(60, Math.max(4, legacy));
+    }
+    // Keep speedSec mirrored for older callers.
+    doc.breaking.speedSec = normalizeSpeedSec(doc.breaking.speedSec) ?? doc.breaking.tickerSpeedSeconds;
+  }
+  if (doc.live && typeof doc.live === 'object') {
+    if (typeof doc.live.tickerSpeedSeconds !== 'number' || !Number.isFinite(doc.live.tickerSpeedSeconds)) {
+      const legacy = normalizeSpeedSec(doc.live.speedSec) ?? 8;
+      doc.live.tickerSpeedSeconds = Math.min(60, Math.max(4, legacy));
+    }
+    doc.live.speedSec = normalizeSpeedSec(doc.live.speedSec) ?? doc.live.tickerSpeedSeconds;
   }
 
   // Normalize to schema-valid values to avoid enum validation errors on future saves.
@@ -215,8 +240,16 @@ async function patchSettings(payload) {
     }
 
     if (Object.prototype.hasOwnProperty.call(next, 'speedSec')) {
-      const s = normalizeSpeedSec(next.speedSec);
-      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.speedSec. Expected 2..30` };
+      const s = clampTickerSpeedSeconds(next.speedSec);
+      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.tickerSpeedSeconds. Expected number` };
+      doc[channel].tickerSpeedSeconds = s;
+      doc[channel].speedSec = s;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(next, 'tickerSpeedSeconds')) {
+      const s = clampTickerSpeedSeconds(next.tickerSpeedSeconds);
+      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.tickerSpeedSeconds. Expected number` };
+      doc[channel].tickerSpeedSeconds = s;
       doc[channel].speedSec = s;
     }
   }
@@ -229,19 +262,24 @@ async function patchSettings(payload) {
 
 function adminSettingsResponse(doc) {
   const d = doc && typeof doc === 'object' ? doc : defaultSettingsDocShape();
-  const breaking = d.breaking && typeof d.breaking === 'object' ? d.breaking : { enabled: false, mode: 'auto', speedSec: 8 };
-  const live = d.live && typeof d.live === 'object' ? d.live : { enabled: false, mode: 'auto', speedSec: 8 };
+  const breaking = d.breaking && typeof d.breaking === 'object' ? d.breaking : { enabled: false, mode: 'auto', tickerSpeedSeconds: 8, speedSec: 8 };
+  const live = d.live && typeof d.live === 'object' ? d.live : { enabled: false, mode: 'auto', tickerSpeedSeconds: 8, speedSec: 8 };
+
+  const breakingSpeed = clampTickerSpeedSeconds(breaking.tickerSpeedSeconds) ?? clampTickerSpeedSeconds(breaking.speedSec) ?? 8;
+  const liveSpeed = clampTickerSpeedSeconds(live.tickerSpeedSeconds) ?? clampTickerSpeedSeconds(live.speedSec) ?? 8;
 
   return {
     breaking: {
       enabled: Boolean(breaking.enabled),
       mode: normalizeMode(breaking.mode) || 'auto',
-      speedSec: normalizeSpeedSec(breaking.speedSec) ?? 8,
+      tickerSpeedSeconds: breakingSpeed,
+      speedSec: breakingSpeed,
     },
     live: {
       enabled: Boolean(live.enabled),
       mode: normalizeMode(live.mode) || 'auto',
-      speedSec: normalizeSpeedSec(live.speedSec) ?? 8,
+      tickerSpeedSeconds: liveSpeed,
+      speedSec: liveSpeed,
     },
     updatedAt: d.updatedAt || null,
   };

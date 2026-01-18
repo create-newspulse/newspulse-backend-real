@@ -54,12 +54,21 @@ function toAdminContract(settings) {
     breaking: {
       enabled: !!settings?.breaking?.enabled,
       mode: settings?.breaking?.mode || 'auto',
+      tickerSpeedSeconds: typeof settings?.breaking?.tickerSpeedSeconds === 'number'
+        ? settings.breaking.tickerSpeedSeconds
+        : (typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 8),
+      // Backward-compat for existing admin clients
       speed: typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 8,
+      speedSec: typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 8,
     },
     live: {
       enabled: !!settings?.live?.enabled,
       mode: settings?.live?.mode || 'auto',
+      tickerSpeedSeconds: typeof settings?.live?.tickerSpeedSeconds === 'number'
+        ? settings.live.tickerSpeedSeconds
+        : (typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 8),
       speed: typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 8,
+      speedSec: typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 8,
     },
   };
 }
@@ -86,6 +95,16 @@ function buildPatchPayload(body) {
 
     if (Object.prototype.hasOwnProperty.call(next, 'speedSec')) {
       payload[channel].speedSec = next.speedSec;
+    }
+
+    // New explicit field name
+    if (Object.prototype.hasOwnProperty.call(next, 'tickerSpeedSeconds')) {
+      payload[channel].tickerSpeedSeconds = next.tickerSpeedSeconds;
+    }
+
+    // Some clients may send speedSeconds
+    if (Object.prototype.hasOwnProperty.call(next, 'speedSeconds')) {
+      payload[channel].tickerSpeedSeconds = next.speedSeconds;
     }
   }
   return payload;
@@ -190,6 +209,14 @@ async function _updateBroadcastSettings(req, res) {
     const code = status === 503 ? 'DB_UNAVAILABLE' : 'BAD_REQUEST';
     return fail(res, status, code, result.message || 'Invalid request');
   }
+
+  // Minimal debug log showing saved speeds (helps diagnose UI overwrites)
+  try {
+    const doc = result.settings || null;
+    const breakingSpeed = doc?.breaking?.tickerSpeedSeconds ?? doc?.breaking?.speedSec;
+    const liveSpeed = doc?.live?.tickerSpeedSeconds ?? doc?.live?.speedSec;
+    console.debug('[broadcast][settings][save]', { breakingTickerSpeedSeconds: breakingSpeed, liveTickerSpeedSeconds: liveSpeed });
+  } catch (_) {}
 
   const doc = await getOrCreateSettings();
   const settings = adminSettingsResponse(doc);
