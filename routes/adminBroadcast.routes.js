@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 
 const BroadcastItem = require('../models/BroadcastItem');
 const { requireAdminAuth } = require('../middleware/adminAuth');
-const { generateTranslationsForBroadcastItem, normalizeLang } = require('../services/translationGuard');
+const { normalizeLang } = require('../services/translationGuard');
 let translationWorker;
 try {
   translationWorker = require('../services/translationWorker');
@@ -137,6 +137,26 @@ function normalizeText(v) {
   return s;
 }
 
+function _normalizeExpiresInMinutes(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  const minutes = Math.floor(n);
+  if (minutes <= 0) return null;
+  // Guardrail: don't allow extremely long expiries by accident.
+  if (minutes > 7 * 24 * 60) return null;
+  return minutes;
+}
+
+function _normalizeExpiresInHours(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  const hours = Math.floor(n);
+  if (hours < 1 || hours > 168) return null;
+  return hours;
+}
+
 // Admin APIs (protected)
 // GET /api/admin/broadcast
 router.get('/', requireAdminAuth, async (_req, res) => {
@@ -189,20 +209,40 @@ router.get('/items', requireAdminAuth, async (req, res) => {
 
   const itemsBy = await listItemsLast24hByChannel();
   if (type) {
-    const items = (itemsBy && itemsBy[type]) || [];
+    const now = Date.now();
+    const items = ((itemsBy && itemsBy[type]) || [])
+      .filter((i) => Boolean(i && i.isLive))
+      .filter((i) => {
+        if (!i || !i.expiresAt) return true;
+        const t = new Date(i.expiresAt).getTime();
+        return Number.isFinite(t) ? t > now : true;
+      })
+      .sort((a, b) => {
+        const at = a && a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const bt = b && b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return bt - at;
+      })
+      .slice(0, 50);
     return ok(res, items.map(i => mapItem(i, { lang })));
   }
 
+  const now = Date.now();
   const all = []
     .concat((itemsBy && itemsBy.breaking) || [])
     .concat((itemsBy && itemsBy.live) || [])
+    .filter((i) => Boolean(i && i.isLive))
+    .filter((i) => {
+      if (!i || !i.expiresAt) return true;
+      const t = new Date(i.expiresAt).getTime();
+      return Number.isFinite(t) ? t > now : true;
+    })
     .sort((a, b) => {
       const at = a && a.createdAt ? new Date(a.createdAt).getTime() : 0;
       const bt = b && b.createdAt ? new Date(b.createdAt).getTime() : 0;
       return bt - at;
     });
 
-  return ok(res, all.map(i => mapItem(i, { lang })));
+  return ok(res, all.slice(0, 50).map(i => mapItem(i, { lang })));
 });
 
 // POST /api/admin/broadcast/items  body { type, text }
@@ -210,7 +250,7 @@ router.post('/items', requireAdminAuth, async (req, res) => {
   if (!ensureDbOr503(res)) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  // Support both body.type (new) and query.type (legacy UIs)
+  // Accept type/lang from either JSON body (preferred) or query params (fallback).
   const type = normalizeChannel(body.type) || normalizeChannel(req.query && req.query.type);
   if (!type) {
     return fail(res, 400, 'INVALID_TYPE', 'Invalid type. Expected breaking|live');
@@ -221,46 +261,84 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     return fail(res, 400, 'INVALID_TEXT', 'Invalid text. Must be non-empty and <= 160 chars');
   }
 
-  const sourceLang = body && Object.prototype.hasOwnProperty.call(body, 'lang')
-    ? _normalizeLangQuery(body.lang)
-    : null;
-  if (body && Object.prototype.hasOwnProperty.call(body, 'lang') && !sourceLang) {
+  const rawLang = Object.prototype.hasOwnProperty.call(body, 'lang') ? body.lang : (req.query && req.query.lang);
+  const lang = rawLang !== undefined ? _normalizeLangQuery(rawLang) : 'en';
+  if (rawLang !== undefined && !lang) {
     return fail(res, 400, 'INVALID_LANG', 'Invalid lang. Expected en|hi|gu');
   }
 
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  const created = await BroadcastItem.create({
-    type,
-    text,
-    sourceLang: normalizeLang(sourceLang || 'gu', 'gu'),
-    textByLang: {
-      [normalizeLang(sourceLang || 'gu', 'gu')]: text,
-    },
-    statusByLang: {
-      [normalizeLang(sourceLang || 'gu', 'gu')]: 'APPROVED',
-      ...(normalizeLang(sourceLang || 'gu', 'gu') !== 'en' ? { en: 'PROCESSING' } : {}),
-      ...(normalizeLang(sourceLang || 'gu', 'gu') !== 'hi' ? { hi: 'PROCESSING' } : {}),
-      ...(normalizeLang(sourceLang || 'gu', 'gu') !== 'gu' ? { gu: 'PROCESSING' } : {}),
-    },
-    qualityByLang: {
-      [normalizeLang(sourceLang || 'gu', 'gu')]: 100,
-    },
-    isLive: true,
-    expiresAt,
-  });
+  // Preferred: expiresInHours (1..168), default 24.
+  // Backward-compat: accept expiresInMinutes (converted to hours, rounded up) if provided.
+  const expiresHoursFromBodyOrQuery =
+    (Object.prototype.hasOwnProperty.call(body, 'expiresInHours') ? body.expiresInHours : undefined)
+    ?? (req.query && req.query.expiresInHours);
+  let expiresInHours = _normalizeExpiresInHours(expiresHoursFromBodyOrQuery);
 
-  // Phase 1: generate translations asynchronously; safe defaults will BLOCK when provider isn't configured.
+  if (expiresInHours === null) {
+    const expiresInMinutes = _normalizeExpiresInMinutes(
+      (Object.prototype.hasOwnProperty.call(body, 'expiresInMinutes') ? body.expiresInMinutes : undefined)
+      ?? (req.query && req.query.expiresInMinutes)
+    );
+    if (expiresInMinutes) {
+      expiresInHours = Math.ceil(expiresInMinutes / 60);
+      if (expiresInHours < 1) expiresInHours = 1;
+      if (expiresInHours > 168) expiresInHours = null;
+    }
+  }
+
+  if (expiresHoursFromBodyOrQuery !== undefined && expiresInHours === null) {
+    return fail(res, 400, 'INVALID_EXPIRES', 'Invalid expiresInHours. Expected 1..168');
+  }
+
+  if (expiresInHours === null) {
+    expiresInHours = 24;
+  }
+
+  // Single-line audit log per requirement.
   try {
-    setImmediate(() => {
-      if (translationWorker && translationWorker.isEnabled && translationWorker.isEnabled()) {
-        translationWorker.enqueueBroadcastItemJob({ itemId: created._id, targetLangs: ['en', 'hi'] }).catch(() => {});
-        return;
-      }
-      generateTranslationsForBroadcastItem(created._id).catch(() => {});
-    });
+    console.log('[broadcast] create item', `type=${type}`, `lang=${lang}`, `expiresInHours=${expiresInHours}`);
   } catch (_) {}
 
-  return res.status(201).json({ ok: true, success: true, data: mapItem(created) });
+  const now = new Date();
+  const resolvedLang = normalizeLang(lang, 'en');
+
+  const createPayload = {
+    type,
+    text,
+    createdAt: now,
+    isLive: true,
+    expiresAt: new Date(now.getTime() + expiresInHours * 60 * 60 * 1000),
+    // Store both legacy + new fields.
+    language: resolvedLang,
+    sourceLang: resolvedLang,
+    textByLang: { [resolvedLang]: text },
+    statusByLang: {
+      [resolvedLang]: 'APPROVED',
+      ...(resolvedLang !== 'en' ? { en: 'PROCESSING' } : {}),
+      ...(resolvedLang !== 'hi' ? { hi: 'PROCESSING' } : {}),
+      ...(resolvedLang !== 'gu' ? { gu: 'PROCESSING' } : {}),
+    },
+    qualityByLang: { [resolvedLang]: 100 },
+  };
+
+  const created = await BroadcastItem.create(createPayload);
+
+  // Translation enqueue: only when the DB queue is enabled.
+  try {
+    if (translationWorker && translationWorker.isEnabled && translationWorker.isEnabled()) {
+      const all = ['en', 'hi', 'gu'];
+      const targetLangs = all.filter(l => l !== resolvedLang);
+      if (targetLangs.length) {
+        translationWorker.enqueueBroadcastItemJob({ itemId: created._id, targetLangs }).catch(() => {});
+        try {
+          console.log('[translate] enqueued broadcast item', String(created._id), '->', targetLangs.join(','));
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+
+  // Admin UI expects: 200 { ok:true, item: <createdItem> }
+  return res.status(200).json({ ok: true, item: mapItem(created, { lang: resolvedLang }) });
 });
 
 // PATCH /api/admin/broadcast/items/:id

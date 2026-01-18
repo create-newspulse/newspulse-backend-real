@@ -151,8 +151,8 @@ async function listItemsLast24hByChannel() {
     ],
   };
   const [breaking, live] = await Promise.all([
-    BroadcastItem.find({ type: 'breaking', createdAt: { $gte: since }, ...notExpired }).sort({ createdAt: -1 }).lean(),
-    BroadcastItem.find({ type: 'live', createdAt: { $gte: since }, ...notExpired }).sort({ createdAt: -1 }).lean(),
+    BroadcastItem.find({ type: 'breaking', isLive: true, createdAt: { $gte: since }, ...notExpired }).sort({ createdAt: -1 }).limit(50).lean(),
+    BroadcastItem.find({ type: 'live', isLive: true, createdAt: { $gte: since }, ...notExpired }).sort({ createdAt: -1 }).limit(50).lean(),
   ]);
 
   return { breaking, live };
@@ -183,8 +183,9 @@ async function deleteItemById(id) {
     return { ok: false, status: 404, message: 'Not found' };
   }
 
-  const deleted = await BroadcastItem.findByIdAndDelete(id).lean();
-  if (!deleted) return { ok: false, status: 404, message: 'Not found' };
+  // Soft-delete (treat isLive as isActive) so admin UI stops showing it immediately.
+  const updated = await BroadcastItem.findByIdAndUpdate(id, { $set: { isLive: false } }, { new: true }).lean();
+  if (!updated) return { ok: false, status: 404, message: 'Not found' };
 
   return { ok: true, status: 200 };
 }
