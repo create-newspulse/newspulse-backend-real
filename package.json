@@ -9,7 +9,8 @@
     "inspect:community": "node scripts/inspectCommunitySubmissions.js",
     "test-email": "node scripts/test-email.js",
     "test-routes": "node scripts/test-routes.js",
-    "migrate:normalize-community": "node scripts/migrate-normalize-community-submissions.js"
+    "migrate:normalize-community": "node scripts/migrate-normalize-community-submissions.js",
+    "migrate:broadcast-lang": "node scripts/migrate_broadcast_lang.js"
   },
   "dependencies": {
     "@simplewebauthn/server": "^13.2.2",

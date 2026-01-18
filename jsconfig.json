@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "checkJs": false,
+    "maxNodeModuleJsDepth": 2,
+    "module": "commonjs",
+    "target": "es2020"
+  },
+  "typeAcquisition": {
+    "enable": false
+  },
+  "exclude": [
+    "node_modules",
+    "**/node_modules/*",
+    "newspulse-backend-real-main/**"
+  ]
+}

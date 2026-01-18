@@ -3,6 +3,13 @@ const mongoose = require('mongoose');
 
 const BroadcastItem = require('../models/BroadcastItem');
 const { requireAdminAuth } = require('../middleware/adminAuth');
+const { generateTranslationsForBroadcastItem, normalizeLang } = require('../services/translationGuard');
+let translationWorker;
+try {
+  translationWorker = require('../services/translationWorker');
+} catch (_) {
+  translationWorker = null;
+}
 const {
   getOrCreateSettings,
   adminSettingsResponse,
@@ -13,6 +20,13 @@ const {
 } = require('../services/broadcastCenter.service');
 
 const router = express.Router();
+
+const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
+
+function _normalizeLangQuery(v) {
+  const s = String(v || '').trim().toLowerCase();
+  return SUPPORTED_LANGS.has(s) ? s : null;
+}
 
 function fail(res, status, code, message, details) {
   return res.status(status).json({
@@ -80,14 +94,36 @@ function buildPatchPayload(body) {
   return payload;
 }
 
-function mapItem(doc) {
+function _resolveAdminDisplayText(doc, lang) {
+  const d = doc && typeof doc === 'object' ? doc : {};
+  if (!lang) return typeof d.text === 'string' ? d.text : '';
+  const src = typeof d.sourceLang === 'string' ? d.sourceLang : null;
+  const by = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
+  const pick =
+    (by && typeof by[lang] === 'string' && by[lang]) ||
+    (src && by && typeof by[src] === 'string' && by[src]) ||
+    (typeof d.text === 'string' ? d.text : '');
+  return String(pick || '');
+}
+
+function mapItem(doc, options = {}) {
   const d = doc && typeof doc === 'object' ? doc : {};
   const _id = d._id ? String(d._id) : undefined;
+  const lang = options && options.lang ? String(options.lang) : null;
   return {
     _id,
     id: _id,
     type: d.type === 'breaking' || d.type === 'live' ? d.type : undefined,
     text: typeof d.text === 'string' ? d.text : '',
+    ...(lang
+      ? {
+          displayText: _resolveAdminDisplayText(d, lang),
+          sourceLang: typeof d.sourceLang === 'string' ? d.sourceLang : undefined,
+          textByLang: d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : {},
+          statusByLang: d.statusByLang && typeof d.statusByLang === 'object' ? d.statusByLang : {},
+          qualityByLang: d.qualityByLang && typeof d.qualityByLang === 'object' ? d.qualityByLang : {},
+        }
+      : {}),
     createdAt: d.createdAt || null,
     expiresAt: d.expiresAt || null,
     isLive: Boolean(d.isLive),
@@ -137,6 +173,13 @@ router.patch('/', requireAdminAuth, _updateBroadcastSettings);
 router.get('/items', requireAdminAuth, async (req, res) => {
   if (!ensureDbOr503(res)) return;
 
+  const lang = Object.prototype.hasOwnProperty.call(req.query || {}, 'lang')
+    ? _normalizeLangQuery(req.query && req.query.lang)
+    : null;
+  if (Object.prototype.hasOwnProperty.call(req.query || {}, 'lang') && !lang) {
+    return fail(res, 400, 'INVALID_LANG', 'Invalid lang. Expected en|hi|gu');
+  }
+
   const type = Object.prototype.hasOwnProperty.call(req.query || {}, 'type')
     ? normalizeChannel(req.query && req.query.type)
     : null;
@@ -147,7 +190,7 @@ router.get('/items', requireAdminAuth, async (req, res) => {
   const itemsBy = await listItemsLast24hByChannel();
   if (type) {
     const items = (itemsBy && itemsBy[type]) || [];
-    return ok(res, items.map(mapItem));
+    return ok(res, items.map(i => mapItem(i, { lang })));
   }
 
   const all = []
@@ -159,7 +202,7 @@ router.get('/items', requireAdminAuth, async (req, res) => {
       return bt - at;
     });
 
-  return ok(res, all.map(mapItem));
+  return ok(res, all.map(i => mapItem(i, { lang })));
 });
 
 // POST /api/admin/broadcast/items  body { type, text }
@@ -178,13 +221,44 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     return fail(res, 400, 'INVALID_TEXT', 'Invalid text. Must be non-empty and <= 160 chars');
   }
 
+  const sourceLang = body && Object.prototype.hasOwnProperty.call(body, 'lang')
+    ? _normalizeLangQuery(body.lang)
+    : null;
+  if (body && Object.prototype.hasOwnProperty.call(body, 'lang') && !sourceLang) {
+    return fail(res, 400, 'INVALID_LANG', 'Invalid lang. Expected en|hi|gu');
+  }
+
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
   const created = await BroadcastItem.create({
     type,
     text,
+    sourceLang: normalizeLang(sourceLang || 'gu', 'gu'),
+    textByLang: {
+      [normalizeLang(sourceLang || 'gu', 'gu')]: text,
+    },
+    statusByLang: {
+      [normalizeLang(sourceLang || 'gu', 'gu')]: 'APPROVED',
+      ...(normalizeLang(sourceLang || 'gu', 'gu') !== 'en' ? { en: 'PROCESSING' } : {}),
+      ...(normalizeLang(sourceLang || 'gu', 'gu') !== 'hi' ? { hi: 'PROCESSING' } : {}),
+      ...(normalizeLang(sourceLang || 'gu', 'gu') !== 'gu' ? { gu: 'PROCESSING' } : {}),
+    },
+    qualityByLang: {
+      [normalizeLang(sourceLang || 'gu', 'gu')]: 100,
+    },
     isLive: true,
     expiresAt,
   });
+
+  // Phase 1: generate translations asynchronously; safe defaults will BLOCK when provider isn't configured.
+  try {
+    setImmediate(() => {
+      if (translationWorker && translationWorker.isEnabled && translationWorker.isEnabled()) {
+        translationWorker.enqueueBroadcastItemJob({ itemId: created._id, targetLangs: ['en', 'hi'] }).catch(() => {});
+        return;
+      }
+      generateTranslationsForBroadcastItem(created._id).catch(() => {});
+    });
+  } catch (_) {}
 
   return res.status(201).json({ ok: true, success: true, data: mapItem(created) });
 });

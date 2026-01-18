@@ -26,6 +26,55 @@ Server will attempt to listen on `PORT` (default 10000) and auto-fallback up to 
 This backend connects using a single variable: `MONGODB_URI`.
 Provide the full connection string exactly as you want Mongoose to connect.
 
+## Broadcast Translation (Phase 1)
+
+Public endpoint (no auth):
+- `/admin-api/public/broadcast?lang=en|hi|gu` (defaults to `gu` if missing/invalid)
+- Safety rule: translations are only shown when `statusByLang[lang] === 'APPROVED'`; otherwise it falls back to source language.
+
+Translation provider config (optional; safe-by-default):
+- `TRANSLATE_PROVIDER=NONE|GOOGLE|MICROSOFT|AWS`
+
+If provider is not configured (default `NONE`), translations are marked `BLOCKED` and clients fall back to the source text.
+
+Provider env vars (placeholders; do not hardcode secrets):
+- Google: `GOOGLE_TRANSLATE_API_KEY`
+- Microsoft: `MICROSOFT_TRANSLATOR_KEY`, `MICROSOFT_TRANSLATOR_REGION`
+- AWS: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`
+
+## Broadcast Translation (Phase 2: Enterprise Guard + Queue)
+
+Best-of multi-engine + Translation Memory:
+- Use `TRANSLATE_PROVIDERS=GOOGLE` for Google-only (default when unset).
+- You can still set `TRANSLATE_PROVIDERS=AUTO` to try all configured providers, or set an explicit list like `TRANSLATE_PROVIDERS=GOOGLE,MICROSOFT`.
+- Approved translations are cached into Translation Memory automatically.
+
+Queue/worker (DB-backed):
+- Enable worker: `TRANSLATION_QUEUE_ENABLED=1`
+- Poll interval: `TRANSLATION_WORKER_INTERVAL_MS=2000`
+
+Strict-topic workflow:
+- Topics list: `TRANSLATE_STRICT_TOPICS=politics,crime,legal,communal,health`
+- Mode: `TRANSLATE_STRICT_MODE=AUTO|REVIEW`
+  - `AUTO`: strict topics auto-apply translations like normal.
+  - `REVIEW`: strict topics are translated but stored as jobs with `NEEDS_REVIEW` and are NOT applied to live content until approved.
+
+Quality thresholds:
+- Default: `TRANSLATE_APPROVAL_THRESHOLD=85`
+- Strict topics: `TRANSLATE_APPROVAL_THRESHOLD_STRICT=92`
+
+Admin endpoints (auth required):
+- `GET /api/admin/translations/jobs` (list)
+- `GET /api/admin/translations/jobs/:id` (detail)
+- `POST /api/admin/translations/jobs/:id/retry`
+- `POST /api/admin/translations/jobs/:id/approve`
+- `POST /api/admin/translations/jobs/:id/reject`
+- `POST /api/admin/translations/broadcast/:itemId/enqueue`
+- Founder-only: `POST /api/admin/translations/broadcast/:itemId/override`
+
+Health:
+- `GET /admin-api/system/translation/health`
+
 ## Public Site Settings: Dev/Prod Isolation
 
 To prevent local admin/public changes from affecting production (and vice-versa), Public Site Settings are **namespaced by scope**.

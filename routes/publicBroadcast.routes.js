@@ -9,6 +9,31 @@ const {
   computeEffectiveEnabled,
 } = require('../services/broadcastCenter.service');
 
+const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
+
+function _normalizeLang(v, fallback = 'gu') {
+  const s = String(v || '').trim().toLowerCase();
+  return SUPPORTED_LANGS.has(s) ? s : fallback;
+}
+
+function _resolvePublicItemText(doc, lang) {
+  const d = doc && typeof doc === 'object' ? doc : {};
+  const target = _normalizeLang(lang, 'gu');
+  const src = SUPPORTED_LANGS.has(String(d.sourceLang || '')) ? String(d.sourceLang) : null;
+  const by = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
+  const status = d.statusByLang && typeof d.statusByLang === 'object' ? d.statusByLang : null;
+
+  // Safety rule: only show a translation when it's explicitly APPROVED.
+  if (by && status && status[target] === 'APPROVED' && typeof by[target] === 'string' && by[target].trim()) {
+    return String(by[target]).trim();
+  }
+
+  const fallback =
+    (src && by && typeof by[src] === 'string' && by[src].trim() ? by[src] : null) ||
+    (typeof d.text === 'string' && d.text.trim() ? d.text : '');
+  return String(fallback || '').trim();
+}
+
 const router = express.Router();
 
 function sendError(res, status, code, message, details) {
@@ -51,6 +76,63 @@ function _mapPublicItem(doc) {
 // Default: stable payload used by the website.
 // Optional: detailed payload (query ?detailed=1) with item objects + id mapping.
 router.get('/', async (req, res) => {
+  const requestedLang = Object.prototype.hasOwnProperty.call((req && req.query) || {}, 'lang')
+    ? _normalizeLang(req.query && req.query.lang, 'gu')
+    : null;
+
+  // New Phase 1 contract: only when ?lang is provided.
+  if (requestedLang) {
+    try {
+      _noStore(res);
+
+      const doc = await getOrCreateSettings();
+      const settings = adminSettingsResponse(doc);
+      const itemsBy = await listItemsLast24hByChannel();
+
+      const limit = 20;
+      const breakingItems = (Array.isArray(itemsBy.breaking) ? itemsBy.breaking : [])
+        .filter(i => i && i.isLive !== false)
+        .slice(0, limit);
+      const liveItems = (Array.isArray(itemsBy.live) ? itemsBy.live : [])
+        .filter(i => i && i.isLive !== false)
+        .slice(0, limit);
+
+      const breakingEnabled = computeEffectiveEnabled(settings.breaking.enabled, settings.breaking.mode, breakingItems.length);
+      const liveEnabled = computeEffectiveEnabled(settings.live.enabled, settings.live.mode, liveItems.length);
+
+      const mapItem = (d) => {
+        const id = d && d._id ? String(d._id) : undefined;
+        return {
+          id,
+          type: d && (d.type === 'breaking' || d.type === 'live') ? d.type : undefined,
+          text: _resolvePublicItemText(d, requestedLang),
+          createdAt: (d && d.createdAt) || null,
+        };
+      };
+
+      return res.status(200).json({
+        ok: true,
+        data: {
+          breaking: {
+            enabled: breakingEnabled,
+            mode: settings.breaking.mode,
+            speedSeconds: settings.breaking.speedSec,
+            items: breakingItems.map(mapItem),
+          },
+          live: {
+            enabled: liveEnabled,
+            mode: settings.live.mode,
+            speedSeconds: settings.live.speedSec,
+            items: liveItems.map(mapItem),
+          },
+        },
+      });
+    } catch (_) {
+      _noStore(res);
+      return sendError(res, 500, 'SERVER_ERROR', 'Failed to load broadcast');
+    }
+  }
+
   if (_wantsDetailed(req)) {
     try {
       _noStore(res);
