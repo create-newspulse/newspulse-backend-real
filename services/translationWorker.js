@@ -41,17 +41,32 @@ async function enqueueBroadcastItemJob({ itemId, targetLangs, strictMode }) {
   const langs = (Array.isArray(targetLangs) ? targetLangs : ['en', 'hi']).map(l => normalizeLang(l));
   const unique = Array.from(new Set(langs));
 
+  // Phase 1 requirement: if Google provider is not configured, enqueue as BLOCKED with reason.
+  // Do not crash; allow the admin UI to see the jobs are blocked.
+  const hasGoogleKey = !!String(process.env.GOOGLE_TRANSLATE_API_KEY || '').trim();
+  const providersRaw = String(process.env.TRANSLATE_PROVIDERS || '').trim() || 'GOOGLE';
+  const providers = providersRaw.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+  const usingGoogle = providers.length === 0 || providers.includes('GOOGLE');
+  const shouldBlockForProvider = usingGoogle && !hasGoogleKey;
+
   const docs = await TranslationJob.insertMany(unique.map((langTo) => ({
     kind: JOB_KIND.BROADCAST_ITEM,
     refId: itemId,
     langTo,
     // keep targetLangs for backward compatibility/debugging
     targetLangs: [langTo],
-    status: 'QUEUED',
+    status: shouldBlockForProvider ? 'BLOCKED' : 'QUEUED',
     attempts: 0,
     nextRunAt: new Date(),
     strictMode: Boolean(strictMode),
     reviewStatus: 'NONE',
+    ...(shouldBlockForProvider
+      ? {
+          providerUsed: 'GOOGLE',
+          reason: 'PROVIDER_NOT_CONFIGURED',
+          lastError: 'PROVIDER_NOT_CONFIGURED',
+        }
+      : {}),
   })));
 
   const ids = docs.map(d => String(d._id));

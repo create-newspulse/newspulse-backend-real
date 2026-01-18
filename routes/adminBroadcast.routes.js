@@ -157,6 +157,13 @@ function _normalizeExpiresInHours(v) {
   return hours;
 }
 
+function _parseExpiresAt(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const d = new Date(v);
+  if (!Number.isFinite(d.getTime())) return null;
+  return d;
+}
+
 // Admin APIs (protected)
 // GET /api/admin/broadcast
 router.get('/', requireAdminAuth, async (_req, res) => {
@@ -262,9 +269,20 @@ router.post('/items', requireAdminAuth, async (req, res) => {
   }
 
   const rawLang = Object.prototype.hasOwnProperty.call(body, 'lang') ? body.lang : (req.query && req.query.lang);
-  const lang = rawLang !== undefined ? _normalizeLangQuery(rawLang) : 'en';
-  if (rawLang !== undefined && !lang) {
+  if (rawLang === undefined) {
+    return fail(res, 400, 'MISSING_LANG', 'Missing lang. Expected en|hi|gu');
+  }
+  const lang = _normalizeLangQuery(rawLang);
+  if (!lang) {
     return fail(res, 400, 'INVALID_LANG', 'Invalid lang. Expected en|hi|gu');
+  }
+
+  // Optional explicit expiresAt (preferred in Phase 1).
+  const hasExpiresAt = Object.prototype.hasOwnProperty.call(body, 'expiresAt') || Object.prototype.hasOwnProperty.call(req.query || {}, 'expiresAt');
+  const rawExpiresAt = Object.prototype.hasOwnProperty.call(body, 'expiresAt') ? body.expiresAt : (req.query && req.query.expiresAt);
+  const parsedExpiresAt = hasExpiresAt ? _parseExpiresAt(rawExpiresAt) : null;
+  if (hasExpiresAt && !parsedExpiresAt) {
+    return fail(res, 400, 'INVALID_EXPIRES_AT', 'Invalid expiresAt. Expected a valid date/time');
   }
 
   // Preferred: expiresInHours (1..168), default 24.
@@ -290,8 +308,22 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     return fail(res, 400, 'INVALID_EXPIRES', 'Invalid expiresInHours. Expected 1..168');
   }
 
-  if (expiresInHours === null) {
-    expiresInHours = 24;
+  if (expiresInHours === null) expiresInHours = 24;
+
+  const now = new Date();
+
+  // If expiresAt provided, validate it's within 1..168h from now.
+  // (Prevents accidental far-future TTLs that clog the UI.)
+  let expiresAt = parsedExpiresAt;
+  if (expiresAt) {
+    const deltaMs = expiresAt.getTime() - now.getTime();
+    const deltaHours = Math.ceil(deltaMs / (60 * 60 * 1000));
+    if (!Number.isFinite(deltaHours) || deltaHours < 1 || deltaHours > 168) {
+      return fail(res, 400, 'INVALID_EXPIRES_AT', 'expiresAt must be between 1 and 168 hours in the future');
+    }
+    expiresInHours = deltaHours;
+  } else {
+    expiresAt = new Date(now.getTime() + expiresInHours * 60 * 60 * 1000);
   }
 
   // Single-line audit log per requirement.
@@ -299,7 +331,6 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     console.log('[broadcast] create item', `type=${type}`, `lang=${lang}`, `expiresInHours=${expiresInHours}`);
   } catch (_) {}
 
-  const now = new Date();
   const resolvedLang = normalizeLang(lang, 'en');
 
   const createPayload = {
@@ -307,7 +338,7 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     text,
     createdAt: now,
     isLive: true,
-    expiresAt: new Date(now.getTime() + expiresInHours * 60 * 60 * 1000),
+    expiresAt,
     // Store both legacy + new fields.
     language: resolvedLang,
     sourceLang: resolvedLang,
@@ -337,8 +368,8 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     }
   } catch (_) {}
 
-  // Admin UI expects: 200 { ok:true, item: <createdItem> }
-  return res.status(200).json({ ok: true, item: mapItem(created, { lang: resolvedLang }) });
+  // Phase 1 contract: 201 + created item.
+  return res.status(201).json({ ok: true, success: true, item: mapItem(created, { lang: resolvedLang }) });
 });
 
 // PATCH /api/admin/broadcast/items/:id
