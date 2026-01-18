@@ -5,6 +5,13 @@ const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const PushHistory = require('../models/PushHistory');
 
+let translationWorker = null;
+try {
+  translationWorker = require('../services/translationWorker');
+} catch (_) {
+  translationWorker = null;
+}
+
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
 const router = express.Router();
 
@@ -96,6 +103,29 @@ function mapStatusToWorkflowStage(status) {
   if (s === 'archived') return 'ARCHIVED';
   if (s === 'deleted') return 'REJECTED';
   return 'DRAFT';
+}
+
+function ensureTranslationGroupIdForDoc(doc) {
+  if (!doc) return null;
+  const existing = String(doc.translationGroupId || '').trim();
+  if (existing) return existing;
+  const id = new mongoose.Types.ObjectId().toString();
+  doc.translationGroupId = id;
+  return id;
+}
+
+function enqueueNewsTranslationsBestEffort(doc) {
+  try {
+    if (!translationWorker || !translationWorker.isEnabled || !translationWorker.isEnabled()) return;
+    if (!translationWorker.enqueueNewsArticleJob) return;
+
+    const sourceLang = String(doc.lang || doc.language || 'gu').trim().toLowerCase();
+    const all = ['en', 'hi', 'gu'];
+    const targetLangs = all.filter(l => l !== sourceLang);
+    translationWorker.enqueueNewsArticleJob({ newsId: doc._id, targetLangs }).catch(() => {});
+  } catch (_) {
+    // ignore
+  }
 }
 
 function getActor(req) {
@@ -202,12 +232,15 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     const workflowStage = mapStatusToWorkflowStage(initialStatus);
     const now = new Date();
     const actor = getActor(req);
+    const translationGroupId = (req.body && req.body.translationGroupId) ? String(req.body.translationGroupId).trim() : '';
     const doc = await News.create({
       title,
       description: summary ?? '',
       content: content ?? body ?? '',
       category,
       language: language || 'en',
+      lang: language || 'en',
+      translationGroupId: translationGroupId || new mongoose.Types.ObjectId().toString(),
       tags: parseTags(tags),
       status: initialStatus || 'draft',
       scheduledAt: scheduled,
@@ -229,6 +262,11 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     });
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+
+    if (String(doc.status || '').toLowerCase() === 'published') {
+      enqueueNewsTranslationsBestEffort(doc);
+    }
+
     return res.status(201).json({
       ok: true,
       success: true,
@@ -469,12 +507,19 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const resolvedCoverImageUrl = coverImageUrl ?? imageURL;
+    let before = null;
+    try {
+      before = await News.findById(id).select('status translationGroupId lang language').lean();
+    } catch (_) {
+      // ignore
+    }
+
     const update = {
       ...(title !== undefined ? { title } : {}),
       ...(summary !== undefined ? { description: summary } : {}),
       ...(content !== undefined || body !== undefined ? { content: content ?? body ?? '' } : {}),
       ...(category !== undefined ? { category } : {}),
-      ...(language !== undefined ? { language } : {}),
+      ...(language !== undefined ? { language, lang: language } : {}),
       ...(tags !== undefined ? { tags: parseTags(tags) } : {}),
       ...(status !== undefined && status !== null && String(status).trim() !== '' ? { status: String(status).toLowerCase() } : {}),
       ...(scheduled !== undefined ? { scheduledAt: scheduled } : {}),
@@ -517,6 +562,21 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+
+    // If an editor published via status update, enqueue translations.
+    try {
+      const beforeStatus = String(before && before.status ? before.status : '').toLowerCase();
+      const afterStatus = String(doc.status || '').toLowerCase();
+      if (beforeStatus !== 'published' && afterStatus === 'published') {
+        // Ensure group id exists for translations.
+        ensureTranslationGroupIdForDoc(doc);
+        doc.lang = doc.lang || doc.language;
+        doc.language = doc.language || doc.lang;
+        await doc.save();
+        enqueueNewsTranslationsBestEffort(doc);
+      }
+    } catch (_) {}
+
     return res.json({
       ok: true,
       success: true,
@@ -556,6 +616,9 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     doc.publishedAt = now;
     doc.publishAt = null;
     doc.scheduledAt = null;
+    ensureTranslationGroupIdForDoc(doc);
+    doc.lang = doc.lang || doc.language;
+    doc.language = doc.language || doc.lang;
 
     const fromStage = String(doc.workflowStage || 'DRAFT');
     doc.workflowStage = 'PUBLISHED';
@@ -575,6 +638,9 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     await doc.save();
 
     await syncArticleFromNews(doc);
+
+    // Phase 2: enqueue translations on publish.
+    enqueueNewsTranslationsBestEffort(doc);
 
     try {
       await PushHistory.create({

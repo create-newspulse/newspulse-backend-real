@@ -8,7 +8,7 @@ const TranslationJobSchema = new mongoose.Schema(
     kind: {
       type: String,
       required: true,
-      enum: ['BROADCAST_ITEM'],
+      enum: ['BROADCAST_ITEM', 'NEWS_ARTICLE'],
       index: true,
     },
     refId: {
@@ -33,6 +33,11 @@ const TranslationJobSchema = new mongoose.Schema(
 
     // Translation result (stored even if pending review)
     translatedText: { type: String, required: false, trim: true, maxlength: 2000 },
+    // For multi-field content (e.g., News articles)
+    translatedFields: {
+      type: Object,
+      default: null,
+    },
     providerUsed: { type: String, required: false, trim: true, maxlength: 40 },
     qualityScore: { type: Number, required: false, min: 0, max: 100 },
 

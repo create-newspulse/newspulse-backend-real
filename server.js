@@ -1305,6 +1305,18 @@ app.use('/admin', adminRoutes);     // legacy path
 // Admin API proxy aliases (some admin builds proxy via /admin-api/*)
 app.use('/admin-api/admin', adminRoutes);
 app.use('/admin-api/api/admin', adminRoutes);
+
+// Compatibility mount (matches common frontend expectation):
+// app.use('/admin-api', adminRouter) with router.post('/admin/login', ...)
+// We avoid changing adminRoutes paths by mounting it under /admin.
+try {
+  const adminApiCompatRouter = express.Router();
+  adminApiCompatRouter.use('/admin', adminRoutes);
+  app.use('/admin-api', adminApiCompatRouter);
+  app.use('/admin-api/api', adminApiCompatRouter);
+} catch (_) {
+  // ignore
+}
 app.use('/api/admin', adminAdsRouter);
 
 // Admin public settings (tickers)
