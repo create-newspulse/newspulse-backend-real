@@ -26,6 +26,21 @@ Server will attempt to listen on `PORT` (default 10000) and auto-fallback up to 
 This backend connects using a single variable: `MONGODB_URI`.
 Provide the full connection string exactly as you want Mongoose to connect.
 
+## Broadcast Auto-Translation (Google-only)
+
+Broadcast items store per-language text in a single document (`text_i18n`). When a broadcast item is created, the backend saves the source text and (best-effort) auto-translates into the other supported languages.
+
+Required env var:
+- `GOOGLE_TRANSLATE_API_KEY` (Google Cloud Translation API v2 key)
+
+Notes:
+- If the key is missing or the API call fails, the backend leaves that translation empty (`null`).
+- Public endpoints fall back to the source language (or any available text) so the UI never blocks on translation.
+
+Endpoints:
+- Admin create: `POST /api/admin/broadcast/items` body `{ "type": "breaking"|"live", "text": "...", "lang": "en"|"hi"|"gu" (optional, default "gu") }`
+- Public ticker fetch: `GET /api/public/broadcast/items?type=breaking|live&lang=en|hi|gu`
+
 ## Public Site Settings: Dev/Prod Isolation
 
 To prevent local admin/public changes from affecting production (and vice-versa), Public Site Settings are **namespaced by scope**.

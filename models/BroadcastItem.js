@@ -33,6 +33,15 @@ const BroadcastItemSchema = new mongoose.Schema(
       default: 'gu',
       index: true,
     },
+
+    // Simplified i18n storage (Phase 1/2 simplification): one document contains all langs.
+    // When a translation is missing or rejected by heuristics, the field may be null/empty.
+    text_i18n: {
+      en: { type: String, required: false, maxlength: 160, trim: true, default: null },
+      hi: { type: String, required: false, maxlength: 160, trim: true, default: null },
+      gu: { type: String, required: false, maxlength: 160, trim: true, default: null },
+    },
+
     textByLang: {
       en: { type: String, required: false, maxlength: 160, trim: true },
       hi: { type: String, required: false, maxlength: 160, trim: true },
@@ -72,6 +81,8 @@ BroadcastItemSchema.pre('validate', function ensureLangFields(next) {
 
     const rawText = typeof this.text === 'string' ? this.text.trim() : '';
 
+    if (!this.text_i18n || typeof this.text_i18n !== 'object') this.text_i18n = {};
+
     // Ensure objects exist.
     if (!this.textByLang || typeof this.textByLang !== 'object') this.textByLang = {};
     if (!this.statusByLang || typeof this.statusByLang !== 'object') this.statusByLang = {};
@@ -79,6 +90,9 @@ BroadcastItemSchema.pre('validate', function ensureLangFields(next) {
 
     // Always persist the source language text.
     if (rawText) {
+      if (!this.text_i18n[sourceLang]) {
+        this.text_i18n[sourceLang] = rawText;
+      }
       if (!this.textByLang[sourceLang]) {
         this.textByLang[sourceLang] = rawText;
       }
@@ -89,6 +103,20 @@ BroadcastItemSchema.pre('validate', function ensureLangFields(next) {
       const hasAny = SUPPORTED_LANGS.some(l => typeof this.textByLang[l] === 'string' && this.textByLang[l].trim());
       if (!hasAny) {
         this.textByLang[sourceLang] = rawText;
+      }
+    }
+
+    // If text_i18n is missing but textByLang exists, backfill it.
+    for (const l of SUPPORTED_LANGS) {
+      if (!this.text_i18n[l] && typeof this.textByLang[l] === 'string' && this.textByLang[l].trim()) {
+        this.text_i18n[l] = this.textByLang[l];
+      }
+    }
+
+    // Keep textByLang aligned for any code paths still reading it.
+    for (const l of SUPPORTED_LANGS) {
+      if (!this.textByLang[l] && typeof this.text_i18n[l] === 'string' && this.text_i18n[l].trim()) {
+        this.textByLang[l] = this.text_i18n[l];
       }
     }
 

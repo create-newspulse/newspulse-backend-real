@@ -4,6 +4,9 @@ const mongoose = require('mongoose');
 const BroadcastItem = require('../models/BroadcastItem');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
+const { translate } = require('../services/translate/googleTranslate');
+const { shouldAcceptTranslation } = require('../services/translate/i18nQuality');
+
 const {
   getOrCreateSettings,
   adminSettingsResponse,
@@ -92,12 +95,19 @@ function _resolveAdminDisplayText(doc, lang) {
   const d = doc && typeof doc === 'object' ? doc : {};
   if (!lang) return typeof d.text === 'string' ? d.text : '';
   const src = typeof d.sourceLang === 'string' ? d.sourceLang : null;
-  const by = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
+
+  const i18n = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
+  const legacy = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
+
   const pick =
-    (by && typeof by[lang] === 'string' && by[lang]) ||
-    (src && by && typeof by[src] === 'string' && by[src]) ||
+    (i18n && typeof i18n[lang] === 'string' && i18n[lang].trim() ? i18n[lang] : null) ||
+    (legacy && typeof legacy[lang] === 'string' && legacy[lang].trim() ? legacy[lang] : null) ||
+    (src && i18n && typeof i18n[src] === 'string' && i18n[src].trim() ? i18n[src] : null) ||
+    (src && legacy && typeof legacy[src] === 'string' && legacy[src].trim() ? legacy[src] : null) ||
+    (SUPPORTED_LANGS.has('gu') && i18n && typeof i18n.gu === 'string' && i18n.gu.trim() ? i18n.gu : null) ||
     (typeof d.text === 'string' ? d.text : '');
-  return String(pick || '');
+
+  return String(pick || '').trim();
 }
 
 function mapItem(doc, options = {}) {
@@ -113,6 +123,7 @@ function mapItem(doc, options = {}) {
       ? {
           displayText: _resolveAdminDisplayText(d, lang),
           sourceLang: typeof d.sourceLang === 'string' ? d.sourceLang : undefined,
+          text_i18n: d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : {},
           textByLang: d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : {},
           statusByLang: d.statusByLang && typeof d.statusByLang === 'object' ? d.statusByLang : {},
           qualityByLang: d.qualityByLang && typeof d.qualityByLang === 'object' ? d.qualityByLang : {},
@@ -263,13 +274,9 @@ router.post('/items', requireAdminAuth, async (req, res) => {
   }
 
   const rawLang = Object.prototype.hasOwnProperty.call(body, 'lang') ? body.lang : (req.query && req.query.lang);
-  if (rawLang === undefined) {
-    return fail(res, 400, 'MISSING_LANG', 'Missing lang. Expected en|hi|gu');
-  }
-  const lang = _normalizeLangQuery(rawLang);
-  if (!lang) {
-    return fail(res, 400, 'INVALID_LANG', 'Invalid lang. Expected en|hi|gu');
-  }
+  // lang is optional; default gu
+  const lang = rawLang === undefined ? 'gu' : _normalizeLangQuery(rawLang);
+  if (!lang) return fail(res, 400, 'INVALID_LANG', 'Invalid lang. Expected en|hi|gu');
 
   // Optional explicit expiresAt (preferred in Phase 1).
   const hasExpiresAt = Object.prototype.hasOwnProperty.call(body, 'expiresAt') || Object.prototype.hasOwnProperty.call(req.query || {}, 'expiresAt');
@@ -336,12 +343,38 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     // Store both legacy + new fields.
     language: resolvedLang,
     sourceLang: resolvedLang,
+    text_i18n: { [resolvedLang]: text },
     textByLang: { [resolvedLang]: text },
     statusByLang: { [resolvedLang]: 'APPROVED' },
     qualityByLang: { [resolvedLang]: 100 },
   };
 
   const created = await BroadcastItem.create(createPayload);
+
+  // Auto-translate (best effort) into remaining supported langs.
+  try {
+    const allLangs = ['en', 'hi', 'gu'];
+    const targets = allLangs.filter(l => l !== resolvedLang);
+
+    created.text_i18n = created.text_i18n && typeof created.text_i18n === 'object' ? created.text_i18n : {};
+    created.textByLang = created.textByLang && typeof created.textByLang === 'object' ? created.textByLang : {};
+
+    for (const targetLang of targets) {
+      const out = await translate(text, resolvedLang, targetLang);
+      if (typeof out === 'string' && out.trim() && shouldAcceptTranslation(text, out, resolvedLang, targetLang)) {
+        const clipped = out.trim().slice(0, 160);
+        created.text_i18n[targetLang] = clipped;
+        created.textByLang[targetLang] = clipped;
+      } else {
+        // Explicit null so clients can detect and fall back.
+        created.text_i18n[targetLang] = null;
+      }
+    }
+
+    await created.save();
+  } catch (_) {
+    // Best effort only.
+  }
 
   // Translation queue/worker removed: no background jobs enqueued.
 

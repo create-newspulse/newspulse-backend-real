@@ -19,19 +19,25 @@ function _normalizeLang(v, fallback = 'gu') {
 function _resolvePublicItemText(doc, lang) {
   const d = doc && typeof doc === 'object' ? doc : {};
   const target = _normalizeLang(lang, 'gu');
-  const src = SUPPORTED_LANGS.has(String(d.sourceLang || '')) ? String(d.sourceLang) : null;
-  const by = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
-  const status = d.statusByLang && typeof d.statusByLang === 'object' ? d.statusByLang : null;
 
-  // Safety rule: only show a translation when it's explicitly APPROVED.
-  if (by && status && status[target] === 'APPROVED' && typeof by[target] === 'string' && by[target].trim()) {
-    return String(by[target]).trim();
-  }
+  const src = SUPPORTED_LANGS.has(String(d.sourceLang || ''))
+    ? String(d.sourceLang)
+    : (SUPPORTED_LANGS.has(String(d.language || '')) ? String(d.language) : null);
 
-  const fallback =
-    (src && by && typeof by[src] === 'string' && by[src].trim() ? by[src] : null) ||
+  const i18n = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
+  const legacy = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
+
+  const pick =
+    (i18n && typeof i18n[target] === 'string' && i18n[target].trim() ? i18n[target] : null) ||
+    (legacy && typeof legacy[target] === 'string' && legacy[target].trim() ? legacy[target] : null) ||
+    (src && i18n && typeof i18n[src] === 'string' && i18n[src].trim() ? i18n[src] : null) ||
+    (src && legacy && typeof legacy[src] === 'string' && legacy[src].trim() ? legacy[src] : null) ||
+    (i18n && (typeof i18n.gu === 'string' && i18n.gu.trim()) ? i18n.gu : null) ||
+    (i18n && (typeof i18n.hi === 'string' && i18n.hi.trim()) ? i18n.hi : null) ||
+    (i18n && (typeof i18n.en === 'string' && i18n.en.trim()) ? i18n.en : null) ||
     (typeof d.text === 'string' && d.text.trim() ? d.text : '');
-  return String(fallback || '').trim();
+
+  return String(pick || '').trim();
 }
 
 const router = express.Router();
@@ -60,13 +66,14 @@ function _wantsDetailed(req) {
   return v === '1' || v === 'true' || v === '2' || v === 'full';
 }
 
-function _mapPublicItem(doc) {
+function _mapPublicItem(doc, options = {}) {
   const d = doc && typeof doc === 'object' ? doc : {};
   const id = d._id ? String(d._id) : undefined;
+  const lang = options && options.lang ? String(options.lang) : null;
   return {
     id,
     type: d.type === 'breaking' || d.type === 'live' ? d.type : undefined,
-    text: typeof d.text === 'string' ? d.text : '',
+    text: lang ? _resolvePublicItemText(d, lang) : (typeof d.text === 'string' ? d.text : ''),
     createdAt: d.createdAt || null,
     expiresAt: d.expiresAt || null,
   };
@@ -187,11 +194,20 @@ router.get('/items', async (req, res) => {
       return sendError(res, 400, 'BAD_REQUEST', 'Invalid type. Expected breaking|live');
     }
 
+    const requestedLang = Object.prototype.hasOwnProperty.call((req && req.query) || {}, 'lang')
+      ? _normalizeLang(req.query && req.query.lang, 'gu')
+      : null;
+
     const itemsBy = await listItemsLast24hByChannel();
     const items = (itemsBy && itemsBy[type]) || [];
     if (_wantsDetailed(req)) {
-      return res.status(200).json({ ok: true, items: items.map(_mapPublicItem) });
+      return res.status(200).json({ ok: true, items: items.map(i => _mapPublicItem(i, { lang: requestedLang })) });
     }
+
+    if (requestedLang) {
+      return res.status(200).json({ ok: true, items: items.map(i => _resolvePublicItemText(i, requestedLang)).filter(Boolean) });
+    }
+
     return res.status(200).json({ ok: true, items: items.map(i => String(i.text || '')).filter(Boolean) });
   } catch (_) {
     _noStore(res);
