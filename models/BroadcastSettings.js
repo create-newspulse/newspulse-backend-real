@@ -21,6 +21,10 @@ const BroadcastSettingsSchema = new mongoose.Schema(
     // Legacy fields used by older routes/UIs (kept for backward compatibility)
     breakingEnabled: { type: Boolean, default: false },
     liveEnabled: { type: Boolean, default: false },
+    // Phase 1: explicit per-channel duration (seconds) used by tickers UI.
+    // (Kept separate from public site/homepage settings.)
+    breakingDurationSeconds: { type: Number, default: 8, min: 2, max: 120 },
+    liveDurationSeconds: { type: Number, default: 8, min: 2, max: 120 },
     breakingMode: { type: String, enum: ['manual', 'auto'], default: 'manual' },
     liveMode: { type: String, enum: ['manual', 'auto'], default: 'auto' },
 
@@ -39,10 +43,16 @@ BroadcastSettingsSchema.pre('save', function preSave(next) {
     const l = this.live || {};
     if (typeof b.tickerSpeedSeconds === 'number' && Number.isFinite(b.tickerSpeedSeconds)) {
       this.breaking.speedSec = b.tickerSpeedSeconds;
+      this.breakingDurationSeconds = b.tickerSpeedSeconds;
     }
     if (typeof l.tickerSpeedSeconds === 'number' && Number.isFinite(l.tickerSpeedSeconds)) {
       this.live.speedSec = l.tickerSpeedSeconds;
+      this.liveDurationSeconds = l.tickerSpeedSeconds;
     }
+
+    // Keep legacy enabled mirrors aligned.
+    this.breakingEnabled = Boolean(this.breaking && this.breaking.enabled);
+    this.liveEnabled = Boolean(this.live && this.live.enabled);
   } catch (_) {}
 
   return next();

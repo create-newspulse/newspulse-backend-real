@@ -122,7 +122,11 @@ test('Public tickers settings returns default when no published', async () => {
   assert.ok(res.body.success);
   assert.ok(res.body.data && res.body.data.tickers);
   assert.strictEqual(res.body.source, 'default');
-  assert.ok(String(res.headers['cache-control'] || '').includes('max-age=60'));
+  {
+    const cc = String(res.headers['cache-control'] || '');
+    assert.ok(cc.includes('no-store'));
+    assert.ok(cc.includes('no-cache'));
+  }
 
   // Default values should match the product defaults
   assert.strictEqual(res.body.data.tickers.live.speedSec, 24);
@@ -222,7 +226,11 @@ test('Preview token allows returning draft via public endpoint', async () => {
   assert.ok(previewRes.body.success);
   assert.strictEqual(previewRes.body.source, 'draft');
   assert.strictEqual(previewRes.body.data.tickers.live.speedSec, 30);
-  assert.strictEqual(String(previewRes.headers['cache-control'] || ''), 'no-store');
+  {
+    const cc = String(previewRes.headers['cache-control'] || '');
+    assert.ok(cc.includes('no-store'));
+    assert.ok(cc.includes('no-cache'));
+  }
 
   // Invalid token returns 401
   const bad = await request(app).get('/public/settings/tickers?preview=badtoken');

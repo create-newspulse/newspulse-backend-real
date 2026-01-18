@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const BroadcastItem = require('../models/BroadcastItem');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
-const { translate } = require('../services/translate/googleTranslate');
+const { translateWithGuardrails } = require('../services/translate/guardedTranslate');
 const { shouldAcceptTranslation } = require('../services/translate/i18nQuality');
 
 const {
@@ -14,7 +14,10 @@ const {
   listItemsLast24hByChannel,
   deleteItemById,
   normalizeChannel,
+  computeEffectiveEnabled,
 } = require('../services/broadcastCenter.service');
+
+const { emitBroadcastUpdated } = require('../services/broadcastSse.service');
 
 const router = express.Router();
 
@@ -73,6 +76,72 @@ function toAdminContract(settings) {
   };
 }
 
+function toAdminConfigContract(settings, itemsByChannel) {
+  const breakingItems = Array.isArray(itemsByChannel?.breaking) ? itemsByChannel.breaking : [];
+  const liveItems = Array.isArray(itemsByChannel?.live) ? itemsByChannel.live : [];
+
+  const breakingEnabled = computeEffectiveEnabled(settings?.breaking?.enabled, settings?.breaking?.mode, breakingItems.length);
+  const liveEnabled = computeEffectiveEnabled(settings?.live?.enabled, settings?.live?.mode, liveItems.length);
+
+  const breakingDuration = typeof settings?.breaking?.durationSeconds === 'number'
+    ? settings.breaking.durationSeconds
+    : (typeof settings?.breaking?.tickerSpeedSeconds === 'number' ? settings.breaking.tickerSpeedSeconds : 12);
+  const liveDuration = typeof settings?.live?.durationSeconds === 'number'
+    ? settings.live.durationSeconds
+    : (typeof settings?.live?.tickerSpeedSeconds === 'number' ? settings.live.tickerSpeedSeconds : 12);
+
+  return {
+    breaking: {
+      enabled: Boolean(breakingEnabled),
+      mode: settings?.breaking?.mode || 'auto',
+      durationSec: breakingDuration,
+      // compatibility
+      durationSeconds: breakingDuration,
+    },
+    live: {
+      enabled: Boolean(liveEnabled),
+      mode: settings?.live?.mode || 'auto',
+      durationSec: liveDuration,
+      durationSeconds: liveDuration,
+    },
+  };
+}
+
+function _buildConfigPatchPayload(type, body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const payload = {};
+
+  const channel = type ? normalizeChannel(type) : null;
+  const channels = channel ? [channel] : ['breaking', 'live'];
+
+  for (const ch of channels) {
+    const next = channel ? b : (b && b[ch]);
+    if (!next || typeof next !== 'object') continue;
+
+    payload[ch] = {};
+
+    if (Object.prototype.hasOwnProperty.call(next, 'enabled')) {
+      payload[ch].enabled = Boolean(next.enabled);
+    }
+    if (Object.prototype.hasOwnProperty.call(next, 'mode')) {
+      payload[ch].mode = next.mode;
+    }
+
+    // Prefer durationSec (requested contract), but accept legacy names too.
+    if (Object.prototype.hasOwnProperty.call(next, 'durationSec')) {
+      payload[ch].durationSeconds = next.durationSec;
+    }
+    if (Object.prototype.hasOwnProperty.call(next, 'durationSeconds')) {
+      payload[ch].durationSeconds = next.durationSeconds;
+    }
+    if (Object.prototype.hasOwnProperty.call(next, 'tickerSpeedSeconds')) {
+      payload[ch].tickerSpeedSeconds = next.tickerSpeedSeconds;
+    }
+  }
+
+  return payload;
+}
+
 function buildPatchPayload(body) {
   const payload = {};
   for (const channel of ['breaking', 'live']) {
@@ -100,6 +169,11 @@ function buildPatchPayload(body) {
     // New explicit field name
     if (Object.prototype.hasOwnProperty.call(next, 'tickerSpeedSeconds')) {
       payload[channel].tickerSpeedSeconds = next.tickerSpeedSeconds;
+    }
+
+    // Phase 1: UI field name
+    if (Object.prototype.hasOwnProperty.call(next, 'durationSeconds')) {
+      payload[channel].durationSeconds = next.durationSeconds;
     }
 
     // Some clients may send speedSeconds
@@ -198,6 +272,69 @@ router.get('/', requireAdminAuth, async (_req, res) => {
   return ok(res, toAdminContract(settings));
 });
 
+// Broadcast Config API (merge-safe)
+// GET  /api/admin/broadcast/config
+// PUT  /api/admin/broadcast/config          -> replaces BOTH breaking+live together
+// PATCH /api/admin/broadcast/config/:type   -> updates only one type (merge-safe)
+router.get('/config', requireAdminAuth, async (_req, res) => {
+  if (!ensureDbOr503(res)) return;
+
+  const doc = await getOrCreateSettings();
+  const settings = adminSettingsResponse(doc);
+  const itemsBy = await listItemsLast24hByChannel();
+  return res.status(200).json(toAdminConfigContract(settings, itemsBy));
+});
+
+router.put('/config', requireAdminAuth, async (req, res) => {
+  if (!ensureDbOr503(res)) return;
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (!body.breaking || typeof body.breaking !== 'object' || !body.live || typeof body.live !== 'object') {
+    return fail(res, 400, 'BAD_REQUEST', 'PUT /broadcast/config requires both breaking and live objects');
+  }
+
+  const result = await patchSettings(_buildConfigPatchPayload(null, body));
+  if (!result.ok) {
+    const status = typeof result.status === 'number' ? result.status : 400;
+    const code = status === 503 ? 'DB_UNAVAILABLE' : 'BAD_REQUEST';
+    return fail(res, status, code, result.message || 'Invalid request');
+  }
+
+  const doc = await getOrCreateSettings();
+  const settings = adminSettingsResponse(doc);
+  const itemsBy = await listItemsLast24hByChannel();
+
+  emitBroadcastUpdated({ reason: 'admin_config_put' }).catch(() => {});
+  return res.status(200).json(toAdminConfigContract(settings, itemsBy));
+});
+
+router.patch('/config/:type', requireAdminAuth, async (req, res) => {
+  if (!ensureDbOr503(res)) return;
+
+  const type = normalizeChannel(req.params && req.params.type);
+  if (!type) return fail(res, 400, 'INVALID_TYPE', 'Invalid type. Expected breaking|live');
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const payload = _buildConfigPatchPayload(type, body);
+  if (!payload[type] || Object.keys(payload[type]).length === 0) {
+    return fail(res, 400, 'BAD_REQUEST', 'No supported fields to update (enabled, mode, durationSec)');
+  }
+
+  const result = await patchSettings(payload);
+  if (!result.ok) {
+    const status = typeof result.status === 'number' ? result.status : 400;
+    const code = status === 503 ? 'DB_UNAVAILABLE' : 'BAD_REQUEST';
+    return fail(res, status, code, result.message || 'Invalid request');
+  }
+
+  const doc = await getOrCreateSettings();
+  const settings = adminSettingsResponse(doc);
+  const itemsBy = await listItemsLast24hByChannel();
+
+  emitBroadcastUpdated({ reason: 'admin_config_patch' }).catch(() => {});
+  return res.status(200).json(toAdminConfigContract(settings, itemsBy));
+});
+
 // PUT /api/admin/broadcast
 async function _updateBroadcastSettings(req, res) {
   if (!ensureDbOr503(res)) return;
@@ -220,6 +357,8 @@ async function _updateBroadcastSettings(req, res) {
 
   const doc = await getOrCreateSettings();
   const settings = adminSettingsResponse(doc);
+
+  emitBroadcastUpdated({ reason: 'admin_settings_save' }).catch(() => {});
   return ok(res, toAdminContract(settings));
 }
 
@@ -227,6 +366,10 @@ router.put('/', requireAdminAuth, _updateBroadcastSettings);
 
 // Some admin UIs use PATCH for settings updates.
 router.patch('/', requireAdminAuth, _updateBroadcastSettings);
+
+// Phase 1 compatibility: PATCH /api/admin/broadcast/settings
+// and via mount alias: PATCH /admin-api/admin/broadcast/settings
+router.patch('/settings', requireAdminAuth, _updateBroadcastSettings);
 
 // GET /api/admin/broadcast/items?type=breaking|live
 router.get('/items', requireAdminAuth, async (req, res) => {
@@ -361,6 +504,11 @@ router.post('/items', requireAdminAuth, async (req, res) => {
 
   const resolvedLang = String(lang || 'gu').trim().toLowerCase();
 
+  // Optional: allow disabling auto-translation (best-effort by default).
+  const autoTranslate = Object.prototype.hasOwnProperty.call(body, 'autoTranslate')
+    ? Boolean(body.autoTranslate)
+    : (Object.prototype.hasOwnProperty.call(req.query || {}, 'autoTranslate') ? String(req.query.autoTranslate).toLowerCase() !== 'false' : true);
+
   const createPayload = {
     type,
     text,
@@ -380,6 +528,7 @@ router.post('/items', requireAdminAuth, async (req, res) => {
 
   // Auto-translate (best effort) into remaining supported langs.
   try {
+    if (!autoTranslate) throw new Error('AUTO_TRANSLATE_DISABLED');
     const allLangs = ['en', 'hi', 'gu'];
     const targets = allLangs.filter(l => l !== resolvedLang);
 
@@ -387,21 +536,30 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     created.textByLang = created.textByLang && typeof created.textByLang === 'object' ? created.textByLang : {};
 
     for (const targetLang of targets) {
-      const out = await translate(text, resolvedLang, targetLang);
-      if (typeof out === 'string' && out.trim() && shouldAcceptTranslation(text, out, resolvedLang, targetLang)) {
-        const clipped = out.trim().slice(0, 160);
-        created.text_i18n[targetLang] = clipped;
-        created.textByLang[targetLang] = clipped;
-      } else {
-        // Explicit null so clients can detect and fall back.
-        created.text_i18n[targetLang] = null;
-      }
+      const r = await translateWithGuardrails(text, resolvedLang, targetLang, { maxLen: 160 });
+      if (!r || !r.ok || typeof r.text !== 'string' || !r.text.trim()) continue;
+
+      const clipped = r.text.trim().slice(0, 160);
+      if (!clipped) continue;
+
+      created.text_i18n[targetLang] = clipped;
+      created.textByLang[targetLang] = clipped;
+
+      const accept = shouldAcceptTranslation(text, clipped, resolvedLang, targetLang);
+      const needsReview = Boolean(r.needsReview) || !accept;
+
+      created.statusByLang = created.statusByLang && typeof created.statusByLang === 'object' ? created.statusByLang : {};
+      created.qualityByLang = created.qualityByLang && typeof created.qualityByLang === 'object' ? created.qualityByLang : {};
+      created.statusByLang[targetLang] = needsReview ? 'NEEDS_REVIEW' : 'APPROVED';
+      created.qualityByLang[targetLang] = Math.max(0, Math.min(100, Math.round((typeof r.score === 'number' ? r.score : 0) * 100)));
     }
 
     await created.save();
-  } catch (_) {
-    // Best effort only.
+  } catch (e) {
+    // Best effort only; missing key should not block item creation.
   }
+
+  emitBroadcastUpdated({ reason: 'admin_item_create' }).catch(() => {});
 
   // Translation queue/worker removed: no background jobs enqueued.
 
@@ -453,6 +611,8 @@ router.patch('/items/:id', requireAdminAuth, async (req, res) => {
     return fail(res, 404, 'NOT_FOUND', 'Not found');
   }
 
+  emitBroadcastUpdated({ reason: 'admin_item_patch' }).catch(() => {});
+
   return ok(res, mapItem(updated));
 });
 
@@ -466,6 +626,8 @@ router.delete('/items/:id', requireAdminAuth, async (req, res) => {
     const code = status === 503 ? 'DB_UNAVAILABLE' : status === 404 ? 'NOT_FOUND' : 'BAD_REQUEST';
     return fail(res, status, code, result.message || 'Failed');
   }
+
+  emitBroadcastUpdated({ reason: 'admin_item_delete' }).catch(() => {});
 
   return res.status(200).json({ ok: true, success: true });
 });

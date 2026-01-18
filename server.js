@@ -457,6 +457,9 @@ app.options('/admin-api/public/broadcast', _handlePublicBroadcastPreflight);
 app.options('/admin-api/public/broadcast/*', _handlePublicBroadcastPreflight);
 app.options('/admin-api/api/public/broadcast', _handlePublicBroadcastPreflight);
 app.options('/admin-api/api/public/broadcast/*', _handlePublicBroadcastPreflight);
+// Legacy public mount
+app.options('/public/broadcast', _handlePublicBroadcastPreflight);
+app.options('/public/broadcast/*', _handlePublicBroadcastPreflight);
 
 app.use(cors(corsOptions));
 
@@ -499,25 +502,28 @@ function _publicBroadcastCorsOverride(req, res, next) {
 app.use('/api/public/broadcast', _publicBroadcastCorsOverride);
 app.use('/admin-api/public/broadcast', _publicBroadcastCorsOverride);
 app.use('/admin-api/api/public/broadcast', _publicBroadcastCorsOverride);
+app.use('/public/broadcast', _publicBroadcastCorsOverride);
 // Ensure OPTIONS preflight works for all routes.
 app.options('*', cors(corsOptions));
 
-// Minimal production request logging for Broadcast Center.
+// Request logging for Broadcast Center (helps diagnose method/path mismatches like 405).
 app.use((req, res, next) => {
-  const env = String(process.env.NODE_ENV || 'development').toLowerCase();
-  if (env !== 'production') return next();
-
   const path = String(req.originalUrl || req.url || '');
   const shouldLog =
     path.startsWith('/admin-api/broadcast') ||
     path.startsWith('/api/admin/broadcast') ||
     path.startsWith('/admin-api/admin/broadcast') ||
-    path.startsWith('/api/public/broadcast');
+    path.startsWith('/admin-api/api/admin/broadcast') ||
+    path.startsWith('/api/public/broadcast') ||
+    path.startsWith('/admin-api/public/broadcast') ||
+    path.startsWith('/admin-api/api/public/broadcast') ||
+    path.startsWith('/public/broadcast');
   if (!shouldLog) return next();
 
   res.on('finish', () => {
     try {
-      console.log('[broadcast]', req.method, path.split('?')[0], res.statusCode);
+      const p = path.split('?')[0];
+      console.log(`[broadcast] method=${req.method} path=${p} status=${res.statusCode}`);
     } catch (_) {}
   });
   return next();
@@ -1224,6 +1230,8 @@ app.use('/api/public/broadcast', publicBroadcastRouter);
 app.use('/admin-api/public/broadcast', publicBroadcastRouter);
 app.use('/admin-api/api/public/broadcast', publicBroadcastRouter);
 // Legacy/website path support
+app.use('/public/broadcast', publicBroadcastRouter);
+// Legacy/website path support
 app.use('/public', publicTickersSettingsRouter);
 // Admin panel proxy basePath support
 app.use('/admin-api/public', publicTickersSettingsRouter);
@@ -1771,8 +1779,7 @@ function _issueJwt(payload, expiresIn) {
   }
 }
 
-// POST /admin/login -> returns success + access/refresh tokens
-app.post('/admin/login', (req, res) => {
+function _adminLoginHandler(req, res) {
   try {
     const body = req.body || {};
     const email = String(body.email || process.env.FOUNDER_EMAIL || 'founder@example.com');
@@ -1811,7 +1818,13 @@ app.post('/admin/login', (req, res) => {
     console.error('login failed:', e?.message || e);
     return res.status(500).json({ success: false, message: 'Login failed' });
   }
-});
+}
+
+// POST /admin/login -> returns success + access/refresh tokens
+app.post('/admin/login', _adminLoginHandler);
+// Phase 1 required alias for admin panel proxy
+app.post('/admin-api/admin/login', _adminLoginHandler);
+app.post('/admin-api/api/admin/login', _adminLoginHandler);
 
 // GET /admin-auth/session -> success true/false based on token; invalid returns success=false
 app.get('/admin-auth/session', (req, res) => {

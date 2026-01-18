@@ -12,6 +12,10 @@ test('Admin Broadcast (standard): routes are mounted and require auth (401)', as
     { method: 'put', path: '/api/admin/broadcast' },
     { method: 'patch', path: '/api/admin/broadcast' },
 
+    { method: 'get', path: '/api/admin/broadcast/config' },
+    { method: 'put', path: '/api/admin/broadcast/config' },
+    { method: 'patch', path: '/api/admin/broadcast/config/breaking' },
+
     { method: 'get', path: '/api/admin/broadcast/items?type=breaking' },
     { method: 'post', path: '/api/admin/broadcast/items' },
     { method: 'patch', path: '/api/admin/broadcast/items/64b64c2f2f2f2f2f2f2f2f2f' },
@@ -31,6 +35,10 @@ test('Admin Broadcast (aliases): /admin-api/admin/broadcast is mounted and requi
     { method: 'put', path: '/admin-api/admin/broadcast' },
     { method: 'patch', path: '/admin-api/admin/broadcast' },
 
+    { method: 'get', path: '/admin-api/admin/broadcast/config' },
+    { method: 'put', path: '/admin-api/admin/broadcast/config' },
+    { method: 'patch', path: '/admin-api/admin/broadcast/config/live' },
+
     { method: 'get', path: '/admin-api/admin/broadcast/items?type=live' },
     { method: 'post', path: '/admin-api/admin/broadcast/items' },
     { method: 'patch', path: '/admin-api/admin/broadcast/items/64b64c2f2f2f2f2f2f2f2f2f' },
@@ -40,6 +48,9 @@ test('Admin Broadcast (aliases): /admin-api/admin/broadcast is mounted and requi
     { method: 'get', path: '/admin-api/api/admin/broadcast' },
     { method: 'put', path: '/admin-api/api/admin/broadcast' },
     { method: 'patch', path: '/admin-api/api/admin/broadcast' },
+    { method: 'get', path: '/admin-api/api/admin/broadcast/config' },
+    { method: 'put', path: '/admin-api/api/admin/broadcast/config' },
+    { method: 'patch', path: '/admin-api/api/admin/broadcast/config/breaking' },
     { method: 'get', path: '/admin-api/api/admin/broadcast/items?type=live' },
     { method: 'post', path: '/admin-api/api/admin/broadcast/items' },
     { method: 'patch', path: '/admin-api/api/admin/broadcast/items/64b64c2f2f2f2f2f2f2f2f2f' },

@@ -53,3 +53,35 @@ test('OPTIONS preflight works for admin broadcast with allowed origin', async ()
   assert.equal(res.headers['access-control-allow-origin'], 'https://admin.newspulse.co.in');
   assert.ok(String(res.headers['access-control-allow-methods'] || '').includes('PUT'));
 });
+
+test('OPTIONS preflight works for admin broadcast items + config (no 405)', async () => {
+  const paths = [
+    { path: '/admin-api/admin/broadcast/items', method: 'POST' },
+    { path: '/admin-api/admin/broadcast/config', method: 'PUT' },
+    { path: '/admin-api/admin/broadcast/config/breaking', method: 'PATCH' },
+  ];
+
+  for (const p of paths) {
+    const res = await request(app)
+      .options(p.path)
+      .set('Origin', 'https://admin.newspulse.co.in')
+      .set('Access-Control-Request-Method', p.method)
+      .set('Access-Control-Request-Headers', 'Content-Type, Authorization')
+      .expect(204);
+
+    assert.equal(res.headers['access-control-allow-origin'], 'https://admin.newspulse.co.in');
+    assert.ok(String(res.headers['access-control-allow-methods'] || '').includes(p.method));
+  }
+});
+
+test('OPTIONS preflight works for public broadcast config with allowed origin', async () => {
+  const res = await request(app)
+    .options('/admin-api/public/broadcast/config')
+    .set('Origin', 'https://www.newspulse.co.in')
+    .set('Access-Control-Request-Method', 'GET')
+    .set('Access-Control-Request-Headers', 'Content-Type')
+    .expect(204);
+
+  assert.equal(res.headers['access-control-allow-origin'], 'https://www.newspulse.co.in');
+  assert.ok(String(res.headers['access-control-allow-methods'] || '').includes('GET'));
+});

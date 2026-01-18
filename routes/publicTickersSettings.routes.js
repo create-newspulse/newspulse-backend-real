@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 
 const SiteSetting = require('../models/SiteSetting');
 const { DEFAULT_TICKERS_CONFIG, TickersConfigSchema } = require('../schemas/tickersConfig.schema');
+const noCache = require('../middleware/noCache');
 
 const router = express.Router();
 
@@ -28,7 +29,7 @@ async function getDraft() {
 
 // GET /api/public/settings/tickers
 // GET /api/public/settings/tickers?preview=TOKEN
-router.get('/settings/tickers', async (req, res) => {
+router.get('/settings/tickers', noCache, async (req, res) => {
   try {
     const previewToken = String(req.query.preview || '').trim();
 
@@ -50,8 +51,6 @@ router.get('/settings/tickers', async (req, res) => {
         return res.status(401).json({ ok: false, success: false, message: 'Invalid preview token' });
       }
 
-      res.set('Cache-Control', 'no-store');
-
       if (!isDbConnected()) {
         return res.json({ ok: true, success: true, status: 200, scope: SCOPE, key: KEY, data: DEFAULT_TICKERS_CONFIG, source: 'default' });
       }
@@ -68,9 +67,7 @@ router.get('/settings/tickers', async (req, res) => {
       return res.json({ ok: true, success: true, status: 200, scope: SCOPE, key: KEY, data: parsed.data, source: draft ? 'draft' : 'default' });
     }
 
-    // Normal public mode: published-only + cache headers
-    res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
-
+    // Normal public mode: published-only
     if (!isDbConnected()) {
       return res.json({ ok: true, success: true, status: 200, scope: SCOPE, key: KEY, data: DEFAULT_TICKERS_CONFIG, source: 'default' });
     }

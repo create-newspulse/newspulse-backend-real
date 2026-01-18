@@ -9,12 +9,15 @@ const {
   computeEffectiveEnabled,
 } = require('../services/broadcastCenter.service');
 
-const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
+const { getBroadcastVersion } = require('../services/broadcastVersion.service');
+const {
+  normalizeLang: _normalizeLang,
+  buildBroadcastSnapshot,
+  addClient,
+  setNoCacheHeaders,
+} = require('../services/broadcastSse.service');
 
-function _normalizeLang(v, fallback = 'gu') {
-  const s = String(v || '').trim().toLowerCase();
-  return SUPPORTED_LANGS.has(s) ? s : fallback;
-}
+const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
 
 function _requestedLangFromReq(req) {
   const q = (req && req.query) || {};
@@ -70,9 +73,7 @@ function sendError(res, status, code, message, details) {
 
 function _noStore(res) {
   try {
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
+    setNoCacheHeaders(res);
   } catch (_) {}
 }
 
@@ -101,51 +102,24 @@ function _mapPublicItem(doc, options = {}) {
 router.get('/', async (req, res) => {
   const requestedLang = _requestedLangFromReq(req);
 
+  const version = await getBroadcastVersion().catch(() => 0);
+
   // New Phase 1 contract: only when ?lang is provided.
   if (requestedLang) {
     try {
       _noStore(res);
 
-      const doc = await getOrCreateSettings();
-      const settings = adminSettingsResponse(doc);
-      const itemsBy = await listItemsLast24hByChannel();
-
-      const limit = 20;
-      const breakingItems = (Array.isArray(itemsBy.breaking) ? itemsBy.breaking : [])
-        .filter(i => i && i.isLive !== false)
-        .slice(0, limit);
-      const liveItems = (Array.isArray(itemsBy.live) ? itemsBy.live : [])
-        .filter(i => i && i.isLive !== false)
-        .slice(0, limit);
-
-      const breakingEnabled = computeEffectiveEnabled(settings.breaking.enabled, settings.breaking.mode, breakingItems.length);
-      const liveEnabled = computeEffectiveEnabled(settings.live.enabled, settings.live.mode, liveItems.length);
-
-      const mapItem = (d) => {
-        const id = d && d._id ? String(d._id) : undefined;
-        return {
-          id,
-          type: d && (d.type === 'breaking' || d.type === 'live') ? d.type : undefined,
-          text: _resolvePublicItemText(d, requestedLang),
-          createdAt: (d && d.createdAt) || null,
-        };
-      };
-
+      const snapshot = await buildBroadcastSnapshot({ lang: requestedLang, version });
       return res.status(200).json({
-        ok: true,
-        data: {
-          breaking: {
-            enabled: breakingEnabled,
-            mode: settings.breaking.mode,
-            speedSeconds: settings.breaking.speedSec,
-            items: breakingItems.map(mapItem),
-          },
-          live: {
-            enabled: liveEnabled,
-            mode: settings.live.mode,
-            speedSeconds: settings.live.speedSec,
-            items: liveItems.map(mapItem),
-          },
+        breaking: {
+          enabled: Boolean(snapshot?.breaking?.enabled),
+          durationSeconds: typeof snapshot?.breaking?.durationSeconds === 'number' ? snapshot.breaking.durationSeconds : 12,
+          items: Array.isArray(snapshot?.breaking?.items) ? snapshot.breaking.items : [],
+        },
+        live: {
+          enabled: Boolean(snapshot?.live?.enabled),
+          durationSeconds: typeof snapshot?.live?.durationSeconds === 'number' ? snapshot.live.durationSeconds : 12,
+          items: Array.isArray(snapshot?.live?.items) ? snapshot.live.items : [],
         },
       });
     } catch (_) {
@@ -168,6 +142,7 @@ router.get('/', async (req, res) => {
       const liveEnabled = computeEffectiveEnabled(settings.live.enabled, settings.live.mode, liveItems.length);
 
       return res.status(200).json({
+        _meta: { version },
         breaking: {
           enabled: breakingEnabled,
           mode: settings.breaking.mode,
@@ -192,6 +167,10 @@ router.get('/', async (req, res) => {
   try {
     _noStore(res);
     const payload = await computePublicPayload();
+    if (payload && typeof payload === 'object') {
+      payload._meta = payload._meta && typeof payload._meta === 'object' ? payload._meta : {};
+      payload._meta.version = version;
+    }
     return res.status(200).json(payload);
   } catch (e) {
     _noStore(res);
@@ -203,6 +182,8 @@ router.get('/', async (req, res) => {
 router.get('/items', async (req, res) => {
   try {
     _noStore(res);
+
+    const version = await getBroadcastVersion().catch(() => 0);
     const type = normalizeChannel(req.query && req.query.type);
     if (!type) {
       return sendError(res, 400, 'BAD_REQUEST', 'Invalid type. Expected breaking|live');
@@ -213,14 +194,14 @@ router.get('/items', async (req, res) => {
     const itemsBy = await listItemsLast24hByChannel();
     const items = (itemsBy && itemsBy[type]) || [];
     if (_wantsDetailed(req)) {
-      return res.status(200).json({ ok: true, items: items.map(i => _mapPublicItem(i, { lang: requestedLang })) });
+      return res.status(200).json({ ok: true, version, items: items.map(i => _mapPublicItem(i, { lang: requestedLang })) });
     }
 
     if (requestedLang) {
-      return res.status(200).json({ ok: true, items: items.map(i => _resolvePublicItemText(i, requestedLang)).filter(Boolean) });
+      return res.status(200).json({ ok: true, version, items: items.map(i => _resolvePublicItemText(i, requestedLang)).filter(Boolean) });
     }
 
-    return res.status(200).json({ ok: true, items: items.map(i => String(i.text || '')).filter(Boolean) });
+    return res.status(200).json({ ok: true, version, items: items.map(i => String(i.text || '')).filter(Boolean) });
   } catch (_) {
     _noStore(res);
     return sendError(res, 500, 'SERVER_ERROR', 'Failed to load broadcast items');
@@ -231,12 +212,76 @@ router.get('/items', async (req, res) => {
 router.get('/settings', async (_req, res) => {
   try {
     _noStore(res);
+    const version = await getBroadcastVersion().catch(() => 0);
     const doc = await getOrCreateSettings();
     const settings = adminSettingsResponse(doc);
-    return res.status(200).json({ ok: true, settings });
+    return res.status(200).json({ ok: true, version, settings });
   } catch (_) {
     _noStore(res);
     return sendError(res, 500, 'SERVER_ERROR', 'Failed to load broadcast settings');
+  }
+});
+
+// GET /api/public/broadcast/config
+// Also mounted at /public/broadcast/config via server mount.
+router.get('/config', async (_req, res) => {
+  try {
+    _noStore(res);
+    const version = await getBroadcastVersion().catch(() => 0);
+    const doc = await getOrCreateSettings();
+    const settings = adminSettingsResponse(doc);
+    const itemsBy = await listItemsLast24hByChannel();
+
+    const breakingItems = Array.isArray(itemsBy?.breaking) ? itemsBy.breaking : [];
+    const liveItems = Array.isArray(itemsBy?.live) ? itemsBy.live : [];
+
+    const breakingEnabled = computeEffectiveEnabled(settings.breaking.enabled, settings.breaking.mode, breakingItems.length);
+    const liveEnabled = computeEffectiveEnabled(settings.live.enabled, settings.live.mode, liveItems.length);
+
+    return res.status(200).json({
+      version,
+      breaking: {
+        enabled: Boolean(breakingEnabled),
+        mode: settings.breaking.mode,
+        durationSec: settings.breaking.durationSeconds,
+        // compatibility
+        durationSeconds: settings.breaking.durationSeconds,
+      },
+      live: {
+        enabled: Boolean(liveEnabled),
+        mode: settings.live.mode,
+        durationSec: settings.live.durationSeconds,
+        durationSeconds: settings.live.durationSeconds,
+      },
+    });
+  } catch (_) {
+    _noStore(res);
+    return sendError(res, 500, 'SERVER_ERROR', 'Failed to load broadcast config');
+  }
+});
+
+// GET /api/public/broadcast/stream?lang=en
+// Also mounted at /public/broadcast/stream?lang=en via server mount.
+router.get('/stream', async (req, res) => {
+  const lang = Object.prototype.hasOwnProperty.call(req.query || {}, 'lang')
+    ? _normalizeLang(req.query && req.query.lang, 'gu')
+    : 'gu';
+
+  _noStore(res);
+
+  addClient({ res, lang });
+
+  // Send initial state immediately.
+  try {
+    const snapshot = await buildBroadcastSnapshot({ lang });
+    res.write('event: broadcast_updated\n');
+    res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+  } catch (_) {
+    // Keep stream open even if initial load fails.
+    try {
+      res.write('event: broadcast_updated\n');
+      res.write(`data: ${JSON.stringify({ version: 0, breaking: { enabled: false, mode: 'auto', durationSeconds: 12, items: [] }, live: { enabled: false, mode: 'auto', durationSeconds: 12, items: [] } })}\n\n`);
+    } catch (_) {}
   }
 });
 

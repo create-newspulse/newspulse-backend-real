@@ -16,11 +16,13 @@ function nowMinus24h() {
 
 function defaultSettingsDocShape() {
   return {
-    breaking: { enabled: false, mode: 'auto', tickerSpeedSeconds: 8, speedSec: 8 },
-    live: { enabled: false, mode: 'auto', tickerSpeedSeconds: 8, speedSec: 8 },
+    breaking: { enabled: false, mode: 'auto', tickerSpeedSeconds: 12, speedSec: 12 },
+    live: { enabled: false, mode: 'auto', tickerSpeedSeconds: 12, speedSec: 12 },
     // Keep legacy fields initialized for older callers
     breakingEnabled: false,
     liveEnabled: false,
+    breakingDurationSeconds: 12,
+    liveDurationSeconds: 12,
     breakingMode: 'manual',
     liveMode: 'auto',
     updatedAt: new Date(),
@@ -63,8 +65,8 @@ function clampTickerSpeedSeconds(v) {
   const n = typeof v === 'number' ? v : Number(v);
   if (!Number.isFinite(n)) return null;
   const rounded = Math.round(n);
-  // Broadcast Center requirement: 4..60 seconds.
-  return Math.min(60, Math.max(4, rounded));
+  // Broadcast Center requirement: 12..45 seconds.
+  return Math.min(45, Math.max(12, rounded));
 }
 
 function normalizeText(v) {
@@ -85,6 +87,16 @@ function applyLegacyMirrors(doc) {
 
   doc.breakingEnabled = breakingEnabled;
   doc.liveEnabled = liveEnabled;
+
+  // Phase 1: durationSeconds is the UI-facing field name; mirror from tickerSpeedSeconds.
+  try {
+    const b = doc.breaking && typeof doc.breaking === 'object' ? doc.breaking : {};
+    const l = doc.live && typeof doc.live === 'object' ? doc.live : {};
+    const bd = clampTickerSpeedSeconds(b.tickerSpeedSeconds ?? b.speedSec) ?? 12;
+    const ld = clampTickerSpeedSeconds(l.tickerSpeedSeconds ?? l.speedSec) ?? 12;
+    doc.breakingDurationSeconds = bd;
+    doc.liveDurationSeconds = ld;
+  } catch (_) {}
 
   // Preserve existing legacy mode semantics if already set; otherwise choose a safe mapping.
   if (!doc.breakingMode) doc.breakingMode = breakingEnabled ? 'auto' : 'manual';
@@ -109,23 +121,23 @@ async function getOrCreateSettings() {
     !doc.live || typeof doc.live !== 'object';
 
   if (changed) {
-    doc.breaking = doc.breaking && typeof doc.breaking === 'object' ? doc.breaking : { enabled: Boolean(doc.breakingEnabled), mode: 'auto', tickerSpeedSeconds: 8, speedSec: 8 };
-    doc.live = doc.live && typeof doc.live === 'object' ? doc.live : { enabled: Boolean(doc.liveEnabled), mode: 'auto', tickerSpeedSeconds: 8, speedSec: 8 };
+    doc.breaking = doc.breaking && typeof doc.breaking === 'object' ? doc.breaking : { enabled: Boolean(doc.breakingEnabled), mode: 'auto', tickerSpeedSeconds: 12, speedSec: 12 };
+    doc.live = doc.live && typeof doc.live === 'object' ? doc.live : { enabled: Boolean(doc.liveEnabled), mode: 'auto', tickerSpeedSeconds: 12, speedSec: 12 };
   }
 
   // Backfill tickerSpeedSeconds from legacy speedSec if missing.
   if (doc.breaking && typeof doc.breaking === 'object') {
     if (typeof doc.breaking.tickerSpeedSeconds !== 'number' || !Number.isFinite(doc.breaking.tickerSpeedSeconds)) {
-      const legacy = normalizeSpeedSec(doc.breaking.speedSec) ?? 8;
-      doc.breaking.tickerSpeedSeconds = Math.min(60, Math.max(4, legacy));
+      const legacy = normalizeSpeedSec(doc.breaking.speedSec) ?? 12;
+      doc.breaking.tickerSpeedSeconds = clampTickerSpeedSeconds(legacy) ?? 12;
     }
     // Keep speedSec mirrored for older callers.
     doc.breaking.speedSec = normalizeSpeedSec(doc.breaking.speedSec) ?? doc.breaking.tickerSpeedSeconds;
   }
   if (doc.live && typeof doc.live === 'object') {
     if (typeof doc.live.tickerSpeedSeconds !== 'number' || !Number.isFinite(doc.live.tickerSpeedSeconds)) {
-      const legacy = normalizeSpeedSec(doc.live.speedSec) ?? 8;
-      doc.live.tickerSpeedSeconds = Math.min(60, Math.max(4, legacy));
+      const legacy = normalizeSpeedSec(doc.live.speedSec) ?? 12;
+      doc.live.tickerSpeedSeconds = clampTickerSpeedSeconds(legacy) ?? 12;
     }
     doc.live.speedSec = normalizeSpeedSec(doc.live.speedSec) ?? doc.live.tickerSpeedSeconds;
   }
@@ -252,6 +264,14 @@ async function patchSettings(payload) {
       doc[channel].tickerSpeedSeconds = s;
       doc[channel].speedSec = s;
     }
+
+    // Phase 1 UI alias
+    if (Object.prototype.hasOwnProperty.call(next, 'durationSeconds')) {
+      const s = clampTickerSpeedSeconds(next.durationSeconds);
+      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.durationSeconds. Expected number` };
+      doc[channel].tickerSpeedSeconds = s;
+      doc[channel].speedSec = s;
+    }
   }
 
   applyLegacyMirrors(doc);
@@ -262,23 +282,25 @@ async function patchSettings(payload) {
 
 function adminSettingsResponse(doc) {
   const d = doc && typeof doc === 'object' ? doc : defaultSettingsDocShape();
-  const breaking = d.breaking && typeof d.breaking === 'object' ? d.breaking : { enabled: false, mode: 'auto', tickerSpeedSeconds: 8, speedSec: 8 };
-  const live = d.live && typeof d.live === 'object' ? d.live : { enabled: false, mode: 'auto', tickerSpeedSeconds: 8, speedSec: 8 };
+  const breaking = d.breaking && typeof d.breaking === 'object' ? d.breaking : { enabled: false, mode: 'auto', tickerSpeedSeconds: 12, speedSec: 12 };
+  const live = d.live && typeof d.live === 'object' ? d.live : { enabled: false, mode: 'auto', tickerSpeedSeconds: 12, speedSec: 12 };
 
-  const breakingSpeed = clampTickerSpeedSeconds(breaking.tickerSpeedSeconds) ?? clampTickerSpeedSeconds(breaking.speedSec) ?? 8;
-  const liveSpeed = clampTickerSpeedSeconds(live.tickerSpeedSeconds) ?? clampTickerSpeedSeconds(live.speedSec) ?? 8;
+  const breakingSpeed = clampTickerSpeedSeconds(breaking.tickerSpeedSeconds) ?? clampTickerSpeedSeconds(breaking.speedSec) ?? 12;
+  const liveSpeed = clampTickerSpeedSeconds(live.tickerSpeedSeconds) ?? clampTickerSpeedSeconds(live.speedSec) ?? 12;
 
   return {
     breaking: {
       enabled: Boolean(breaking.enabled),
       mode: normalizeMode(breaking.mode) || 'auto',
       tickerSpeedSeconds: breakingSpeed,
+      durationSeconds: breakingSpeed,
       speedSec: breakingSpeed,
     },
     live: {
       enabled: Boolean(live.enabled),
       mode: normalizeMode(live.mode) || 'auto',
       tickerSpeedSeconds: liveSpeed,
+      durationSeconds: liveSpeed,
       speedSec: liveSpeed,
     },
     updatedAt: d.updatedAt || null,

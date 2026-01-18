@@ -4,6 +4,8 @@ const mongoose = require('mongoose');
 const BroadcastItem = require('../models/BroadcastItem');
 const BroadcastSettings = require('../models/BroadcastSettings');
 const { requireAdminAuth } = require('../middleware/adminAuth');
+const noCache = require('../middleware/noCache');
+const { emitBroadcastUpdated } = require('../services/broadcastSse.service');
 const {
 	normalizeChannel,
 	getOrCreateSettings: getOrCreateSettingsV2,
@@ -83,6 +85,7 @@ router.patch('/settings', requireAdminAuthIfAdminApi, async (req, res) => {
 		return res.status(result.status).json({ ok: false, message: result.message });
 	}
 	const settingsDoc = await getOrCreateSettingsV2();
+	emitBroadcastUpdated({ reason: 'admin_patch_settings_v2' }).catch(() => {});
 	return res.status(200).json({ ok: true, settings: adminSettingsResponse(settingsDoc) });
 });
 
@@ -119,6 +122,7 @@ router.post('/items', requireAdminAuthIfAdminApi, async (req, res, next) => {
 	if (!created.ok) {
 		return res.status(created.status).json({ ok: false, message: created.message });
 	}
+	emitBroadcastUpdated({ reason: 'admin_create_item_v2' }).catch(() => {});
 
 	return res.status(201).json({ ok: true, item: created.item });
 });
@@ -137,6 +141,7 @@ router.post('/:channel/items', requireAdminAuthIfAdminApi, async (req, res) => {
 	if (!created.ok) {
 		return res.status(created.status).json({ ok: false, message: created.message });
 	}
+	emitBroadcastUpdated({ reason: 'admin_create_item_v2_alt' }).catch(() => {});
 
 	return res.status(201).json({ ok: true, item: created.item });
 });
@@ -150,6 +155,7 @@ router.delete('/items/:id', requireAdminAuthIfAdminApi, async (req, res, next) =
 	if (!result.ok) {
 		return res.status(result.status).json({ ok: false, message: result.message });
 	}
+	emitBroadcastUpdated({ reason: 'admin_delete_item_v2' }).catch(() => {});
 	return res.status(200).json({ ok: true });
 });
 
@@ -246,6 +252,7 @@ router.put('/settings', blockLegacyBroadcastEndpointsInProd, requireAdminAuthIfA
 	s.updatedAt = new Date();
 
 	await s.save();
+	emitBroadcastUpdated({ reason: 'admin_put_settings_legacy' }).catch(() => {});
 	return res.json(pickSettingsResponse(s));
 });
 
@@ -302,6 +309,7 @@ router.post('/items', blockLegacyBroadcastEndpointsInProd, requireAdminAuthIfAdm
 		isLive: false,
 		expiresAt,
 	});
+	emitBroadcastUpdated({ reason: 'admin_post_item_legacy' }).catch(() => {});
 
 	return res.status(201).json(item);
 });
@@ -330,6 +338,7 @@ router.patch('/items/:id', blockLegacyBroadcastEndpointsInProd, requireAdminAuth
 	}
 
 	await item.save();
+	emitBroadcastUpdated({ reason: 'admin_patch_item_legacy' }).catch(() => {});
 	return res.json(item);
 });
 
@@ -345,12 +354,13 @@ router.delete('/items/:id', blockLegacyBroadcastEndpointsInProd, requireAdminAut
 		// ignore
 	}
 	if (!deleted) return res.status(404).json({ message: 'Not found' });
+	emitBroadcastUpdated({ reason: 'admin_delete_item_legacy' }).catch(() => {});
 	return res.json({ ok: true });
 });
 
 // PUBLIC: GET /api/broadcast/public?language=gu
 // Returns settings + last-24h breaking/live items (stable shape for website).
-router.get('/public', async (req, res) => {
+router.get('/public', noCache, async (req, res) => {
 	// If DB is down, still return a stable shape.
 	if (mongoose.connection.readyState !== 1) {
 		return res.json({

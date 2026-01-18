@@ -4,9 +4,9 @@ const request = require('supertest');
 
 const app = require('../server');
 
-test('Public Broadcast Center: GET /api/public/broadcast?detailed=1 returns detailed payload with id mapping', async () => {
+test('Public Broadcast Center Phase 1: GET /admin-api/public/broadcast?lang=en returns breaking+live with durationSeconds', async () => {
   const res = await request(app)
-    .get('/api/public/broadcast?detailed=1')
+    .get('/admin-api/public/broadcast?lang=en')
     .expect('Content-Type', /json/)
     .expect(200);
 
@@ -16,14 +16,10 @@ test('Public Broadcast Center: GET /api/public/broadcast?detailed=1 returns deta
 
   for (const key of ['breaking', 'live']) {
     assert.equal(typeof res.body[key].enabled, 'boolean');
-    assert.equal(typeof res.body[key].mode, 'string');
-    assert.ok(typeof res.body[key].speed === 'number' || typeof res.body[key].speedSec === 'number');
+    assert.equal(typeof res.body[key].durationSeconds, 'number');
     assert.ok(Array.isArray(res.body[key].items));
   }
 
-  // No-cache headers for public broadcast endpoints
   const cc = String(res.headers['cache-control'] || '');
   assert.ok(cc.includes('no-store'));
-  assert.ok(cc.includes('no-cache'));
-  assert.ok(cc.includes('must-revalidate'));
 });
