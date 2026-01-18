@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 
 const News = require('../models/News');
+const { safeTranslateText, normalizeLang } = require('../services/translate/safeTranslate');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -35,7 +36,121 @@ function normalizeLanguage(v) {
 
 function getRequestedLang(req) {
   // Canonical param is `lang`, but accept `language` for backward compatibility.
-  return normalizeLanguage(req.query.lang) || normalizeLanguage(req.query.language) || null;
+  return (
+    normalizeLanguage(req.query.lang) ||
+    normalizeLanguage(req.query.language) ||
+    normalizeLanguage(req.headers['x-lang']) ||
+    normalizeLanguage(req.headers['x-language']) ||
+    normalizeLanguage(req.lang) ||
+    null
+  );
+}
+
+function applyLangFilter(filter, lang) {
+  if (!lang) return;
+  if (lang === 'gu') {
+    filter.$and.push({
+      $or: [
+        { lang: 'gu' },
+        { language: 'gu' },
+        // Default-to-gu ONLY when neither field provides a language.
+        {
+          $and: [
+            { $or: [{ lang: null }, { lang: { $exists: false } }] },
+            { $or: [{ language: null }, { language: { $exists: false } }] },
+          ],
+        },
+      ],
+    });
+  } else {
+    filter.$and.push({ $or: [{ lang }, { language: lang }] });
+  }
+}
+
+function isPlainTextBody(content) {
+  const s = String(content || '');
+  if (!s.trim()) return true;
+  return !/[<][^>]+[>]/.test(s);
+}
+
+async function translateNewsDocFields(doc, targetLang, { contextPrefix = 'news', strict = false } = {}) {
+  const requested = normalizeLang(targetLang);
+  if (!requested) return { doc, changed: false, flags: { bodyTranslated: false } };
+
+  const source = normalizeLang(doc.lang || doc.language) || 'gu';
+  if (source === requested) return { doc, changed: false, flags: { bodyTranslated: false } };
+
+  let changed = false;
+  const warnings = [];
+
+  const titleRes = await safeTranslateText({
+    text: doc.title || '',
+    sourceLang: source,
+    targetLang: requested,
+    context: `${contextPrefix}:title`,
+    strict,
+  });
+  if (!titleRes.usedFallback && titleRes.text) {
+    doc.title = titleRes.text;
+    changed = true;
+  } else if (titleRes.warnings?.length) {
+    warnings.push(...titleRes.warnings);
+  }
+
+  const descRes = await safeTranslateText({
+    text: doc.description || doc.summary || '',
+    sourceLang: source,
+    targetLang: requested,
+    context: `${contextPrefix}:summary`,
+    strict,
+  });
+  if (!descRes.usedFallback && descRes.text) {
+    doc.description = descRes.text;
+    changed = true;
+  } else if (descRes.warnings?.length) {
+    warnings.push(...descRes.warnings);
+  }
+
+  let bodyTranslated = false;
+  if (typeof doc.content === 'string' && doc.content.trim()) {
+    if (isPlainTextBody(doc.content)) {
+      const bodyRes = await safeTranslateText({
+        text: doc.content,
+        sourceLang: source,
+        targetLang: requested,
+        context: `${contextPrefix}:body`,
+        strict: false,
+      });
+      if (!bodyRes.usedFallback && bodyRes.text) {
+        doc.content = bodyRes.text;
+        changed = true;
+        bodyTranslated = true;
+      } else {
+        bodyTranslated = false;
+        warnings.push('body_not_translated');
+      }
+    } else {
+      // Safe behavior for rich text: do not translate body.
+      bodyTranslated = false;
+      warnings.push('body_richtext_not_translated');
+    }
+  }
+
+  if (changed) {
+    doc.lang = requested;
+    doc.language = requested;
+  }
+
+  if (warnings.length) {
+    doc.translation = {
+      requestedLang: requested,
+      sourceLang: source,
+      bodyTranslated,
+      warnings: Array.from(new Set(warnings)).slice(0, 8),
+    };
+  }
+
+  return { doc, changed, flags: { bodyTranslated } };
 }
 
 function buildPublicPublishedFilter({ category, q, founderOnly, type }) {
@@ -141,8 +256,8 @@ async function listPublicNews(req, res) {
     const founderOnly = parseTruthy(req.query.founderOnly);
     const type = String(req.query.type || '').trim().toLowerCase();
 
-    // Default language for public story feed is Gujarati.
-    const lang = getRequestedLang(req) || 'gu';
+    // Default language for public story feed is Gujarati (backward compatible).
+    const requestedLang = getRequestedLang(req) || 'gu';
 
     let q = String(req.query.q || '').trim();
     // Keep keyword search safe and bounded
@@ -152,43 +267,48 @@ async function listPublicNews(req, res) {
       return res.status(200).json({ items: [], page, limit, total: 0, totalPages: 1 });
     }
 
-    const filter = buildPublicPublishedFilter({
-      category: category || undefined,
-      q: q || undefined,
-      founderOnly,
-      type,
-    });
+    const buildFilterForLang = (lang) => {
+      const f = buildPublicPublishedFilter({
+        category: category || undefined,
+        q: q || undefined,
+        founderOnly,
+        type,
+      });
+      applyLangFilter(f, lang);
+      return f;
+    };
 
-    if (lang) {
-      // Backward compatibility: treat missing language/lang as "en".
-      if (lang === 'gu') {
-        filter.$and.push({
-          $or: [
-            { lang: 'gu' },
-            { language: 'gu' },
-            // Default-to-gu ONLY when neither field provides a language.
-            {
-              $and: [
-                { $or: [{ lang: null }, { lang: { $exists: false } }] },
-                { $or: [{ language: null }, { language: { $exists: false } }] },
-              ],
-            },
-          ],
-        });
-      } else {
-        filter.$and.push({ $or: [{ lang }, { language: lang }] });
-      }
-    }
+    const filter = buildFilterForLang(requestedLang);
 
     const skip = (page - 1) * limit;
     const sort = { publishedAt: -1, createdAt: -1 };
 
-    const [itemsRaw, total] = await Promise.all([
+    let [itemsRaw, total] = await Promise.all([
       News.find(filter).select(PUBLIC_SELECT).sort(sort).skip(skip).limit(limit).lean(),
       News.countDocuments(filter),
     ]);
 
-    const items = (itemsRaw || []).map(withCoverImageUrl);
+    // If the requested language has no docs, fall back to Gujarati and translate server-side.
+    const shouldFallbackTranslate = total === 0 && requestedLang !== 'gu';
+    if (shouldFallbackTranslate) {
+      const fallbackFilter = buildFilterForLang('gu');
+      [itemsRaw, total] = await Promise.all([
+        News.find(fallbackFilter).select(PUBLIC_SELECT).sort(sort).skip(skip).limit(limit).lean(),
+        News.countDocuments(fallbackFilter),
+      ]);
+    }
+
+    let items = (itemsRaw || []).map(withCoverImageUrl);
+
+    if (shouldFallbackTranslate && items.length) {
+      items = await Promise.all(
+        items.map(async (it) => {
+          const out = { ...it };
+          await translateNewsDocFields(out, requestedLang, { contextPrefix: 'news:list', strict: false });
+          return out;
+        })
+      );
+    }
     const totalPages = Math.max(Math.ceil(total / limit), 1);
 
     return res.status(200).json({ items, page, limit, total, totalPages });
@@ -241,18 +361,36 @@ async function getPublicNewsBySlugOrId(req, res) {
     const base = buildPublicPublishedFilter({});
     let doc = null;
 
-    if (isObjectIdLike(slugOrIdRaw)) {
-      doc = await News.findOne({ ...base, _id: slugOrIdRaw }).select(PUBLIC_SELECT).lean();
-    } else {
-      const slug = slugOrIdRaw.toLowerCase();
-      doc = await News.findOne({ ...base, slug }).select(PUBLIC_SELECT).lean();
+    // Prefer requested language doc when available.
+    const requestedLang = getRequestedLang(req);
+
+    const lookup = isObjectIdLike(slugOrIdRaw)
+      ? { _id: slugOrIdRaw }
+      : { slug: slugOrIdRaw.toLowerCase() };
+
+    if (requestedLang) {
+      const byLangFilter = { ...base, ...lookup, $and: [...(base.$and || [])] };
+      applyLangFilter(byLangFilter, requestedLang);
+      doc = await News.findOne(byLangFilter).select(PUBLIC_SELECT).lean();
+    }
+
+    if (!doc) {
+      doc = await News.findOne({ ...base, ...lookup }).select(PUBLIC_SELECT).lean();
     }
 
     if (!doc) {
       return res.status(404).json({ message: 'Not found' });
     }
 
-    return res.status(200).json(withCoverImageUrl(doc));
+    const out = withCoverImageUrl(doc);
+
+    // If caller requested a different language, translate fields best-effort.
+    const target = normalizeLang(requestedLang);
+    if (target && target !== normalizeLang(out.lang || out.language)) {
+      await translateNewsDocFields(out, target, { contextPrefix: 'news:detail', strict: true });
+    }
+
+    return res.status(200).json(out);
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
   }

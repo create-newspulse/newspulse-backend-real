@@ -16,6 +16,22 @@ function _normalizeLang(v, fallback = 'gu') {
   return SUPPORTED_LANGS.has(s) ? s : fallback;
 }
 
+function _requestedLangFromReq(req) {
+  const q = (req && req.query) || {};
+  // Preserve Phase 1 behavior: only treat query lang as requested when explicitly present.
+  const hasQueryLang = Object.prototype.hasOwnProperty.call(q, 'lang');
+  const queryLang = hasQueryLang ? _normalizeLang(q.lang, 'gu') : null;
+  if (queryLang) return queryLang;
+
+  const headerLang = req && req.headers ? (req.headers['x-lang'] || req.headers['x-language']) : null;
+  if (headerLang) return _normalizeLang(headerLang, 'gu');
+
+  const midLang = req && req.lang ? req.lang : null;
+  if (midLang) return _normalizeLang(midLang, 'gu');
+
+  return null;
+}
+
 function _resolvePublicItemText(doc, lang) {
   const d = doc && typeof doc === 'object' ? doc : {};
   const target = _normalizeLang(lang, 'gu');
@@ -83,9 +99,7 @@ function _mapPublicItem(doc, options = {}) {
 // Default: stable payload used by the website.
 // Optional: detailed payload (query ?detailed=1) with item objects + id mapping.
 router.get('/', async (req, res) => {
-  const requestedLang = Object.prototype.hasOwnProperty.call((req && req.query) || {}, 'lang')
-    ? _normalizeLang(req.query && req.query.lang, 'gu')
-    : null;
+  const requestedLang = _requestedLangFromReq(req);
 
   // New Phase 1 contract: only when ?lang is provided.
   if (requestedLang) {
@@ -194,9 +208,7 @@ router.get('/items', async (req, res) => {
       return sendError(res, 400, 'BAD_REQUEST', 'Invalid type. Expected breaking|live');
     }
 
-    const requestedLang = Object.prototype.hasOwnProperty.call((req && req.query) || {}, 'lang')
-      ? _normalizeLang(req.query && req.query.lang, 'gu')
-      : null;
+    const requestedLang = _requestedLangFromReq(req);
 
     const itemsBy = await listItemsLast24hByChannel();
     const items = (itemsBy && itemsBy[type]) || [];

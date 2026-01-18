@@ -160,6 +160,8 @@ const adminAdSettingsRouter = require('./routes/adminAdSettings.routes');
 const publicRoutes = require('./routes/public.routes');
 const siteSettingsRoutes = require('./routes/siteSettings.routes');
 const publicSettingsRouter = require('./routes/publicSettings.routes');
+const publicTranslationRouter = require('./routes/publicTranslation.routes');
+const publicUiLabelsRouter = require('./routes/publicUiLabels.routes');
 const adminPublicSettingsRouter = require('./routes/adminPublicSettings.routes');
 const PublicSiteSettings = require('./models/PublicSiteSettings');
 const User = require('./models/User');
@@ -189,6 +191,8 @@ try { publicCommunitySettingsRouter = require(`${BASE}/routes/public/communitySe
 let publicFeatureTogglesRouter = null;
 try { publicFeatureTogglesRouter = require('./routes/publicFeatureToggles'); } catch (_) { console.warn('[init] optional public feature toggles router not found; skipping'); }
 
+const { langMiddleware } = require('./middleware/lang');
+
 const app = express();
 
 app.use((req, res, next) => {
@@ -196,6 +200,10 @@ app.use((req, res, next) => {
   res.setHeader('X-Newspulse-Db', _safeDbLabel());
   next();
 });
+
+// Language negotiation (query ?lang=hi, header x-lang: hi). Controllers may still
+// choose their own defaults for backward compatibility.
+app.use(langMiddleware);
 
 // Stable health route for admin-api proxies (no auth/DB dependency)
 // Must ALWAYS return 200 JSON and include DB connection status.
@@ -1154,6 +1162,19 @@ app.use('/api/site-settings', siteSettingsRoutes);
 // Mount early to avoid being shadowed by other /api routers.
 app.use('/api/public/trending-topics', publicTrendingTopicsRouter);
 app.use('/api/public/news', publicNewsRouter);
+// Admin panel proxy basePath support for public news
+app.use('/admin-api/public/news', publicNewsRouter);
+app.use('/admin-api/api/public/news', publicNewsRouter);
+
+// Translation health (no auth)
+app.use('/api/public/translation', publicTranslationRouter);
+app.use('/admin-api/public/translation', publicTranslationRouter);
+app.use('/admin-api/api/public/translation', publicTranslationRouter);
+
+// UI labels (no auth)
+app.use('/api/public', publicUiLabelsRouter);
+app.use('/admin-api/public', publicUiLabelsRouter);
+app.use('/admin-api/api/public', publicUiLabelsRouter);
 
 // Articles router mounted at /api and alias at root for /articles
 app.use('/api', articlesRoutes);
