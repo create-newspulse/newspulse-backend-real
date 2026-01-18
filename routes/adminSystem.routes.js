@@ -13,6 +13,20 @@ function isDbReady() {
   return mongoose.connection.readyState === 1;
 }
 
+// GET /admin-api/admin/system/translation-status
+// Debug endpoint for admin panel: translation providers/config health.
+router.get('/system/translation-status', requireAdminAuth, (_req, res) => {
+  const googleConfigured = !!(process.env.GOOGLE_TRANSLATE_API_KEY || '').trim();
+
+  return res.status(200).json({
+    googleConfigured,
+    queueEnabled: false,
+    providers: {
+      google: { configured: googleConfigured },
+    },
+  });
+});
+
 // GET /api/admin/system/ai-training-info
 // TODO: Replace placeholder with real training metadata from storage/DB.
 router.get('/system/ai-training-info', requireAdminAuth, (_req, res) => {

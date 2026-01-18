@@ -57,6 +57,18 @@ test('GET /admin-api/admin/system/ai-training-info returns 200 JSON when AI not 
   assert.ok(String(res.headers['content-type'] || '').includes('application/json'));
 });
 
+test('GET /admin-api/admin/system/translation-status returns provider config flags', async () => {
+  const token = makeOpaqueAdminToken();
+  const res = await request(app)
+    .get('/admin-api/admin/system/translation-status')
+    .set('Authorization', `Bearer ${token}`);
+
+  assert.equal(res.status, 200);
+  assert.ok(Object.prototype.hasOwnProperty.call(res.body, 'googleConfigured'));
+  assert.equal(res.body.queueEnabled, false);
+  assert.ok(typeof res.body.providers === 'object');
+});
+
 test('GET /admin-api/admin/ads returns 503 JSON when DB unavailable', async () => {
   const token = makeOpaqueAdminToken();
   const res = await request(app)

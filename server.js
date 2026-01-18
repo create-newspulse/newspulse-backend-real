@@ -1343,6 +1343,9 @@ for (const p of [
 // Admin-prefixed alias for system AI training info
 // Admin system endpoints mounted under /api/admin (handled by adminSystemRoutes)
 app.use('/api/admin', adminSystemRoutes);
+// Admin API proxy aliases (frontend often proxies /admin-api/*)
+app.use('/admin-api/admin', adminSystemRoutes);
+app.use('/admin-api/api/admin', adminSystemRoutes);
 // health routes handled directly above by healthHandler
 // System monitor hub handled by systemRoutes (mounted above)
 app.use('/api/admin/community', adminCommunityRoutes);
