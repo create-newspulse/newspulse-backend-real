@@ -117,7 +117,9 @@ function _buildConfigPatchPayload(type, body) {
   const channels = channel ? [channel] : ['breaking', 'live'];
 
   for (const ch of channels) {
-    const next = channel ? b : (b && b[ch]);
+    const next = channel
+      ? b
+      : (ch === 'live' ? ((b && b.live) || (b && b.liveUpdates)) : (b && b[ch]));
     if (!next || typeof next !== 'object') continue;
 
     payload[ch] = {};
@@ -154,7 +156,7 @@ function _summarizePatchKeys(body) {
   const out = [];
   const b = body && typeof body === 'object' ? body : {};
   for (const ch of ['breaking', 'live']) {
-    const next = b[ch];
+    const next = ch === 'live' ? ((b && b.live) || (b && b.liveUpdates)) : b[ch];
     if (!next || typeof next !== 'object') continue;
     for (const k of ['enabled', 'mode', 'durationSec', 'durationSeconds', 'tickerSpeedSeconds', 'scrollDurationSeconds', 'scrollDurationSec', 'speedSec', 'speed']) {
       if (Object.prototype.hasOwnProperty.call(next, k)) out.push(`${ch}.${k}`);
@@ -166,7 +168,7 @@ function _summarizePatchKeys(body) {
 function buildPatchPayload(body) {
   const payload = {};
   for (const channel of ['breaking', 'live']) {
-    const next = body?.[channel];
+    const next = channel === 'live' ? (body?.live ?? body?.liveUpdates) : body?.[channel];
     if (!next || typeof next !== 'object') continue;
 
     payload[channel] = {};

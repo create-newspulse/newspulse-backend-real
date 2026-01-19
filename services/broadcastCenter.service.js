@@ -256,18 +256,16 @@ async function deleteItemById(id) {
   return { ok: true, status: 200 };
 }
 
-async function patchSettings(payload) {
-  if (!isDbReady()) {
-    return { ok: false, status: 503, message: 'Database unavailable' };
-  }
-
-  const doc = await getOrCreateSettings();
-  if (!doc) return { ok: false, status: 503, message: 'Database unavailable' };
-
+function applySettingsPatch(doc, payload) {
   const body = payload && typeof payload === 'object' ? payload : {};
+  // Compatibility: some clients use liveUpdates instead of live.
+  const normalized =
+    body.liveUpdates && typeof body.liveUpdates === 'object' && (!body.live || typeof body.live !== 'object')
+      ? { ...body, live: body.liveUpdates }
+      : body;
 
   for (const channel of ['breaking', 'live']) {
-    const next = body[channel];
+    const next = normalized[channel];
     if (!next || typeof next !== 'object') continue;
 
     if (Object.prototype.hasOwnProperty.call(next, 'enabled')) {
@@ -302,6 +300,14 @@ async function patchSettings(payload) {
       doc[channel].speedSec = s;
     }
 
+    // Requested shorthand
+    if (Object.prototype.hasOwnProperty.call(next, 'durationSec')) {
+      const s = clampScrollDurationSeconds(next.durationSec);
+      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.durationSec. Expected number` };
+      doc[channel].tickerSpeedSeconds = s;
+      doc[channel].speedSec = s;
+    }
+
     // Requested field name from admin panel: scrollDurationSeconds
     if (Object.prototype.hasOwnProperty.call(next, 'scrollDurationSeconds')) {
       const s = clampScrollDurationSeconds(next.scrollDurationSeconds);
@@ -318,6 +324,20 @@ async function patchSettings(payload) {
       doc[channel].speedSec = s;
     }
   }
+
+  return { ok: true, status: 200 };
+}
+
+async function patchSettings(payload) {
+  if (!isDbReady()) {
+    return { ok: false, status: 503, message: 'Database unavailable' };
+  }
+
+  const doc = await getOrCreateSettings();
+  if (!doc) return { ok: false, status: 503, message: 'Database unavailable' };
+
+  const applied = applySettingsPatch(doc, payload);
+  if (!applied.ok) return applied;
 
   applyLegacyMirrors(doc);
   await doc.save();
@@ -415,6 +435,7 @@ module.exports = {
   createItem,
   deleteItemById,
   patchSettings,
+  applySettingsPatch,
   computePublicPayload,
   computeEffectiveEnabled,
   computePublicEnabled,
