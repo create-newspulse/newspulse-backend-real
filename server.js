@@ -1142,6 +1142,8 @@ app.use('/admin-api/broadcast', broadcastRoutes);
 app.use('/api/admin/broadcast', adminBroadcastRouter);
 app.use('/admin-api/admin/broadcast', adminBroadcastRouter);
 app.use('/admin-api/api/admin/broadcast', adminBroadcastRouter);
+// Legacy/alternate mount used by some reverse proxies
+app.use('/admin/broadcast', adminBroadcastRouter);
 
 // Admin Glossary (Phase 1)
 app.use('/api/admin/glossary', adminGlossaryRouter);

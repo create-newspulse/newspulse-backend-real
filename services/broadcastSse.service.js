@@ -1,4 +1,4 @@
-const { computeEffectiveEnabled, listItemsLast24hByChannel, getOrCreateSettings, adminSettingsResponse } = require('./broadcastCenter.service');
+const { computePublicEnabled, listItemsLast24hByChannel, getOrCreateSettings, adminSettingsResponse } = require('./broadcastCenter.service');
 const { getBroadcastVersion, bumpBroadcastVersion } = require('./broadcastVersion.service');
 
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
@@ -48,8 +48,8 @@ async function buildBroadcastSnapshot({ lang, version } = {}) {
     .filter(i => i && i.isLive !== false)
     .slice(0, limit);
 
-  const breakingEnabled = computeEffectiveEnabled(settings.breaking.enabled, settings.breaking.mode, breakingItems.length);
-  const liveEnabled = computeEffectiveEnabled(settings.live.enabled, settings.live.mode, liveItems.length);
+  const breakingEnabled = computePublicEnabled(settings.breaking.enabled, settings.breaking.mode);
+  const liveEnabled = computePublicEnabled(settings.live.enabled, settings.live.mode);
 
   const mapItem = (d) => {
     const id = d && d._id ? String(d._id) : undefined;
@@ -68,12 +68,14 @@ async function buildBroadcastSnapshot({ lang, version } = {}) {
       enabled: breakingEnabled,
       mode: settings.breaking.mode,
       durationSeconds: settings.breaking.durationSeconds ?? settings.breaking.speedSec,
+      scrollDurationSeconds: settings.breaking.durationSeconds ?? settings.breaking.speedSec,
       items: breakingItems.map(mapItem),
     },
     live: {
       enabled: liveEnabled,
       mode: settings.live.mode,
       durationSeconds: settings.live.durationSeconds ?? settings.live.speedSec,
+      scrollDurationSeconds: settings.live.durationSeconds ?? settings.live.speedSec,
       items: liveItems.map(mapItem),
     },
   };

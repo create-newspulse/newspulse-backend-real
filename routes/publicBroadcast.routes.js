@@ -6,7 +6,7 @@ const {
   normalizeChannel,
   getOrCreateSettings,
   adminSettingsResponse,
-  computeEffectiveEnabled,
+  computePublicEnabled,
 } = require('../services/broadcastCenter.service');
 
 const { getBroadcastVersion } = require('../services/broadcastVersion.service');
@@ -138,8 +138,8 @@ router.get('/', async (req, res) => {
       const breakingItems = Array.isArray(itemsBy.breaking) ? itemsBy.breaking : [];
       const liveItems = Array.isArray(itemsBy.live) ? itemsBy.live : [];
 
-      const breakingEnabled = computeEffectiveEnabled(settings.breaking.enabled, settings.breaking.mode, breakingItems.length);
-      const liveEnabled = computeEffectiveEnabled(settings.live.enabled, settings.live.mode, liveItems.length);
+      const breakingEnabled = computePublicEnabled(settings.breaking.enabled, settings.breaking.mode);
+      const liveEnabled = computePublicEnabled(settings.live.enabled, settings.live.mode);
 
       return res.status(200).json({
         _meta: { version },
@@ -184,7 +184,7 @@ router.get('/items', async (req, res) => {
     _noStore(res);
 
     const version = await getBroadcastVersion().catch(() => 0);
-    const type = normalizeChannel(req.query && req.query.type);
+    const type = normalizeChannel((req.query && req.query.type) || (req.query && req.query.kind));
     if (!type) {
       return sendError(res, 400, 'BAD_REQUEST', 'Invalid type. Expected breaking|live');
     }
@@ -235,8 +235,8 @@ router.get('/config', async (_req, res) => {
     const breakingItems = Array.isArray(itemsBy?.breaking) ? itemsBy.breaking : [];
     const liveItems = Array.isArray(itemsBy?.live) ? itemsBy.live : [];
 
-    const breakingEnabled = computeEffectiveEnabled(settings.breaking.enabled, settings.breaking.mode, breakingItems.length);
-    const liveEnabled = computeEffectiveEnabled(settings.live.enabled, settings.live.mode, liveItems.length);
+    const breakingEnabled = computePublicEnabled(settings.breaking.enabled, settings.breaking.mode);
+    const liveEnabled = computePublicEnabled(settings.live.enabled, settings.live.mode);
 
     return res.status(200).json({
       version,
@@ -246,12 +246,14 @@ router.get('/config', async (_req, res) => {
         durationSec: settings.breaking.durationSeconds,
         // compatibility
         durationSeconds: settings.breaking.durationSeconds,
+        scrollDurationSeconds: settings.breaking.durationSeconds,
       },
       live: {
         enabled: Boolean(liveEnabled),
         mode: settings.live.mode,
         durationSec: settings.live.durationSeconds,
         durationSeconds: settings.live.durationSeconds,
+        scrollDurationSeconds: settings.live.durationSeconds,
       },
     });
   } catch (_) {

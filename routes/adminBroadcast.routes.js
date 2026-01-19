@@ -14,7 +14,7 @@ const {
   listItemsLast24hByChannel,
   deleteItemById,
   normalizeChannel,
-  computeEffectiveEnabled,
+  computePublicEnabled,
 } = require('../services/broadcastCenter.service');
 
 const { emitBroadcastUpdated } = require('../services/broadcastSse.service');
@@ -80,8 +80,8 @@ function toAdminConfigContract(settings, itemsByChannel) {
   const breakingItems = Array.isArray(itemsByChannel?.breaking) ? itemsByChannel.breaking : [];
   const liveItems = Array.isArray(itemsByChannel?.live) ? itemsByChannel.live : [];
 
-  const breakingEnabled = computeEffectiveEnabled(settings?.breaking?.enabled, settings?.breaking?.mode, breakingItems.length);
-  const liveEnabled = computeEffectiveEnabled(settings?.live?.enabled, settings?.live?.mode, liveItems.length);
+  const breakingEnabled = computePublicEnabled(settings?.breaking?.enabled, settings?.breaking?.mode);
+  const liveEnabled = computePublicEnabled(settings?.live?.enabled, settings?.live?.mode);
 
   const breakingDuration = typeof settings?.breaking?.durationSeconds === 'number'
     ? settings.breaking.durationSeconds
@@ -97,12 +97,14 @@ function toAdminConfigContract(settings, itemsByChannel) {
       durationSec: breakingDuration,
       // compatibility
       durationSeconds: breakingDuration,
+      scrollDurationSeconds: breakingDuration,
     },
     live: {
       enabled: Boolean(liveEnabled),
       mode: settings?.live?.mode || 'auto',
       durationSec: liveDuration,
       durationSeconds: liveDuration,
+      scrollDurationSeconds: liveDuration,
     },
   };
 }
@@ -134,12 +136,31 @@ function _buildConfigPatchPayload(type, body) {
     if (Object.prototype.hasOwnProperty.call(next, 'durationSeconds')) {
       payload[ch].durationSeconds = next.durationSeconds;
     }
+    if (Object.prototype.hasOwnProperty.call(next, 'scrollDurationSeconds')) {
+      payload[ch].scrollDurationSeconds = next.scrollDurationSeconds;
+    }
+    if (Object.prototype.hasOwnProperty.call(next, 'scrollDurationSec')) {
+      payload[ch].scrollDurationSeconds = next.scrollDurationSec;
+    }
     if (Object.prototype.hasOwnProperty.call(next, 'tickerSpeedSeconds')) {
       payload[ch].tickerSpeedSeconds = next.tickerSpeedSeconds;
     }
   }
 
   return payload;
+}
+
+function _summarizePatchKeys(body) {
+  const out = [];
+  const b = body && typeof body === 'object' ? body : {};
+  for (const ch of ['breaking', 'live']) {
+    const next = b[ch];
+    if (!next || typeof next !== 'object') continue;
+    for (const k of ['enabled', 'mode', 'durationSec', 'durationSeconds', 'tickerSpeedSeconds', 'scrollDurationSeconds', 'scrollDurationSec', 'speedSec', 'speed']) {
+      if (Object.prototype.hasOwnProperty.call(next, k)) out.push(`${ch}.${k}`);
+    }
+  }
+  return out;
 }
 
 function buildPatchPayload(body) {
@@ -308,6 +329,38 @@ router.put('/config', requireAdminAuth, async (req, res) => {
   return res.status(200).json(toAdminConfigContract(settings, itemsBy));
 });
 
+// PATCH /api/admin/broadcast/config
+// Merge-safe partial update for either/both channels.
+router.patch('/config', requireAdminAuth, async (req, res) => {
+  if (!ensureDbOr503(res)) return;
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const payload = _buildConfigPatchPayload(null, body);
+  const touched = _summarizePatchKeys(body);
+  if ((!payload.breaking || Object.keys(payload.breaking).length === 0) && (!payload.live || Object.keys(payload.live).length === 0)) {
+    return fail(res, 400, 'BAD_REQUEST', 'No supported fields to update (enabled, mode, durationSec/scrollDurationSeconds)');
+  }
+
+  // Minimal debug log (no secrets)
+  try {
+    console.log('[broadcast][config][patch]', { keys: touched });
+  } catch (_) {}
+
+  const result = await patchSettings(payload);
+  if (!result.ok) {
+    const status = typeof result.status === 'number' ? result.status : 400;
+    const code = status === 503 ? 'DB_UNAVAILABLE' : 'BAD_REQUEST';
+    return fail(res, status, code, result.message || 'Invalid request');
+  }
+
+  const doc = await getOrCreateSettings();
+  const settings = adminSettingsResponse(doc);
+  const itemsBy = await listItemsLast24hByChannel();
+
+  emitBroadcastUpdated({ reason: 'admin_config_patch_merge' }).catch(() => {});
+  return res.status(200).json(toAdminConfigContract(settings, itemsBy));
+});
+
 router.patch('/config/:type', requireAdminAuth, async (req, res) => {
   if (!ensureDbOr503(res)) return;
 
@@ -319,6 +372,10 @@ router.patch('/config/:type', requireAdminAuth, async (req, res) => {
   if (!payload[type] || Object.keys(payload[type]).length === 0) {
     return fail(res, 400, 'BAD_REQUEST', 'No supported fields to update (enabled, mode, durationSec)');
   }
+
+  try {
+    console.log('[broadcast][config][patch-one]', { type, keys: _summarizePatchKeys({ [type]: body }) });
+  } catch (_) {}
 
   const result = await patchSettings(payload);
   if (!result.ok) {

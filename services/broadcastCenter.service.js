@@ -6,6 +6,16 @@ const BroadcastSettings = require('../models/BroadcastSettings');
 const CHANNELS = new Set(['breaking', 'live']);
 const MODES = new Set(['auto', 'force_on', 'force_off', 'off']);
 
+// Broadcast Center UI presets should not accidentally disable tickers.
+// Clamp scroll duration (seconds) to a safe, readable range.
+function clampScrollDurationSeconds(v) {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return null;
+  const rounded = Math.round(n);
+  // Spec: 12–30 seconds recommended.
+  return Math.min(30, Math.max(12, rounded));
+}
+
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
@@ -40,6 +50,14 @@ function normalizeMode(v) {
   // Compatibility alias from tickers settings UI.
   if (s === 'off') return 'force_off';
   return s;
+}
+
+function normalizeModeForPatch(v) {
+  const s = String(v || '').trim().toLowerCase();
+  // Historical values from older UIs.
+  if (s === 'off') return 'force_off';
+  if (s === 'manual') return 'force_on';
+  return normalizeMode(s);
 }
 
 function normalizeModeForDoc(rawMode, explicitEnabled) {
@@ -173,6 +191,17 @@ function computeEffectiveEnabled(explicitEnabled, mode, itemsCount) {
   return itemsCount > 0;
 }
 
+function computePublicEnabled(explicitEnabled, mode) {
+  // Public site should not flip enabled off just because items are temporarily empty.
+  // Only explicit disable or force_off disables.
+  if (explicitEnabled === false) return false;
+  const m = normalizeMode(mode) || 'auto';
+  if (m === 'force_off') return false;
+  if (m === 'force_on') return true;
+  // auto: honor explicit flag only (no dependency on items).
+  return Boolean(explicitEnabled);
+}
+
 async function listItemsLast24hByChannel() {
   if (!isDbReady()) {
     return { breaking: [], live: [] };
@@ -246,20 +275,20 @@ async function patchSettings(payload) {
     }
 
     if (Object.prototype.hasOwnProperty.call(next, 'mode')) {
-      const m = normalizeMode(next.mode);
+      const m = normalizeModeForPatch(next.mode);
       if (!m) return { ok: false, status: 400, message: `Invalid ${channel}.mode. Expected auto|force_on|force_off` };
       doc[channel].mode = m;
     }
 
     if (Object.prototype.hasOwnProperty.call(next, 'speedSec')) {
-      const s = clampTickerSpeedSeconds(next.speedSec);
+      const s = clampScrollDurationSeconds(next.speedSec);
       if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.tickerSpeedSeconds. Expected number` };
       doc[channel].tickerSpeedSeconds = s;
       doc[channel].speedSec = s;
     }
 
     if (Object.prototype.hasOwnProperty.call(next, 'tickerSpeedSeconds')) {
-      const s = clampTickerSpeedSeconds(next.tickerSpeedSeconds);
+      const s = clampScrollDurationSeconds(next.tickerSpeedSeconds);
       if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.tickerSpeedSeconds. Expected number` };
       doc[channel].tickerSpeedSeconds = s;
       doc[channel].speedSec = s;
@@ -267,8 +296,24 @@ async function patchSettings(payload) {
 
     // Phase 1 UI alias
     if (Object.prototype.hasOwnProperty.call(next, 'durationSeconds')) {
-      const s = clampTickerSpeedSeconds(next.durationSeconds);
+      const s = clampScrollDurationSeconds(next.durationSeconds);
       if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.durationSeconds. Expected number` };
+      doc[channel].tickerSpeedSeconds = s;
+      doc[channel].speedSec = s;
+    }
+
+    // Requested field name from admin panel: scrollDurationSeconds
+    if (Object.prototype.hasOwnProperty.call(next, 'scrollDurationSeconds')) {
+      const s = clampScrollDurationSeconds(next.scrollDurationSeconds);
+      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.scrollDurationSeconds. Expected number` };
+      doc[channel].tickerSpeedSeconds = s;
+      doc[channel].speedSec = s;
+    }
+
+    // Also accept scrollDurationSec
+    if (Object.prototype.hasOwnProperty.call(next, 'scrollDurationSec')) {
+      const s = clampScrollDurationSeconds(next.scrollDurationSec);
+      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.scrollDurationSec. Expected number` };
       doc[channel].tickerSpeedSeconds = s;
       doc[channel].speedSec = s;
     }
@@ -316,8 +361,8 @@ async function computePublicPayload() {
   const breakingItems = Array.isArray(itemsByChannel.breaking) ? itemsByChannel.breaking : [];
   const liveItems = Array.isArray(itemsByChannel.live) ? itemsByChannel.live : [];
 
-  const breakingEnabled = computeEffectiveEnabled(settings.breaking.enabled, settings.breaking.mode, breakingItems.length);
-  const liveEnabled = computeEffectiveEnabled(settings.live.enabled, settings.live.mode, liveItems.length);
+  const breakingEnabled = computePublicEnabled(settings.breaking.enabled, settings.breaking.mode);
+  const liveEnabled = computePublicEnabled(settings.live.enabled, settings.live.mode);
 
   const mapPublicItem = (doc) => {
     const d = doc && typeof doc === 'object' ? doc : {};
@@ -372,4 +417,6 @@ module.exports = {
   patchSettings,
   computePublicPayload,
   computeEffectiveEnabled,
+  computePublicEnabled,
+  clampScrollDurationSeconds,
 };
