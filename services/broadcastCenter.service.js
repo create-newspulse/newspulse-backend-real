@@ -83,8 +83,8 @@ function clampTickerSpeedSeconds(v) {
   const n = typeof v === 'number' ? v : Number(v);
   if (!Number.isFinite(n)) return null;
   const rounded = Math.round(n);
-  // Broadcast Center requirement: 12..45 seconds.
-  return Math.min(45, Math.max(12, rounded));
+  // Keep consistent with UI contract: 12–30 seconds.
+  return Math.min(30, Math.max(12, rounded));
 }
 
 function normalizeText(v) {

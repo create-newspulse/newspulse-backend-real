@@ -1,6 +1,8 @@
 const express = require('express');
 const mongoose = require('mongoose');
 
+const noCache = require('../middleware/noCache');
+
 const BroadcastItem = require('../models/BroadcastItem');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
@@ -59,19 +61,19 @@ function toAdminContract(settings) {
       mode: settings?.breaking?.mode || 'auto',
       tickerSpeedSeconds: typeof settings?.breaking?.tickerSpeedSeconds === 'number'
         ? settings.breaking.tickerSpeedSeconds
-        : (typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 8),
+        : (typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12),
       // Backward-compat for existing admin clients
-      speed: typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 8,
-      speedSec: typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 8,
+      speed: typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12,
+      speedSec: typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12,
     },
     live: {
       enabled: !!settings?.live?.enabled,
       mode: settings?.live?.mode || 'auto',
       tickerSpeedSeconds: typeof settings?.live?.tickerSpeedSeconds === 'number'
         ? settings.live.tickerSpeedSeconds
-        : (typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 8),
-      speed: typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 8,
-      speedSec: typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 8,
+        : (typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12),
+      speed: typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12,
+      speedSec: typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12,
     },
   };
 }
@@ -287,7 +289,7 @@ function _parseExpiresAt(v) {
 
 // Admin APIs (protected)
 // GET /api/admin/broadcast
-router.get('/', requireAdminAuth, async (_req, res) => {
+router.get('/', requireAdminAuth, noCache, async (_req, res) => {
   if (!ensureDbOr503(res)) return;
 
   const doc = await getOrCreateSettings();
@@ -422,6 +424,9 @@ async function _updateBroadcastSettings(req, res) {
 }
 
 router.put('/', requireAdminAuth, _updateBroadcastSettings);
+
+// Some admin panels still use POST for updates.
+router.post('/', requireAdminAuth, _updateBroadcastSettings);
 
 // Some admin UIs use PATCH for settings updates.
 router.patch('/', requireAdminAuth, _updateBroadcastSettings);

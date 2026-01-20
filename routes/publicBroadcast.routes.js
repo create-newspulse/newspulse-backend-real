@@ -114,11 +114,13 @@ router.get('/', async (req, res) => {
         breaking: {
           enabled: Boolean(snapshot?.breaking?.enabled),
           durationSeconds: typeof snapshot?.breaking?.durationSeconds === 'number' ? snapshot.breaking.durationSeconds : 12,
+          tickerSpeedSeconds: typeof snapshot?.breaking?.durationSeconds === 'number' ? snapshot.breaking.durationSeconds : 12,
           items: Array.isArray(snapshot?.breaking?.items) ? snapshot.breaking.items : [],
         },
         live: {
           enabled: Boolean(snapshot?.live?.enabled),
           durationSeconds: typeof snapshot?.live?.durationSeconds === 'number' ? snapshot.live.durationSeconds : 12,
+          tickerSpeedSeconds: typeof snapshot?.live?.durationSeconds === 'number' ? snapshot.live.durationSeconds : 12,
           items: Array.isArray(snapshot?.live?.items) ? snapshot.live.items : [],
         },
       });
@@ -148,6 +150,7 @@ router.get('/', async (req, res) => {
           mode: settings.breaking.mode,
           speed: settings.breaking.speedSec,
           speedSec: settings.breaking.speedSec,
+          tickerSpeedSeconds: settings.breaking.tickerSpeedSeconds,
           items: breakingItems.map(_mapPublicItem),
         },
         live: {
@@ -155,6 +158,7 @@ router.get('/', async (req, res) => {
           mode: settings.live.mode,
           speed: settings.live.speedSec,
           speedSec: settings.live.speedSec,
+          tickerSpeedSeconds: settings.live.tickerSpeedSeconds,
           items: liveItems.map(_mapPublicItem),
         },
       });
@@ -170,6 +174,14 @@ router.get('/', async (req, res) => {
     if (payload && typeof payload === 'object') {
       payload._meta = payload._meta && typeof payload._meta === 'object' ? payload._meta : {};
       payload._meta.version = version;
+
+      // Ensure stable field name for the website.
+      if (payload.breaking && typeof payload.breaking === 'object') {
+        payload.breaking.tickerSpeedSeconds = typeof payload.breaking.speedSec === 'number' ? payload.breaking.speedSec : 12;
+      }
+      if (payload.live && typeof payload.live === 'object') {
+        payload.live.tickerSpeedSeconds = typeof payload.live.speedSec === 'number' ? payload.live.speedSec : 12;
+      }
     }
     return res.status(200).json(payload);
   } catch (e) {
