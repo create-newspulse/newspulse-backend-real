@@ -23,6 +23,9 @@ const { emitBroadcastUpdated } = require('../services/broadcastSse.service');
 
 const router = express.Router();
 
+// Prevent stale admin panel responses (Render/Vercel/proxies).
+router.use(noCache);
+
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
 
 function _normalizeLangQuery(v) {
@@ -59,9 +62,25 @@ function toAdminContract(settings) {
     breaking: {
       enabled: !!settings?.breaking?.enabled,
       mode: settings?.breaking?.mode || 'auto',
+      // Canonical API field
+      durationSec: typeof settings?.breaking?.durationSec === 'number'
+        ? settings.breaking.durationSec
+        : (typeof settings?.breaking?.durationSeconds === 'number'
+            ? settings.breaking.durationSeconds
+            : (typeof settings?.breaking?.tickerSpeedSeconds === 'number'
+                ? settings.breaking.tickerSpeedSeconds
+                : (typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12))),
+      // Backward-compat fields
       tickerSpeedSeconds: typeof settings?.breaking?.tickerSpeedSeconds === 'number'
         ? settings.breaking.tickerSpeedSeconds
-        : (typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12),
+        : (typeof settings?.breaking?.durationSeconds === 'number'
+            ? settings.breaking.durationSeconds
+            : (typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12)),
+      durationSeconds: typeof settings?.breaking?.durationSeconds === 'number'
+        ? settings.breaking.durationSeconds
+        : (typeof settings?.breaking?.tickerSpeedSeconds === 'number'
+            ? settings.breaking.tickerSpeedSeconds
+            : (typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12)),
       // Backward-compat for existing admin clients
       speed: typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12,
       speedSec: typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12,
@@ -69,9 +88,25 @@ function toAdminContract(settings) {
     live: {
       enabled: !!settings?.live?.enabled,
       mode: settings?.live?.mode || 'auto',
+      // Canonical API field
+      durationSec: typeof settings?.live?.durationSec === 'number'
+        ? settings.live.durationSec
+        : (typeof settings?.live?.durationSeconds === 'number'
+            ? settings.live.durationSeconds
+            : (typeof settings?.live?.tickerSpeedSeconds === 'number'
+                ? settings.live.tickerSpeedSeconds
+                : (typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12))),
+      // Backward-compat fields
       tickerSpeedSeconds: typeof settings?.live?.tickerSpeedSeconds === 'number'
         ? settings.live.tickerSpeedSeconds
-        : (typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12),
+        : (typeof settings?.live?.durationSeconds === 'number'
+            ? settings.live.durationSeconds
+            : (typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12)),
+      durationSeconds: typeof settings?.live?.durationSeconds === 'number'
+        ? settings.live.durationSeconds
+        : (typeof settings?.live?.tickerSpeedSeconds === 'number'
+            ? settings.live.tickerSpeedSeconds
+            : (typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12)),
       speed: typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12,
       speedSec: typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12,
     },

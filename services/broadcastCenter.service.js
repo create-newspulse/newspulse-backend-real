@@ -357,6 +357,8 @@ function adminSettingsResponse(doc) {
     breaking: {
       enabled: Boolean(breaking.enabled),
       mode: normalizeMode(breaking.mode) || 'auto',
+      // Canonical API field
+      durationSec: breakingSpeed,
       tickerSpeedSeconds: breakingSpeed,
       durationSeconds: breakingSpeed,
       speedSec: breakingSpeed,
@@ -364,6 +366,8 @@ function adminSettingsResponse(doc) {
     live: {
       enabled: Boolean(live.enabled),
       mode: normalizeMode(live.mode) || 'auto',
+      // Canonical API field
+      durationSec: liveSpeed,
       tickerSpeedSeconds: liveSpeed,
       durationSeconds: liveSpeed,
       speedSec: liveSpeed,
@@ -416,11 +420,23 @@ async function computePublicPayload() {
     },
     breaking: {
       enabled: breakingEnabled,
+      mode: settings.breaking.mode,
+      // Canonical API field
+      durationSec: settings.breaking.durationSec,
+      // Backward-compat fields
+      durationSeconds: settings.breaking.durationSeconds,
+      tickerSpeedSeconds: settings.breaking.tickerSpeedSeconds,
       speedSec: settings.breaking.speedSec,
       items: breakingItems.map(i => String(i.text || '')).filter(Boolean),
     },
     live: {
       enabled: liveEnabled,
+      mode: settings.live.mode,
+      // Canonical API field
+      durationSec: settings.live.durationSec,
+      // Backward-compat fields
+      durationSeconds: settings.live.durationSeconds,
+      tickerSpeedSeconds: settings.live.tickerSpeedSeconds,
       speedSec: settings.live.speedSec,
       items: liveItems.map(i => String(i.text || '')).filter(Boolean),
     },

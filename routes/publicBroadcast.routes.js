@@ -110,18 +110,28 @@ router.get('/', async (req, res) => {
       _noStore(res);
 
       const snapshot = await buildBroadcastSnapshot({ lang: requestedLang, version });
+      const breakingItems = Array.isArray(snapshot?.breaking?.items) ? snapshot.breaking.items : [];
+      const liveItems = Array.isArray(snapshot?.live?.items) ? snapshot.live.items : [];
       return res.status(200).json({
         breaking: {
           enabled: Boolean(snapshot?.breaking?.enabled),
+          mode: snapshot?.breaking?.mode || 'auto',
+          // Canonical API field
+          durationSec: typeof snapshot?.breaking?.durationSeconds === 'number' ? snapshot.breaking.durationSeconds : 12,
+          // Backward-compat fields
           durationSeconds: typeof snapshot?.breaking?.durationSeconds === 'number' ? snapshot.breaking.durationSeconds : 12,
           tickerSpeedSeconds: typeof snapshot?.breaking?.durationSeconds === 'number' ? snapshot.breaking.durationSeconds : 12,
-          items: Array.isArray(snapshot?.breaking?.items) ? snapshot.breaking.items : [],
+          items: breakingItems.map(i => String(i && i.text ? i.text : '')).filter(Boolean),
         },
         live: {
           enabled: Boolean(snapshot?.live?.enabled),
+          mode: snapshot?.live?.mode || 'auto',
+          // Canonical API field
+          durationSec: typeof snapshot?.live?.durationSeconds === 'number' ? snapshot.live.durationSeconds : 12,
+          // Backward-compat fields
           durationSeconds: typeof snapshot?.live?.durationSeconds === 'number' ? snapshot.live.durationSeconds : 12,
           tickerSpeedSeconds: typeof snapshot?.live?.durationSeconds === 'number' ? snapshot.live.durationSeconds : 12,
-          items: Array.isArray(snapshot?.live?.items) ? snapshot.live.items : [],
+          items: liveItems.map(i => String(i && i.text ? i.text : '')).filter(Boolean),
         },
       });
     } catch (_) {
@@ -148,17 +158,23 @@ router.get('/', async (req, res) => {
         breaking: {
           enabled: breakingEnabled,
           mode: settings.breaking.mode,
+          // Canonical API field
+          durationSec: settings.breaking.durationSec,
           speed: settings.breaking.speedSec,
           speedSec: settings.breaking.speedSec,
           tickerSpeedSeconds: settings.breaking.tickerSpeedSeconds,
+          durationSeconds: settings.breaking.durationSeconds,
           items: breakingItems.map(_mapPublicItem),
         },
         live: {
           enabled: liveEnabled,
           mode: settings.live.mode,
+          // Canonical API field
+          durationSec: settings.live.durationSec,
           speed: settings.live.speedSec,
           speedSec: settings.live.speedSec,
           tickerSpeedSeconds: settings.live.tickerSpeedSeconds,
+          durationSeconds: settings.live.durationSeconds,
           items: liveItems.map(_mapPublicItem),
         },
       });
@@ -178,9 +194,19 @@ router.get('/', async (req, res) => {
       // Ensure stable field name for the website.
       if (payload.breaking && typeof payload.breaking === 'object') {
         payload.breaking.tickerSpeedSeconds = typeof payload.breaking.speedSec === 'number' ? payload.breaking.speedSec : 12;
+        payload.breaking.durationSec = typeof payload.breaking.durationSec === 'number'
+          ? payload.breaking.durationSec
+          : (typeof payload.breaking.durationSeconds === 'number'
+              ? payload.breaking.durationSeconds
+              : payload.breaking.tickerSpeedSeconds);
       }
       if (payload.live && typeof payload.live === 'object') {
         payload.live.tickerSpeedSeconds = typeof payload.live.speedSec === 'number' ? payload.live.speedSec : 12;
+        payload.live.durationSec = typeof payload.live.durationSec === 'number'
+          ? payload.live.durationSec
+          : (typeof payload.live.durationSeconds === 'number'
+              ? payload.live.durationSeconds
+              : payload.live.tickerSpeedSeconds);
       }
     }
     return res.status(200).json(payload);
@@ -255,16 +281,20 @@ router.get('/config', async (_req, res) => {
       breaking: {
         enabled: Boolean(breakingEnabled),
         mode: settings.breaking.mode,
-        durationSec: settings.breaking.durationSeconds,
+        // Canonical API field
+        durationSec: settings.breaking.durationSec,
         // compatibility
         durationSeconds: settings.breaking.durationSeconds,
+        tickerSpeedSeconds: settings.breaking.tickerSpeedSeconds,
         scrollDurationSeconds: settings.breaking.durationSeconds,
       },
       live: {
         enabled: Boolean(liveEnabled),
         mode: settings.live.mode,
-        durationSec: settings.live.durationSeconds,
+        // Canonical API field
+        durationSec: settings.live.durationSec,
         durationSeconds: settings.live.durationSeconds,
+        tickerSpeedSeconds: settings.live.tickerSpeedSeconds,
         scrollDurationSeconds: settings.live.durationSeconds,
       },
     });
