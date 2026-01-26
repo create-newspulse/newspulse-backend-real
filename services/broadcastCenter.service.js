@@ -50,7 +50,7 @@ function defaultSettingsDocShape() {
     liveEnabled: false,
     breakingDurationSeconds: DEFAULT_TICKER_SPEED_SECONDS,
     liveDurationSeconds: DEFAULT_TICKER_SPEED_SECONDS,
-    breakingMode: 'manual',
+    breakingMode: 'auto',
     liveMode: 'auto',
     updatedAt: new Date(),
   };
@@ -133,9 +133,15 @@ function applyLegacyMirrors(doc) {
     doc.liveDurationSeconds = ld;
   } catch (_) {}
 
-  // Preserve existing legacy mode semantics if already set; otherwise choose a safe mapping.
-  if (!doc.breakingMode) doc.breakingMode = breakingEnabled ? 'auto' : 'manual';
-  if (!doc.liveMode) doc.liveMode = liveEnabled ? 'auto' : 'manual';
+  // Keep legacy mode mirrors aligned from nested source-of-truth.
+  // Legacy mode supports only manual|auto.
+  const mapLegacyMode = (nestedMode) => {
+    const m = normalizeMode(nestedMode) || 'auto';
+    return m === 'force_off' ? 'manual' : 'auto';
+  };
+
+  doc.breakingMode = mapLegacyMode(doc.breaking?.mode);
+  doc.liveMode = mapLegacyMode(doc.live?.mode);
 }
 
 async function getOrCreateSettings() {

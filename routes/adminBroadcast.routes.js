@@ -174,6 +174,61 @@ function _summarizePatchKeys(body) {
 
 function buildPatchPayload(body) {
   const payload = {};
+
+  const b = body && typeof body === 'object' ? body : {};
+
+  const hasNested =
+    (b.breaking && typeof b.breaking === 'object') ||
+    (b.live && typeof b.live === 'object') ||
+    (b.liveUpdates && typeof b.liveUpdates === 'object');
+
+  // Flat/root payload compatibility:
+  // - Either legacy per-channel fields like breakingEnabled/liveEnabled
+  // - Or root fields (enabled/mode/durationSec/etc) applied to BOTH channels.
+  // This keeps nested { breaking, live } as the single source of truth.
+  if (!hasNested) {
+    const rootToBoth = {};
+    for (const k of ['enabled', 'mode', 'durationSec', 'durationSeconds', 'tickerSpeedSeconds', 'scrollDurationSeconds', 'scrollDurationSec', 'speed', 'speedSec', 'speedSeconds']) {
+      if (Object.prototype.hasOwnProperty.call(b, k)) rootToBoth[k] = b[k];
+    }
+
+    const flat = { ...b };
+    if (Object.keys(rootToBoth).length > 0) {
+      flat.breaking = rootToBoth;
+      flat.live = rootToBoth;
+    } else {
+      const breakingFlat = {};
+      const liveFlat = {};
+
+      const pick = (srcKey, dest, destKey) => {
+        if (Object.prototype.hasOwnProperty.call(b, srcKey)) dest[destKey] = b[srcKey];
+      };
+
+      pick('breakingEnabled', breakingFlat, 'enabled');
+      pick('liveEnabled', liveFlat, 'enabled');
+
+      pick('breakingMode', breakingFlat, 'mode');
+      pick('liveMode', liveFlat, 'mode');
+
+      pick('breakingDurationSeconds', breakingFlat, 'durationSeconds');
+      pick('liveDurationSeconds', liveFlat, 'durationSeconds');
+
+      pick('breakingDurationSec', breakingFlat, 'durationSec');
+      pick('liveDurationSec', liveFlat, 'durationSec');
+
+      pick('breakingTickerSpeedSeconds', breakingFlat, 'tickerSpeedSeconds');
+      pick('liveTickerSpeedSeconds', liveFlat, 'tickerSpeedSeconds');
+
+      pick('breakingSpeedSec', breakingFlat, 'speedSec');
+      pick('liveSpeedSec', liveFlat, 'speedSec');
+
+      if (Object.keys(breakingFlat).length > 0) flat.breaking = breakingFlat;
+      if (Object.keys(liveFlat).length > 0) flat.live = liveFlat;
+    }
+
+    body = flat;
+  }
+
   for (const channel of ['breaking', 'live']) {
     const next = channel === 'live' ? (body?.live ?? body?.liveUpdates) : body?.[channel];
     if (!next || typeof next !== 'object') continue;
