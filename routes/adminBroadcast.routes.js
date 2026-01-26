@@ -58,57 +58,26 @@ function ok(res, data) {
 }
 
 function toAdminContract(settings) {
+  const resolveDurationSec = (s) => {
+    if (!s || typeof s !== 'object') return 18;
+    const v =
+      (typeof s.durationSec === 'number' ? s.durationSec : null) ??
+      (typeof s.durationSeconds === 'number' ? s.durationSeconds : null) ??
+      (typeof s.tickerSpeedSeconds === 'number' ? s.tickerSpeedSeconds : null) ??
+      (typeof s.speedSec === 'number' ? s.speedSec : null);
+    return typeof v === 'number' ? v : 18;
+  };
+
   return {
     breaking: {
       enabled: !!settings?.breaking?.enabled,
       mode: settings?.breaking?.mode || 'auto',
-      // Canonical API field
-      durationSec: typeof settings?.breaking?.durationSec === 'number'
-        ? settings.breaking.durationSec
-        : (typeof settings?.breaking?.durationSeconds === 'number'
-            ? settings.breaking.durationSeconds
-            : (typeof settings?.breaking?.tickerSpeedSeconds === 'number'
-                ? settings.breaking.tickerSpeedSeconds
-                : (typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12))),
-      // Backward-compat fields
-      tickerSpeedSeconds: typeof settings?.breaking?.tickerSpeedSeconds === 'number'
-        ? settings.breaking.tickerSpeedSeconds
-        : (typeof settings?.breaking?.durationSeconds === 'number'
-            ? settings.breaking.durationSeconds
-            : (typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12)),
-      durationSeconds: typeof settings?.breaking?.durationSeconds === 'number'
-        ? settings.breaking.durationSeconds
-        : (typeof settings?.breaking?.tickerSpeedSeconds === 'number'
-            ? settings.breaking.tickerSpeedSeconds
-            : (typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12)),
-      // Backward-compat for existing admin clients
-      speed: typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12,
-      speedSec: typeof settings?.breaking?.speedSec === 'number' ? settings.breaking.speedSec : 12,
+      durationSec: resolveDurationSec(settings?.breaking),
     },
     live: {
       enabled: !!settings?.live?.enabled,
       mode: settings?.live?.mode || 'auto',
-      // Canonical API field
-      durationSec: typeof settings?.live?.durationSec === 'number'
-        ? settings.live.durationSec
-        : (typeof settings?.live?.durationSeconds === 'number'
-            ? settings.live.durationSeconds
-            : (typeof settings?.live?.tickerSpeedSeconds === 'number'
-                ? settings.live.tickerSpeedSeconds
-                : (typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12))),
-      // Backward-compat fields
-      tickerSpeedSeconds: typeof settings?.live?.tickerSpeedSeconds === 'number'
-        ? settings.live.tickerSpeedSeconds
-        : (typeof settings?.live?.durationSeconds === 'number'
-            ? settings.live.durationSeconds
-            : (typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12)),
-      durationSeconds: typeof settings?.live?.durationSeconds === 'number'
-        ? settings.live.durationSeconds
-        : (typeof settings?.live?.tickerSpeedSeconds === 'number'
-            ? settings.live.tickerSpeedSeconds
-            : (typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12)),
-      speed: typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12,
-      speedSec: typeof settings?.live?.speedSec === 'number' ? settings.live.speedSec : 12,
+      durationSec: resolveDurationSec(settings?.live),
     },
   };
 }
@@ -120,28 +89,29 @@ function toAdminConfigContract(settings, itemsByChannel) {
   const breakingEnabled = computePublicEnabled(settings?.breaking?.enabled, settings?.breaking?.mode);
   const liveEnabled = computePublicEnabled(settings?.live?.enabled, settings?.live?.mode);
 
-  const breakingDuration = typeof settings?.breaking?.durationSeconds === 'number'
-    ? settings.breaking.durationSeconds
-    : (typeof settings?.breaking?.tickerSpeedSeconds === 'number' ? settings.breaking.tickerSpeedSeconds : 12);
-  const liveDuration = typeof settings?.live?.durationSeconds === 'number'
-    ? settings.live.durationSeconds
-    : (typeof settings?.live?.tickerSpeedSeconds === 'number' ? settings.live.tickerSpeedSeconds : 12);
+  const resolveDurationSec = (s) => {
+    if (!s || typeof s !== 'object') return 18;
+    const v =
+      (typeof s.durationSec === 'number' ? s.durationSec : null) ??
+      (typeof s.durationSeconds === 'number' ? s.durationSeconds : null) ??
+      (typeof s.tickerSpeedSeconds === 'number' ? s.tickerSpeedSeconds : null) ??
+      (typeof s.speedSec === 'number' ? s.speedSec : null);
+    return typeof v === 'number' ? v : 18;
+  };
+
+  const breakingDuration = resolveDurationSec(settings?.breaking);
+  const liveDuration = resolveDurationSec(settings?.live);
 
   return {
     breaking: {
       enabled: Boolean(breakingEnabled),
       mode: settings?.breaking?.mode || 'auto',
       durationSec: breakingDuration,
-      // compatibility
-      durationSeconds: breakingDuration,
-      scrollDurationSeconds: breakingDuration,
     },
     live: {
       enabled: Boolean(liveEnabled),
       mode: settings?.live?.mode || 'auto',
       durationSec: liveDuration,
-      durationSeconds: liveDuration,
-      scrollDurationSeconds: liveDuration,
     },
   };
 }
@@ -216,6 +186,19 @@ function buildPatchPayload(body) {
 
     if (Object.prototype.hasOwnProperty.call(next, 'mode')) {
       payload[channel].mode = next.mode;
+    }
+
+    // Preferred canonical field
+    if (Object.prototype.hasOwnProperty.call(next, 'durationSec')) {
+      payload[channel].durationSec = next.durationSec;
+    }
+
+    // Accept legacy duration field names
+    if (Object.prototype.hasOwnProperty.call(next, 'scrollDurationSeconds')) {
+      payload[channel].scrollDurationSeconds = next.scrollDurationSeconds;
+    }
+    if (Object.prototype.hasOwnProperty.call(next, 'scrollDurationSec')) {
+      payload[channel].scrollDurationSeconds = next.scrollDurationSec;
     }
 
     if (Object.prototype.hasOwnProperty.call(next, 'speed')) {

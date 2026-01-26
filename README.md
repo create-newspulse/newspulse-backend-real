@@ -294,6 +294,7 @@ Backend direct (no proxy):
 
 Notes:
 - Success envelope: `{ ok: true, success: true, data: ... }`
+- Settings contract: `breaking` + `live` return `{ enabled, mode, durationSec }` (legacy keys are still accepted on write for compatibility).
 - Each item includes `id` (string) and `_id` (string), plus `type`, `text`, `createdAt` (and `expiresAt` when present).
 
 Example: list items
@@ -331,7 +332,7 @@ Example: update settings
 curl -X PUT "http://localhost:10000/admin-api/admin/broadcast" \
   -H "Authorization: Bearer <ADMIN_JWT>" \
   -H "Content-Type: application/json" \
-  -d '{"breaking":{"enabled":true,"mode":"auto","speedSec":8},"live":{"enabled":true,"mode":"auto","speedSec":10}}'
+  -d '{"breaking":{"enabled":true,"mode":"auto","durationSec":18},"live":{"enabled":true,"mode":"auto","durationSec":20}}'
 ```
 
 #### POST /admin-api/broadcast/breaking/items

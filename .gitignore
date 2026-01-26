@@ -25,7 +25,12 @@ out/
 
 # Temporary
 tmp/
-.tmp/###################################
+.tmp/
+
+# Local audit output
+audit.json
+
+###################################
 # Node / package managers
 ###################################
 node_modules/

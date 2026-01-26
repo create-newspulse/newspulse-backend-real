@@ -6,6 +6,13 @@ const BroadcastSettings = require('../models/BroadcastSettings');
 const CHANNELS = new Set(['breaking', 'live']);
 const MODES = new Set(['auto', 'force_on', 'force_off', 'off']);
 
+const DEFAULT_TICKER_SPEED_SECONDS = 18;
+
+const DEFAULT_BROADCAST = {
+  breaking: { enabled: false, mode: 'auto', tickerSpeedSeconds: DEFAULT_TICKER_SPEED_SECONDS },
+  live: { enabled: false, mode: 'auto', tickerSpeedSeconds: DEFAULT_TICKER_SPEED_SECONDS },
+};
+
 // Broadcast Center UI presets should not accidentally disable tickers.
 // Clamp scroll duration (seconds) to a safe, readable range.
 function clampScrollDurationSeconds(v) {
@@ -26,13 +33,23 @@ function nowMinus24h() {
 
 function defaultSettingsDocShape() {
   return {
-    breaking: { enabled: false, mode: 'auto', tickerSpeedSeconds: 12, speedSec: 12 },
-    live: { enabled: false, mode: 'auto', tickerSpeedSeconds: 12, speedSec: 12 },
+    breaking: {
+      enabled: DEFAULT_BROADCAST.breaking.enabled,
+      mode: DEFAULT_BROADCAST.breaking.mode,
+      tickerSpeedSeconds: DEFAULT_BROADCAST.breaking.tickerSpeedSeconds,
+      speedSec: DEFAULT_BROADCAST.breaking.tickerSpeedSeconds,
+    },
+    live: {
+      enabled: DEFAULT_BROADCAST.live.enabled,
+      mode: DEFAULT_BROADCAST.live.mode,
+      tickerSpeedSeconds: DEFAULT_BROADCAST.live.tickerSpeedSeconds,
+      speedSec: DEFAULT_BROADCAST.live.tickerSpeedSeconds,
+    },
     // Keep legacy fields initialized for older callers
     breakingEnabled: false,
     liveEnabled: false,
-    breakingDurationSeconds: 12,
-    liveDurationSeconds: 12,
+    breakingDurationSeconds: DEFAULT_TICKER_SPEED_SECONDS,
+    liveDurationSeconds: DEFAULT_TICKER_SPEED_SECONDS,
     breakingMode: 'manual',
     liveMode: 'auto',
     updatedAt: new Date(),
@@ -110,8 +127,8 @@ function applyLegacyMirrors(doc) {
   try {
     const b = doc.breaking && typeof doc.breaking === 'object' ? doc.breaking : {};
     const l = doc.live && typeof doc.live === 'object' ? doc.live : {};
-    const bd = clampTickerSpeedSeconds(b.tickerSpeedSeconds ?? b.speedSec) ?? 12;
-    const ld = clampTickerSpeedSeconds(l.tickerSpeedSeconds ?? l.speedSec) ?? 12;
+    const bd = clampTickerSpeedSeconds(b.tickerSpeedSeconds ?? b.speedSec) ?? DEFAULT_TICKER_SPEED_SECONDS;
+    const ld = clampTickerSpeedSeconds(l.tickerSpeedSeconds ?? l.speedSec) ?? DEFAULT_TICKER_SPEED_SECONDS;
     doc.breakingDurationSeconds = bd;
     doc.liveDurationSeconds = ld;
   } catch (_) {}
@@ -139,23 +156,37 @@ async function getOrCreateSettings() {
     !doc.live || typeof doc.live !== 'object';
 
   if (changed) {
-    doc.breaking = doc.breaking && typeof doc.breaking === 'object' ? doc.breaking : { enabled: Boolean(doc.breakingEnabled), mode: 'auto', tickerSpeedSeconds: 12, speedSec: 12 };
-    doc.live = doc.live && typeof doc.live === 'object' ? doc.live : { enabled: Boolean(doc.liveEnabled), mode: 'auto', tickerSpeedSeconds: 12, speedSec: 12 };
+    doc.breaking = doc.breaking && typeof doc.breaking === 'object'
+      ? doc.breaking
+      : {
+          enabled: Boolean(doc.breakingEnabled),
+          mode: 'auto',
+          tickerSpeedSeconds: DEFAULT_TICKER_SPEED_SECONDS,
+          speedSec: DEFAULT_TICKER_SPEED_SECONDS,
+        };
+    doc.live = doc.live && typeof doc.live === 'object'
+      ? doc.live
+      : {
+          enabled: Boolean(doc.liveEnabled),
+          mode: 'auto',
+          tickerSpeedSeconds: DEFAULT_TICKER_SPEED_SECONDS,
+          speedSec: DEFAULT_TICKER_SPEED_SECONDS,
+        };
   }
 
   // Backfill tickerSpeedSeconds from legacy speedSec if missing.
   if (doc.breaking && typeof doc.breaking === 'object') {
     if (typeof doc.breaking.tickerSpeedSeconds !== 'number' || !Number.isFinite(doc.breaking.tickerSpeedSeconds)) {
-      const legacy = normalizeSpeedSec(doc.breaking.speedSec) ?? 12;
-      doc.breaking.tickerSpeedSeconds = clampTickerSpeedSeconds(legacy) ?? 12;
+      const legacy = normalizeSpeedSec(doc.breaking.speedSec) ?? DEFAULT_TICKER_SPEED_SECONDS;
+      doc.breaking.tickerSpeedSeconds = clampTickerSpeedSeconds(legacy) ?? DEFAULT_TICKER_SPEED_SECONDS;
     }
     // Keep speedSec mirrored for older callers.
     doc.breaking.speedSec = normalizeSpeedSec(doc.breaking.speedSec) ?? doc.breaking.tickerSpeedSeconds;
   }
   if (doc.live && typeof doc.live === 'object') {
     if (typeof doc.live.tickerSpeedSeconds !== 'number' || !Number.isFinite(doc.live.tickerSpeedSeconds)) {
-      const legacy = normalizeSpeedSec(doc.live.speedSec) ?? 12;
-      doc.live.tickerSpeedSeconds = clampTickerSpeedSeconds(legacy) ?? 12;
+      const legacy = normalizeSpeedSec(doc.live.speedSec) ?? DEFAULT_TICKER_SPEED_SECONDS;
+      doc.live.tickerSpeedSeconds = clampTickerSpeedSeconds(legacy) ?? DEFAULT_TICKER_SPEED_SECONDS;
     }
     doc.live.speedSec = normalizeSpeedSec(doc.live.speedSec) ?? doc.live.tickerSpeedSeconds;
   }
@@ -347,11 +378,15 @@ async function patchSettings(payload) {
 
 function adminSettingsResponse(doc) {
   const d = doc && typeof doc === 'object' ? doc : defaultSettingsDocShape();
-  const breaking = d.breaking && typeof d.breaking === 'object' ? d.breaking : { enabled: false, mode: 'auto', tickerSpeedSeconds: 12, speedSec: 12 };
-  const live = d.live && typeof d.live === 'object' ? d.live : { enabled: false, mode: 'auto', tickerSpeedSeconds: 12, speedSec: 12 };
+  const breaking = d.breaking && typeof d.breaking === 'object'
+    ? d.breaking
+    : { enabled: false, mode: 'auto', tickerSpeedSeconds: DEFAULT_TICKER_SPEED_SECONDS, speedSec: DEFAULT_TICKER_SPEED_SECONDS };
+  const live = d.live && typeof d.live === 'object'
+    ? d.live
+    : { enabled: false, mode: 'auto', tickerSpeedSeconds: DEFAULT_TICKER_SPEED_SECONDS, speedSec: DEFAULT_TICKER_SPEED_SECONDS };
 
-  const breakingSpeed = clampTickerSpeedSeconds(breaking.tickerSpeedSeconds) ?? clampTickerSpeedSeconds(breaking.speedSec) ?? 12;
-  const liveSpeed = clampTickerSpeedSeconds(live.tickerSpeedSeconds) ?? clampTickerSpeedSeconds(live.speedSec) ?? 12;
+  const breakingSpeed = clampTickerSpeedSeconds(breaking.tickerSpeedSeconds) ?? clampTickerSpeedSeconds(breaking.speedSec) ?? DEFAULT_TICKER_SPEED_SECONDS;
+  const liveSpeed = clampTickerSpeedSeconds(live.tickerSpeedSeconds) ?? clampTickerSpeedSeconds(live.speedSec) ?? DEFAULT_TICKER_SPEED_SECONDS;
 
   return {
     breaking: {
