@@ -170,6 +170,7 @@ const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes
 const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
 const adminTickersSettingsRouter = require('./routes/adminTickersSettings.routes');
 const publicBroadcastRouter = require('./routes/publicBroadcast.routes');
+const publicApiBroadcastRouter = require('./routes/publicApiBroadcast.routes');
 let adminWorkflowApiRouter = null;
 let adminPushHistoryApiRouter = null;
 let adminWorkflowLegacyRouter = null;
@@ -460,6 +461,9 @@ app.options('/admin-api/api/public/broadcast/*', _handlePublicBroadcastPreflight
 // Legacy public mount
 app.options('/public/broadcast', _handlePublicBroadcastPreflight);
 app.options('/public/broadcast/*', _handlePublicBroadcastPreflight);
+// New public-api mount (translated tickers)
+app.options('/public-api/broadcast', _handlePublicBroadcastPreflight);
+app.options('/public-api/broadcast/*', _handlePublicBroadcastPreflight);
 
 app.use(cors(corsOptions));
 
@@ -503,6 +507,7 @@ app.use('/api/public/broadcast', _publicBroadcastCorsOverride);
 app.use('/admin-api/public/broadcast', _publicBroadcastCorsOverride);
 app.use('/admin-api/api/public/broadcast', _publicBroadcastCorsOverride);
 app.use('/public/broadcast', _publicBroadcastCorsOverride);
+app.use('/public-api/broadcast', _publicBroadcastCorsOverride);
 // Ensure OPTIONS preflight works for all routes.
 app.options('*', cors(corsOptions));
 
@@ -517,7 +522,8 @@ app.use((req, res, next) => {
     path.startsWith('/api/public/broadcast') ||
     path.startsWith('/admin-api/public/broadcast') ||
     path.startsWith('/admin-api/api/public/broadcast') ||
-    path.startsWith('/public/broadcast');
+    path.startsWith('/public/broadcast') ||
+    path.startsWith('/public-api/broadcast');
   if (!shouldLog) return next();
 
   res.on('finish', () => {
@@ -1228,6 +1234,8 @@ app.use('/api/public', publicAdsRouter);
 app.use('/api/public', publicTickersSettingsRouter);
 // Public Broadcast Center tickers (Breaking + Live Updates)
 app.use('/api/public/broadcast', publicBroadcastRouter);
+// New public-api translated tickers
+app.use('/public-api/broadcast', publicApiBroadcastRouter);
 // Admin panel proxy basePath support (some frontends call /admin-api/* even for public reads)
 app.use('/admin-api/public/broadcast', publicBroadcastRouter);
 app.use('/admin-api/api/public/broadcast', publicBroadcastRouter);
