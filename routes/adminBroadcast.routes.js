@@ -86,9 +86,6 @@ function toAdminConfigContract(settings, itemsByChannel) {
   const breakingItems = Array.isArray(itemsByChannel?.breaking) ? itemsByChannel.breaking : [];
   const liveItems = Array.isArray(itemsByChannel?.live) ? itemsByChannel.live : [];
 
-  const breakingEnabled = computePublicEnabled(settings?.breaking?.enabled, settings?.breaking?.mode);
-  const liveEnabled = computePublicEnabled(settings?.live?.enabled, settings?.live?.mode);
-
   const resolveDurationSec = (s) => {
     if (!s || typeof s !== 'object') return 18;
     const v =
@@ -104,12 +101,13 @@ function toAdminConfigContract(settings, itemsByChannel) {
 
   return {
     breaking: {
-      enabled: Boolean(breakingEnabled),
+      // Admin config should reflect the stored flag (not computed/effective enabled).
+      enabled: Boolean(settings?.breaking?.enabled),
       mode: settings?.breaking?.mode || 'auto',
       durationSec: breakingDuration,
     },
     live: {
-      enabled: Boolean(liveEnabled),
+      enabled: Boolean(settings?.live?.enabled),
       mode: settings?.live?.mode || 'auto',
       durationSec: liveDuration,
     },
