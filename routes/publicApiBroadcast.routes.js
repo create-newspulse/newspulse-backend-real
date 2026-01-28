@@ -13,21 +13,8 @@ const googleTranslate = require('../services/googleTranslate.service');
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
 
 function normalizeLang(v) {
-  const s0 = String(v || '').trim().toLowerCase();
-  if (!s0) return null;
-  const s = s0.split(/[-_]/)[0];
+  const s = String(v || '').trim().toLowerCase();
   return SUPPORTED_LANGS.has(s) ? s : null;
-}
-
-function requestedLang(req) {
-  const q = req && req.query ? req.query : {};
-  const h = req && req.headers ? req.headers : {};
-  return (
-    normalizeLang(q.lang) ||
-    normalizeLang(h['x-lang']) ||
-    normalizeLang(h['x-language']) ||
-    null
-  );
 }
 
 function wantsNoCache(req) {
@@ -117,28 +104,20 @@ function clip160(s) {
 function resolveTextForLang(doc, lang) {
   const d = doc && typeof doc === 'object' ? doc : {};
   const i18n = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
-  const translations = d.translations && typeof d.translations === 'object' ? d.translations : null;
   const legacy = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
   const pick = (obj) => (obj && typeof obj[lang] === 'string' && obj[lang].trim() ? String(obj[lang]).trim() : null);
-  return pick(translations) || pick(i18n) || pick(legacy) || null;
+  return pick(i18n) || pick(legacy) || null;
 }
 
 function resolveSourceText(doc) {
   // Prefer Gujarati, then Hindi, then English, then raw.
   const d = doc && typeof doc === 'object' ? doc : {};
   const i18n = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
-  const translations = d.translations && typeof d.translations === 'object' ? d.translations : null;
   const legacy = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
   return clip160(
-    (translations && typeof translations.gu === 'string' && translations.gu.trim() ? translations.gu : null) ||
-    (i18n && typeof i18n.gu === 'string' && i18n.gu.trim() ? i18n.gu : null) ||
-    (legacy && typeof legacy.gu === 'string' && legacy.gu.trim() ? legacy.gu : null) ||
-    (translations && typeof translations.hi === 'string' && translations.hi.trim() ? translations.hi : null) ||
-    (i18n && typeof i18n.hi === 'string' && i18n.hi.trim() ? i18n.hi : null) ||
-    (legacy && typeof legacy.hi === 'string' && legacy.hi.trim() ? legacy.hi : null) ||
-    (translations && typeof translations.en === 'string' && translations.en.trim() ? translations.en : null) ||
-    (i18n && typeof i18n.en === 'string' && i18n.en.trim() ? i18n.en : null) ||
-    (legacy && typeof legacy.en === 'string' && legacy.en.trim() ? legacy.en : null) ||
+    resolveTextForLang(d, 'gu') ||
+    resolveTextForLang(d, 'hi') ||
+    resolveTextForLang(d, 'en') ||
     (typeof d.text === 'string' ? d.text : '')
   );
 }
@@ -219,7 +198,7 @@ async function translateItems({ docs, targetLang }) {
 
 // GET /public-api/broadcast?lang=en|hi|gu
 router.get('/', async (req, res) => {
-  const lang = requestedLang(req) || 'gu';
+  const lang = normalizeLang(req.query && req.query.lang) || 'gu';
   const bypassCache = wantsNoCache(req);
 
   try {

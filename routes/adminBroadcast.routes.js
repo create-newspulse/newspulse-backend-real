@@ -29,9 +29,7 @@ router.use(noCache);
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
 
 function _normalizeLangQuery(v) {
-  const s0 = String(v || '').trim().toLowerCase();
-  if (!s0) return null;
-  const s = s0.split(/[-_]/)[0];
+  const s = String(v || '').trim().toLowerCase();
   return SUPPORTED_LANGS.has(s) ? s : null;
 }
 
@@ -581,18 +579,9 @@ router.post('/items', requireAdminAuth, async (req, res) => {
   }
 
   const rawLang = Object.prototype.hasOwnProperty.call(body, 'lang') ? body.lang : (req.query && req.query.lang);
-  // lang is optional; if omitted, best-effort detect (fallback gu).
-  let lang = rawLang === undefined ? null : _normalizeLangQuery(rawLang);
-  if (rawLang !== undefined && !lang) return fail(res, 400, 'INVALID_LANG', 'Invalid lang. Expected en|hi|gu');
-  if (!lang) {
-    try {
-      const detected = await require('../services/googleTranslate.service').detectLanguage(text);
-      const dl = detected && detected.ok ? _normalizeLangQuery(detected.lang) : null;
-      lang = dl || 'gu';
-    } catch (_) {
-      lang = 'gu';
-    }
-  }
+  // lang is optional; default gu
+  const lang = rawLang === undefined ? 'gu' : _normalizeLangQuery(rawLang);
+  if (!lang) return fail(res, 400, 'INVALID_LANG', 'Invalid lang. Expected en|hi|gu');
 
   // Optional explicit expiresAt (preferred in Phase 1).
   const hasExpiresAt = Object.prototype.hasOwnProperty.call(body, 'expiresAt') || Object.prototype.hasOwnProperty.call(req.query || {}, 'expiresAt');
@@ -665,7 +654,6 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     language: resolvedLang,
     sourceLang: resolvedLang,
     text_i18n: { [resolvedLang]: text },
-    translations: { [resolvedLang]: text },
     textByLang: { [resolvedLang]: text },
     statusByLang: { [resolvedLang]: 'APPROVED' },
     qualityByLang: { [resolvedLang]: 100 },
@@ -690,8 +678,6 @@ router.post('/items', requireAdminAuth, async (req, res) => {
       if (!clipped) continue;
 
       created.text_i18n[targetLang] = clipped;
-      created.translations = created.translations && typeof created.translations === 'object' ? created.translations : {};
-      created.translations[targetLang] = clipped;
       created.textByLang[targetLang] = clipped;
 
       const accept = shouldAcceptTranslation(text, clipped, resolvedLang, targetLang);

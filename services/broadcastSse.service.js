@@ -5,9 +5,7 @@ const googleTranslate = require('./googleTranslate.service');
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
 
 function normalizeLang(v, fallback = 'gu') {
-  const s0 = String(v || '').trim().toLowerCase();
-  if (!s0) return fallback;
-  const s = s0.split(/[-_]/)[0];
+  const s = String(v || '').trim().toLowerCase();
   return SUPPORTED_LANGS.has(s) ? s : fallback;
 }
 

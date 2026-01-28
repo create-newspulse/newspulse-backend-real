@@ -72,47 +72,7 @@ async function translateMany(texts, targetLang, options = {}) {
   return { ok: true, items: out };
 }
 
-/**
- * Detect language of a single string using Google Translate API v2.
- *
- * @param {string} text
- * @param {{ apiKey?: string, fetchImpl?: any }} [options]
- * @returns {Promise<{ ok: true, lang: string, confidence?: number } | { ok: false, error: string }>}
- */
-async function detectLanguage(text, options = {}) {
-  const t = String(text ?? '').trim();
-  if (!t) return { ok: false, error: 'Missing text' };
-
-  const apiKey = options.apiKey || process.env.GOOGLE_TRANSLATE_API_KEY;
-  if (!apiKey) return { ok: false, error: 'Missing GOOGLE_TRANSLATE_API_KEY' };
-
-  const fetchImpl = options.fetchImpl || globalThis.fetch;
-  if (typeof fetchImpl !== 'function') return { ok: false, error: 'fetch is not available' };
-
-  const url = `https://translation.googleapis.com/language/translate/v2/detect?key=${encodeURIComponent(apiKey)}`;
-  const res = await fetchImpl(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ q: t }),
-  });
-
-  const json = await res.json().catch(() => null);
-  if (!res.ok) {
-    const msg = json && json.error && json.error.message ? json.error.message : `HTTP_${res.status}`;
-    return { ok: false, error: `Detect failed: ${msg}` };
-  }
-
-  const detections = json && json.data && Array.isArray(json.data.detections) ? json.data.detections : null;
-  const first = detections && Array.isArray(detections[0]) ? detections[0][0] : null;
-  const lang = first && typeof first.language === 'string' ? String(first.language).trim().toLowerCase() : null;
-  if (!lang) return { ok: false, error: 'Detect failed: unexpected response shape' };
-
-  const confidence = typeof first.confidence === 'number' ? first.confidence : undefined;
-  return { ok: true, lang, ...(confidence !== undefined ? { confidence } : {}) };
-}
-
 module.exports = {
   translateMany,
-  detectLanguage,
   stableHash,
 };
