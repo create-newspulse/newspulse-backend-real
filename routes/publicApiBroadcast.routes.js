@@ -8,6 +8,9 @@ const {
   computePublicEnabled,
 } = require('../services/broadcastCenter.service');
 
+const mongoose = require('mongoose');
+const BroadcastItem = require('../models/BroadcastItem');
+
 const googleTranslate = require('../services/googleTranslate.service');
 
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
@@ -114,6 +117,29 @@ function clip160(s) {
   return String(s || '').trim().slice(0, 160);
 }
 
+function normalizeDurationSec(v, fallback = 18) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function mirrorDurationFields(durationSec) {
+  const d = normalizeDurationSec(durationSec);
+  return {
+    durationSec: d,
+    tickerSpeedSeconds: d,
+    durationSeconds: d,
+    speed: d,
+    speedSec: d,
+  };
+}
+
+function getDocSourceLang(doc) {
+  const d = doc && typeof doc === 'object' ? doc : {};
+  const sl = normalizeLang(d.sourceLang);
+  const ll = normalizeLang(d.language);
+  return sl || ll || 'auto';
+}
+
 function resolveTextForLang(doc, lang) {
   const d = doc && typeof doc === 'object' ? doc : {};
   const translations = d.translations && typeof d.translations === 'object' ? d.translations : null;
@@ -176,11 +202,13 @@ async function translateItems({ docs, targetLang }) {
   // Translate only those which do NOT already have targetLang stored.
   const toTranslateIdx = [];
   const toTranslateTexts = [];
+  const toTranslateKeys = [];
   for (let i = 0; i < items.length; i++) {
     if (stored[i]) continue;
     const src = resolved[i];
     if (!src) continue;
-    const k = `${lang}::${src}`;
+    const srcLang = getDocSourceLang(items[i]);
+    const k = `${srcLang}:${lang}:${googleTranslate.stableHash(src)}`;
     const cached = getTrCached(k);
     if (typeof cached === 'string' && cached.trim()) {
       resolved[i] = clip160(cached);
@@ -188,6 +216,7 @@ async function translateItems({ docs, targetLang }) {
     }
     toTranslateIdx.push(i);
     toTranslateTexts.push(src);
+    toTranslateKeys.push(k);
   }
 
   if (!toTranslateTexts.length) {
@@ -209,8 +238,21 @@ async function translateItems({ docs, targetLang }) {
     const v = clip160(tr.items[j]);
     if (v) {
       resolved[i] = v;
-      const k = `${lang}::${toTranslateTexts[j]}`;
+      const k = toTranslateKeys[j];
       setTrCached(k, v);
+
+      // Best-effort: persist translation on the story to avoid re-translation.
+      try {
+        const doc = items[i];
+        const id = doc && doc._id ? String(doc._id) : null;
+        if (id && mongoose.connection && mongoose.connection.readyState === 1) {
+          const set = {};
+          set[`translations.${lang}`] = v;
+          set[`text_i18n.${lang}`] = v;
+          set[`textByLang.${lang}`] = v;
+          await BroadcastItem.updateOne({ _id: id }, { $set: set }).catch(() => {});
+        }
+      } catch (_) {}
     }
   }
 
@@ -243,15 +285,13 @@ router.get('/', async (req, res) => {
         breaking: {
           enabled: Boolean(breakingEnabled),
           mode: settings.breaking.mode,
-          durationSec: settings.breaking.durationSec ?? settings.breaking.tickerSpeedSeconds,
-          tickerSpeedSeconds: settings.breaking.tickerSpeedSeconds,
+          ...mirrorDurationFields(settings.breaking.durationSec ?? settings.breaking.tickerSpeedSeconds ?? settings.breaking.durationSeconds ?? settings.breaking.speedSec ?? settings.breaking.speed),
           items: breakingItemsSrc,
         },
         live: {
           enabled: Boolean(liveEnabled),
           mode: settings.live.mode,
-          durationSec: settings.live.durationSec ?? settings.live.tickerSpeedSeconds,
-          tickerSpeedSeconds: settings.live.tickerSpeedSeconds,
+          ...mirrorDurationFields(settings.live.durationSec ?? settings.live.tickerSpeedSeconds ?? settings.live.durationSeconds ?? settings.live.speedSec ?? settings.live.speed),
           items: liveItemsSrc,
         },
       },
@@ -329,8 +369,8 @@ router.get('/', async (req, res) => {
       data: {
         translationFallback: true,
         translationError: true,
-        breaking: { enabled: false, mode: 'auto', tickerSpeedSeconds: 18, items: [] },
-        live: { enabled: false, mode: 'auto', tickerSpeedSeconds: 18, items: [] },
+        breaking: { enabled: false, mode: 'auto', ...mirrorDurationFields(18), items: [] },
+        live: { enabled: false, mode: 'auto', ...mirrorDurationFields(18), items: [] },
       },
     });
   }
