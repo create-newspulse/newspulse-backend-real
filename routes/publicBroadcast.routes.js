@@ -39,22 +39,24 @@ function _resolvePublicItemText(doc, lang) {
   const d = doc && typeof doc === 'object' ? doc : {};
   const target = _normalizeLang(lang, 'gu');
 
-  const src = SUPPORTED_LANGS.has(String(d.sourceLang || ''))
-    ? String(d.sourceLang)
-    : (SUPPORTED_LANGS.has(String(d.language || '')) ? String(d.language) : null);
-
   const i18n = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
   const legacy = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
 
+  const pickFrom = (obj, k) =>
+    (obj && typeof obj[k] === 'string' && obj[k].trim() ? String(obj[k]).trim() : null);
+
+  // Requested Phase 1 fallback order:
+  // requested -> en -> hi -> gu -> sourceText
   const pick =
-    (i18n && typeof i18n[target] === 'string' && i18n[target].trim() ? i18n[target] : null) ||
-    (legacy && typeof legacy[target] === 'string' && legacy[target].trim() ? legacy[target] : null) ||
-    (src && i18n && typeof i18n[src] === 'string' && i18n[src].trim() ? i18n[src] : null) ||
-    (src && legacy && typeof legacy[src] === 'string' && legacy[src].trim() ? legacy[src] : null) ||
-    (i18n && (typeof i18n.gu === 'string' && i18n.gu.trim()) ? i18n.gu : null) ||
-    (i18n && (typeof i18n.hi === 'string' && i18n.hi.trim()) ? i18n.hi : null) ||
-    (i18n && (typeof i18n.en === 'string' && i18n.en.trim()) ? i18n.en : null) ||
-    (typeof d.text === 'string' && d.text.trim() ? d.text : '');
+    pickFrom(i18n, target) ||
+    pickFrom(legacy, target) ||
+    pickFrom(i18n, 'en') ||
+    pickFrom(legacy, 'en') ||
+    pickFrom(i18n, 'hi') ||
+    pickFrom(legacy, 'hi') ||
+    pickFrom(i18n, 'gu') ||
+    pickFrom(legacy, 'gu') ||
+    (typeof d.text === 'string' && d.text.trim() ? String(d.text).trim() : '');
 
   return String(pick || '').trim();
 }
@@ -229,14 +231,25 @@ router.get('/items', async (req, res) => {
 
     const requestedLang = _requestedLangFromReq(req);
 
-    const itemsBy = await listItemsLast24hByChannel();
-    const items = (itemsBy && itemsBy[type]) || [];
-    if (_wantsDetailed(req)) {
-      return res.status(200).json({ ok: true, version, items: items.map(i => _mapPublicItem(i, { lang: requestedLang })) });
+    // Phase 1 requirement: when lang is provided, return items with `text`
+    // resolved/translated for that language.
+    if (requestedLang) {
+      const snapshot = await buildBroadcastSnapshot({ lang: requestedLang, version });
+      const items = Array.isArray(snapshot?.[type]?.items) ? snapshot[type].items : [];
+
+      if (_wantsDetailed(req)) {
+        return res.status(200).json({ ok: true, version, items });
+      }
+
+      return res.status(200).json({ ok: true, version, items: items.map(i => String(i && i.text ? i.text : '')).filter(Boolean) });
     }
 
-    if (requestedLang) {
-      return res.status(200).json({ ok: true, version, items: items.map(i => _resolvePublicItemText(i, requestedLang)).filter(Boolean) });
+    const itemsBy = await listItemsLast24hByChannel();
+    const items = (itemsBy && itemsBy[type]) || [];
+
+    // Backward-compat behavior (no lang): stable wrapper.
+    if (_wantsDetailed(req)) {
+      return res.status(200).json({ ok: true, version, items: items.map(i => _mapPublicItem(i)) });
     }
 
     return res.status(200).json({ ok: true, version, items: items.map(i => String(i.text || '')).filter(Boolean) });
