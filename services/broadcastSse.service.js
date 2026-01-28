@@ -5,7 +5,9 @@ const googleTranslate = require('./googleTranslate.service');
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
 
 function normalizeLang(v, fallback = 'gu') {
-  const s = String(v || '').trim().toLowerCase();
+  const s0 = String(v || '').trim().toLowerCase();
+  if (!s0) return fallback;
+  const s = s0.split(/[-_]/)[0];
   return SUPPORTED_LANGS.has(s) ? s : fallback;
 }
 
@@ -17,12 +19,15 @@ function resolvePublicText(doc, lang) {
     ? String(d.sourceLang)
     : (SUPPORTED_LANGS.has(String(d.language || '')) ? String(d.language) : null);
 
+  const translations = d.translations && typeof d.translations === 'object' ? d.translations : null;
   const i18n = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
   const legacy = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
 
   const pick =
+    (translations && typeof translations[target] === 'string' && translations[target].trim() ? translations[target] : null) ||
     (i18n && typeof i18n[target] === 'string' && i18n[target].trim() ? i18n[target] : null) ||
     (legacy && typeof legacy[target] === 'string' && legacy[target].trim() ? legacy[target] : null) ||
+    (src && translations && typeof translations[src] === 'string' && translations[src].trim() ? translations[src] : null) ||
     (src && i18n && typeof i18n[src] === 'string' && i18n[src].trim() ? i18n[src] : null) ||
     (src && legacy && typeof legacy[src] === 'string' && legacy[src].trim() ? legacy[src] : null) ||
     (i18n && typeof i18n.gu === 'string' && i18n.gu.trim() ? i18n.gu : null) ||
