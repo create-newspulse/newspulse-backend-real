@@ -133,15 +133,4 @@ BroadcastItemSchema.pre('validate', function ensureLangFields(next) {
 // Auto-delete after expiresAt.
 BroadcastItemSchema.index({ expiresAt: 1 }, { name: 'expiresAt_ttl', expireAfterSeconds: 0 });
 
-// Phase 1 contract helpers (no DB duplication).
-BroadcastItemSchema.virtual('sourceText').get(function () {
-  return typeof this.text === 'string' ? this.text : undefined;
-});
-BroadcastItemSchema.virtual('texts').get(function () {
-  return this.text_i18n && typeof this.text_i18n === 'object' ? this.text_i18n : undefined;
-});
-
-BroadcastItemSchema.set('toJSON', { virtuals: true });
-BroadcastItemSchema.set('toObject', { virtuals: true });
-
 module.exports = mongoose.models.BroadcastItem || mongoose.model('BroadcastItem', BroadcastItemSchema);

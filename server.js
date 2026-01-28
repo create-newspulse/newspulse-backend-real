@@ -171,7 +171,6 @@ const publicTickersSettingsRouter = require('./routes/publicTickersSettings.rout
 const adminTickersSettingsRouter = require('./routes/adminTickersSettings.routes');
 const publicBroadcastRouter = require('./routes/publicBroadcast.routes');
 const publicApiBroadcastRouter = require('./routes/publicApiBroadcast.routes');
-const publicApiTranslateRouter = require('./routes/publicApiTranslate.routes');
 let adminWorkflowApiRouter = null;
 let adminPushHistoryApiRouter = null;
 let adminWorkflowLegacyRouter = null;
@@ -466,10 +465,6 @@ app.options('/public/broadcast/*', _handlePublicBroadcastPreflight);
 app.options('/public-api/broadcast', _handlePublicBroadcastPreflight);
 app.options('/public-api/broadcast/*', _handlePublicBroadcastPreflight);
 
-// New public-api translate endpoint (Google Translate proxy)
-app.options('/public-api/translate', _handlePublicBroadcastPreflight);
-app.options('/public-api/translate/*', _handlePublicBroadcastPreflight);
-
 app.use(cors(corsOptions));
 
 // Ensure GET responses for public ads slot include the required CORS headers.
@@ -513,7 +508,6 @@ app.use('/admin-api/public/broadcast', _publicBroadcastCorsOverride);
 app.use('/admin-api/api/public/broadcast', _publicBroadcastCorsOverride);
 app.use('/public/broadcast', _publicBroadcastCorsOverride);
 app.use('/public-api/broadcast', _publicBroadcastCorsOverride);
-app.use('/public-api/translate', _publicBroadcastCorsOverride);
 // Ensure OPTIONS preflight works for all routes.
 app.options('*', cors(corsOptions));
 
@@ -1242,8 +1236,6 @@ app.use('/api/public', publicTickersSettingsRouter);
 app.use('/api/public/broadcast', publicBroadcastRouter);
 // New public-api translated tickers
 app.use('/public-api/broadcast', publicApiBroadcastRouter);
-// New public-api translate (frontend-safe Google proxy)
-app.use('/public-api/translate', publicApiTranslateRouter);
 // Admin panel proxy basePath support (some frontends call /admin-api/* even for public reads)
 app.use('/admin-api/public/broadcast', publicBroadcastRouter);
 app.use('/admin-api/api/public/broadcast', publicBroadcastRouter);

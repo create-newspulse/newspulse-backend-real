@@ -6,7 +6,8 @@ const noCache = require('../middleware/noCache');
 const BroadcastItem = require('../models/BroadcastItem');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
-const googleProvider = require('../services/translation/providers/googleProvider');
+const { translateWithGuardrails } = require('../services/translate/guardedTranslate');
+const { shouldAcceptTranslation } = require('../services/translate/i18nQuality');
 
 const {
   getOrCreateSettings,
@@ -26,15 +27,6 @@ const router = express.Router();
 router.use(noCache);
 
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
-
-function detectSourceLangFromText(text) {
-  const s = String(text || '');
-  // Gujarati: U+0A80–U+0AFF
-  if (/[\u0A80-\u0AFF]/.test(s)) return 'gu';
-  // Devanagari: U+0900–U+097F
-  if (/[\u0900-\u097F]/.test(s)) return 'hi';
-  return 'en';
-}
 
 function _normalizeLangQuery(v) {
   const s = String(v || '').trim().toLowerCase();
@@ -586,9 +578,10 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     return fail(res, 400, 'INVALID_TEXT', 'Invalid text. Must be non-empty and <= 160 chars');
   }
 
-  // Phase 1: auto-detect source language from Unicode range.
-  // (Admin UI stays simple: no glossary / no review workflows.)
-  const detectedSourceLang = detectSourceLangFromText(text);
+  const rawLang = Object.prototype.hasOwnProperty.call(body, 'lang') ? body.lang : (req.query && req.query.lang);
+  // lang is optional; default gu
+  const lang = rawLang === undefined ? 'gu' : _normalizeLangQuery(rawLang);
+  if (!lang) return fail(res, 400, 'INVALID_LANG', 'Invalid lang. Expected en|hi|gu');
 
   // Optional explicit expiresAt (preferred in Phase 1).
   const hasExpiresAt = Object.prototype.hasOwnProperty.call(body, 'expiresAt') || Object.prototype.hasOwnProperty.call(req.query || {}, 'expiresAt');
@@ -641,13 +634,15 @@ router.post('/items', requireAdminAuth, async (req, res) => {
 
   // Single-line audit log per requirement.
   try {
-    console.log('[broadcast] create item', `type=${type}`, `sourceLang=${detectedSourceLang}`, `expiresInHours=${expiresInHours}`);
+    console.log('[broadcast] create item', `type=${type}`, `lang=${lang}`, `expiresInHours=${expiresInHours}`);
   } catch (_) {}
 
-  const resolvedLang = detectedSourceLang;
+  const resolvedLang = String(lang || 'gu').trim().toLowerCase();
 
-  // Best-effort translation: enabled only when Google API key is configured.
-  const googleConfigured = Boolean(googleProvider && typeof googleProvider.isConfigured === 'function' && googleProvider.isConfigured());
+  // Optional: allow disabling auto-translation (best-effort by default).
+  const autoTranslate = Object.prototype.hasOwnProperty.call(body, 'autoTranslate')
+    ? Boolean(body.autoTranslate)
+    : (Object.prototype.hasOwnProperty.call(req.query || {}, 'autoTranslate') ? String(req.query.autoTranslate).toLowerCase() !== 'false' : true);
 
   const createPayload = {
     type,
@@ -667,10 +662,8 @@ router.post('/items', requireAdminAuth, async (req, res) => {
   const created = await BroadcastItem.create(createPayload);
 
   // Auto-translate (best effort) into remaining supported langs.
-  // IMPORTANT: Google-only; never blocks item creation.
   try {
-    if (!googleConfigured) throw new Error('GOOGLE_NOT_CONFIGURED');
-
+    if (!autoTranslate) throw new Error('AUTO_TRANSLATE_DISABLED');
     const allLangs = ['en', 'hi', 'gu'];
     const targets = allLangs.filter(l => l !== resolvedLang);
 
@@ -678,17 +671,27 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     created.textByLang = created.textByLang && typeof created.textByLang === 'object' ? created.textByLang : {};
 
     for (const targetLang of targets) {
-      const r = await googleProvider.translate({ text, sourceLang: resolvedLang, targetLang });
+      const r = await translateWithGuardrails(text, resolvedLang, targetLang, { maxLen: 160 });
       if (!r || !r.ok || typeof r.text !== 'string' || !r.text.trim()) continue;
+
       const clipped = r.text.trim().slice(0, 160);
       if (!clipped) continue;
+
       created.text_i18n[targetLang] = clipped;
       created.textByLang[targetLang] = clipped;
+
+      const accept = shouldAcceptTranslation(text, clipped, resolvedLang, targetLang);
+      const needsReview = Boolean(r.needsReview) || !accept;
+
+      created.statusByLang = created.statusByLang && typeof created.statusByLang === 'object' ? created.statusByLang : {};
+      created.qualityByLang = created.qualityByLang && typeof created.qualityByLang === 'object' ? created.qualityByLang : {};
+      created.statusByLang[targetLang] = needsReview ? 'NEEDS_REVIEW' : 'APPROVED';
+      created.qualityByLang[targetLang] = Math.max(0, Math.min(100, Math.round((typeof r.score === 'number' ? r.score : 0) * 100)));
     }
 
     await created.save();
-  } catch (_) {
-    // Best effort only; missing key or translation failures should not block add.
+  } catch (e) {
+    // Best effort only; missing key should not block item creation.
   }
 
   emitBroadcastUpdated({ reason: 'admin_item_create' }).catch(() => {});

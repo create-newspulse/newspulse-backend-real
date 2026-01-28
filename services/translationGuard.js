@@ -318,8 +318,15 @@ async function translateBestOf(text, sourceLang, targetLang, options = {}) {
     return { status: 'BLOCKED', reasons, topicTags: topics, qa: null };
   }
 
-  // Phase goals: never require multi-provider agreement.
-  // If multiple providers are configured, we still pick the best candidate by score.
+  // Strict mode: if multiple providers are available, require agreement.
+  if (effectiveStrict && okCandidates.length >= 2) {
+    okCandidates.sort((a, b) => (b.score || 0) - (a.score || 0));
+    const top = okCandidates[0];
+    const agree = okCandidates.some(c => c !== top && jaccardSimilarity(c.translatedPre, top.translatedPre) >= 0.92);
+    if (!agree) {
+      return { status: 'BLOCKED', reasons: ['STRICT_MODE_NO_PROVIDER_AGREEMENT'], topicTags: topics, qa: top.checks || null };
+    }
+  }
 
   // Choose best score
   okCandidates.sort((a, b) => (b.score || 0) - (a.score || 0));
