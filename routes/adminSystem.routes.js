@@ -21,9 +21,7 @@ router.get('/system/translation-status', requireAdminAuth, (_req, res) => {
   return res.status(200).json({
     googleConfigured,
     queueEnabled: false,
-    providers: {
-      google: { configured: googleConfigured },
-    },
+    providers: googleConfigured ? ['GOOGLE'] : [],
   });
 });
 
