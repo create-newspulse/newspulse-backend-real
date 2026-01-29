@@ -62,3 +62,52 @@ test('Public API Broadcast: translation fallback is not cached (prevents stuck G
 
   mongoose.connection.readyState = prevReady;
 });
+
+test('Public API Broadcast: ignores poisoned stored en and re-translates', async () => {
+  const prevReady = mongoose.connection.readyState;
+  mongoose.connection.readyState = 1;
+
+  const now = new Date();
+  const breakingDocs = [
+    {
+      _id: 'b1',
+      type: 'breaking',
+      isLive: true,
+      // Bad data scenario: stored `en` is actually Gujarati.
+      text_i18n: { gu: 'ગુજરાતી 1', en: 'ગુજરાતી 1' },
+      createdAt: now,
+      expiresAt: null,
+    },
+  ];
+
+  BroadcastSettings.findOne = async () => ({
+    breaking: { enabled: true, mode: 'auto', tickerSpeedSeconds: 18, speedSec: 18 },
+    live: { enabled: true, mode: 'auto', tickerSpeedSeconds: 18, speedSec: 18 },
+    save: async () => {},
+  });
+
+  BroadcastItem.find = (filter) => {
+    const type = filter && filter.type;
+    const docs = type === 'breaking' ? breakingDocs : [];
+    return {
+      sort() { return this; },
+      limit() { return this; },
+      lean: async () => docs,
+    };
+  };
+
+  googleTranslate.translateMany = async (texts, targetLang) => {
+    const lang = String(targetLang || '').toLowerCase();
+    return { ok: true, items: (texts || []).map((t) => `${lang}:${String(t)}`) };
+  };
+
+  const res = await request(app)
+    .get('/public-api/broadcast?lang=en&nocache=1')
+    .expect(200);
+
+  assert.ok(String(res.headers['x-newspulse-build'] || '').length > 0);
+  // Should not return stored Gujarati for en.
+  assert.deepEqual(res.body.breaking.items, ['en:ગુજરાતી 1']);
+
+  mongoose.connection.readyState = prevReady;
+});

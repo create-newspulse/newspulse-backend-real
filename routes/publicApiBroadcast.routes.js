@@ -12,6 +12,26 @@ const googleTranslate = require('../services/googleTranslate.service');
 
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
 
+function pickGitSha() {
+  const candidates = [
+    process.env.RENDER_GIT_COMMIT,
+    process.env.GITHUB_SHA,
+    process.env.VERCEL_GIT_COMMIT_SHA,
+    process.env.COMMIT_SHA,
+    process.env.SOURCE_VERSION,
+  ].filter(Boolean);
+
+  const sha = candidates.length ? String(candidates[0]) : '';
+  return sha.length > 64 ? sha.slice(0, 64) : sha;
+}
+
+const BUILD_TIME = String(process.env.BUILD_TIME || new Date().toISOString());
+
+function buildHeaderValue() {
+  const sha = pickGitSha();
+  return sha ? `${sha}@${BUILD_TIME}` : BUILD_TIME;
+}
+
 function normalizeLang(v) {
   const s0 = String(v || '').trim().toLowerCase();
   if (!s0) return null;
@@ -114,6 +134,19 @@ function clip160(s) {
   return String(s || '').trim().slice(0, 160);
 }
 
+function looksLikeLang(text, lang) {
+  const s = String(text || '').trim();
+  if (!s) return false;
+  const l = normalizeLang(lang);
+
+  // Heuristic guards against “poisoned” stored translations.
+  // If a stored `en` value is actually Gujarati text, we should re-translate.
+  if (l === 'gu') return /[\u0A80-\u0AFF]/.test(s);
+  if (l === 'hi') return /[\u0900-\u097F]/.test(s);
+  if (l === 'en') return /[A-Za-z]/.test(s);
+  return false;
+}
+
 function normalizeDurationSec(v, fallback = 18) {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -189,8 +222,14 @@ async function translateItems({ docs, targetLang }) {
   const lang = normalizeLang(targetLang) || 'gu';
   const items = Array.isArray(docs) ? docs : [];
 
-  // If targetLang text is already stored, return it without hitting translation.
-  const stored = items.map((d) => resolveTextForLang(d, lang));
+  // If targetLang text is already stored AND looks like the correct language, use it.
+  // Otherwise, translate (prevents “en shows Gujarati” when stored values are wrong).
+  const stored = items.map((d) => {
+    const v = resolveTextForLang(d, lang);
+    if (!v) return null;
+    if (lang === 'gu') return v;
+    return looksLikeLang(v, lang) ? v : null;
+  });
 
   if (lang === 'gu') {
     const texts = stored.map((t, i) => clip160(t || resolveSourceText(items[i]))).filter(Boolean);
@@ -257,6 +296,9 @@ router.get('/', async (req, res) => {
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
   if (bypassCache) res.setHeader('X-No-Cache', '1');
+
+  // Safe deploy/debug marker (no secrets).
+  res.setHeader('X-Newspulse-Build', buildHeaderValue());
 
   try {
     const doc = await getOrCreateSettings();

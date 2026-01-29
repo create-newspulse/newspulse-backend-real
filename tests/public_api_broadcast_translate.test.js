@@ -12,6 +12,7 @@ test('Public API Broadcast: GET /public-api/broadcast returns stable payload', a
 
   assert.equal(res.body && typeof res.body, 'object');
   assert.equal(res.headers['cache-control'], 'no-store');
+  assert.ok(String(res.headers['x-newspulse-build'] || '').length > 0);
 
   assert.equal(typeof res.body.breaking, 'object');
   assert.equal(typeof res.body.live, 'object');
