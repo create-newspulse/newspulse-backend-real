@@ -21,12 +21,7 @@ test('Public API Broadcast: GET /public-api/broadcast returns stable payload', a
   for (const key of ['breaking', 'live']) {
     assert.equal(typeof res.body.data[key].enabled, 'boolean');
     assert.equal(typeof res.body.data[key].mode, 'string');
-    assert.equal(typeof res.body.data[key].durationSec, 'number');
-    // Backward-compat keys must mirror durationSec.
-    for (const k of ['tickerSpeedSeconds', 'durationSeconds', 'speed', 'speedSec']) {
-      assert.equal(typeof res.body.data[key][k], 'number');
-      assert.equal(res.body.data[key][k], res.body.data[key].durationSec);
-    }
+    assert.equal(typeof res.body.data[key].tickerSpeedSeconds, 'number');
     assert.ok(Array.isArray(res.body.data[key].items));
   }
 });

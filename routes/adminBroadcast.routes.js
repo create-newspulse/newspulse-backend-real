@@ -6,7 +6,7 @@ const noCache = require('../middleware/noCache');
 const BroadcastItem = require('../models/BroadcastItem');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
-const guardedTranslate = require('../services/translate/guardedTranslate');
+const { translateWithGuardrails } = require('../services/translate/guardedTranslate');
 const { shouldAcceptTranslation } = require('../services/translate/i18nQuality');
 
 const {
@@ -685,7 +685,7 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     created.textByLang = created.textByLang && typeof created.textByLang === 'object' ? created.textByLang : {};
 
     for (const targetLang of targets) {
-      const r = await guardedTranslate.translateWithGuardrails(text, resolvedLang, targetLang, { maxLen: 160 });
+      const r = await translateWithGuardrails(text, resolvedLang, targetLang, { maxLen: 160 });
       if (!r || !r.ok || typeof r.text !== 'string' || !r.text.trim()) continue;
 
       const clipped = r.text.trim().slice(0, 160);
@@ -752,70 +752,18 @@ router.patch('/items/:id', requireAdminAuth, async (req, res) => {
     next.text = t;
   }
 
-  // Optional lang update (or sourceLang override) from admin UI.
-  if (Object.prototype.hasOwnProperty.call(body, 'lang')) {
-    const l = _normalizeLangQuery(body.lang);
-    if (!l) return fail(res, 400, 'INVALID_LANG', 'Invalid lang. Expected en|hi|gu');
-    next.sourceLang = l;
-    next.language = l;
-  }
-
   if (Object.keys(next).length === 0) {
     return fail(res, 400, 'BAD_REQUEST', 'No supported fields to update');
   }
 
-  const updated = await BroadcastItem.findById(id);
+  const updated = await BroadcastItem.findByIdAndUpdate(id, { $set: next }, { new: true }).lean();
   if (!updated) {
     return fail(res, 404, 'NOT_FOUND', 'Not found');
   }
 
-  // Apply updates
-  for (const [k, v] of Object.entries(next)) updated.set(k, v);
-
-  // If text changed, ensure sourceLang exists and regenerate translations.
-  try {
-    const textChanged = Object.prototype.hasOwnProperty.call(next, 'text');
-    if (textChanged) {
-      let srcLang = _normalizeLangQuery(updated.sourceLang);
-      if (!srcLang) {
-        const det = await require('../services/googleTranslate.service').detectLanguage(updated.text);
-        srcLang = det && det.ok ? _normalizeLangQuery(det.lang) : null;
-      }
-      if (!srcLang) srcLang = 'gu';
-
-      updated.sourceLang = srcLang;
-      updated.language = srcLang;
-
-      const raw = String(updated.text || '').trim().slice(0, 160);
-      updated.translations = updated.translations && typeof updated.translations === 'object' ? updated.translations : {};
-      updated.text_i18n = updated.text_i18n && typeof updated.text_i18n === 'object' ? updated.text_i18n : {};
-      updated.textByLang = updated.textByLang && typeof updated.textByLang === 'object' ? updated.textByLang : {};
-
-      // Persist source text
-      updated.translations[srcLang] = raw;
-      updated.text_i18n[srcLang] = raw;
-      updated.textByLang[srcLang] = raw;
-
-      const targets = ['en', 'hi', 'gu'].filter((l) => l !== srcLang);
-      for (const targetLang of targets) {
-        const r = await guardedTranslate.translateWithGuardrails(raw, srcLang, targetLang, { maxLen: 160 });
-        if (!r || !r.ok || typeof r.text !== 'string' || !r.text.trim()) continue;
-        const clipped = r.text.trim().slice(0, 160);
-        if (!clipped) continue;
-        updated.translations[targetLang] = clipped;
-        updated.text_i18n[targetLang] = clipped;
-        updated.textByLang[targetLang] = clipped;
-      }
-    }
-  } catch (_) {
-    // Best-effort only; keep patch successful.
-  }
-
-  const saved = await updated.save();
-
   emitBroadcastUpdated({ reason: 'admin_item_patch' }).catch(() => {});
 
-  return ok(res, mapItem(saved));
+  return ok(res, mapItem(updated));
 });
 
 // DELETE /api/admin/broadcast/items/:id
