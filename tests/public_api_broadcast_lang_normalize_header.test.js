@@ -48,8 +48,7 @@ test('Public API Broadcast: normalizes lang like en-US and accepts x-lang header
     .get('/public-api/broadcast?lang=en-US&nocache=1')
     .expect(200);
 
-  assert.equal(res1.body.ok, true);
-  assert.deepEqual(res1.body.data.breaking.items, ['en:ગુજરાતી 1']);
+  assert.deepEqual(res1.body.breaking.items, ['en:ગુજરાતી 1']);
 
   // Header x-lang en-US -> en
   const res2 = await request(app)
@@ -57,8 +56,7 @@ test('Public API Broadcast: normalizes lang like en-US and accepts x-lang header
     .set('x-lang', 'en-US')
     .expect(200);
 
-  assert.equal(res2.body.ok, true);
-  assert.deepEqual(res2.body.data.breaking.items, ['en:ગુજરાતી 1']);
+  assert.deepEqual(res2.body.breaking.items, ['en:ગુજરાતી 1']);
 
   mongoose.connection.readyState = prevReady;
 });

@@ -51,18 +51,14 @@ test('Public API Broadcast: translation fallback is not cached (prevents stuck G
     .get('/public-api/broadcast?lang=en')
     .expect(200);
 
-  assert.equal(res1.body.ok, true);
-  assert.equal(res1.body.success, true);
-  assert.equal(res1.body.data.translationFallback, true);
-  assert.deepEqual(res1.body.data.breaking.items, ['ગુજરાતી 1']);
+  assert.deepEqual(res1.body.breaking.items, ['ગુજરાતી 1']);
 
   // If fallback were cached, this second response would stay Gujarati.
   const res2 = await request(app)
     .get('/public-api/broadcast?lang=en')
     .expect(200);
 
-  assert.ok(res2.body.data.translationFallback === undefined || res2.body.data.translationFallback === false);
-  assert.deepEqual(res2.body.data.breaking.items, ['en:ગુજરાતી 1']);
+  assert.deepEqual(res2.body.breaking.items, ['en:ગુજરાતી 1']);
 
   mongoose.connection.readyState = prevReady;
 });

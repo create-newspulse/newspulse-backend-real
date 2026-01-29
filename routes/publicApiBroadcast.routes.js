@@ -249,8 +249,14 @@ async function translateItems({ docs, targetLang }) {
 
 // GET /public-api/broadcast?lang=en|hi|gu
 router.get('/', async (req, res) => {
-  const lang = requestedLang(req) || 'gu';
+  const lang = requestedLang(req) || 'en';
   const bypassCache = wantsNoCache(req);
+
+  // Prevent edge/CDN caching from serving the wrong language.
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  if (bypassCache) res.setHeader('X-No-Cache', '1');
 
   try {
     const doc = await getOrCreateSettings();
@@ -267,33 +273,29 @@ router.get('/', async (req, res) => {
     const liveEnabled = computePublicEnabled(settings.live.enabled, settings.live.mode);
 
     const base = {
-      ok: true,
-      success: true,
-      data: {
-        breaking: {
-          enabled: Boolean(breakingEnabled),
-          mode: settings.breaking.mode,
-          ...mirrorDurationFields(
-            settings.breaking.durationSec ??
-            settings.breaking.tickerSpeedSeconds ??
-            settings.breaking.durationSeconds ??
-            settings.breaking.speedSec ??
-            settings.breaking.speed
-          ),
-          items: breakingItemsSrc,
-        },
-        live: {
-          enabled: Boolean(liveEnabled),
-          mode: settings.live.mode,
-          ...mirrorDurationFields(
-            settings.live.durationSec ??
-            settings.live.tickerSpeedSeconds ??
-            settings.live.durationSeconds ??
-            settings.live.speedSec ??
-            settings.live.speed
-          ),
-          items: liveItemsSrc,
-        },
+      breaking: {
+        enabled: Boolean(breakingEnabled),
+        mode: settings.breaking.mode,
+        ...mirrorDurationFields(
+          settings.breaking.durationSec ??
+          settings.breaking.tickerSpeedSeconds ??
+          settings.breaking.durationSeconds ??
+          settings.breaking.speedSec ??
+          settings.breaking.speed
+        ),
+        items: breakingItemsSrc,
+      },
+      live: {
+        enabled: Boolean(liveEnabled),
+        mode: settings.live.mode,
+        ...mirrorDurationFields(
+          settings.live.durationSec ??
+          settings.live.tickerSpeedSeconds ??
+          settings.live.durationSeconds ??
+          settings.live.speedSec ??
+          settings.live.speed
+        ),
+        items: liveItemsSrc,
       },
     };
 
@@ -327,31 +329,19 @@ router.get('/', async (req, res) => {
 
     const fallback = (!breakingTr.ok) || (!liveTr.ok);
     if (fallback) {
-      payload.data.translationFallback = true;
-      payload.data.translationError = true;
-      if (debugTranslationEnabled()) {
-        try {
-          console.warn('[public-api][broadcast] translation fallback', {
-            lang,
-            breakingOk: breakingTr.ok,
-            liveOk: liveTr.ok,
-            breakingError: breakingTr.error,
-            liveError: liveTr.error,
-          });
-        } catch (_) {}
-      }
+      try {
+        console.warn('[public-api][broadcast] translation failed; returning source text', {
+          lang,
+          breakingOk: breakingTr.ok,
+          liveOk: liveTr.ok,
+          breakingError: breakingTr.error,
+          liveError: liveTr.error,
+        });
+      } catch (_) {}
     }
 
-    if (breakingTr.items) payload.data.breaking.items = breakingTr.items;
-    if (liveTr.items) payload.data.live.items = liveTr.items;
-
-    // Optional detailed schema (for new frontend): itemsObjects
-    payload.data.breaking.itemsObjects = breakingDocs
-      .map((d, i) => mapItem(d, lang, payload.data.breaking.items[i], { translationError: !breakingTr.ok }))
-      .filter((x) => x && x.text);
-    payload.data.live.itemsObjects = liveDocs
-      .map((d, i) => mapItem(d, lang, payload.data.live.items[i], { translationError: !liveTr.ok }))
-      .filter((x) => x && x.text);
+    if (breakingTr.items) payload.breaking.items = breakingTr.items;
+    if (liveTr.items) payload.live.items = liveTr.items;
 
     // Critical: do NOT cache fallback payloads; prevents “stuck Gujarati” for en/hi.
     if (!bypassCache && !fallback) setCached(cacheKey, payload);
@@ -364,14 +354,8 @@ router.get('/', async (req, res) => {
     } catch (_) {}
 
     return res.status(200).json({
-      ok: true,
-      success: true,
-      data: {
-        translationFallback: true,
-        translationError: true,
-        breaking: { enabled: false, mode: 'auto', ...mirrorDurationFields(18), items: [] },
-        live: { enabled: false, mode: 'auto', ...mirrorDurationFields(18), items: [] },
-      },
+      breaking: { enabled: false, mode: 'auto', ...mirrorDurationFields(18), items: [] },
+      live: { enabled: false, mode: 'auto', ...mirrorDurationFields(18), items: [] },
     });
   }
 });

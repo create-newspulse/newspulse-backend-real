@@ -171,6 +171,7 @@ const publicTickersSettingsRouter = require('./routes/publicTickersSettings.rout
 const adminTickersSettingsRouter = require('./routes/adminTickersSettings.routes');
 const publicBroadcastRouter = require('./routes/publicBroadcast.routes');
 const publicApiBroadcastRouter = require('./routes/publicApiBroadcast.routes');
+const debugRouter = require('./routes/_debug.routes');
 let adminWorkflowApiRouter = null;
 let adminPushHistoryApiRouter = null;
 let adminWorkflowLegacyRouter = null;
@@ -1236,6 +1237,8 @@ app.use('/api/public', publicTickersSettingsRouter);
 app.use('/api/public/broadcast', publicBroadcastRouter);
 // New public-api translated tickers
 app.use('/public-api/broadcast', publicApiBroadcastRouter);
+// Safe debug/version endpoint (no secrets)
+app.use('/_debug', debugRouter);
 // Admin panel proxy basePath support (some frontends call /admin-api/* even for public reads)
 app.use('/admin-api/public/broadcast', publicBroadcastRouter);
 app.use('/admin-api/api/public/broadcast', publicBroadcastRouter);
