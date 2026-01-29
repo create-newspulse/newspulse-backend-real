@@ -6,8 +6,9 @@ const noCache = require('../middleware/noCache');
 const BroadcastItem = require('../models/BroadcastItem');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
-const { translateWithGuardrails } = require('../services/translate/guardedTranslate');
+const guardedTranslate = require('../services/translate/guardedTranslate');
 const { shouldAcceptTranslation } = require('../services/translate/i18nQuality');
+const broadcastItemI18n = require('../services/broadcastItemI18n.service');
 
 const {
   getOrCreateSettings,
@@ -677,31 +678,36 @@ router.post('/items', requireAdminAuth, async (req, res) => {
   // Auto-translate (best effort) into remaining supported langs.
   try {
     if (!autoTranslate) throw new Error('AUTO_TRANSLATE_DISABLED');
-    const allLangs = ['en', 'hi', 'gu'];
-    const targets = allLangs.filter(l => l !== resolvedLang);
+    const translator = async (raw, sourceLang, targetLang) => {
+      // Use guardrails for quality + fallback behavior; cached at broadcastItemI18n level.
+      return guardedTranslate.translateWithGuardrails(raw, sourceLang, targetLang, { maxLen: 160 });
+    };
+
+    const built = await broadcastItemI18n.buildTextI18n({ text, sourceLang: resolvedLang, translator });
+    const i18n = built && built.text_i18n ? built.text_i18n : { [resolvedLang]: text };
 
     created.text_i18n = created.text_i18n && typeof created.text_i18n === 'object' ? created.text_i18n : {};
     created.translations = created.translations && typeof created.translations === 'object' ? created.translations : {};
     created.textByLang = created.textByLang && typeof created.textByLang === 'object' ? created.textByLang : {};
 
-    for (const targetLang of targets) {
-      const r = await translateWithGuardrails(text, resolvedLang, targetLang, { maxLen: 160 });
-      if (!r || !r.ok || typeof r.text !== 'string' || !r.text.trim()) continue;
-
-      const clipped = r.text.trim().slice(0, 160);
+    for (const targetLang of ['en', 'hi', 'gu']) {
+      const clipped = typeof i18n[targetLang] === 'string' && i18n[targetLang].trim() ? i18n[targetLang].trim().slice(0, 160) : null;
       if (!clipped) continue;
 
       created.text_i18n[targetLang] = clipped;
       created.translations[targetLang] = clipped;
       created.textByLang[targetLang] = clipped;
 
-      const accept = shouldAcceptTranslation(text, clipped, resolvedLang, targetLang);
-      const needsReview = Boolean(r.needsReview) || !accept;
+      // Preserve existing heuristics/status grading on translated langs.
+      if (targetLang !== resolvedLang) {
+        const accept = shouldAcceptTranslation(text, clipped, resolvedLang, targetLang);
+        const needsReview = !accept;
 
-      created.statusByLang = created.statusByLang && typeof created.statusByLang === 'object' ? created.statusByLang : {};
-      created.qualityByLang = created.qualityByLang && typeof created.qualityByLang === 'object' ? created.qualityByLang : {};
-      created.statusByLang[targetLang] = needsReview ? 'NEEDS_REVIEW' : 'APPROVED';
-      created.qualityByLang[targetLang] = Math.max(0, Math.min(100, Math.round((typeof r.score === 'number' ? r.score : 0) * 100)));
+        created.statusByLang = created.statusByLang && typeof created.statusByLang === 'object' ? created.statusByLang : {};
+        created.qualityByLang = created.qualityByLang && typeof created.qualityByLang === 'object' ? created.qualityByLang : {};
+        created.statusByLang[targetLang] = needsReview ? 'NEEDS_REVIEW' : 'APPROVED';
+        created.qualityByLang[targetLang] = 100;
+      }
     }
 
     await created.save();
@@ -752,18 +758,69 @@ router.patch('/items/:id', requireAdminAuth, async (req, res) => {
     next.text = t;
   }
 
+  if (Object.prototype.hasOwnProperty.call(body, 'lang')) {
+    const l = _normalizeLangQuery(body.lang);
+    if (!l) return fail(res, 400, 'INVALID_LANG', 'Invalid lang. Expected en|hi|gu');
+    next.sourceLang = l;
+    next.language = l;
+  }
+
   if (Object.keys(next).length === 0) {
     return fail(res, 400, 'BAD_REQUEST', 'No supported fields to update');
   }
 
-  const updated = await BroadcastItem.findByIdAndUpdate(id, { $set: next }, { new: true }).lean();
-  if (!updated) {
+  const doc = await BroadcastItem.findById(id);
+  if (!doc) {
     return fail(res, 404, 'NOT_FOUND', 'Not found');
   }
 
+  for (const [k, v] of Object.entries(next)) doc.set(k, v);
+
+  const textChanged = Object.prototype.hasOwnProperty.call(next, 'text');
+  const langChanged = Object.prototype.hasOwnProperty.call(next, 'sourceLang') || Object.prototype.hasOwnProperty.call(next, 'language');
+
+  // If text OR lang changed, regenerate translations and persist.
+  if (textChanged || langChanged) {
+    let srcLang = _normalizeLangQuery(doc.sourceLang) || _normalizeLangQuery(doc.language);
+    if (!srcLang && textChanged) {
+      try {
+        const detected = await require('../services/googleTranslate.service').detectLanguage(doc.text);
+        const dl = detected && detected.ok ? _normalizeLangQuery(detected.lang) : null;
+        srcLang = dl || 'gu';
+      } catch (_) {
+        srcLang = 'gu';
+      }
+    }
+    if (!srcLang) srcLang = 'gu';
+
+    doc.sourceLang = srcLang;
+    doc.language = srcLang;
+
+    const translator = async (raw, sourceLang, targetLang) => {
+      return guardedTranslate.translateWithGuardrails(raw, sourceLang, targetLang, { maxLen: 160 });
+    };
+
+    const built = await broadcastItemI18n.buildTextI18n({ text: doc.text, sourceLang: srcLang, translator });
+    const i18n = built && built.text_i18n ? built.text_i18n : { [srcLang]: String(doc.text || '').trim().slice(0, 160) };
+
+    doc.text_i18n = doc.text_i18n && typeof doc.text_i18n === 'object' ? doc.text_i18n : {};
+    doc.translations = doc.translations && typeof doc.translations === 'object' ? doc.translations : {};
+    doc.textByLang = doc.textByLang && typeof doc.textByLang === 'object' ? doc.textByLang : {};
+
+    for (const l of ['en', 'hi', 'gu']) {
+      const clipped = typeof i18n[l] === 'string' && i18n[l].trim() ? i18n[l].trim().slice(0, 160) : null;
+      if (!clipped) continue;
+      doc.text_i18n[l] = clipped;
+      doc.translations[l] = clipped;
+      doc.textByLang[l] = clipped;
+    }
+  }
+
+  const saved = await doc.save();
+
   emitBroadcastUpdated({ reason: 'admin_item_patch' }).catch(() => {});
 
-  return ok(res, mapItem(updated));
+  return ok(res, mapItem(saved));
 });
 
 // DELETE /api/admin/broadcast/items/:id

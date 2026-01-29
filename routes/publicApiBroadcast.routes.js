@@ -114,6 +114,22 @@ function clip160(s) {
   return String(s || '').trim().slice(0, 160);
 }
 
+function normalizeDurationSec(v, fallback = 18) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function mirrorDurationFields(durationSec) {
+  const d = normalizeDurationSec(durationSec);
+  return {
+    durationSec: d,
+    tickerSpeedSeconds: d,
+    durationSeconds: d,
+    speed: d,
+    speedSec: d,
+  };
+}
+
 function resolveTextForLang(doc, lang) {
   const d = doc && typeof doc === 'object' ? doc : {};
   const translations = d.translations && typeof d.translations === 'object' ? d.translations : null;
@@ -123,8 +139,18 @@ function resolveTextForLang(doc, lang) {
   return pick(translations) || pick(i18n) || pick(legacy) || null;
 }
 
+function resolveOriginalText(doc) {
+  const d = doc && typeof doc === 'object' ? doc : {};
+  const sourceLang = normalizeLang(d.sourceLang) || normalizeLang(d.language);
+  if (sourceLang) {
+    const src = resolveTextForLang(d, sourceLang);
+    if (src) return clip160(src);
+  }
+  return resolveSourceText(d);
+}
+
 function resolveSourceText(doc) {
-  // Prefer Gujarati, then Hindi, then English, then raw.
+  // Fallback order: any stored translation (gu->hi->en), then raw.
   const d = doc && typeof doc === 'object' ? doc : {};
   const translations = d.translations && typeof d.translations === 'object' ? d.translations : null;
   const i18n = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
@@ -176,11 +202,14 @@ async function translateItems({ docs, targetLang }) {
   // Translate only those which do NOT already have targetLang stored.
   const toTranslateIdx = [];
   const toTranslateTexts = [];
+  const toTranslateKeys = [];
   for (let i = 0; i < items.length; i++) {
     if (stored[i]) continue;
     const src = resolved[i];
     if (!src) continue;
-    const k = `${lang}::${src}`;
+    const d = items[i] && typeof items[i] === 'object' ? items[i] : {};
+    const srcLang = normalizeLang(d.sourceLang) || normalizeLang(d.language) || 'auto';
+    const k = `${srcLang}:${lang}:${googleTranslate.stableHash(src)}`;
     const cached = getTrCached(k);
     if (typeof cached === 'string' && cached.trim()) {
       resolved[i] = clip160(cached);
@@ -188,6 +217,7 @@ async function translateItems({ docs, targetLang }) {
     }
     toTranslateIdx.push(i);
     toTranslateTexts.push(src);
+    toTranslateKeys.push(k);
   }
 
   if (!toTranslateTexts.length) {
@@ -209,7 +239,7 @@ async function translateItems({ docs, targetLang }) {
     const v = clip160(tr.items[j]);
     if (v) {
       resolved[i] = v;
-      const k = `${lang}::${toTranslateTexts[j]}`;
+      const k = toTranslateKeys[j];
       setTrCached(k, v);
     }
   }
@@ -230,8 +260,8 @@ router.get('/', async (req, res) => {
     const breakingDocs = Array.isArray(itemsBy?.breaking) ? itemsBy.breaking : [];
     const liveDocs = Array.isArray(itemsBy?.live) ? itemsBy.live : [];
 
-    const breakingItemsSrc = breakingDocs.map(resolveSourceText).map(String).filter(Boolean);
-    const liveItemsSrc = liveDocs.map(resolveSourceText).map(String).filter(Boolean);
+    const breakingItemsSrc = breakingDocs.map(resolveOriginalText).map(String).filter(Boolean);
+    const liveItemsSrc = liveDocs.map(resolveOriginalText).map(String).filter(Boolean);
 
     const breakingEnabled = computePublicEnabled(settings.breaking.enabled, settings.breaking.mode);
     const liveEnabled = computePublicEnabled(settings.live.enabled, settings.live.mode);
@@ -243,15 +273,25 @@ router.get('/', async (req, res) => {
         breaking: {
           enabled: Boolean(breakingEnabled),
           mode: settings.breaking.mode,
-          durationSec: settings.breaking.durationSec ?? settings.breaking.tickerSpeedSeconds,
-          tickerSpeedSeconds: settings.breaking.tickerSpeedSeconds,
+          ...mirrorDurationFields(
+            settings.breaking.durationSec ??
+            settings.breaking.tickerSpeedSeconds ??
+            settings.breaking.durationSeconds ??
+            settings.breaking.speedSec ??
+            settings.breaking.speed
+          ),
           items: breakingItemsSrc,
         },
         live: {
           enabled: Boolean(liveEnabled),
           mode: settings.live.mode,
-          durationSec: settings.live.durationSec ?? settings.live.tickerSpeedSeconds,
-          tickerSpeedSeconds: settings.live.tickerSpeedSeconds,
+          ...mirrorDurationFields(
+            settings.live.durationSec ??
+            settings.live.tickerSpeedSeconds ??
+            settings.live.durationSeconds ??
+            settings.live.speedSec ??
+            settings.live.speed
+          ),
           items: liveItemsSrc,
         },
       },
@@ -329,8 +369,8 @@ router.get('/', async (req, res) => {
       data: {
         translationFallback: true,
         translationError: true,
-        breaking: { enabled: false, mode: 'auto', tickerSpeedSeconds: 18, items: [] },
-        live: { enabled: false, mode: 'auto', tickerSpeedSeconds: 18, items: [] },
+        breaking: { enabled: false, mode: 'auto', ...mirrorDurationFields(18), items: [] },
+        live: { enabled: false, mode: 'auto', ...mirrorDurationFields(18), items: [] },
       },
     });
   }
