@@ -650,7 +650,7 @@ router.post('/items', requireAdminAuth, async (req, res) => {
     console.log('[broadcast] create item', `type=${type}`, `lang=${lang}`, `expiresInHours=${expiresInHours}`);
   } catch (_) {}
 
-  const resolvedLang = String(lang || 'gu').trim().toLowerCase();
+  const resolvedLang = _normalizeLangQuery(lang) || 'gu';
 
   // Optional: allow disabling auto-translation (best-effort by default).
   const autoTranslate = Object.prototype.hasOwnProperty.call(body, 'autoTranslate')

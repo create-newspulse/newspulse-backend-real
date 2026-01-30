@@ -35,9 +35,6 @@ async function translateMany(texts, targetLang, options = {}) {
   if (!arr.length) return { ok: true, items: [] };
   if (!lang) return { ok: false, error: 'Missing targetLang' };
 
-  // Allow skipping translation for Gujarati.
-  if (lang === 'gu') return { ok: true, items: arr };
-
   const apiKey = options.apiKey || process.env.GOOGLE_TRANSLATE_API_KEY;
   if (!apiKey) return { ok: false, error: 'Missing GOOGLE_TRANSLATE_API_KEY' };
 

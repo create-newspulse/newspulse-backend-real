@@ -158,6 +158,11 @@ function clip160(s) {
   return String(s || '').trim().slice(0, 160);
 }
 
+function resolveSourceLang(doc) {
+  const d = doc && typeof doc === 'object' ? doc : {};
+  return normalizeLang(d.sourceLang) || normalizeLang(d.language) || null;
+}
+
 function normalizeDurationSec(v, fallback = 18) {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -185,7 +190,7 @@ function resolveTextForLang(doc, lang) {
 
 function resolveOriginalText(doc) {
   const d = doc && typeof doc === 'object' ? doc : {};
-  const sourceLang = normalizeLang(d.sourceLang) || normalizeLang(d.language);
+  const sourceLang = resolveSourceLang(d);
   if (sourceLang) {
     const src = resolveTextForLang(d, sourceLang);
     if (src) return clip160(src);
@@ -194,11 +199,18 @@ function resolveOriginalText(doc) {
 }
 
 function resolveSourceText(doc) {
-  // Fallback order: any stored translation (gu->hi->en), then raw.
+  // Prefer the declared sourceLang text; otherwise fall back to any stored text.
   const d = doc && typeof doc === 'object' ? doc : {};
+  const srcLang = resolveSourceLang(d);
   const translations = d.translations && typeof d.translations === 'object' ? d.translations : null;
   const i18n = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
   const legacy = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
+
+  if (srcLang) {
+    const src = resolveTextForLang(d, srcLang);
+    if (src) return clip160(src);
+  }
+
   return clip160(
     (translations && typeof translations.gu === 'string' && translations.gu.trim() ? translations.gu : null) ||
     (i18n && typeof i18n.gu === 'string' && i18n.gu.trim() ? i18n.gu : null) ||
@@ -234,30 +246,56 @@ async function translateItems({ docs, targetLang }) {
   const lang = normalizeLang(targetLang) || 'en';
   const items = Array.isArray(docs) ? docs : [];
 
+  let storedHits = 0;
+  let cacheHits = 0;
+  let translatedCount = 0;
+  const sourceLangCounts = { en: 0, hi: 0, gu: 0, unknown: 0 };
+
+  // Resolve per-item sourceLang + sourceText first.
+  const sources = items.map((d) => {
+    const srcLang = resolveSourceLang(d);
+    if (srcLang === 'en' || srcLang === 'hi' || srcLang === 'gu') sourceLangCounts[srcLang]++;
+    else sourceLangCounts.unknown++;
+    const srcText = clip160(resolveOriginalText(d));
+    return { srcLang: srcLang || 'auto', srcText };
+  });
+
   // If targetLang text is already stored, return it without hitting translation.
   const stored = items.map((d) => resolveTextForLang(d, lang));
 
-  if (lang === 'gu') {
-    const texts = stored.map((t, i) => clip160(t || resolveSourceText(items[i]))).filter(Boolean);
-    return { ok: true, items: texts, usedTranslation: false, translationError: false };
-  }
-
-  const resolved = stored.map((t, i) => clip160(t || resolveSourceText(items[i])));
+  // Build initial resolved array: if target==sourceLang, use source; else use stored target if present; else source.
+  const resolved = items.map((d, i) => {
+    const srcLang = resolveSourceLang(d);
+    const srcText = sources[i].srcText;
+    if (srcLang && lang === srcLang) return clip160(srcText);
+    const st = stored[i];
+    if (st) {
+      storedHits++;
+      return clip160(st);
+    }
+    return clip160(srcText);
+  });
 
   // Translate only those which do NOT already have targetLang stored.
   const toTranslateIdx = [];
   const toTranslateTexts = [];
   const toTranslateKeys = [];
   for (let i = 0; i < items.length; i++) {
-    if (stored[i]) continue;
-    const src = resolved[i];
-    if (!src) continue;
     const d = items[i] && typeof items[i] === 'object' ? items[i] : {};
-    const srcLang = normalizeLang(d.sourceLang) || normalizeLang(d.language) || 'auto';
-    const k = `${srcLang}:${lang}:${googleTranslate.stableHash(src)}`;
+    const srcLang = resolveSourceLang(d);
+    // No translation needed when target equals source.
+    if (srcLang && lang === srcLang) continue;
+    // No translation needed when target is already stored.
+    if (stored[i]) continue;
+
+    const src = sources[i].srcText;
+    if (!src) continue;
+
+    const k = `${srcLang || 'auto'}:${lang}:${googleTranslate.stableHash(src)}`;
     const cached = getTrCached(k);
     if (typeof cached === 'string' && cached.trim()) {
       resolved[i] = clip160(cached);
+      cacheHits++;
       continue;
     }
     toTranslateIdx.push(i);
@@ -286,10 +324,23 @@ async function translateItems({ docs, targetLang }) {
       resolved[i] = v;
       const k = toTranslateKeys[j];
       setTrCached(k, v);
+      translatedCount++;
     }
   }
 
-  return { ok: true, items: resolved.filter(Boolean), usedTranslation: true, translationError: false };
+  return {
+    ok: true,
+    items: resolved.filter(Boolean),
+    usedTranslation: true,
+    translationError: false,
+    meta: {
+      targetLang: lang,
+      storedHits,
+      cacheHits,
+      translatedCount,
+      sourceLangCounts,
+    },
+  };
 }
 
 // GET /public-api/broadcast?lang=en|hi|gu
@@ -317,8 +368,16 @@ router.get('/', async (req, res) => {
     const breakingDocs = Array.isArray(itemsBy?.breaking) ? itemsBy.breaking : [];
     const liveDocs = Array.isArray(itemsBy?.live) ? itemsBy.live : [];
 
-    const breakingItemsSrc = breakingDocs.map(resolveOriginalText).map(String).filter(Boolean);
-    const liveItemsSrc = liveDocs.map(resolveOriginalText).map(String).filter(Boolean);
+    // Canonical source text + sourceLang summary (used for cache keys + deterministic translation).
+    const breakingSources = breakingDocs
+      .map((d) => ({ srcLang: resolveSourceLang(d) || 'auto', srcText: resolveOriginalText(d) }))
+      .filter((x) => x && x.srcText);
+    const liveSources = liveDocs
+      .map((d) => ({ srcLang: resolveSourceLang(d) || 'auto', srcText: resolveOriginalText(d) }))
+      .filter((x) => x && x.srcText);
+
+    const breakingItemsSrc = breakingSources.map((x) => String(x.srcText)).filter(Boolean);
+    const liveItemsSrc = liveSources.map((x) => String(x.srcText)).filter(Boolean);
 
     const breakingEnabled = computePublicEnabled(settings.breaking.enabled, settings.breaking.mode);
     const liveEnabled = computePublicEnabled(settings.live.enabled, settings.live.mode);
@@ -350,31 +409,59 @@ router.get('/', async (req, res) => {
       },
     };
 
-    // No translation required.
-    if (lang === 'gu') {
-      return res.status(200).json(_guardStripNumTokens(base, { lang }));
-    }
+    // NOTE: We intentionally do not short-circuit Gujarati: if sourceLang!=gu,
+    // target=gu may still require translation.
 
     const cacheKey = `public-api:broadcast:${lang}:` + hashKey([
       settings.breaking.enabled,
       settings.breaking.mode,
       settings.breaking.tickerSpeedSeconds,
-      breakingItemsSrc.join('\n'),
+      breakingDocs.map((d) => `${resolveSourceLang(d) || 'auto'}:${resolveOriginalText(d)}`).join('\n'),
       settings.live.enabled,
       settings.live.mode,
       settings.live.tickerSpeedSeconds,
-      liveItemsSrc.join('\n'),
+      liveDocs.map((d) => `${resolveSourceLang(d) || 'auto'}:${resolveOriginalText(d)}`).join('\n'),
     ]);
 
     if (!bypassCache) {
       const cached = getCached(cacheKey);
-      if (cached) return res.status(200).json(cached);
+      if (cached) {
+        if (isDevEnv()) {
+          try {
+            console.log('[public-api][broadcast] response cache hit', { targetLang: lang });
+          } catch (_) {}
+        }
+        return res.status(200).json(cached);
+      }
     }
 
     const [breakingTr, liveTr] = await Promise.all([
       translateItems({ docs: breakingDocs, targetLang: lang }),
       translateItems({ docs: liveDocs, targetLang: lang }),
     ]);
+
+    if (isDevEnv()) {
+      try {
+        if (breakingTr && breakingTr.meta) {
+          console.log('[public-api][broadcast] breaking translation', {
+            targetLang: breakingTr.meta.targetLang,
+            sourceLangCounts: breakingTr.meta.sourceLangCounts,
+            storedHits: breakingTr.meta.storedHits,
+            cacheHits: breakingTr.meta.cacheHits,
+            translatedCount: breakingTr.meta.translatedCount,
+          });
+        }
+        if (liveTr && liveTr.meta) {
+          console.log('[public-api][broadcast] live translation', {
+            targetLang: liveTr.meta.targetLang,
+            sourceLangCounts: liveTr.meta.sourceLangCounts,
+            storedHits: liveTr.meta.storedHits,
+            cacheHits: liveTr.meta.cacheHits,
+            translatedCount: liveTr.meta.translatedCount,
+          });
+        }
+      } catch (_) {}
+    }
 
     const payload = JSON.parse(JSON.stringify(base));
 
