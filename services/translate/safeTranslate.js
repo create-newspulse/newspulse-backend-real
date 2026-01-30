@@ -14,7 +14,9 @@ function isDbReady() {
 }
 
 function normalizeLang(v) {
-  const s = String(v ?? '').trim().toLowerCase();
+  const s0 = String(v ?? '').trim().toLowerCase();
+  if (!s0) return null;
+  const s = s0.split(/[-_]/)[0];
   if (s === 'en' || s === 'hi' || s === 'gu') return s;
   return null;
 }
@@ -142,7 +144,9 @@ function normalizeDigitsToAscii(s) {
 }
 
 function restoreNumericTokensFuzzy(text, placeholderMap) {
-  // Fix common Google token-mangling cases for numeric placeholders.
+  // Fix common token-mangling cases for numeric placeholders.
+  // NOTE: Numeric masking is intentionally avoided (prefer no masking).
+  // This remains as a last-resort safety net for legacy/provider artifacts.
   let out = String(text || '');
   out = out.replace(/__NUM(?:_[A-Z]+)*_(\d+)__/g, (m, idx) => {
     const key = `__NUM_${idx}__`;
@@ -161,6 +165,13 @@ function restoreNumericTokensFuzzy(text, placeholderMap) {
   out = out.replace(/\bNUM(?:_[A-Z]+)*(?:_\d+)?__/g, '');
   out = out.replace(/__NUM\s*(?=\d)/g, '');
   return out;
+}
+
+function stripLeakedNumTokens(text) {
+  return String(text || '')
+    .replace(/__NUM(?:_[A-Z]+)*(?:_\d+)?__/gi, '')
+    .replace(/\bNUM(?:_[A-Z]+)*(?:_\d+)?__/gi, '')
+    .replace(/__NUM\s*(?=\d)/gi, '');
 }
 
 function normalizeSpaces(text) {
@@ -347,9 +358,8 @@ async function safeTranslateText({ text, sourceLang, targetLang, context, strict
   const { text: t0, map: urlMap } = protectByRegex(original, urlRx, 'URL');
   const { text: t1, map: emailMap } = protectByRegex(t0, emailRx, 'EMAIL');
 
-  // Protect numbers/currency/percentages/dates
-  const numericRx = /(?:₹|\$|€|£)?\d+(?:,\d{3})*(?:\.\d+)?%?|\b\d+(?:\.\d+)?%\b|\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/g;
-  const { text: t2, map: numMap } = protectByRegex(t1, numericRx, 'NUM');
+  // Prefer no numeric masking. Digits are normalized after translation.
+  const t2 = t1;
 
   // Protect locked terms (best-effort; avoid huge regexes)
   let t3 = t2;
@@ -372,7 +382,7 @@ async function safeTranslateText({ text, sourceLang, targetLang, context, strict
     }
   }
 
-  const placeholderMap = mergeMaps(urlMap, emailMap, numMap, lockMap);
+  const placeholderMap = mergeMaps(urlMap, emailMap, lockMap);
 
   const rawTranslated = await googleTranslate(t3, source, target);
   if (!rawTranslated) {
@@ -384,7 +394,7 @@ async function safeTranslateText({ text, sourceLang, targetLang, context, strict
   }
 
   const restored = normalizeSpaces(restorePlaceholders(rawTranslated, placeholderMap));
-  const restoredSafe = normalizeDigitsToAscii(restoreNumericTokensFuzzy(restored, placeholderMap));
+  const restoredSafe = normalizeDigitsToAscii(stripLeakedNumTokens(restored));
   const placeholderTokens = [...placeholderMap.keys()];
   const placeholdersMissing = placeholderTokens.filter(t => restoredSafe.includes(t));
   if (placeholdersMissing.length) {

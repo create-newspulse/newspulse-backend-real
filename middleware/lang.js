@@ -1,5 +1,7 @@
 function normalizeLanguage(v) {
-  const s = String(v ?? '').trim().toLowerCase();
+  const s0 = String(v ?? '').trim().toLowerCase();
+  if (!s0) return null;
+  const s = s0.split(/[-_]/)[0];
   if (s === 'en' || s === 'hi' || s === 'gu') return s;
   return null;
 }

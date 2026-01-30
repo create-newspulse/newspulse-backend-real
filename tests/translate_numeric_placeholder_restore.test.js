@@ -13,8 +13,8 @@ test('Translate: numeric placeholders never leak and digits are restored', async
       json: async () => ({
         data: {
           translations: [
-            // Simulate a real-world mangled placeholder coming back from provider.
-            { translatedText: 'ચાંદીમાં ભાવ __NUM__NUM_NUM_0__ પર પહોંચ્યો' },
+            // Simulate translated output containing localized digits.
+            { translatedText: 'ચાંદીમાં ભાવ ૨૯૩૦૦૦ પર પહોંચ્યો' },
           ],
         },
       }),
@@ -25,7 +25,7 @@ test('Translate: numeric placeholders never leak and digits are restored', async
     const out = await googleTranslate.translate('Price reached 293000', 'en', 'gu');
 
     assert.ok(out, 'translation should return a string');
-    assert.ok(out.includes('293000'), 'digits should be restored as ASCII');
+    assert.ok(out.includes('293000'), 'digits should be normalized to ASCII');
     assert.ok(!out.includes('__NUM'), `should not contain __NUM tokens. got=${JSON.stringify(out)}`);
   } finally {
     global.fetch = prevFetch;

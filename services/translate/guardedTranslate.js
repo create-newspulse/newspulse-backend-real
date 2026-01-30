@@ -10,7 +10,9 @@ const { diceCoefficientWords } = require('./translationQa');
 const SUPPORTED = new Set(['en', 'hi', 'gu']);
 
 function _normalizeLang(v) {
-  const s = String(v || '').trim().toLowerCase();
+  const s0 = String(v || '').trim().toLowerCase();
+  if (!s0) return null;
+  const s = s0.split(/[-_]/)[0];
   return SUPPORTED.has(s) ? s : null;
 }
 
@@ -56,25 +58,12 @@ function _restore(text, map) {
   return out;
 }
 
-function _restoreNumericTokensFuzzy(text, numMap) {
+function _stripLeakedNumTokens(text) {
+  // Prefer no numeric masking. This is a safety net for legacy/provider artifacts like "__NUM__NUM_NUM_5__".
   let out = String(text || '');
-  out = _restore(out, numMap);
-
-  out = out.replace(/__NUM(?:_[A-Z]+)*_(\d+)__/g, (m, idx) => {
-    const key = `__NUM_${idx}__`;
-    const v = numMap && typeof numMap.get === 'function' ? numMap.get(key) : null;
-    return (typeof v === 'string' && v.length) ? v : m;
-  });
-
-  out = out.replace(/\bNUM(?:_[A-Z]+)*_(\d+)__/g, (m, idx) => {
-    const key = `__NUM_${idx}__`;
-    const v = numMap && typeof numMap.get === 'function' ? numMap.get(key) : null;
-    return (typeof v === 'string' && v.length) ? v : m;
-  });
-
-  out = out.replace(/__NUM(?:_[A-Z]+)*(?:_\d+)?__/g, '');
-  out = out.replace(/\bNUM(?:_[A-Z]+)*(?:_\d+)?__/g, '');
-  out = out.replace(/__NUM\s*(?=\d)/g, '');
+  out = out.replace(/__NUM(?:_[A-Z]+)*(?:_\d+)?__/gi, '');
+  out = out.replace(/\bNUM(?:_[A-Z]+)*(?:_\d+)?__/gi, '');
+  out = out.replace(/__NUM\s*(?=\d)/gi, '');
   return out;
 }
 
@@ -164,17 +153,15 @@ async function translateWithGuardrails(text, sourceLang, targetLang, options = {
   // Preserve URLs/emails/numbers + uppercase abbreviations + configured abbreviations list.
   const urlRx = /\b(?:https?:\/\/|www\.)[^\s]+/gi;
   const emailRx = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
-  const numericRx = /(?:₹|\$|€|£)?\d+(?:,\d{3})*(?:\.\d+)?%?|\b\d+(?:\.\d+)?%\b|\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/g;
   const allCapsRx = /\b[A-Z]{2,}\b/g;
 
   let t0 = withPT;
   const { text: t1, map: urlMap } = _protectByRegex(t0, urlRx, 'URL');
   const { text: t2, map: emailMap } = _protectByRegex(t1, emailRx, 'EMAIL');
-  const { text: t3, map: numMap } = _protectByRegex(t2, numericRx, 'NUM');
-  const { text: t4, map: capsMap } = _protectByRegex(t3, allCapsRx, 'CAPS');
+  const { text: t3, map: capsMap } = _protectByRegex(t2, allCapsRx, 'CAPS');
 
   // Protect configured abbreviations as exact tokens as well.
-  let q = t4;
+  let q = t3;
   const abbr = getAbbreviationsList();
   const abbrMap = new Map();
   if (abbr.length) {
@@ -196,7 +183,7 @@ async function translateWithGuardrails(text, sourceLang, targetLang, options = {
 
   const doPost = (translated) => {
     let out = _decodeBasicEntities(translated);
-    out = _restoreNumericTokensFuzzy(out, numMap);
+    out = _stripLeakedNumTokens(out);
     out = _restore(_restore(_restore(out, emailMap), urlMap), capsMap);
     for (const [token, value] of abbrMap.entries()) {
       out = out.split(token).join(value);

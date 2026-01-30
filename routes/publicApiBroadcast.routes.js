@@ -12,6 +12,11 @@ const googleTranslate = require('../services/googleTranslate.service');
 
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
 
+function isDevEnv() {
+  const env = String(process.env.NODE_ENV || '').trim().toLowerCase();
+  return env === 'development' || env === 'dev';
+}
+
 function _containsNumToken(s) {
   return /__NUM/i.test(String(s || ''));
 }
@@ -225,7 +230,8 @@ function mapItem(doc, targetLang, translatedText, meta = {}) {
 }
 
 async function translateItems({ docs, targetLang }) {
-  const lang = normalizeLang(targetLang) || 'gu';
+  // IMPORTANT: Never default to Gujarati for unknown/invalid langs.
+  const lang = normalizeLang(targetLang) || 'en';
   const items = Array.isArray(docs) ? docs : [];
 
   // If targetLang text is already stored, return it without hitting translation.
@@ -290,6 +296,12 @@ async function translateItems({ docs, targetLang }) {
 router.get('/', async (req, res) => {
   const lang = requestedLang(req) || 'en';
   const bypassCache = wantsNoCache(req);
+
+  if (isDevEnv()) {
+    try {
+      console.log('[public-api][broadcast] lang resolved', { resolvedLang: lang, targetLang: lang, bypassCache: Boolean(bypassCache) });
+    } catch (_) {}
+  }
 
   // Prevent edge/CDN caching from serving the wrong language.
   res.setHeader('Cache-Control', 'no-store');
