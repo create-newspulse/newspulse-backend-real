@@ -12,6 +12,45 @@ const googleTranslate = require('../services/googleTranslate.service');
 
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
 
+function _containsNumToken(s) {
+  return /__NUM/i.test(String(s || ''));
+}
+
+function _stripNumTokensFromString(s) {
+  // Last-resort safety net. We should never emit these tokens.
+  return String(s || '')
+    .replace(/__NUM(?:_[A-Z]+)*(?:_\d+)?__/gi, '')
+    .replace(/__NUM\s*(?=\d)/gi, '')
+    .trim();
+}
+
+function _guardStripNumTokens(payload, meta = {}) {
+  try {
+    const p = payload && typeof payload === 'object' ? payload : null;
+    if (!p) return payload;
+
+    const scrubItems = (arr, path) => {
+      if (!Array.isArray(arr)) return;
+      for (let i = 0; i < arr.length; i++) {
+        const v = arr[i];
+        if (typeof v !== 'string') continue;
+        if (!_containsNumToken(v)) continue;
+        const cleaned = _stripNumTokensFromString(v);
+        if (cleaned !== v) {
+          console.error('[public-api][broadcast] leaked __NUM token stripped', { path, index: i, ...meta });
+          arr[i] = cleaned;
+        }
+      }
+    };
+
+    scrubItems(p.breaking && p.breaking.items, 'breaking.items');
+    scrubItems(p.live && p.live.items, 'live.items');
+  } catch (_) {
+    // never block response
+  }
+  return payload;
+}
+
 function normalizeLang(v) {
   const s0 = String(v || '').trim().toLowerCase();
   if (!s0) return null;
@@ -301,7 +340,7 @@ router.get('/', async (req, res) => {
 
     // No translation required.
     if (lang === 'gu') {
-      return res.status(200).json(base);
+      return res.status(200).json(_guardStripNumTokens(base, { lang }));
     }
 
     const cacheKey = `public-api:broadcast:${lang}:` + hashKey([
@@ -346,7 +385,7 @@ router.get('/', async (req, res) => {
     // Critical: do NOT cache fallback payloads; prevents “stuck Gujarati” for en/hi.
     if (!bypassCache && !fallback) setCached(cacheKey, payload);
 
-    return res.status(200).json(payload);
+    return res.status(200).json(_guardStripNumTokens(payload, { lang, fallback }));
   } catch (e) {
     // Never crash: return safe defaults.
     try {

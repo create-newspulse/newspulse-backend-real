@@ -16,6 +16,23 @@ function _decodeBasicEntities(s) {
     .replace(/&nbsp;/g, ' ');
 }
 
+function _normalizeDigitsToAscii(s) {
+  // Convert common localized digit sets to ASCII digits.
+  // (Prevents Gujarati/Devanagari numerals from leaking to UI.)
+  const str = String(s || '');
+  const map = {
+    // Devanagari ०..९
+    '०': '0', '१': '1', '२': '2', '३': '3', '४': '4', '५': '5', '६': '6', '७': '7', '८': '8', '९': '9',
+    // Gujarati ૦..૯
+    '૦': '0', '૧': '1', '૨': '2', '૩': '3', '૪': '4', '૫': '5', '૬': '6', '૭': '7', '૮': '8', '૯': '9',
+    // Arabic-Indic ٠..٩
+    '٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4', '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9',
+    // Eastern Arabic-Indic ۰..۹
+    '۰': '0', '۱': '1', '۲': '2', '۳': '3', '۴': '4', '۵': '5', '۶': '6', '۷': '7', '۸': '8', '۹': '9',
+  };
+  return str.replace(/[०-९૦-૯٠-٩۰-۹]/g, (ch) => map[ch] || ch);
+}
+
 function _protectByRegex(text, regex, prefix) {
   const s = String(text || '');
   const map = new Map();
@@ -37,6 +54,34 @@ function _restore(text, map) {
   return out;
 }
 
+function _restoreNumericTokensFuzzy(text, numMap) {
+  let out = String(text || '');
+  // First pass: exact replacement.
+  out = _restore(out, numMap);
+
+  // Second pass: attempt to recover if Google altered token shape.
+  // Example seen in wild: "__NUM__NUM_NUM_5__" or "__NUM_NUM_5__".
+  out = out.replace(/__NUM(?:_[A-Z]+)*_(\d+)__/g, (m, idx) => {
+    const key = `__NUM_${idx}__`;
+    const v = numMap && typeof numMap.get === 'function' ? numMap.get(key) : null;
+    return (typeof v === 'string' && v.length) ? v : m;
+  });
+
+  // Some providers drop the leading "__" while keeping the trailing "__".
+  out = out.replace(/\bNUM(?:_[A-Z]+)*_(\d+)__/g, (m, idx) => {
+    const key = `__NUM_${idx}__`;
+    const v = numMap && typeof numMap.get === 'function' ? numMap.get(key) : null;
+    return (typeof v === 'string' && v.length) ? v : m;
+  });
+
+  // Final safety: strip any remaining NUM tokens (should be impossible after restore).
+  out = out.replace(/__NUM(?:_[A-Z]+)*(?:_\d+)?__/g, '');
+  out = out.replace(/\bNUM(?:_[A-Z]+)*(?:_\d+)?__/g, '');
+  // Some mangles drop the trailing "__" and concatenate with digits.
+  out = out.replace(/__NUM\s*(?=\d)/g, '');
+  return out;
+}
+
 async function translate(text, sourceLang, targetLang) {
   const apiKey = String(process.env.GOOGLE_TRANSLATE_API_KEY || '').trim();
   const raw = String(text || '').trim();
@@ -53,7 +98,7 @@ async function translate(text, sourceLang, targetLang) {
   // Never translate URLs/emails; keep numbers/currency/percentages/dates stable.
   const urlRx = /\b(?:https?:\/\/|www\.)[^\s]+/gi;
   const emailRx = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
-  const numericRx = /(?:₹|\$|€|£)?\d{1,3}(?:,\d{3})*(?:\.\d+)?%?|\b\d+(?:\.\d+)?%\b|\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/g;
+  const numericRx = /(?:₹|\$|€|£)?\d+(?:,\d{3})*(?:\.\d+)?%?|\b\d+(?:\.\d+)?%\b|\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/g;
 
   const { text: t0, map: urlMap } = _protectByRegex(raw, urlRx, 'URL');
   const { text: t1, map: emailMap } = _protectByRegex(t0, emailRx, 'EMAIL');
@@ -79,8 +124,10 @@ async function translate(text, sourceLang, targetLang) {
     const cleaned = _decodeBasicEntities(translated).trim();
     if (!cleaned) return null;
 
-    const restored = _restore(_restore(_restore(cleaned, numMap), emailMap), urlMap).trim();
-    return restored ? restored : null;
+    const restoredNums = _restoreNumericTokensFuzzy(cleaned, numMap);
+    const restored = _restore(_restore(restoredNums, emailMap), urlMap).trim();
+    const normalizedDigits = _normalizeDigitsToAscii(restored).trim();
+    return normalizedDigits ? normalizedDigits : null;
   } catch (_) {
     return null;
   }

@@ -24,6 +24,17 @@ function _decodeBasicEntities(s) {
     .replace(/&nbsp;/g, ' ');
 }
 
+function _normalizeDigitsToAscii(s) {
+  const str = String(s || '');
+  const map = {
+    '०': '0', '१': '1', '२': '2', '३': '3', '४': '4', '५': '5', '६': '6', '७': '7', '८': '8', '९': '9',
+    '૦': '0', '૧': '1', '૨': '2', '૩': '3', '૪': '4', '૫': '5', '૬': '6', '૭': '7', '૮': '8', '૯': '9',
+    '٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4', '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9',
+    '۰': '0', '۱': '1', '۲': '2', '۳': '3', '۴': '4', '۵': '5', '۶': '6', '۷': '7', '۸': '8', '۹': '9',
+  };
+  return str.replace(/[०-९૦-૯٠-٩۰-۹]/g, (ch) => map[ch] || ch);
+}
+
 function _protectByRegex(text, regex, prefix) {
   const s = String(text || '');
   const map = new Map();
@@ -42,6 +53,28 @@ function _restore(text, map) {
   for (const [token, value] of (map || new Map()).entries()) {
     out = out.split(token).join(value);
   }
+  return out;
+}
+
+function _restoreNumericTokensFuzzy(text, numMap) {
+  let out = String(text || '');
+  out = _restore(out, numMap);
+
+  out = out.replace(/__NUM(?:_[A-Z]+)*_(\d+)__/g, (m, idx) => {
+    const key = `__NUM_${idx}__`;
+    const v = numMap && typeof numMap.get === 'function' ? numMap.get(key) : null;
+    return (typeof v === 'string' && v.length) ? v : m;
+  });
+
+  out = out.replace(/\bNUM(?:_[A-Z]+)*_(\d+)__/g, (m, idx) => {
+    const key = `__NUM_${idx}__`;
+    const v = numMap && typeof numMap.get === 'function' ? numMap.get(key) : null;
+    return (typeof v === 'string' && v.length) ? v : m;
+  });
+
+  out = out.replace(/__NUM(?:_[A-Z]+)*(?:_\d+)?__/g, '');
+  out = out.replace(/\bNUM(?:_[A-Z]+)*(?:_\d+)?__/g, '');
+  out = out.replace(/__NUM\s*(?=\d)/g, '');
   return out;
 }
 
@@ -131,7 +164,7 @@ async function translateWithGuardrails(text, sourceLang, targetLang, options = {
   // Preserve URLs/emails/numbers + uppercase abbreviations + configured abbreviations list.
   const urlRx = /\b(?:https?:\/\/|www\.)[^\s]+/gi;
   const emailRx = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
-  const numericRx = /(?:₹|\$|€|£)?\d{1,3}(?:,\d{3})*(?:\.\d+)?%?|\b\d+(?:\.\d+)?%\b|\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/g;
+  const numericRx = /(?:₹|\$|€|£)?\d+(?:,\d{3})*(?:\.\d+)?%?|\b\d+(?:\.\d+)?%\b|\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/g;
   const allCapsRx = /\b[A-Z]{2,}\b/g;
 
   let t0 = withPT;
@@ -163,13 +196,16 @@ async function translateWithGuardrails(text, sourceLang, targetLang, options = {
 
   const doPost = (translated) => {
     let out = _decodeBasicEntities(translated);
-    out = _restore(_restore(_restore(_restore(out, numMap), emailMap), urlMap), capsMap);
+    out = _restoreNumericTokensFuzzy(out, numMap);
+    out = _restore(_restore(_restore(out, emailMap), urlMap), capsMap);
     for (const [token, value] of abbrMap.entries()) {
       out = out.split(token).join(value);
     }
     out = applyProtectedTermsPost(out, tokenMap, target);
     out = enforceProtectedTermsPostFix(out, target);
     out = _fixPunctuationSpacing(out);
+
+    out = _normalizeDigitsToAscii(out);
 
     if (target === 'hi') out = _cleanupHindi(out);
     if (target === 'gu') out = _cleanupGujarati(out);

@@ -130,6 +130,39 @@ function restorePlaceholders(text, map) {
   return out;
 }
 
+function normalizeDigitsToAscii(s) {
+  const str = String(s || '');
+  const map = {
+    '०': '0', '१': '1', '२': '2', '३': '3', '४': '4', '५': '5', '६': '6', '७': '7', '८': '8', '९': '9',
+    '૦': '0', '૧': '1', '૨': '2', '૩': '3', '૪': '4', '૫': '5', '૬': '6', '૭': '7', '૮': '8', '૯': '9',
+    '٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4', '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9',
+    '۰': '0', '۱': '1', '۲': '2', '۳': '3', '۴': '4', '۵': '5', '۶': '6', '۷': '7', '۸': '8', '۹': '9',
+  };
+  return str.replace(/[०-९૦-૯٠-٩۰-۹]/g, (ch) => map[ch] || ch);
+}
+
+function restoreNumericTokensFuzzy(text, placeholderMap) {
+  // Fix common Google token-mangling cases for numeric placeholders.
+  let out = String(text || '');
+  out = out.replace(/__NUM(?:_[A-Z]+)*_(\d+)__/g, (m, idx) => {
+    const key = `__NUM_${idx}__`;
+    const v = placeholderMap && typeof placeholderMap.get === 'function' ? placeholderMap.get(key) : null;
+    return (typeof v === 'string' && v.length) ? v : m;
+  });
+
+  out = out.replace(/\bNUM(?:_[A-Z]+)*_(\d+)__/g, (m, idx) => {
+    const key = `__NUM_${idx}__`;
+    const v = placeholderMap && typeof placeholderMap.get === 'function' ? placeholderMap.get(key) : null;
+    return (typeof v === 'string' && v.length) ? v : m;
+  });
+
+  // Final safety: strip any remaining NUM tokens.
+  out = out.replace(/__NUM(?:_[A-Z]+)*(?:_\d+)?__/g, '');
+  out = out.replace(/\bNUM(?:_[A-Z]+)*(?:_\d+)?__/g, '');
+  out = out.replace(/__NUM\s*(?=\d)/g, '');
+  return out;
+}
+
 function normalizeSpaces(text) {
   return String(text || '')
     .replace(/\s+/g, ' ')
@@ -315,7 +348,7 @@ async function safeTranslateText({ text, sourceLang, targetLang, context, strict
   const { text: t1, map: emailMap } = protectByRegex(t0, emailRx, 'EMAIL');
 
   // Protect numbers/currency/percentages/dates
-  const numericRx = /(?:₹|\$|€|£)?\d{1,3}(?:,\d{3})*(?:\.\d+)?%?|\b\d+(?:\.\d+)?%\b|\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/g;
+  const numericRx = /(?:₹|\$|€|£)?\d+(?:,\d{3})*(?:\.\d+)?%?|\b\d+(?:\.\d+)?%\b|\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b|\b\d{4}[\/-]\d{1,2}[\/-]\d{1,2}\b/g;
   const { text: t2, map: numMap } = protectByRegex(t1, numericRx, 'NUM');
 
   // Protect locked terms (best-effort; avoid huge regexes)
@@ -351,8 +384,9 @@ async function safeTranslateText({ text, sourceLang, targetLang, context, strict
   }
 
   const restored = normalizeSpaces(restorePlaceholders(rawTranslated, placeholderMap));
+  const restoredSafe = normalizeDigitsToAscii(restoreNumericTokensFuzzy(restored, placeholderMap));
   const placeholderTokens = [...placeholderMap.keys()];
-  const placeholdersMissing = placeholderTokens.filter(t => restored.includes(t));
+  const placeholdersMissing = placeholderTokens.filter(t => restoredSafe.includes(t));
   if (placeholdersMissing.length) {
     const warnings = ['placeholder_restore_failed'];
     if (safeMode) {
@@ -362,20 +396,20 @@ async function safeTranslateText({ text, sourceLang, targetLang, context, strict
 
   // Back-translation check (avoid doubling calls for very long bodies)
   let backTranslated = null;
-  if (restored.length <= 400 || strict) {
-    backTranslated = await googleTranslate(restored, target, source);
+  if (restoredSafe.length <= 400 || strict) {
+    backTranslated = await googleTranslate(restoredSafe, target, source);
   }
 
   const { score, warnings } = computeScore({
     sourceText: original,
-    translatedText: restored,
+    translatedText: restoredSafe,
     targetLang: target,
     placeholderMap: placeholderMap,
     backTranslatedText: backTranslated,
   });
 
   const accepted = score >= threshold;
-  const finalText = accepted ? restored : original;
+  const finalText = accepted ? restoredSafe : original;
 
   if (!accepted) warnings.push('below_threshold');
 
@@ -390,7 +424,7 @@ async function safeTranslateText({ text, sourceLang, targetLang, context, strict
       sourceText: original,
       sourceLang: source,
       targetLang: target,
-      translatedText: restored,
+      translatedText: restoredSafe,
       score,
       warnings,
     });
