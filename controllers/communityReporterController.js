@@ -316,7 +316,7 @@ async function submitCommunityReport(req, res) {
       reporterName: doc.reporterName,
     });
   } catch (e) {
-    console.error('[COMMUNITY_REPORT][submit-error]', e?.message || e);
+    console.error('[COMMUNITY_REPORT][submit-error]', e);
     return res.status(500).json({ ok: false, message: 'SERVER_ERROR' });
   }
 }

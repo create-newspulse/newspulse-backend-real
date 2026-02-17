@@ -6,6 +6,11 @@ const _nodeEnvEarly = String(process.env.NODE_ENV || 'development').toLowerCase(
 const _isRenderEarly = !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
 const _isProdEarly = _nodeEnvEarly === 'production' || _isRenderEarly;
 
+// If the developer explicitly sets PORT in the shell, preserve it.
+// (dotenv override is enabled for local dev to avoid stale envs, but PORT is a
+// common one to intentionally override when multiple instances are running.)
+const _preDotenvPort = process.env.PORT;
+
 // IMPORTANT:
 // - Local dev: allow .env to override any stale shell environment vars.
 // - Production (Render): NEVER override Render-provided env vars from the repo's .env.
@@ -14,6 +19,10 @@ require('dotenv').config({
   path: path.join(__dirname, '.env'),
   override: !_isProdEarly,
 });
+
+if (_preDotenvPort) {
+  process.env.PORT = _preDotenvPort;
+}
 
 // Backward-compat: older setups used MONGO_URI.
 // Prefer MONGODB_URI, but if only MONGO_URI exists, alias it.
