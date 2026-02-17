@@ -23,7 +23,7 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   state: { type: String, required: false, trim: true },
   country: { type: String, required: false, trim: true },
   // Submission content
-  category: { type: String, required: false, trim: true, default: 'community' },
+  category: { type: String, required: true, trim: true },
   headline: { type: String, required: true, trim: true, maxlength: 200 },
   body: { type: String, required: true, trim: true, maxlength: 10000 },
   mediaUrl: { type: String, required: false, trim: true },

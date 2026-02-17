@@ -200,10 +200,9 @@ router.post('/submissions', async (req, res) => {
       fullName,
       email,
       location,
+      category,
       headline,
       story,
-      ageGroup,
-      category,
       phone,
       city,
       state,
@@ -224,6 +223,8 @@ router.post('/submissions', async (req, res) => {
     const errors = [];
     if (!name || !String(name).trim()) errors.push('name required');
     if (!email || !String(email).trim()) errors.push('email required');
+    if (!location || !String(location).trim()) errors.push('location required');
+    if (!category || !String(category).trim()) errors.push('category required');
     if (!headline || !String(headline).trim()) errors.push('headline required');
     if (!story || !String(story).trim()) errors.push('story required');
     if (errors.length) return res.status(400).json({ success: false, message: 'Validation failed', errors });
@@ -270,8 +271,7 @@ router.post('/submissions', async (req, res) => {
       // Legacy/alias fields for compatibility
       name: (name || '').trim(),
       email: (email || '').trim().toLowerCase(),
-      ageGroup: (ageGroup === undefined || ageGroup === null) ? undefined : String(ageGroup).trim(),
-      category: (category ? String(category).trim() : 'community'),
+      category: (category || '').trim(),
       headline: (headline || '').trim(),
       body: (story || '').trim(), // underlying field
       // Normalized location object expected by schema
@@ -320,7 +320,7 @@ router.post('/submissions', async (req, res) => {
       createdAt: submission.createdAt,
     }});
   } catch (e) {
-    console.error('[COMMUNITY_REPORTER][create-error]', e);
+    console.error('[COMMUNITY_REPORTER][create-error]', e?.message || e);
     return res.status(500).json({ success: false, message: 'Server error creating submission' });
   }
 });
@@ -406,55 +406,8 @@ router.get('/reporter-stories', async (req, res) => {
   }
 });
 
-// Phase 1 endpoint (public): simplified submit payload
-// POST /api/community-reporter/submit
-// Accepts: { name, email, location, headline, story, ageGroup }
-router.post('/submit', async (req, res) => {
-  try {
-    const body = req.body || {};
-    const {
-      name,
-      email,
-      location,
-      headline,
-      story,
-      ageGroup,
-    } = body;
-
-    const reporterName = String(name || '').trim();
-    const reporterEmail = String(email || '').trim().toLowerCase();
-    const reporterLocation = String(location || '').trim();
-    const headlineNorm = String(headline || '').trim();
-    const storyNorm = String(story || '').trim();
-    const ageGroupNorm = (ageGroup === undefined || ageGroup === null) ? undefined : String(ageGroup).trim();
-
-    const errors = [];
-    if (!reporterName) errors.push('name required');
-    if (!reporterEmail) errors.push('email required');
-    if (!headlineNorm) errors.push('headline required');
-    if (!storyNorm) errors.push('story required');
-    if (errors.length) {
-      return res.status(400).json({ ok: false, message: 'Validation failed', errors });
-    }
-
-    const submission = await CommunitySubmission.create({
-      reporterName,
-      reporterEmail,
-      reporterLocation: reporterLocation || undefined,
-      name: reporterName,
-      email: reporterEmail,
-      headline: headlineNorm,
-      body: storyNorm,
-      ageGroup: ageGroupNorm,
-      status: 'under_review',
-    });
-
-    return res.status(201).json({ ok: true, id: submission._id.toString() });
-  } catch (e) {
-    console.error('[COMMUNITY_REPORTER][submit-error]', e);
-    return res.status(500).json({ ok: false, message: 'Server error creating submission' });
-  }
-});
+// Phase 1 endpoints (public): submit + list by email
+router.post('/submit', submitCommunityReport);
 // Keep legacy handler exported but our above inline endpoint returns desired shape
 // router.get('/my-stories', listMyCommunityReports);
 
