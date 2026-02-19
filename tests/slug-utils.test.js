@@ -17,8 +17,9 @@ test('getSlugCandidates returns both raw+decoded normalized forms', () => {
   const encoded = '%E0%A4%85%E0%A4%97%E0%A4%B0';
   const candidates = getSlugCandidates(encoded);
 
-  // Raw path form is preserved (normalized), plus decoded Unicode.
-  assert.ok(candidates.includes(encoded.toLowerCase()));
+  // Raw path form is preserved exactly (to match legacy percent-encoded storage),
+  // plus the decoded Unicode.
+  assert.ok(candidates.includes(encoded));
   assert.ok(candidates.includes('अगर'));
   assert.equal(new Set(candidates).size, candidates.length);
 });

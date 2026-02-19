@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const News = require('../models/News');
+const { safeDecodeURIComponent } = require('../lib/slug');
 
 function normalizeLanguage(v) {
   const s = String(v ?? '').trim().toLowerCase();
@@ -91,5 +92,30 @@ exports.updateNews = async (req, res) => {
     return res.json({ message: 'News updated successfully' });
   } catch (error) {
     return res.status(500).json({ error: error.message });
+  }
+};
+
+// GET /api/news/slug/:slug
+// Public-ish compatibility endpoint used by some clients.
+// Must tolerate percent-encoded and decoded Unicode slugs.
+exports.getPublishedNewsBySlug = async (req, res) => {
+  try {
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      return res.status(503).json({ success: false, message: 'Database unavailable' });
+    }
+
+    const raw = String(req.params.slug ?? '').trim();
+    if (!raw) return res.status(400).json({ success: false, message: 'Missing slug' });
+
+    const decoded = String(safeDecodeURIComponent(raw) ?? '').trim();
+
+    const article =
+      (await News.findOne({ slug: decoded, status: 'published' }).lean()) ||
+      (await News.findOne({ slug: raw, status: 'published' }).lean());
+
+    if (!article) return res.status(404).json({ success: false });
+    return res.json({ success: true, data: article });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error?.message || String(error) });
   }
 };

@@ -9,12 +9,15 @@
 
 const express = require('express');
 const router = express.Router();
-const { createNews, getNews, updateNews } = require('../controllers/newsController');
+const { createNews, getNews, updateNews, getPublishedNewsBySlug } = require('../controllers/newsController');
 
 // Primary root path so mounted at /api/news gives /api/news (list/create)
 router.route('/').post(createNews).get(getNews);
 // Backward compatibility path (legacy double /news/news)
 router.route('/news').post(createNews).get(getNews);
+
+// Compatibility: lookup published news by slug (unicode-safe)
+router.get('/slug/:slug', getPublishedNewsBySlug);
 
 // Update by id (non-breaking addition)
 router.route('/:id').put(updateNews).patch(updateNews);
