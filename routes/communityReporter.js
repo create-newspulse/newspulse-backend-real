@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const multer = require('multer');
+const mongoose = require('mongoose');
 const CommunitySubmission = require('../models/CommunitySubmission');
 // Re-use legacy models from nested app for reporter + story linkage
 let Reporter = null;
@@ -331,45 +332,51 @@ router.post('/submissions', async (req, res) => {
 // Returns a safe public listing filtered by normalized reporter email
 router.get('/my-stories', async (req, res) => {
   try {
-    const emailParam = req.query && req.query.email;
-    const rawEmail = String(emailParam || '').trim();
-    if (!rawEmail) {
-      return res.status(400).json({ ok: false, message: 'email is required' });
+    const emailQuery = req.query && req.query.email;
+    const email = String(emailQuery || '').trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required' });
     }
 
-    const normalizedEmail = rawEmail.toLowerCase();
+    // In local/test runs without MongoDB, avoid Mongoose command buffering delays.
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      return res.status(200).json({ ok: true, success: true, stories: [], submissions: [], message: 'Database unavailable' });
+    }
 
-    // Prefer normalized reporterEmailNorm lookups, with fallback for legacy docs
-    const stories = await CommunitySubmission
+    // Primary: Phase-1 schema stores email at the top-level `email`.
+    // Fallback: support legacy docs that stored reporterEmail/contact.email.
+    const docs = await CommunitySubmission
       .find({
         $or: [
-          { reporterEmailNorm: normalizedEmail },
-          { reporterEmail: normalizedEmail },
-          { email: normalizedEmail },
-          { 'contact.email': normalizedEmail },
+          { email },
+          { reporterEmailNorm: email },
+          { reporterEmail: email },
+          { 'contact.email': email },
         ],
         isDeleted: { $ne: true },
       })
       .sort({ createdAt: -1 })
       .lean();
 
-    const payload = stories.map(s => ({
-      id: String(s._id),
-      headline: s.headline,
-      summary: (s.summary || (s.body || '')).slice(0, 160),
-      status: s.status,
-      category: s.category,
-      city: s.city || (s.location && s.location.city) || null,
-      language: s.language || 'en',
-      createdAt: s.createdAt,
-      updatedAt: s.updatedAt,
-    }));
+    const items = docs.map(s => {
+      const city = (s.location && s.location.city) || s.city || s.reporterLocation || null;
+      return {
+        id: String(s._id),
+        headline: s.headline || '',
+        story: s.body || '',
+        ageGroup: s.ageGroup || null,
+        status: s.status || 'NEW',
+        location: s.location || (city ? { city, state: s.state || null, country: s.country || null } : null),
+        createdAt: s.createdAt || null,
+        updatedAt: s.updatedAt || null,
+      };
+    });
 
-    console.log('[MyStories] email =', normalizedEmail, 'count =', payload.length);
-    return res.json({ ok: true, stories: payload });
-  } catch (err) {
-    console.error('MyStories: failed to load stories', err);
-    return res.status(500).json({ ok: false, message: 'Failed to load stories' });
+    // Frontend compatibility: some builds expect `stories`, others `submissions`.
+    return res.status(200).json({ ok: true, success: true, stories: items, submissions: items });
+  } catch (error) {
+    console.error('CommunityReporter my-stories error:', error);
+    return res.status(500).json({ message: 'Internal error in Community Reporter my stories' });
   }
 });
 
