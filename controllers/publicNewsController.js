@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const News = require('../models/News');
 const { safeTranslateText, normalizeLang } = require('../services/translate/safeTranslate');
+const { getSlugCandidates } = require('../lib/slug');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -364,9 +365,14 @@ async function getPublicNewsBySlugOrId(req, res) {
     // Prefer requested language doc when available.
     const requestedLang = getRequestedLang(req);
 
-    const lookup = isObjectIdLike(slugOrIdRaw)
-      ? { _id: slugOrIdRaw }
-      : { slug: slugOrIdRaw.toLowerCase() };
+    let lookup;
+    if (isObjectIdLike(slugOrIdRaw)) {
+      lookup = { _id: slugOrIdRaw };
+    } else {
+      const slugCandidates = getSlugCandidates(slugOrIdRaw);
+      const slugFilter = slugCandidates.length === 1 ? slugCandidates[0] : { $in: slugCandidates };
+      lookup = { slug: slugFilter };
+    }
 
     if (requestedLang) {
       const byLangFilter = { ...base, ...lookup, $and: [...(base.$and || [])] };

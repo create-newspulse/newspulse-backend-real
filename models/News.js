@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { canonicalizeSlug } = require('../lib/slug');
 
 // Workflow stages
 // Admin panel (new) expects lowercase identifiers.
@@ -126,6 +127,18 @@ const newsSchema = new mongoose.Schema({
   source: { type: String, index: true }, // e.g. 'community', 'editor'
   communityReportId: { type: mongoose.Schema.Types.ObjectId, ref: 'CommunitySubmission', index: true },
 }, { timestamps: true });
+
+// Store slugs as plain Unicode (not percent-encoded) so lookups are stable across clients.
+newsSchema.pre('validate', function preValidate(next) {
+  try {
+    if (this.isModified('slug')) {
+      this.slug = canonicalizeSlug(this.slug);
+    }
+    return next();
+  } catch (e) {
+    return next(e);
+  }
+});
 
 // Virtual alias so UI can use `body` consistently
 newsSchema.virtual('body')

@@ -4,6 +4,7 @@ const Article = require('../models/Article');
 const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const PushHistory = require('../models/PushHistory');
+const { canonicalizeSlug, getSlugCandidates } = require('../lib/slug');
 
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
@@ -50,8 +51,7 @@ function _parseSafeSort(raw, allowedFields, fallbackField = 'updatedAt', fallbac
 }
 
 function normalizeSlug(slug) {
-  const s = String(slug || '').trim().toLowerCase();
-  return s;
+  return canonicalizeSlug(slug);
 }
 
 function slugifyFromTitle(title) {
@@ -65,7 +65,9 @@ function slugifyFromTitle(title) {
 
 async function assertSlugUnique(slug, excludeId) {
   if (!slug) return;
-  const q = { slug };
+  const candidates = getSlugCandidates(slug);
+  const slugFilter = candidates.length === 1 ? candidates[0] : { $in: candidates };
+  const q = { slug: slugFilter };
   if (excludeId) q._id = { $ne: excludeId };
   const existing = await News.findOne(q).select('_id slug').lean();
   if (existing) {

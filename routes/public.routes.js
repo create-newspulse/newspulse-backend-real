@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 // "Stories" in this backend map to the public Article model.
 // If your frontend uses a different shape/model, tell me and I’ll swap it.
 const Article = require('../models/Article');
+const { getSlugCandidates } = require('../lib/slug');
 
 const router = express.Router();
 
@@ -48,12 +49,13 @@ router.get('/stories/:slug', async (req, res) => {
       return res.status(200).json({ success: false, message: 'Database unavailable' });
     }
 
-    const slug = String(req.params.slug || '').trim().toLowerCase();
-    if (!slug) {
+    const candidates = getSlugCandidates(req.params.slug);
+    if (!candidates.length) {
       return res.status(400).json({ success: false, message: 'Missing slug' });
     }
 
-    const story = await Article.findOne({ slug, status: 'published' }).lean();
+    const slugFilter = candidates.length === 1 ? candidates[0] : { $in: candidates };
+    const story = await Article.findOne({ slug: slugFilter, status: 'published' }).lean();
     if (!story) {
       return res.status(404).json({ success: false, message: 'Story not found' });
     }

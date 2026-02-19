@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { canonicalizeSlug } = require('../../lib/slug');
 
 const WORKFLOW_STAGES = [
   'DRAFT',
@@ -87,6 +88,18 @@ const newsSchema = new mongoose.Schema({
     ],
     default: [],
   },
+});
+
+// Store slugs as plain Unicode (not percent-encoded) so lookups are stable across clients.
+newsSchema.pre('validate', function preValidate(next) {
+  try {
+    if (this.isModified('slug')) {
+      this.slug = canonicalizeSlug(this.slug);
+    }
+    return next();
+  } catch (e) {
+    return next(e);
+  }
 });
 
 newsSchema.index({ workflowStage: 1, workflowUpdatedAt: -1 });

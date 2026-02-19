@@ -1,6 +1,7 @@
 const Article = require('../models/Article');
 const { CATEGORY_VALUES, LANGUAGE_VALUES } = require('../models/Article');
 const mongoose = require('mongoose');
+const { getSlugCandidates } = require('../lib/slug');
 
 function parseBool(v) {
   if (v === undefined || v === null || v === '') return undefined;
@@ -15,7 +16,9 @@ function escapeRegex(s) {
 }
 
 function normalizeSlug(slug) {
-  return String(slug || '').trim().toLowerCase();
+  // Keep backward-compat callers, but normalize via candidate logic.
+  const c = getSlugCandidates(slug);
+  return c[0] || '';
 }
 
 function shouldDeferToAdminArticlesRouter(req) {
@@ -119,12 +122,14 @@ async function getArticleBySlug(req, res, next) {
     if (mongoose.connection.readyState !== 1) {
       return res.status(503).json({ message: 'Database not connected' });
     }
-    const slug = normalizeSlug(req.params.slug);
+    const candidates = getSlugCandidates(req.params.slug);
+    const slug = candidates[0] || '';
 
     // If this looks like a Mongo ObjectId, defer to the existing /api/articles/:id route.
     if (/^[0-9a-f]{24}$/i.test(slug)) return next();
 
-    const filter = { slug, status: 'published' };
+    const slugFilter = candidates.length === 1 ? slug : { $in: candidates };
+    const filter = { slug: slugFilter, status: 'published' };
 
     const doc = await Article.findOne(filter).lean();
     if (!doc) {

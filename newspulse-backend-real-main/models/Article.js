@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { canonicalizeSlug } = require('../../lib/slug');
 
 const CATEGORY_VALUES = [
   'breaking',
@@ -45,6 +46,18 @@ const articleSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// Store slugs as plain Unicode (not percent-encoded) so lookups are stable across clients.
+articleSchema.pre('validate', function preValidate(next) {
+  try {
+    if (this.isModified('slug')) {
+      this.slug = canonicalizeSlug(this.slug);
+    }
+    return next();
+  } catch (e) {
+    return next(e);
+  }
+});
 
 articleSchema.pre('save', function preSave(next) {
   try {
