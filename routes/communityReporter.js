@@ -10,7 +10,8 @@ let ReporterStory = null;
 try { Reporter = require('../newspulse-backend-real-main/models/Reporter'); } catch (_) {}
 try { ReporterStory = require('../newspulse-backend-real-main/models/CommunityStory'); } catch (_) {}
 const { runCommunityAiChecks } = require('../services/communityAi');
-const { submitCommunityReport, listMyCommunityReports } = require('../controllers/communityReporterController');
+// NOTE: Phase-1 /submit handler is implemented inline below for clarity and
+// to keep it fully aligned with the public form payload.
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
 const router = express.Router();
@@ -407,7 +408,55 @@ router.get('/reporter-stories', async (req, res) => {
 });
 
 // Phase 1 endpoints (public): submit + list by email
-router.post('/submit', submitCommunityReport);
+// POST /api/community-reporter/submit
+router.post('/submit', async (req, res) => {
+  try {
+    const { name, email, location, headline, story, ageGroup } = req.body || {};
+
+    if (!name || !email || !headline || !story || !ageGroup) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    const nameNorm = String(name).trim();
+    const emailNorm = String(email).trim().toLowerCase();
+    const headlineNorm = String(headline).trim();
+    const storyNorm = String(story).trim();
+    const ageGroupNorm = String(ageGroup).trim();
+
+    const locationObj = (location && typeof location === 'object') ? location : null;
+    const locationText = (typeof location === 'string') ? location.trim() : undefined;
+
+    const submission = await CommunitySubmission.create({
+      name: nameNorm,
+      email: emailNorm,
+      reporterName: nameNorm,
+      reporterEmail: emailNorm,
+      reporterLocation: locationText,
+      location: locationObj ? {
+        city: locationObj.city ?? null,
+        state: locationObj.state ?? null,
+        country: locationObj.country ?? null,
+      } : (locationText ? { city: locationText || null, state: null, country: null } : { city: null, state: null, country: null }),
+      headline: headlineNorm,
+      story: storyNorm,
+      ageGroup: ageGroupNorm,
+      status: 'NEW',
+      sourceType: 'community',
+      reporterVerificationLevel: 'unverified',
+      ipAddress: req.ip ? String(req.ip) : undefined,
+      userAgent: req.get('user-agent') ? String(req.get('user-agent')) : undefined,
+    });
+
+    return res.status(201).json({ success: true, id: submission._id });
+  } catch (error) {
+    console.error('CommunityReporterSubmit error:', error);
+    // Surface validation errors as 400s to avoid noisy 500s for bad payloads.
+    if (error && (error.name === 'ValidationError' || error.code === 11000)) {
+      return res.status(400).json({ message: 'Invalid submission payload' });
+    }
+    return res.status(500).json({ message: 'Internal error in Community Reporter submit' });
+  }
+});
 // Keep legacy handler exported but our above inline endpoint returns desired shape
 // router.get('/my-stories', listMyCommunityReports);
 

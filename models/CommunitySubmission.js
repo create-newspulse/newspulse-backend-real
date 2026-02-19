@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 // Phase 1 Community Reporter simplified semantics are layered on top of
 // the existing (more advanced) schema. We keep the extended fields for
-// forward compatibility but expose a virtual "story" field and map
+// forward compatibility and accept Phase-1 "story" via an alias to "body".
 // simplified statuses via the API layer. (pending -> NEW, approved -> APPROVED, rejected -> REJECTED)
 // Relaxed schema: only core fields required; no enums to avoid 500s on new labels.
 const CommunitySubmissionSchema = new mongoose.Schema({
@@ -12,10 +12,13 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   // Normalized reporter email for consistent lookups
   reporterEmailNorm: { type: String, required: false, index: true },
   // Optional aliases preserved for backward compatibility and API expectations
-  name: { type: String, required: false, trim: true },
-  email: { type: String, required: false, trim: true, lowercase: true },
+  // Phase-1 fields (frontend sends these). We make them required but backfill
+  // them automatically from reporterName/reporterEmail for compatibility.
+  name: { type: String, required: true, trim: true },
+  email: { type: String, required: true, trim: true, lowercase: true },
   userName: { type: String, required: false, trim: true },
-  ageGroup: { type: String, required: false, trim: true },
+  // Phase-1 required; provide safe default for legacy endpoints that don't send it.
+  ageGroup: { type: String, required: true, trim: true, default: 'UNKNOWN' },
   reporterAgeGroup: { type: String, required: false, trim: true },
   // Location fields (string legacy fields remain optional for back-compat)
   reporterLocation: { type: String, required: false, trim: true },
@@ -23,15 +26,18 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   state: { type: String, required: false, trim: true },
   country: { type: String, required: false, trim: true },
   // Submission content
-  category: { type: String, required: true, trim: true },
+  category: { type: String, required: false, trim: true, default: null },
   headline: { type: String, required: true, trim: true, maxlength: 200 },
-  body: { type: String, required: true, trim: true, maxlength: 10000 },
+  // Use `body` as the stored field; accept `story` as an alias so Phase-1 payloads
+  // can send { story: "..." } without causing validation errors.
+  body: { type: String, required: true, trim: true, maxlength: 50000, alias: 'story' },
   mediaUrl: { type: String, required: false, trim: true },
   mediaLink: { type: String, required: false, trim: true },
   // Meta / status
   acceptTerms: { type: Boolean, required: false, default: false },
   acceptedPolicy: { type: Boolean, required: false, default: false },
-  status: { type: String, required: false, trim: true, default: 'under_review', index: true },
+  // Default aligns with Phase-1 endpoint; legacy endpoints may set other status labels.
+  status: { type: String, required: false, trim: true, default: 'NEW', index: true },
   // Decision metadata
   decisionBy: { type: String, required: false, trim: true },
   rejectReason: { type: String, required: false, trim: true },
@@ -96,11 +102,6 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   withdrawnAt: { type: Date, required: false },
 }, { timestamps: true });
 
-// Virtual alias so Phase 1 routes can use "story" seamlessly
-CommunitySubmissionSchema.virtual('story')
-  .get(function() { return this.body; })
-  .set(function(v) { this.body = v; });
-
 // NOTE: Do not define a virtual named 'userName' because it conflicts with the real path.
 // If a display alias is needed elsewhere, use 'reporterDisplayName' via application-level mapping.
 // Safe display virtual preferring contact.name, then userName fallbacks.
@@ -121,6 +122,21 @@ CommunitySubmissionSchema.pre('save', function(next) {
       this.reporterEmailNorm = String(this.email).trim().toLowerCase();
     } else if (this.contact && this.contact.email) {
       this.reporterEmailNorm = String(this.contact.email).trim().toLowerCase();
+    }
+  } catch (_) {}
+  next();
+});
+
+// Backfill Phase-1 aliases before validation so required(name/email) never 500s
+// when legacy endpoints only provide reporterName/reporterEmail.
+CommunitySubmissionSchema.pre('validate', function(next) {
+  try {
+    if (!this.name && this.reporterName) this.name = String(this.reporterName).trim();
+    if (!this.email && this.reporterEmail) this.email = String(this.reporterEmail).trim().toLowerCase();
+
+    // Prefer explicit ageGroup, else fall back to reporterAgeGroup, else keep default.
+    if ((!this.ageGroup || this.ageGroup === 'UNKNOWN') && this.reporterAgeGroup) {
+      this.ageGroup = String(this.reporterAgeGroup).trim();
     }
   } catch (_) {}
   next();
