@@ -216,108 +216,81 @@ async function getCommunityReporterAnalytics(req, res, next) {
 // POST /api/community-reporter/submit
 async function submitCommunityReport(req, res) {
   try {
-    console.log('[community-reporter-submit] incoming body', req.body);
     const body = req.body || {};
-    // Support both nested payload ({ reporter, story }) and flat fields
+    if (process.env.COMMUNITY_REPORTER_DEBUG_SUBMIT === '1') {
+      console.log('[COMMUNITY_REPORTER][submit] incoming body', body);
+    }
+
+    // Support both nested payload ({ reporter, story }) and flat Phase-1 fields
     const reporter = body.reporter || {};
     const story = body.story || {};
 
-    const reporterName = (reporter.fullName || body.reporterName || '').trim();
-    const reporterEmail = (reporter.email || body.reporterEmail || '').trim().toLowerCase();
-    const reporterPhone = reporter.phone || body.reporterPhone || undefined;
-    const reporterCity = reporter.city || body.reporterCity || undefined;
-    const reporterState = reporter.state || body.reporterState || undefined;
-    const reporterCountry = reporter.country || body.reporterCountry || undefined;
-    const reporterTypeRaw = (reporter.reporterType || body.reporterType || 'community').toString();
-    const preferredLanguages = Array.isArray(reporter.preferredLanguages) ? reporter.preferredLanguages : (Array.isArray(body.preferredLanguages) ? body.preferredLanguages : undefined);
+    const name = String(
+      body.name ||
+      reporter.fullName ||
+      reporter.name ||
+      body.fullName ||
+      body.reporterName ||
+      ''
+    ).trim();
 
-    const category = (story.category || body.category || '').trim();
-    const headline = (story.headline || body.headline || '').trim();
-    const storyText = (story.body || body.storyText || '').trim();
-    const ageGroup = story.ageGroup || body.ageGroup || undefined;
-    const locationCity = story.locationCity || undefined;
-    const locationState = story.locationState || undefined;
-    const urgency = story.urgency || 'normal';
-    const canContact = ('canContact' in story) ? !!story.canContact : true;
+    const email = String(
+      body.email ||
+      reporter.email ||
+      body.reporterEmail ||
+      ''
+    ).trim().toLowerCase();
 
-    const agreesToEthics = ('agreesToEthics' in reporter) ? reporter.agreesToEthics : undefined;
+    const location = body.location ?? reporter.location ?? undefined;
 
-    // Basic validation -> 400, not 500
-    if (!reporterName || !reporterEmail || !reporterPhone || !category || !headline || !storyText) {
-      return res.status(400).json({
-        ok: false,
-        message: 'VALIDATION_ERROR',
-        details: {
-          reporterName: Boolean(reporterName),
-          reporterEmail: Boolean(reporterEmail),
-          reporterPhone: Boolean(reporterPhone),
-          category: Boolean(category),
-          headline: Boolean(headline),
-          story: Boolean(storyText),
-        }
-      });
+    const headline = String(
+      body.headline ||
+      story.headline ||
+      ''
+    ).trim();
+
+    const storyText = String(
+      body.story ||
+      body.storyText ||
+      story.body ||
+      story.storyText ||
+      ''
+    ).trim();
+
+    const ageGroup = String(body.ageGroup || story.ageGroup || '').trim();
+
+    if (!name || !email || !headline || !storyText || !ageGroup) {
+      return res.status(400).json({ message: 'Missing required fields' });
     }
-    if (agreesToEthics !== undefined && agreesToEthics !== true) {
-      return res.status(400).json({ ok: false, message: 'VALIDATION_ERROR', details: { agreesToEthics: false } });
-    }
 
-    const doc = new CommunityReport({
-      reporterName: String(reporterName).trim(),
-      reporterEmail: String(reporterEmail).trim().toLowerCase(),
-      reporterPhone: reporterPhone || undefined,
-      reporterCity: (locationCity || reporterCity) || undefined,
-      reporterState: (locationState || reporterState) || undefined,
-      reporterCountry: reporterCountry || undefined,
-      reporterType: (reporterTypeRaw === 'professional' || reporterTypeRaw === 'journalist') ? 'professional' : 'community',
-      category: String(category).trim(),
-      headline: String(headline).trim(),
-      storyText: String(storyText).trim(),
-      ageGroup: ageGroup || undefined,
-      preferredLanguages: Array.isArray(preferredLanguages) ? preferredLanguages : undefined,
-      status: 'pending',
-      reviewNotes: undefined,
+    const locationObj = (location && typeof location === 'object') ? location : null;
+    const locationText = (typeof location === 'string') ? location.trim() : undefined;
+
+    const submission = await CommunitySubmissionModel.create({
+      name,
+      email,
+      reporterName: name,
+      reporterEmail: email,
+      reporterLocation: locationText,
+      location: locationObj ? {
+        city: locationObj.city ?? null,
+        state: locationObj.state ?? null,
+        country: locationObj.country ?? null,
+      } : { city: null, state: null, country: null },
+      headline,
+      body: storyText,
+      ageGroup,
+      status: 'NEW',
+      sourceType: 'community',
+      reporterVerificationLevel: 'unverified',
+      ipAddress: req.ip ? String(req.ip) : undefined,
+      userAgent: req.get('user-agent') ? String(req.get('user-agent')) : undefined,
     });
 
-    // Log reporterEmail being saved
-    console.log('[COMMUNITY_REPORT][submit] saving for reporterEmail:', String(doc.reporterEmail || '').toLowerCase());
-    await doc.save();
-
-    // Also create a unified CommunitySubmission record to keep flows consistent
-    try {
-      await CommunitySubmissionModel.create({
-        reporterName: doc.reporterName,
-        reporterEmail: doc.reporterEmail,
-        name: doc.reporterName,
-        email: doc.reporterEmail,
-        category: doc.category,
-        headline: doc.headline,
-        body: doc.storyText,
-        city: doc.reporterCity || undefined,
-        state: doc.reporterState || undefined,
-        country: doc.reporterCountry || undefined,
-        location: { city: doc.reporterCity || null, state: doc.reporterState || null, country: doc.reporterCountry || null },
-        status: 'PENDING_FOUNDER',
-        sourceType: doc.reporterType === 'professional' ? 'journalist' : 'community',
-        reporterVerificationLevel: 'unverified',
-      });
-    } catch (syncErr) {
-      console.warn('[COMMUNITY_REPORT][submit-sync] failed to create CommunitySubmission mirror', syncErr?.message || syncErr);
-    }
-    const reporterTypeOut = doc.reporterType === 'professional' ? 'journalist' : 'community';
-    const statusOut = 'under_review'; // map internal 'pending' to external 'under_review'
-
-    return res.status(201).json({
-      ok: true,
-      message: 'Story submitted successfully.',
-      storyId: doc._id.toString(),
-      referenceId: doc.referenceId || doc._id.toString(),
-      status: statusOut,
-      reporterType: reporterTypeOut,
-      reporterName: doc.reporterName,
-    });
+    return res.status(201).json({ success: true, id: submission._id });
   } catch (e) {
-    console.error('[COMMUNITY_REPORT][submit-error]', e?.message || e);
-    return res.status(500).json({ ok: false, message: 'SERVER_ERROR' });
+    console.error('CommunityReporterSubmit error:', e && e.stack ? e.stack : e);
+    return res.status(500).json({ message: 'Internal error in Community Reporter submit' });
   }
 }
 

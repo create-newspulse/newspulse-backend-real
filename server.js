@@ -151,6 +151,8 @@ let adminTeamRoutesV2 = null;
 try { adminTeamRoutesV2 = require('./src/routes/adminTeamRoutes'); } catch (_) { console.warn('[init] optional src/routes/adminTeamRoutes not found; skipping'); }
 const adminSecurityRoutes = require('./routes/adminSecurity.routes');
 const adminAuditRoutes = require('./routes/adminAudit.routes');
+const adminAiModelsRouter = require('./routes/adminAiModels.routes');
+const ownerAiModelsRouter = require('./routes/ownerAiModels.routes');
 let adminMetaRoutes = null;
 try { adminMetaRoutes = require('./routes/adminMeta.routes'); } catch (_) { console.warn('[init] optional routes/adminMeta.routes not found; skipping'); }
 const publicAdsRouter = require('./routes/publicAds.routes');
@@ -1292,6 +1294,18 @@ app.use('/admin', adminRoutes);     // legacy path
 // Admin API proxy aliases (some admin builds proxy via /admin-api/*)
 app.use('/admin-api/admin', adminRoutes);
 app.use('/admin-api/api/admin', adminRoutes);
+
+// Admin AI Models (status + refresh)
+// - Primary (admin panel proxy): /admin-api/ai/models/status, /admin-api/ai/models/refresh
+// - Compatibility alias used by some builds: /ai/models/status
+app.use('/admin-api/ai/models', adminAiModelsRouter);
+app.use('/ai/models', adminAiModelsRouter);
+
+// Owner AI Models (founder/owner-key protected)
+// - /admin-api/owner/ai-model-log
+// - /admin-api/owner/ai-model-rollback
+// - /admin-api/owner/ai-model-status
+app.use('/admin-api/owner', ownerAiModelsRouter);
 
 // Compatibility mount (matches common frontend expectation):
 // app.use('/admin-api', adminRouter) with router.post('/admin/login', ...)
