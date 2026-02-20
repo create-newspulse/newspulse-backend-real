@@ -45,11 +45,36 @@ const newsSchema = new mongoose.Schema({
   content: String,
   slug: { type: String, index: true },
   tags: [String],
-  category: { type: String, index: true },
+  category: {
+    type: String,
+    index: true,
+    set: (v) => {
+      if (v === null || v === undefined) return v;
+      return String(v).trim().toLowerCase();
+    },
+  },
   // Canonical request/query param is `lang` for News.
   // Keep `language` too for backward compatibility with older clients/docs.
-  lang: { type: String, enum: ['en', 'hi', 'gu'], default: 'gu', index: true },
-  language: { type: String, enum: ['en', 'hi', 'gu'], default: 'gu', index: true },
+  lang: {
+    type: String,
+    enum: ['en', 'hi', 'gu'],
+    default: 'gu',
+    index: true,
+    set: (v) => {
+      if (v === null || v === undefined) return v;
+      return String(v).trim().toLowerCase();
+    },
+  },
+  language: {
+    type: String,
+    enum: ['en', 'hi', 'gu'],
+    default: 'gu',
+    index: true,
+    set: (v) => {
+      if (v === null || v === undefined) return v;
+      return String(v).trim().toLowerCase();
+    },
+  },
   translationGroupId: { type: String, index: true },
   date: { type: Date, default: Date.now },
   imageURL: String,

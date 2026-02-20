@@ -47,13 +47,22 @@ function matchesClause(doc, clause) {
   if (!keys.length) return true;
   for (const k of keys) {
     const v = clause[k];
+    const actual = doc ? doc[k] : undefined;
     if (v && typeof v === 'object' && Object.prototype.hasOwnProperty.call(v, '$exists')) {
       const exists = Object.prototype.hasOwnProperty.call(doc, k);
       if (Boolean(v.$exists) !== exists) return false;
+    } else if (v && typeof v === 'object' && Object.prototype.hasOwnProperty.call(v, '$in')) {
+      const arr = Array.isArray(v.$in) ? v.$in : [];
+      if (!arr.includes(actual)) return false;
+    } else if (v && typeof v === 'object' && Object.prototype.hasOwnProperty.call(v, '$regex')) {
+      const rx = v.$regex instanceof RegExp
+        ? v.$regex
+        : new RegExp(String(v.$regex || ''), String(v.$options || ''));
+      if (!rx.test(String(actual ?? ''))) return false;
     } else if (v === null) {
-      if (doc[k] !== null && doc[k] !== undefined) return false;
+      if (actual !== null && actual !== undefined) return false;
     } else {
-      if (doc[k] !== v) return false;
+      if (actual !== v) return false;
     }
   }
   return true;

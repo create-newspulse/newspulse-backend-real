@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const News = require('../models/News');
 const { safeTranslateText, normalizeLang } = require('../services/translate/safeTranslate');
-const { getSlugCandidates } = require('../lib/slug');
+const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug } = require('../lib/slug');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -49,11 +49,13 @@ function getRequestedLang(req) {
 
 function applyLangFilter(filter, lang) {
   if (!lang) return;
+  const lower = String(lang).trim().toLowerCase();
+  const upper = lower.toUpperCase();
   if (lang === 'gu') {
     filter.$and.push({
       $or: [
-        { lang: 'gu' },
-        { language: 'gu' },
+        { lang: { $in: [lower, upper] } },
+        { language: { $in: [lower, upper] } },
         // Default-to-gu ONLY when neither field provides a language.
         {
           $and: [
@@ -64,7 +66,7 @@ function applyLangFilter(filter, lang) {
       ],
     });
   } else {
-    filter.$and.push({ $or: [{ lang }, { language: lang }] });
+    filter.$and.push({ $or: [{ lang: { $in: [lower, upper] } }, { language: { $in: [lower, upper] } }] });
   }
 }
 
@@ -156,19 +158,12 @@ async function translateNewsDocFields(doc, targetLang, { contextPrefix = 'news',
 
 function buildPublicPublishedFilter({ category, q, founderOnly, type }) {
   const now = new Date();
+  const normalizedCategory = category ? normalizeCategorySlug(category) : null;
 
   const filter = {
     $and: [
-      // Compatibility: some collections use status/workflowStage, others use a boolean.
-      {
-        $or: [
-          { published: true },
-          { status: 'published' },
-          { status: { $regex: '^published$', $options: 'i' } },
-          { workflowStage: 'published' },
-          { workflowStage: 'PUBLISHED' },
-        ],
-      },
+      // Public list must only include published stories.
+      { status: { $regex: '^published$', $options: 'i' } },
       { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
       { $or: [{ locked: { $ne: true } }, { locked: { $exists: false } }] },
       { $or: [{ embargoUntil: null }, { embargoUntil: { $exists: false } }, { embargoUntil: { $lte: now } }] },
@@ -178,7 +173,10 @@ function buildPublicPublishedFilter({ category, q, founderOnly, type }) {
     ],
   };
 
-  if (category) filter.category = category;
+  if (normalizedCategory) {
+    // Case-safe for older mixed-case data.
+    filter.category = new RegExp(`^${escapeRegExp(normalizedCategory)}$`, 'i');
+  }
 
   if (founderOnly) {
     filter.$and.push({
@@ -402,8 +400,76 @@ async function getPublicNewsBySlugOrId(req, res) {
   }
 }
 
+// GET /api/public/news/slug/:slug
+// Unicode-safe: tries both decoded and raw slug variants.
+async function getPublicNewsBySlug(req, res) {
+  try {
+    res.set('Cache-Control', 'no-store');
+
+    const decodedParam = String(req.params.slug ?? '').trim();
+    if (!decodedParam) return res.status(400).json({ message: 'Missing slug' });
+
+    if (!isDbReady()) {
+      return res.status(404).json({ message: 'Not found' });
+    }
+
+    // Express usually decodes route params. To also try the raw percent-encoded
+    // form (which may be stored by older clients), extract it from originalUrl.
+    const originalUrl = String(req.originalUrl || req.url || '');
+    const rawFromUrl = (() => {
+      const m = originalUrl.match(/\/slug\/([^?]+)/);
+      return m && m[1] ? String(m[1]).trim() : '';
+    })();
+
+    const decoded = String(safeDecodeURIComponent(decodedParam) ?? '').trim();
+    const candidates = new Set();
+    if (decoded) candidates.add(decoded);
+    if (decodedParam) candidates.add(decodedParam);
+    if (rawFromUrl) candidates.add(rawFromUrl);
+
+    // Also try canonical/normalized forms for stable lookups.
+    const canonRaw = canonicalizeSlug(rawFromUrl || decodedParam);
+    if (canonRaw) candidates.add(canonRaw);
+    const canonDecoded = decoded ? canonicalizeSlug(decoded) : '';
+    if (canonDecoded) candidates.add(canonDecoded);
+
+    for (const c of getSlugCandidates(rawFromUrl || decodedParam)) candidates.add(c);
+
+    const slugCandidates = Array.from(candidates).filter(Boolean);
+    const slugFilter = slugCandidates.length <= 1 ? (slugCandidates[0] || decodedParam) : { $in: slugCandidates };
+
+    const base = buildPublicPublishedFilter({});
+    const requestedLang = getRequestedLang(req);
+
+    let doc = null;
+    if (requestedLang) {
+      const byLangFilter = { ...base, slug: slugFilter, $and: [...(base.$and || [])] };
+      applyLangFilter(byLangFilter, requestedLang);
+      doc = await News.findOne(byLangFilter).select(PUBLIC_SELECT).lean();
+    }
+
+    if (!doc) {
+      doc = await News.findOne({ ...base, slug: slugFilter }).select(PUBLIC_SELECT).lean();
+    }
+
+    if (!doc) return res.status(404).json({ message: 'Not found' });
+
+    const out = withCoverImageUrl(doc);
+
+    const target = normalizeLang(requestedLang);
+    if (target && target !== normalizeLang(out.lang || out.language)) {
+      await translateNewsDocFields(out, target, { contextPrefix: 'news:detail', strict: true });
+    }
+
+    return res.status(200).json(out);
+  } catch (e) {
+    return res.status(500).json({ message: e?.message || String(e) });
+  }
+}
+
 module.exports = {
   listPublicNews,
   listPublicNewsTranslations,
   getPublicNewsBySlugOrId,
+  getPublicNewsBySlug,
 };
