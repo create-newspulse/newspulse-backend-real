@@ -973,6 +973,53 @@ router.delete('/articles/:id/forever', requireAdminAuth, async (req, res) => {
   }
 });
 
+// POST /api/admin/articles/forever/bulk → bulk permanent delete (admin only; deletes only status='deleted')
+router.post('/articles/forever/bulk', requireAdminAuth, async (req, res) => {
+  try {
+    const rawIds = req.body && req.body.ids;
+    if (!Array.isArray(rawIds) || rawIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'ids is required' });
+    }
+
+    const ids = rawIds
+      .map((v) => String(v || '').trim())
+      .filter(Boolean);
+
+    if (!ids.length) {
+      return res.status(400).json({ success: false, message: 'ids is required' });
+    }
+
+    for (const id of ids) {
+      if (!mongoose.isValidObjectId(id)) {
+        return res.status(400).json({ success: false, message: 'Invalid id in ids' });
+      }
+    }
+
+    const result = await Article.deleteMany({
+      _id: { $in: ids },
+      status: 'deleted',
+    });
+
+    const deletedCount = Number(result && typeof result.deletedCount === 'number' ? result.deletedCount : 0);
+    return res.status(200).json({ success: true, deletedCount });
+  } catch (err) {
+    console.error('[articles.forever-delete.bulk] error:', err?.message || err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// DELETE /api/admin/articles/forever/all-deleted → delete ALL soft-deleted articles (admin only)
+router.delete('/articles/forever/all-deleted', requireAdminAuth, async (req, res) => {
+  try {
+    const result = await Article.deleteMany({ status: 'deleted' });
+    const deletedCount = Number(result && typeof result.deletedCount === 'number' ? result.deletedCount : 0);
+    return res.status(200).json({ success: true, deletedCount });
+  } catch (err) {
+    console.error('[articles.forever-delete.all-deleted] error:', err?.message || err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
 // POST alias: /api/articles/:id/hard-delete (admin panel fallback)
 router.post('/articles/:id/hard-delete', async (req, res) => {
   try {
