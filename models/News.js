@@ -61,8 +61,7 @@ const newsSchema = new mongoose.Schema({
     default: 'en',
     index: true,
     set: (v) => {
-      if (v === null || v === undefined) return v;
-      return String(v).trim().toLowerCase();
+      return String(v || 'en').trim().toLowerCase();
     },
   },
   language: {
@@ -71,8 +70,7 @@ const newsSchema = new mongoose.Schema({
     default: 'en',
     index: true,
     set: (v) => {
-      if (v === null || v === undefined) return v;
-      return String(v).trim().toLowerCase();
+      return String(v || 'en').trim().toLowerCase();
     },
   },
   // Cached translations to make language switching instant.

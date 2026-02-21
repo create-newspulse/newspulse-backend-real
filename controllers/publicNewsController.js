@@ -547,7 +547,11 @@ async function getPublicNewsBySlug(req, res) {
     const canonDecoded = decoded ? canonicalizeSlug(decoded) : '';
     if (canonDecoded) candidates.add(canonDecoded);
 
+    for (const c of getSlugCandidates(decodedParam)) candidates.add(c);
     for (const c of getSlugCandidates(rawFromUrl || decodedParam)) candidates.add(c);
+    if (decoded) {
+      for (const c of getSlugCandidates(decoded)) candidates.add(c);
+    }
 
     const slugCandidates = Array.from(candidates).filter(Boolean);
     const slugFilter = slugCandidates.length <= 1 ? (slugCandidates[0] || decodedParam) : { $in: slugCandidates };
