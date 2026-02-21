@@ -8,6 +8,7 @@ const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const PushHistory = require('../models/PushHistory');
 const { canonicalizeSlug, getSlugCandidates } = require('../lib/slug');
+const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
@@ -214,6 +215,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     }
 
     const resolvedCoverImageUrl = coverImageUrl ?? imageURL;
+    const absoluteCoverImageUrl = resolvedCoverImageUrl !== undefined ? absolutizeUploadsUrl(resolvedCoverImageUrl) : null;
     const workflowStage = mapStatusToWorkflowStage(initialStatus);
     const now = new Date();
     const actor = getActor(req);
@@ -230,7 +232,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       status: initialStatus || 'draft',
       scheduledAt: scheduled,
       imageURL: imageURL ?? resolvedCoverImageUrl,
-      coverImageUrl: resolvedCoverImageUrl,
+      coverImageUrl: absoluteCoverImageUrl ?? null,
       slug: resolvedSlug,
 
       workflowStage,
@@ -509,7 +511,8 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       ...(status !== undefined && status !== null && String(status).trim() !== '' ? { status: String(status).toLowerCase() } : {}),
       ...(scheduled !== undefined ? { scheduledAt: scheduled } : {}),
       ...(imageURL !== undefined ? { imageURL } : {}),
-      ...(coverImageUrl !== undefined ? { coverImageUrl } : {}),
+      ...(coverImageUrl !== undefined ? { coverImageUrl: absolutizeUploadsUrl(coverImageUrl) } : {}),
+      ...(resolvedCoverImageUrl !== undefined && coverImageUrl === undefined ? { coverImageUrl: absolutizeUploadsUrl(resolvedCoverImageUrl) } : {}),
       ...(resolvedCoverImageUrl !== undefined && imageURL === undefined ? { imageURL: resolvedCoverImageUrl } : {}),
       ...(resolvedSlug !== undefined ? { slug: resolvedSlug } : {}),
     };

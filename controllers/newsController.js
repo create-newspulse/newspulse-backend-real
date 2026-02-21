@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const News = require('../models/News');
 const { safeDecodeURIComponent } = require('../lib/slug');
+const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 
 function normalizeLanguage(v) {
   const s = String(v ?? '').trim().toLowerCase();
@@ -18,11 +19,24 @@ function normalizeTranslationGroupId(v) {
   return s ? s : null;
 }
 
+function normalizeTranslationKey(v) {
+  const s = String(v ?? '').trim();
+  return s ? s : null;
+}
+
 exports.createNews = async (req, res) => {
   try {
     const body = { ...(req.body || {}) };
     if (body.coverImageUrl === undefined && body.imageURL !== undefined) {
       body.coverImageUrl = body.imageURL;
+    }
+
+    if (body.coverImageUrl !== undefined) {
+      body.coverImageUrl = absolutizeUploadsUrl(body.coverImageUrl);
+      // Keep legacy field aligned when it matches.
+      if (body.imageURL !== undefined && body.imageURL === body.coverImageUrl) {
+        body.imageURL = body.coverImageUrl;
+      }
     }
 
     // Multilingual publishing (Option A+)
@@ -39,6 +53,9 @@ exports.createNews = async (req, res) => {
     const translationGroupId = normalizeTranslationGroupId(body.translationGroupId);
     body.translationGroupId = translationGroupId || new mongoose.Types.ObjectId().toString();
 
+    const translationKey = normalizeTranslationKey(body.translationKey);
+    body.translationKey = translationKey || body.translationGroupId;
+
     const news = new News(body);
     await news.save();
     res.status(201).json({ message: "News created successfully" });
@@ -49,7 +66,23 @@ exports.createNews = async (req, res) => {
 
 exports.getNews = async (req, res) => {
   try {
-    const newsList = await News.find().sort({ date: -1 });
+    const q = { status: { $regex: '^published$', $options: 'i' } };
+
+    // Filters
+    const lang = normalizeLanguage(req.query.lang) || normalizeLanguage(req.query.language);
+    if (lang) {
+      const lower = lang;
+      const upper = lang.toUpperCase();
+      q.$or = [{ lang: { $in: [lower, upper] } }, { language: { $in: [lower, upper] } }];
+    }
+
+    const topic = (req.query.topic !== undefined) ? String(req.query.topic || '').trim().toLowerCase() : '';
+    if (topic) q.topic = new RegExp(`^${topic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+
+    const state = String(req.query.state || req.query.locationState || '').trim();
+    if (state) q['location.state'] = new RegExp(`^${state.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+
+    const newsList = await News.find(q).sort({ publishedAt: -1, date: -1 });
     const items = (newsList || []).map(doc => {
       const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
       obj.coverImageUrl = obj.coverImageUrl || obj.imageURL || null;
@@ -73,6 +106,13 @@ exports.updateNews = async (req, res) => {
       body.coverImageUrl = body.imageURL;
     }
 
+    if (body.coverImageUrl !== undefined) {
+      body.coverImageUrl = absolutizeUploadsUrl(body.coverImageUrl);
+      if (body.imageURL !== undefined && body.imageURL === body.coverImageUrl) {
+        body.imageURL = body.coverImageUrl;
+      }
+    }
+
     const lang = getIncomingLang(body);
     if (lang) {
       body.lang = lang;
@@ -85,6 +125,10 @@ exports.updateNews = async (req, res) => {
     const translationGroupId = normalizeTranslationGroupId(body.translationGroupId);
     if (translationGroupId) body.translationGroupId = translationGroupId;
     else if (body.translationGroupId !== undefined) delete body.translationGroupId;
+
+    const translationKey = normalizeTranslationKey(body.translationKey);
+    if (translationKey) body.translationKey = translationKey;
+    else if (body.translationKey !== undefined) delete body.translationKey;
 
     const updated = await News.findByIdAndUpdate(id, body, { new: true, runValidators: false });
     if (!updated) return res.status(404).json({ error: 'Not found' });

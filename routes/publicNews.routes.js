@@ -3,6 +3,7 @@ const express = require('express');
 const {
   listPublicNews,
   listPublicNewsTranslations,
+  getPublicNewsByTranslationKey,
   getPublicNewsBySlugOrId,
   getPublicNewsBySlug,
 } = require('../controllers/publicNewsController');
@@ -15,6 +16,9 @@ router.get('/', listPublicNews);
 
 // GET /api/public/news/translations/:translationGroupId
 router.get('/translations/:translationGroupId', listPublicNewsTranslations);
+
+// GET /api/public/news/translation?translationKey=...&lang=...
+router.get('/translation', getPublicNewsByTranslationKey);
 
 // GET /api/public/news/slug/:slug
 router.get('/slug/:slug', getPublicNewsBySlug);

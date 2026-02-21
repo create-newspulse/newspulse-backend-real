@@ -75,7 +75,58 @@ const newsSchema = new mongoose.Schema({
       return String(v).trim().toLowerCase();
     },
   },
+  // New canonical group key for translations. Keep translationGroupId for backward compatibility.
+  translationKey: { type: String, index: true },
   translationGroupId: { type: String, index: true },
+  topic: {
+    type: String,
+    index: true,
+    set: (v) => {
+      if (v === null || v === undefined) return v;
+      const s = String(v).trim();
+      return s ? s.toLowerCase() : s;
+    },
+  },
+  location: {
+    state: {
+      type: String,
+      default: null,
+      index: true,
+      set: (v) => {
+        if (v === null || v === undefined) return v;
+        const s = String(v).trim();
+        return s ? s : null;
+      },
+    },
+    city: {
+      type: String,
+      default: null,
+      set: (v) => {
+        if (v === null || v === undefined) return v;
+        const s = String(v).trim();
+        return s ? s : null;
+      },
+    },
+    district: {
+      type: String,
+      default: null,
+      set: (v) => {
+        if (v === null || v === undefined) return v;
+        const s = String(v).trim();
+        return s ? s : null;
+      },
+    },
+    isUT: { type: Boolean, default: null },
+    country: {
+      type: String,
+      default: null,
+      set: (v) => {
+        if (v === null || v === undefined) return v;
+        const s = String(v).trim();
+        return s ? s : null;
+      },
+    },
+  },
   date: { type: Date, default: Date.now },
   imageURL: String,
   coverImageUrl: String,
@@ -177,6 +228,10 @@ newsSchema.set('toObject', { virtuals: true });
 newsSchema.index({ workflowStage: 1, workflowUpdatedAt: -1 });
 newsSchema.index({ status: 1, createdAt: -1 });
 newsSchema.index({ scheduledAt: 1 });
+newsSchema.index({ translationKey: 1, lang: 1, status: 1, publishedAt: -1 });
+newsSchema.index({ translationGroupId: 1, lang: 1, status: 1, publishedAt: -1 });
+newsSchema.index({ topic: 1, status: 1, publishedAt: -1 });
+newsSchema.index({ 'location.state': 1, status: 1, publishedAt: -1 });
 
 // Avoid OverwriteModelError when multiple apps import this model.
 module.exports = mongoose.models.News || mongoose.model('News', newsSchema);

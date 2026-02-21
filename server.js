@@ -12,7 +12,9 @@ const _isProdEarly = _nodeEnvEarly === 'production' || _isRenderEarly;
 //   A committed .env would otherwise clobber the real Render config.
 require('dotenv').config({
   path: path.join(__dirname, '.env'),
-  override: !_isProdEarly,
+  // In tests, individual test files set env vars (esp. NODE_ENV) explicitly.
+  // Avoid a committed/local .env accidentally overriding those values.
+  override: !_isProdEarly && _nodeEnvEarly !== 'test',
 });
 
 // Backward-compat: older setups used MONGO_URI.
@@ -168,6 +170,7 @@ const adminPublicSettingsRouter = require('./routes/adminPublicSettings.routes')
 const PublicSiteSettings = require('./models/PublicSiteSettings');
 const User = require('./models/User');
 const publicNewsRouter = require('./routes/publicNews.routes');
+const adminNewsTranslationsRouter = require('./routes/adminNewsTranslations.routes');
 const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');
 const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
 const adminTickersSettingsRouter = require('./routes/adminTickersSettings.routes');
@@ -585,7 +588,8 @@ app.post('/api/uploads', _upload.any(), (req, res) => {
 
     const filename = path.basename(String(file.filename || ''));
     const host = req.get('host');
-    const base = `${req.protocol}://${host}`;
+    const envBase = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+    const base = envBase || `${req.protocol}://${host}`;
     const url = `${base}/uploads/${encodeURIComponent(filename)}`;
 
     return res.json({
@@ -1191,6 +1195,11 @@ app.use('/api/public/news', publicNewsRouter);
 // Admin panel proxy basePath support for public news
 app.use('/admin-api/public/news', publicNewsRouter);
 app.use('/admin-api/api/public/news', publicNewsRouter);
+
+// Admin: generate publish-time translations for News (requires admin auth)
+app.use('/api/admin/news', adminNewsTranslationsRouter);
+app.use('/admin-api/admin/news', adminNewsTranslationsRouter);
+app.use('/admin-api/api/admin/news', adminNewsTranslationsRouter);
 
 // Translation health (no auth)
 app.use('/api/public/translation', publicTranslationRouter);

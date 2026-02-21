@@ -24,6 +24,16 @@ function normalizeCategorySlug(v) {
   return String(v || '').trim().toLowerCase();
 }
 
+function normalizeTopicSlug(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  return s ? s : null;
+}
+
+function normalizeLocationPart(v) {
+  const s = String(v ?? '').trim();
+  return s ? s : null;
+}
+
 function parseTruthy(v) {
   const s = String(v ?? '').trim().toLowerCase();
   return s === 'true' || s === '1' || s === 'yes' || s === 'y';
@@ -224,8 +234,11 @@ const PUBLIC_SELECT = [
   'slug',
   'tags',
   'category',
+  'topic',
+  'location',
   'lang',
   'language',
+  'translationKey',
   'translationGroupId',
   'imageURL',
   'coverImageUrl',
@@ -252,6 +265,8 @@ async function listPublicNews(req, res) {
     const limit = Math.min(Math.max(parseInt(req.query.limit || '30', 10), 1), 100);
 
     const category = normalizeCategorySlug(req.query.category);
+    const topic = normalizeTopicSlug(req.query.topic);
+    const state = normalizeLocationPart(req.query.state || req.query.locationState);
     const founderOnly = parseTruthy(req.query.founderOnly);
     const type = String(req.query.type || '').trim().toLowerCase();
 
@@ -273,6 +288,8 @@ async function listPublicNews(req, res) {
         founderOnly,
         type,
       });
+      if (topic) f.$and.push({ topic: new RegExp(`^${escapeRegExp(topic)}$`, 'i') });
+      if (state) f.$and.push({ 'location.state': new RegExp(`^${escapeRegExp(state)}$`, 'i') });
       applyLangFilter(f, lang);
       return f;
     };
@@ -313,6 +330,42 @@ async function listPublicNews(req, res) {
     return res.status(200).json({ items, page, limit, total, totalPages });
   } catch (e) {
     return res.status(500).json({ items: [], page: 1, limit: 30, total: 0, totalPages: 1, message: e?.message || String(e) });
+  }
+}
+
+// GET /api/public/news/translation?translationKey=...&lang=...
+async function getPublicNewsByTranslationKey(req, res) {
+  try {
+    res.set('Cache-Control', 'no-store');
+
+    const translationKey = String(req.query.translationKey || '').trim();
+    if (!translationKey) return res.status(400).json({ message: 'Missing translationKey' });
+
+    if (!isDbReady()) {
+      return res.status(404).json({ message: 'Not found' });
+    }
+
+    const requestedLang = getRequestedLang(req);
+    const base = buildPublicPublishedFilter({});
+    base.$and.push({ $or: [{ translationKey }, { translationGroupId: translationKey }] });
+
+    const filter = { ...base, $and: [...(base.$and || [])] };
+    if (requestedLang) applyLangFilter(filter, requestedLang);
+
+    let doc = await News.findOne(filter).select(PUBLIC_SELECT).lean();
+    if (!doc && !requestedLang) {
+      // Default: try Gujarati if not specified.
+      const fallback = { ...base, $and: [...(base.$and || [])] };
+      applyLangFilter(fallback, 'gu');
+      doc = await News.findOne(fallback).select(PUBLIC_SELECT).lean();
+    }
+
+    if (!doc) return res.status(404).json({ message: 'Not found' });
+
+    const out = withCoverImageUrl(doc);
+    return res.status(200).json(out);
+  } catch (e) {
+    return res.status(500).json({ message: e?.message || String(e) });
   }
 }
 
@@ -470,6 +523,7 @@ async function getPublicNewsBySlug(req, res) {
 module.exports = {
   listPublicNews,
   listPublicNewsTranslations,
+  getPublicNewsByTranslationKey,
   getPublicNewsBySlugOrId,
   getPublicNewsBySlug,
 };
