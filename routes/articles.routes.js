@@ -1,6 +1,9 @@
 const express = require('express');
 const News = require('../models/News');
-const Article = require('../models/Article');
+const PublicArticle = require('../models/Article');
+// CMS/admin "articles" are stored in the News collection in this codebase.
+// Keep an alias named Article for routes that treat these as "Articles".
+const Article = News;
 const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const PushHistory = require('../models/PushHistory');
@@ -141,7 +144,7 @@ async function syncArticleFromNews(doc) {
 
   // Do not let this throw and break the CMS flow; log and move on.
   try {
-    return await Article.findOneAndUpdate(
+    return await PublicArticle.findOneAndUpdate(
       { slug },
       { $set: update },
       { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
@@ -939,6 +942,31 @@ router.delete('/articles/:id/hard-delete', async (req, res) => {
   } catch (err) {
     console.error('[articles.hard-delete] error:', err?.message || err);
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal server error' });
+  }
+});
+
+// DELETE /api/admin/articles/:id/forever → permanent delete (admin only; only if already deleted)
+// NOTE: This router is mounted at multiple base paths; we enforce admin auth at the route level.
+router.delete('/articles/:id/forever', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    let doc = null;
+    try {
+      doc = await Article.findById(id);
+    } catch (_) {
+      // invalid ObjectId
+    }
+
+    if (!doc) return res.status(404).json({ success: false, message: 'Article not found' });
+    if (String(doc.status || '') !== 'deleted') {
+      return res.status(400).json({ success: false, message: 'Only deleted articles can be permanently removed.' });
+    }
+
+    await Article.deleteOne({ _id: id });
+    return res.status(200).json({ success: true });
+  } catch (err) {
+    console.error('[articles.forever-delete] error:', err?.message || err);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
 

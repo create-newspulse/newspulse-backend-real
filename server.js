@@ -338,6 +338,15 @@ const corsOptions = {
 
     if (allowedOrigins.includes(String(origin))) return callback(null, true);
 
+    // Dev convenience: allow any localhost/127.0.0.1 origin (any port)
+    // so admin UIs can run on different ports without editing allowlists.
+    if (_corsIsDev) {
+      const o = String(origin);
+      if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(o)) {
+        return callback(null, true);
+      }
+    }
+
     // Allow specific Vercel apps (and their preview deploys)
     if (_ADMIN_PANEL_VERCEL_REGEX.test(String(origin))) return callback(null, true);
     if (_FRONTEND_MAIN_VERCEL_REGEX.test(String(origin))) return callback(null, true);
