@@ -2,10 +2,15 @@ const mongoose = require('mongoose');
 
 const News = require('../models/News');
 const { safeTranslateText, normalizeLang } = require('../services/translate/safeTranslate');
+const { translateText } = require('../services/translate/googleTranslateHelper');
 const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug } = require('../lib/slug');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
+}
+
+function isDbReadyOrTest() {
+  return (mongoose.connection && mongoose.connection.readyState === 1) || String(process.env.NODE_ENV || '').toLowerCase() === 'test';
 }
 
 function normalizeSlugOrId(v) {
@@ -164,6 +169,62 @@ async function translateNewsDocFields(doc, targetLang, { contextPrefix = 'news',
   }
 
   return { doc, changed, flags: { bodyTranslated } };
+}
+
+// POST /api/public/news/:id/translate
+// Stores translations in News.translations[lang] so switching is instant.
+async function translatePublicNews(req, res) {
+  try {
+    const target = normalizeLanguage(req.body && req.body.lang);
+    if (!target) return res.status(400).json({ success: false });
+
+    if (!isDbReadyOrTest()) {
+      return res.status(503).json({ success: false, message: 'Database unavailable' });
+    }
+
+    const apiKey = String(process.env.GOOGLE_TRANSLATE_API_KEY || '').trim();
+    if (!apiKey) {
+      return res.status(400).json({ success: false, message: 'Missing GOOGLE_TRANSLATE_API_KEY' });
+    }
+
+    const id = String(req.params.id || '').trim();
+    if (!mongoose.isValidObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
+
+    const doc = await News.findById(id);
+    if (!doc || String(doc.status || '').toLowerCase() !== 'published') {
+      return res.status(404).json({ success: false });
+    }
+
+    if (doc.translations && doc.translations[target] && String(doc.translations[target].content || '').trim()) {
+      const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+      return res.status(200).json({ success: true, data: { ...obj, activeLang: target } });
+    }
+
+    const sourceLang = normalizeLanguage(doc.lang || doc.language) || 'en';
+    const title = String(doc.title || '');
+    const summary = String(doc.summary || doc.description || '');
+    const content = String(doc.content || doc.body || '');
+
+    const [tTitle, tSummary, tContent] = await Promise.all([
+      translateText(title, target, { apiKey }),
+      translateText(summary, target, { apiKey }),
+      translateText(content, target, { apiKey }),
+    ]);
+
+    doc.translations = doc.translations || {};
+    doc.translations[target] = {
+      title: tTitle && tTitle.ok ? tTitle.text : title,
+      summary: tSummary && tSummary.ok ? tSummary.text : summary,
+      content: tContent && tContent.ok ? tContent.text : content,
+    };
+
+    await doc.save();
+
+    const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+    return res.status(200).json({ success: true, data: { ...obj, activeLang: target } });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: 'translate failed' });
+  }
 }
 
 function buildPublicPublishedFilter({ category, q, founderOnly, type }) {
@@ -526,4 +587,5 @@ module.exports = {
   getPublicNewsByTranslationKey,
   getPublicNewsBySlugOrId,
   getPublicNewsBySlug,
+  translatePublicNews,
 };

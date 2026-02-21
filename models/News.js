@@ -58,7 +58,7 @@ const newsSchema = new mongoose.Schema({
   lang: {
     type: String,
     enum: ['en', 'hi', 'gu'],
-    default: 'gu',
+    default: 'en',
     index: true,
     set: (v) => {
       if (v === null || v === undefined) return v;
@@ -68,11 +68,30 @@ const newsSchema = new mongoose.Schema({
   language: {
     type: String,
     enum: ['en', 'hi', 'gu'],
-    default: 'gu',
+    default: 'en',
     index: true,
     set: (v) => {
       if (v === null || v === undefined) return v;
       return String(v).trim().toLowerCase();
+    },
+  },
+  // Cached translations to make language switching instant.
+  // NOTE: Summary is stored as `description` in this model, but clients may treat it as summary.
+  translations: {
+    en: {
+      title: { type: String, default: '' },
+      summary: { type: String, default: '' },
+      content: { type: String, default: '' },
+    },
+    hi: {
+      title: { type: String, default: '' },
+      summary: { type: String, default: '' },
+      content: { type: String, default: '' },
+    },
+    gu: {
+      title: { type: String, default: '' },
+      summary: { type: String, default: '' },
+      content: { type: String, default: '' },
     },
   },
   // New canonical group key for translations. Keep translationGroupId for backward compatibility.

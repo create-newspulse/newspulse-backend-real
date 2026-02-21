@@ -76,10 +76,10 @@ function applyLangFilter(items, filter) {
   return items.filter((doc) => ors.some((cl) => matchesExpression(doc, cl)));
 }
 
-test('Model default lang is gu when omitted', () => {
+test('Model default lang is en when omitted', () => {
   const doc = new News({ title: 't', description: 'd' });
-  assert.equal(doc.lang, 'gu');
-  assert.equal(doc.language, 'gu');
+  assert.equal(doc.lang, 'en');
+  assert.equal(doc.language, 'en');
 });
 
 test('GET /api/public/news supports lang=en and returns feed shape', async () => {

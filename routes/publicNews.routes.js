@@ -6,6 +6,7 @@ const {
   getPublicNewsByTranslationKey,
   getPublicNewsBySlugOrId,
   getPublicNewsBySlug,
+  translatePublicNews,
 } = require('../controllers/publicNewsController');
 
 const router = express.Router();
@@ -22,6 +23,9 @@ router.get('/translation', getPublicNewsByTranslationKey);
 
 // GET /api/public/news/slug/:slug
 router.get('/slug/:slug', getPublicNewsBySlug);
+
+// POST /api/public/news/:id/translate
+router.post('/:id/translate', translatePublicNews);
 
 // GET /api/public/news/:slugOrId
 router.get('/:slugOrId', getPublicNewsBySlugOrId);
