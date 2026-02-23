@@ -202,6 +202,10 @@ const { langMiddleware } = require('./middleware/lang');
 
 const app = express();
 
+// Important when running behind proxies (Render/Vercel/etc.) so req.protocol is correct
+// and X-Forwarded-* headers are trusted.
+app.set('trust proxy', 1);
+
 app.use((req, res, next) => {
   res.setHeader('X-Newspulse-Env', _safeEnvLabel());
   res.setHeader('X-Newspulse-Db', _safeDbLabel());
@@ -555,10 +559,14 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // Serve uploaded files publicly
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+
+// Admin panel compat endpoints (fast fallbacks)
+const adminCompatRoutes = require('./src/routes/adminCompat.routes');
+app.use('/api', adminCompatRoutes);
 
 // Upload handler (multipart/form-data)
-const _uploadsDir = path.join(__dirname, 'uploads');
+const _uploadsDir = path.join(process.cwd(), 'uploads');
 try { fs.mkdirSync(_uploadsDir, { recursive: true }); } catch (_) {}
 
 const _uploadStorage = multer.diskStorage({
