@@ -55,7 +55,15 @@ router.get('/stories/:slug', async (req, res) => {
     }
 
     const slugFilter = candidates.length === 1 ? candidates[0] : { $in: candidates };
-    const story = await Article.findOne({ slug: slugFilter, status: 'published' }).lean();
+    const story = await Article.findOne({
+      status: 'published',
+      $or: [
+        { slug: slugFilter },
+        { 'slugs.en': slugFilter },
+        { 'slugs.hi': slugFilter },
+        { 'slugs.gu': slugFilter },
+      ],
+    }).lean();
     if (!story) {
       return res.status(404).json({ success: false, message: 'Story not found' });
     }

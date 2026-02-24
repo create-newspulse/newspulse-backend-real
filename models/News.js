@@ -44,6 +44,13 @@ const newsSchema = new mongoose.Schema({
   description: { type: String, required: true },
   content: String,
   slug: { type: String, index: true },
+  // Per-language slugs used for language-specific URLs.
+  // Keep legacy `slug` for backward compatibility.
+  slugs: {
+    en: { type: String, default: null, index: true },
+    hi: { type: String, default: null, index: true },
+    gu: { type: String, default: null, index: true },
+  },
   tags: [String],
   category: {
     type: String,
@@ -227,6 +234,21 @@ newsSchema.pre('validate', function preValidate(next) {
     if (this.isModified('slug')) {
       this.slug = canonicalizeSlug(this.slug);
     }
+
+    if (this.slugs && typeof this.slugs === 'object') {
+      for (const k of ['en', 'hi', 'gu']) {
+        if (this.slugs[k] !== undefined && this.slugs[k] !== null) {
+          this.slugs[k] = canonicalizeSlug(this.slugs[k]);
+        }
+      }
+    }
+
+    // If caller only set per-language slugs, keep legacy `slug` aligned for older lookups.
+    const docLang = String(this.lang || this.language || 'en').trim().toLowerCase();
+    if ((!this.slug || !String(this.slug).trim()) && this.slugs && this.slugs[docLang]) {
+      this.slug = this.slugs[docLang];
+    }
+
     return next();
   } catch (e) {
     return next(e);
@@ -249,6 +271,9 @@ newsSchema.index({ translationKey: 1, lang: 1, status: 1, publishedAt: -1 });
 newsSchema.index({ translationGroupId: 1, lang: 1, status: 1, publishedAt: -1 });
 newsSchema.index({ topic: 1, status: 1, publishedAt: -1 });
 newsSchema.index({ 'location.state': 1, status: 1, publishedAt: -1 });
+newsSchema.index({ 'slugs.en': 1 });
+newsSchema.index({ 'slugs.hi': 1 });
+newsSchema.index({ 'slugs.gu': 1 });
 
 // Avoid OverwriteModelError when multiple apps import this model.
 module.exports = mongoose.models.News || mongoose.model('News', newsSchema);

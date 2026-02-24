@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const News = require('../models/News');
 const { safeTranslateText, normalizeLang } = require('../services/translate/safeTranslate');
 const { translateText } = require('../services/translate/googleTranslateHelper');
-const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug } = require('../lib/slug');
+const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -218,6 +218,13 @@ async function translatePublicNews(req, res) {
       content: tContent && tContent.ok ? tContent.text : content,
     };
 
+    // Keep per-language slugs in sync with stored translations.
+    doc.slugs = doc.slugs || {};
+    const titleForSlug = String(doc.translations[target].title || '').trim();
+    if (titleForSlug) {
+      doc.slugs[target] = slugifyUnicode(titleForSlug);
+    }
+
     await doc.save();
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
@@ -293,6 +300,7 @@ const PUBLIC_SELECT = [
   'description',
   'content',
   'slug',
+  'slugs',
   'tags',
   'category',
   'topic',
@@ -315,6 +323,24 @@ function withCoverImageUrl(obj) {
   out.lang = out.lang || out.language || 'gu';
   out.language = out.language || out.lang || 'gu';
   return out;
+}
+
+function pickCanonicalSlug(doc, lang) {
+  const target = normalizeLang(lang) || normalizeLang(doc?.lang || doc?.language) || 'en';
+  const slugs = doc && doc.slugs && typeof doc.slugs === 'object' ? doc.slugs : null;
+  return (
+    (slugs && slugs[target]) ||
+    doc?.slug ||
+    (slugs && (slugs.en || slugs.hi || slugs.gu)) ||
+    null
+  );
+}
+
+function attachLocalizationFields(doc, requestedLang) {
+  doc.canonicalSlug = pickCanonicalSlug(doc, requestedLang);
+  doc.localizedTitle = doc.title || '';
+  doc.localizedContent = doc.content || '';
+  return doc;
 }
 
 // GET /api/public/news?category=&type=video&founderOnly=true&limit=30&page=1
@@ -477,23 +503,30 @@ async function getPublicNewsBySlugOrId(req, res) {
     // Prefer requested language doc when available.
     const requestedLang = getRequestedLang(req);
 
-    let lookup;
+    const lookup = { ...base, $and: [...(base.$and || [])] };
     if (isObjectIdLike(slugOrIdRaw)) {
-      lookup = { _id: slugOrIdRaw };
+      lookup._id = slugOrIdRaw;
     } else {
       const slugCandidates = getSlugCandidates(slugOrIdRaw);
       const slugFilter = slugCandidates.length === 1 ? slugCandidates[0] : { $in: slugCandidates };
-      lookup = { slug: slugFilter };
+      lookup.$and.push({
+        $or: [
+          { slug: slugFilter },
+          { 'slugs.en': slugFilter },
+          { 'slugs.hi': slugFilter },
+          { 'slugs.gu': slugFilter },
+        ],
+      });
     }
 
     if (requestedLang) {
-      const byLangFilter = { ...base, ...lookup, $and: [...(base.$and || [])] };
+      const byLangFilter = { ...lookup, $and: [...(lookup.$and || [])] };
       applyLangFilter(byLangFilter, requestedLang);
       doc = await News.findOne(byLangFilter).select(PUBLIC_SELECT).lean();
     }
 
     if (!doc) {
-      doc = await News.findOne({ ...base, ...lookup }).select(PUBLIC_SELECT).lean();
+      doc = await News.findOne(lookup).select(PUBLIC_SELECT).lean();
     }
 
     if (!doc) {
@@ -507,6 +540,8 @@ async function getPublicNewsBySlugOrId(req, res) {
     if (target && target !== normalizeLang(out.lang || out.language)) {
       await translateNewsDocFields(out, target, { contextPrefix: 'news:detail', strict: true });
     }
+
+    attachLocalizationFields(out, target || requestedLang);
 
     return res.status(200).json(out);
   } catch (e) {
@@ -556,18 +591,27 @@ async function getPublicNewsBySlug(req, res) {
     const slugCandidates = Array.from(candidates).filter(Boolean);
     const slugFilter = slugCandidates.length <= 1 ? (slugCandidates[0] || decodedParam) : { $in: slugCandidates };
 
+    const slugClause = {
+      $or: [
+        { slug: slugFilter },
+        { 'slugs.en': slugFilter },
+        { 'slugs.hi': slugFilter },
+        { 'slugs.gu': slugFilter },
+      ],
+    };
+
     const base = buildPublicPublishedFilter({});
     const requestedLang = getRequestedLang(req);
 
     let doc = null;
     if (requestedLang) {
-      const byLangFilter = { ...base, slug: slugFilter, $and: [...(base.$and || [])] };
+      const byLangFilter = { ...base, $and: [...(base.$and || []), slugClause] };
       applyLangFilter(byLangFilter, requestedLang);
       doc = await News.findOne(byLangFilter).select(PUBLIC_SELECT).lean();
     }
 
     if (!doc) {
-      doc = await News.findOne({ ...base, slug: slugFilter }).select(PUBLIC_SELECT).lean();
+      doc = await News.findOne({ ...base, $and: [...(base.$and || []), slugClause] }).select(PUBLIC_SELECT).lean();
     }
 
     if (!doc) return res.status(404).json({ message: 'Not found' });
@@ -578,6 +622,8 @@ async function getPublicNewsBySlug(req, res) {
     if (target && target !== normalizeLang(out.lang || out.language)) {
       await translateNewsDocFields(out, target, { contextPrefix: 'news:detail', strict: true });
     }
+
+    attachLocalizationFields(out, target || requestedLang);
 
     return res.status(200).json(out);
   } catch (e) {

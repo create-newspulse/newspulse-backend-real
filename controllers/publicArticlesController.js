@@ -129,14 +129,31 @@ async function getArticleBySlug(req, res, next) {
     if (/^[0-9a-f]{24}$/i.test(slug)) return next();
 
     const slugFilter = candidates.length === 1 ? slug : { $in: candidates };
-    const filter = { slug: slugFilter, status: 'published' };
+    const filter = {
+      status: 'published',
+      $or: [
+        { slug: slugFilter },
+        { 'slugs.en': slugFilter },
+        { 'slugs.hi': slugFilter },
+        { 'slugs.gu': slugFilter },
+      ],
+    };
 
     const doc = await Article.findOne(filter).lean();
     if (!doc) {
       return res.status(404).json({ message: 'Article not found' });
     }
 
-    return res.json(doc);
+    const requestedLang = String(req.query.lang || req.query.language || '').trim().toLowerCase();
+    const target = (requestedLang === 'en' || requestedLang === 'hi' || requestedLang === 'gu') ? requestedLang : null;
+    const canonicalSlug = (target && doc.slugs && doc.slugs[target]) ? doc.slugs[target] : (doc.slug || null);
+
+    return res.json({
+      ...doc,
+      canonicalSlug,
+      localizedTitle: doc.title || '',
+      localizedContent: doc.content || '',
+    });
   } catch (e) {
     return next(e);
   }

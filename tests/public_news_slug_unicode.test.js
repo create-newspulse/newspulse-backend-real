@@ -33,6 +33,7 @@ test('GET /api/public/news/slug/:slug is unicode-safe and lang filter is case-sa
         description: 'd',
         content: 'c',
         slug: unicodeSlug,
+        slugs: { en: 'english-slug', hi: unicodeSlug, gu: 'gujarati-slug' },
         lang: 'en',
         language: 'en',
         category: 'national',
@@ -43,18 +44,29 @@ test('GET /api/public/news/slug/:slug is unicode-safe and lang filter is case-sa
     const res = await request(app).get(`/api/public/news/slug/${encoded}?lang=EN`);
     assert.equal(res.status, 200);
     assert.equal(res.body.slug, unicodeSlug);
+    assert.equal(res.body.canonicalSlug, 'english-slug');
 
     assert.ok(calls.length >= 1, 'expected at least one News.findOne call');
     const first = calls[0];
 
     // Ensure we include raw (percent-encoded) and decoded candidates.
-    const slugExpr = first.slug;
-    const inList = slugExpr && typeof slugExpr === 'object' && Array.isArray(slugExpr.$in) ? slugExpr.$in : [];
-    assert.ok(inList.includes(encoded) || String(slugExpr) === encoded, 'expected raw encoded slug candidate');
-    assert.ok(inList.includes(unicodeSlug) || String(slugExpr) === unicodeSlug, 'expected decoded unicode slug candidate');
+    const ands = first.$and || [];
+    const slugCond = ands.find((c) => Array.isArray(c?.$or) && c.$or.some((x) => x?.slug || x?.['slugs.en'] || x?.['slugs.hi'] || x?.['slugs.gu']));
+    assert.ok(slugCond, 'expected a slug lookup condition');
+
+    const slugOr = slugCond.$or || [];
+    const values = [];
+    for (const clause of slugOr) {
+      const v = clause.slug ?? clause['slugs.en'] ?? clause['slugs.hi'] ?? clause['slugs.gu'];
+      if (!v) continue;
+      if (typeof v === 'object' && Array.isArray(v.$in)) values.push(...v.$in);
+      else values.push(String(v));
+    }
+
+    assert.ok(values.includes(encoded), 'expected raw encoded slug candidate');
+    assert.ok(values.includes(unicodeSlug), 'expected decoded unicode slug candidate');
 
     // Ensure lang filter was applied case-safely via $in.
-    const ands = first.$and || [];
     const langCond = ands.find((c) => Array.isArray(c?.$or) && c.$or.some((x) => x?.lang || x?.language));
     assert.ok(langCond, 'expected a lang filter condition');
 

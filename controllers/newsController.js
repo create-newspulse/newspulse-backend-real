@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 const News = require('../models/News');
-const { safeDecodeURIComponent } = require('../lib/slug');
+const { safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 
 function normalizeLanguage(v) {
@@ -22,6 +22,36 @@ function normalizeTranslationGroupId(v) {
 function normalizeTranslationKey(v) {
   const s = String(v ?? '').trim();
   return s ? s : null;
+}
+
+function getTitleForLangFromDocLike(docLike, lang) {
+  const desired = normalizeLanguage(lang);
+  if (!desired) return '';
+
+  const t = docLike && docLike.translations && docLike.translations[desired];
+  const fromTranslations = t && typeof t.title === 'string' ? t.title : '';
+  if (fromTranslations && fromTranslations.trim()) return fromTranslations;
+
+  const baseLang = normalizeLanguage(docLike?.lang) || normalizeLanguage(docLike?.language) || null;
+  if (baseLang === desired) return String(docLike?.title || '');
+
+  return '';
+}
+
+function ensureNewsSlugs(docLike) {
+  const out = { ...(docLike.slugs || {}) };
+  for (const lang of ['en', 'hi', 'gu']) {
+    const title = getTitleForLangFromDocLike(docLike, lang);
+    if (title && title.trim()) {
+      out[lang] = slugifyUnicode(title);
+    }
+  }
+  docLike.slugs = out;
+
+  const baseLang = normalizeLanguage(docLike?.lang) || normalizeLanguage(docLike?.language) || 'en';
+  if ((!docLike.slug || !String(docLike.slug).trim()) && out[baseLang]) {
+    docLike.slug = out[baseLang];
+  }
 }
 
 exports.createNews = async (req, res) => {
@@ -55,6 +85,8 @@ exports.createNews = async (req, res) => {
 
     const translationKey = normalizeTranslationKey(body.translationKey);
     body.translationKey = translationKey || body.translationGroupId;
+
+    ensureNewsSlugs(body);
 
     const news = new News(body);
     await news.save();
@@ -130,8 +162,12 @@ exports.updateNews = async (req, res) => {
     if (translationKey) body.translationKey = translationKey;
     else if (body.translationKey !== undefined) delete body.translationKey;
 
-    const updated = await News.findByIdAndUpdate(id, body, { new: true, runValidators: false });
-    if (!updated) return res.status(404).json({ error: 'Not found' });
+    const doc = await News.findById(id);
+    if (!doc) return res.status(404).json({ error: 'Not found' });
+
+    doc.set(body);
+    ensureNewsSlugs(doc);
+    await doc.save();
 
     return res.json({ message: 'News updated successfully' });
   } catch (error) {
@@ -153,9 +189,19 @@ exports.getPublishedNewsBySlug = async (req, res) => {
 
     const decoded = String(safeDecodeURIComponent(raw) ?? '').trim();
 
+    const lookup = (slugValue) => ({
+      status: 'published',
+      $or: [
+        { slug: slugValue },
+        { 'slugs.en': slugValue },
+        { 'slugs.hi': slugValue },
+        { 'slugs.gu': slugValue },
+      ],
+    });
+
     const article =
-      (await News.findOne({ slug: decoded, status: 'published' }).lean()) ||
-      (await News.findOne({ slug: raw, status: 'published' }).lean());
+      (await News.findOne(lookup(decoded)).lean()) ||
+      (await News.findOne(lookup(raw)).lean());
 
     if (!article) return res.status(404).json({ success: false });
     return res.json({ success: true, data: article });

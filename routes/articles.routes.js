@@ -7,7 +7,7 @@ const Article = News;
 const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const PushHistory = require('../models/PushHistory');
-const { canonicalizeSlug, getSlugCandidates } = require('../lib/slug');
+const { canonicalizeSlug, getSlugCandidates, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 
 
@@ -59,12 +59,45 @@ function normalizeSlug(slug) {
 }
 
 function slugifyFromTitle(title) {
-  return String(title || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 120);
+  return slugifyUnicode(title);
+}
+
+function normalizeLanguage(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (s === 'en' || s === 'hi' || s === 'gu') return s;
+  return null;
+}
+
+function getTitleForLangFromDocLike(docLike, lang) {
+  const desired = normalizeLanguage(lang);
+  if (!desired) return '';
+
+  const t = docLike && docLike.translations && docLike.translations[desired];
+  const fromTranslations = t && typeof t.title === 'string' ? t.title : '';
+  if (fromTranslations && fromTranslations.trim()) return fromTranslations;
+
+  const baseLang = normalizeLanguage(docLike?.lang) || normalizeLanguage(docLike?.language) || null;
+  if (baseLang === desired) return String(docLike?.title || '');
+  return '';
+}
+
+function ensureNewsSlugs(docLike) {
+  if (!docLike) return;
+  const out = { ...(docLike.slugs || {}) };
+  for (const lang of ['en', 'hi', 'gu']) {
+    const t = getTitleForLangFromDocLike(docLike, lang);
+    if (t && t.trim()) out[lang] = slugifyUnicode(t);
+  }
+
+  const baseLang = normalizeLanguage(docLike?.lang) || normalizeLanguage(docLike?.language) || 'en';
+  if (!out[baseLang] && docLike.title) {
+    out[baseLang] = slugifyUnicode(docLike.title);
+  }
+
+  docLike.slugs = out;
+  if ((!docLike.slug || !String(docLike.slug).trim()) && out[baseLang]) {
+    docLike.slug = out[baseLang];
+  }
 }
 
 async function assertSlugUnique(slug, excludeId) {
@@ -132,6 +165,7 @@ async function syncArticleFromNews(doc) {
   const update = {
     title: doc.title,
     slug,
+    slugs: doc.slugs || null,
     summary: doc.description || null,
     content: doc.content || null,
     category: doc.category,
@@ -220,6 +254,21 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     const now = new Date();
     const actor = getActor(req);
     const translationGroupId = (req.body && req.body.translationGroupId) ? String(req.body.translationGroupId).trim() : '';
+
+    const langNorm = normalizeLanguage(language) || 'en';
+    const slugs = { ...(req.body && req.body.slugs && typeof req.body.slugs === 'object' ? req.body.slugs : {}) };
+    slugs[langNorm] = resolvedSlug;
+    // Best-effort for other languages if titles exist in `translations` payload.
+    if (req.body && req.body.translations && typeof req.body.translations === 'object') {
+      for (const k of ['en', 'hi', 'gu']) {
+        const t = req.body.translations && req.body.translations[k];
+        const titleForSlug = t && typeof t.title === 'string' ? t.title : '';
+        if (titleForSlug && titleForSlug.trim()) {
+          slugs[k] = slugifyUnicode(titleForSlug);
+        }
+      }
+    }
+
     const doc = await News.create({
       title,
       description: summary ?? '',
@@ -234,6 +283,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       imageURL: imageURL ?? resolvedCoverImageUrl,
       coverImageUrl: absoluteCoverImageUrl ?? null,
       slug: resolvedSlug,
+      slugs,
 
       workflowStage,
       workflowUpdatedAt: now,
@@ -485,7 +535,20 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       return res.status(400).json({ ok: false, success: false, message: 'Invalid status' });
     }
 
-    const resolvedSlug = slug !== undefined ? normalizeSlug(slug) : undefined;
+    let before = null;
+    try {
+      before = await News.findById(id).select('status translationGroupId lang language slugs').lean();
+    } catch (_) {
+      // ignore
+    }
+
+    const effectiveLang = normalizeLanguage(language) || normalizeLanguage(before?.lang || before?.language) || 'en';
+
+    // On update: if slug is provided, use it. Otherwise if title is updated, regenerate slug for that language.
+    const resolvedSlug = slug !== undefined
+      ? normalizeSlug(slug)
+      : (title !== undefined ? slugifyFromTitle(title) : undefined);
+
     if (resolvedSlug !== undefined) {
       if (!resolvedSlug) {
         return res.status(400).json({ ok: false, success: false, message: 'Slug cannot be empty' });
@@ -494,13 +557,6 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const resolvedCoverImageUrl = coverImageUrl ?? imageURL;
-    let before = null;
-    try {
-      before = await News.findById(id).select('status translationGroupId lang language').lean();
-    } catch (_) {
-      // ignore
-    }
-
     const update = {
       ...(title !== undefined ? { title } : {}),
       ...(summary !== undefined ? { description: summary } : {}),
@@ -514,7 +570,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       ...(coverImageUrl !== undefined ? { coverImageUrl: absolutizeUploadsUrl(coverImageUrl) } : {}),
       ...(resolvedCoverImageUrl !== undefined && coverImageUrl === undefined ? { coverImageUrl: absolutizeUploadsUrl(resolvedCoverImageUrl) } : {}),
       ...(resolvedCoverImageUrl !== undefined && imageURL === undefined ? { imageURL: resolvedCoverImageUrl } : {}),
-      ...(resolvedSlug !== undefined ? { slug: resolvedSlug } : {}),
+      ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
     };
 
     let doc = null;
@@ -526,6 +582,10 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     if (!doc) {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Route not found', path: req.originalUrl });
     }
+
+    // Ensure other language slugs are kept in sync when translations exist.
+    ensureNewsSlugs(doc);
+    await doc.save();
     // If status changed, keep workflow stage aligned (non-breaking)
     if (update.status) {
       const stage = mapStatusToWorkflowStage(update.status);
@@ -545,6 +605,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
           toStage: stage,
           note: 'Status updated',
         });
+        ensureNewsSlugs(doc);
         await doc.save();
       }
     }
@@ -607,6 +668,8 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     ensureTranslationGroupIdForDoc(doc);
     doc.lang = doc.lang || doc.language;
     doc.language = doc.language || doc.lang;
+
+    ensureNewsSlugs(doc);
 
     const fromStage = String(doc.workflowStage || 'DRAFT');
     doc.workflowStage = 'PUBLISHED';
