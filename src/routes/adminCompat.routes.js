@@ -132,11 +132,12 @@ router.post('/uploads/cover', coverUpload.fields([
     const publicId = result?.public_id || null;
     const width = typeof result?.width === 'number' ? result.width : null;
     const height = typeof result?.height === 'number' ? result.height : null;
+    const format = result?.format ? String(result.format) : null;
 
     return res.status(200).json({
       ok: true,
       success: true,
-      data: { url, publicId, width, height },
+      data: { url, publicId, width, height, format },
     });
   } catch (e) {
     console.error('[uploads.cover] cloudinary upload failed', {

@@ -132,7 +132,22 @@ function withCoverImageUrl(obj) {
     obj.coverImageUrl ||
     obj.imageURL ||
     null;
-  return { ...obj, coverImageUrl: coverUrl };
+
+  const coverImageObj = (() => {
+    const v = obj.coverImage;
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      return {
+        url: v.url ? String(v.url) : (coverUrl || null),
+        publicId: v.publicId ? String(v.publicId) : null,
+        alt: v.alt ? String(v.alt) : null,
+      };
+    }
+    if (typeof v === 'string') return { url: v, publicId: null, alt: null };
+    if (coverUrl) return { url: coverUrl, publicId: null, alt: null };
+    return v; // leave undefined/null as-is
+  })();
+
+  return { ...obj, coverImageUrl: coverUrl, ...(coverImageObj ? { coverImage: coverImageObj } : {}) };
 }
 
 function mapStatusToWorkflowStage(status) {
