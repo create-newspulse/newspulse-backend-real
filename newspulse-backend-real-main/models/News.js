@@ -33,6 +33,11 @@ const newsSchema = new mongoose.Schema({
   date: { type: Date, default: Date.now },
   imageURL: String,
   coverImageUrl: String,
+  coverImage: {
+    url: { type: String, default: null },
+    publicId: { type: String, default: null },
+    alt: { type: String, default: null },
+  },
   status: { type: String, default: 'draft' },
   publishAt: { type: Date, default: null },
   publishedAt: { type: Date, default: null },

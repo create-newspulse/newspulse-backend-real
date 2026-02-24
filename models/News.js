@@ -154,6 +154,11 @@ const newsSchema = new mongoose.Schema({
   date: { type: Date, default: Date.now },
   imageURL: String,
   coverImageUrl: String,
+  coverImage: {
+    url: { type: String, default: null },
+    publicId: { type: String, default: null },
+    alt: { type: String, default: null },
+  },
 
   // Canonical workflow object used by Admin Panel workflow screen.
   // Keep legacy top-level fields below for backward compatibility.

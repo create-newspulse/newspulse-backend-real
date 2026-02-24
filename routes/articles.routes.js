@@ -126,7 +126,13 @@ function validatePublishable(doc) {
 
 function withCoverImageUrl(obj) {
   if (!obj) return obj;
-  return { ...obj, coverImageUrl: obj.coverImageUrl || obj.imageURL || null };
+  const coverUrl =
+    (obj.coverImage && typeof obj.coverImage === 'object' && !Array.isArray(obj.coverImage) ? obj.coverImage.url : null) ||
+    (typeof obj.coverImage === 'string' ? obj.coverImage : null) ||
+    obj.coverImageUrl ||
+    obj.imageURL ||
+    null;
+  return { ...obj, coverImageUrl: coverUrl };
 }
 
 function mapStatusToWorkflowStage(status) {
@@ -161,7 +167,18 @@ async function syncArticleFromNews(doc) {
   if (!slug) return null;
 
   const isPublished = String(doc.status || '').toLowerCase() === 'published';
-  const coverImage = doc.coverImageUrl || doc.imageURL || null;
+  const coverUrl =
+    (doc.coverImage && typeof doc.coverImage === 'object' && !Array.isArray(doc.coverImage) ? doc.coverImage.url : null) ||
+    doc.coverImageUrl ||
+    doc.imageURL ||
+    null;
+  const coverImage = coverUrl
+    ? {
+        url: coverUrl,
+        publicId: doc.coverImage && typeof doc.coverImage === 'object' ? (doc.coverImage.publicId || null) : null,
+        alt: doc.coverImage && typeof doc.coverImage === 'object' ? (doc.coverImage.alt || null) : null,
+      }
+    : { url: null, publicId: null, alt: null };
   const update = {
     title: doc.title,
     slug,
@@ -206,6 +223,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       scheduledAt,
       imageURL,
       coverImageUrl,
+      coverImage,
     } = req.body || {};
 
     if (!title) {
@@ -248,7 +266,8 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       await assertSlugUnique(resolvedSlug);
     }
 
-    const resolvedCoverImageUrl = coverImageUrl ?? imageURL;
+    const coverObj = (coverImage && typeof coverImage === 'object' && !Array.isArray(coverImage)) ? coverImage : null;
+    const resolvedCoverImageUrl = coverImageUrl ?? imageURL ?? (coverObj ? coverObj.url : undefined);
     const absoluteCoverImageUrl = resolvedCoverImageUrl !== undefined ? absolutizeUploadsUrl(resolvedCoverImageUrl) : null;
     const workflowStage = mapStatusToWorkflowStage(initialStatus);
     const now = new Date();
@@ -282,6 +301,13 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       scheduledAt: scheduled,
       imageURL: imageURL ?? resolvedCoverImageUrl,
       coverImageUrl: absoluteCoverImageUrl ?? null,
+      ...(coverObj || absoluteCoverImageUrl ? {
+        coverImage: {
+          url: coverObj && coverObj.url !== undefined ? absolutizeUploadsUrl(coverObj.url) : (absoluteCoverImageUrl ?? null),
+          publicId: coverObj && coverObj.publicId !== undefined ? (coverObj.publicId || null) : null,
+          alt: coverObj && coverObj.alt !== undefined ? (coverObj.alt || null) : null,
+        },
+      } : {}),
       slug: resolvedSlug,
       slugs,
 
@@ -522,6 +548,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       scheduledAt,
       imageURL,
       coverImageUrl,
+      coverImage,
     } = req.body || {};
 
     let scheduled = scheduledAt;
@@ -537,7 +564,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
     let before = null;
     try {
-      before = await News.findById(id).select('status translationGroupId lang language slugs').lean();
+      before = await News.findById(id).select('status translationGroupId lang language slugs coverImage coverImageUrl imageURL').lean();
     } catch (_) {
       // ignore
     }
@@ -557,6 +584,26 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const resolvedCoverImageUrl = coverImageUrl ?? imageURL;
+
+    const coverObj = (coverImage && typeof coverImage === 'object' && !Array.isArray(coverImage)) ? coverImage : null;
+    const prevCover = (() => {
+      const v = before && before.coverImage;
+      if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+      const u = before && (before.coverImageUrl || before.imageURL);
+      return u ? { url: u, publicId: null, alt: null } : null;
+    })();
+    let nextCover = null;
+    if (coverObj) {
+      nextCover = {
+        url: prevCover && prevCover.url ? String(prevCover.url) : null,
+        publicId: prevCover && prevCover.publicId ? String(prevCover.publicId) : null,
+        alt: prevCover && prevCover.alt ? String(prevCover.alt) : null,
+      };
+      if (coverObj.url !== undefined) nextCover.url = absolutizeUploadsUrl(coverObj.url);
+      if (coverObj.publicId !== undefined) nextCover.publicId = coverObj.publicId ? String(coverObj.publicId) : null;
+      if (coverObj.alt !== undefined) nextCover.alt = coverObj.alt ? String(coverObj.alt) : null;
+    }
+
     const update = {
       ...(title !== undefined ? { title } : {}),
       ...(summary !== undefined ? { description: summary } : {}),
@@ -570,6 +617,14 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       ...(coverImageUrl !== undefined ? { coverImageUrl: absolutizeUploadsUrl(coverImageUrl) } : {}),
       ...(resolvedCoverImageUrl !== undefined && coverImageUrl === undefined ? { coverImageUrl: absolutizeUploadsUrl(resolvedCoverImageUrl) } : {}),
       ...(resolvedCoverImageUrl !== undefined && imageURL === undefined ? { imageURL: resolvedCoverImageUrl } : {}),
+      ...(nextCover ? {
+        coverImage: nextCover,
+        ...(nextCover.url ? {
+          // keep legacy fields in sync for older clients
+          coverImageUrl: nextCover.url,
+          ...(imageURL === undefined ? { imageURL: nextCover.url } : {}),
+        } : {}),
+      } : {}),
       ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
     };
 

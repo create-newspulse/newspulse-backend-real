@@ -2,6 +2,9 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { requireAdminAuth } = require('../../middleware/adminAuth');
+
+const { uploadCoverImageBuffer, deleteCoverByPublicId } = require('../../lib/cloudinary');
 
 const router = express.Router();
 
@@ -31,6 +34,12 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+});
+
+// Cover uploads should not hit local disk (Cloudinary only)
+const coverUpload = multer({
+  storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
 });
 
@@ -103,30 +112,60 @@ router.post('/media/upload', upload.fields([
 
 // --------------------- COVER UPLOAD ---------------------
 // supports field name: cover (preferred) OR file
-router.post('/uploads/cover', upload.fields([
+router.post('/uploads/cover', coverUpload.fields([
   { name: 'cover', maxCount: 1 },
   { name: 'file', maxCount: 1 },
-]), (req, res) => {
+]), async (req, res) => {
   const file = pickUploadedFile(req);
   if (!file) return bad(res, 400, 'No cover uploaded (field: cover)', req.originalUrl);
 
-  const urls = buildUrls(req, file.filename);
+  if (!file.buffer || !Buffer.isBuffer(file.buffer)) {
+    return bad(res, 400, 'Invalid upload (missing file buffer)', req.originalUrl);
+  }
+  if (!String(file.mimetype || '').toLowerCase().startsWith('image/')) {
+    return bad(res, 400, 'Invalid file type (image required)', req.originalUrl);
+  }
 
-  return ok(
-    res,
-    {
-      cover: {
-        fileName: file.filename,
-        mimeType: file.mimetype,
-        size: file.size,
-        ...urls,
-      },
-      // common aliases
-      url: urls.url,
-      relativeUrl: urls.relativeUrl,
-    },
-    'Cover uploaded'
-  );
+  try {
+    const result = await uploadCoverImageBuffer(file);
+    const url = result?.secure_url || result?.url || null;
+    const publicId = result?.public_id || null;
+    const width = typeof result?.width === 'number' ? result.width : null;
+    const height = typeof result?.height === 'number' ? result.height : null;
+
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      data: { url, publicId, width, height },
+    });
+  } catch (e) {
+    console.error('[uploads.cover] cloudinary upload failed', {
+      message: e?.message || String(e),
+      name: e?.name,
+    });
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      message: 'Cover upload failed',
+      code: e?.code || undefined,
+    });
+  }
+});
+
+// --------------------- COVER DELETE (optional) ---------------------
+// DELETE /api/uploads/cover/:publicId
+// NOTE: publicId may include slashes (folder path); client should URL-encode it.
+router.delete('/uploads/cover/:publicId(*)', requireAdminAuth, async (req, res) => {
+  try {
+    const publicId = String(req.params.publicId || '').trim();
+    if (!publicId) return bad(res, 400, 'Missing publicId', req.originalUrl);
+
+    const out = await deleteCoverByPublicId(publicId);
+    return ok(res, { result: out }, 'Cover deleted');
+  } catch (e) {
+    console.error('[uploads.cover.delete] failed', e?.message || e);
+    return bad(res, e?.status || 500, e?.message || 'Cover delete failed', req.originalUrl);
+  }
 });
 
 module.exports = router;

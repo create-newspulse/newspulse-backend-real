@@ -21,6 +21,25 @@ const CATEGORY_VALUES = [
 const LANGUAGE_VALUES = ['en', 'hi', 'gu'];
 const STATUS_VALUES = ['draft', 'published'];
 
+function _normalizeCoverImage(ret) {
+  if (!ret) return ret;
+  const v = ret.coverImage;
+  if (typeof v === 'string') {
+    ret.coverImage = { url: v, publicId: null, alt: null };
+  } else if (v && typeof v === 'object' && !Array.isArray(v)) {
+    ret.coverImage = {
+      url: v.url ? String(v.url) : null,
+      publicId: v.publicId ? String(v.publicId) : null,
+      alt: v.alt ? String(v.alt) : null,
+    };
+  } else if (v === undefined) {
+    // leave as-is
+  } else {
+    ret.coverImage = null;
+  }
+  return ret;
+}
+
 const articleSchema = new mongoose.Schema(
   {
     title: { type: String, required: true, trim: true },
@@ -45,14 +64,28 @@ const articleSchema = new mongoose.Schema(
 
     isBreaking: { type: Boolean, default: false, index: true },
 
-    coverImage: { type: String, default: null },
+    coverImage: {
+      url: { type: String, default: null },
+      publicId: { type: String, default: null },
+      alt: { type: String, default: null },
+    },
     tags: { type: [String], default: [] },
 
     state: { type: String, default: null },
     district: { type: String, default: null },
     city: { type: String, default: null },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    toJSON: {
+      virtuals: true,
+      transform: (_doc, ret) => _normalizeCoverImage(ret),
+    },
+    toObject: {
+      virtuals: true,
+      transform: (_doc, ret) => _normalizeCoverImage(ret),
+    },
+  }
 );
 
 // Store slugs as plain Unicode (not percent-encoded) so lookups are stable across clients.
@@ -61,6 +94,13 @@ articleSchema.pre('validate', function preValidate(next) {
     if (this.isModified('slug')) {
       this.slug = canonicalizeSlug(this.slug);
     }
+
+    // Backward compatibility: older docs/clients used `coverImage` as a string URL.
+    try {
+      if (this.coverImage && typeof this.coverImage === 'string') {
+        this.coverImage = { url: String(this.coverImage), publicId: null, alt: null };
+      }
+    } catch (_) {}
 
     if (this.slugs && typeof this.slugs === 'object') {
       for (const k of ['en', 'hi', 'gu']) {
