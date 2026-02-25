@@ -549,13 +549,19 @@ router.get('/articles/:id', async (req, res, next) => {
 // PUT /api/articles/:id → update existing article by id (CMS/admin)
 router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
   try {
-    const { id } = req.params;
+    const rawId = String(req.params.id || '').trim();
+    if (!mongoose.Types.ObjectId.isValid(rawId)) {
+      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+    }
+
+    const requestBody = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
+
     const {
       title,
       slug,
       summary,
       content,
-      body,
+      body: bodyText,
       category,
       language,
       tags,
@@ -564,7 +570,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       imageURL,
       coverImageUrl,
       coverImage,
-    } = req.body || {};
+    } = requestBody;
 
     let scheduled = scheduledAt;
     if (scheduled) {
@@ -579,7 +585,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
     let before = null;
     try {
-      before = await News.findById(id).select('status translationGroupId lang language slugs coverImage coverImageUrl imageURL').lean();
+      before = await News.findById(rawId).select('status translationGroupId lang language slugs coverImage coverImageUrl imageURL').lean();
     } catch (_) {
       // ignore
     }
@@ -595,7 +601,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       if (!resolvedSlug) {
         return res.status(400).json({ ok: false, success: false, message: 'Slug cannot be empty' });
       }
-      await assertSlugUnique(resolvedSlug, id);
+      await assertSlugUnique(resolvedSlug, rawId);
     }
 
     const resolvedCoverImageUrl = coverImageUrl ?? imageURL;
@@ -622,7 +628,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     const update = {
       ...(title !== undefined ? { title } : {}),
       ...(summary !== undefined ? { description: summary } : {}),
-      ...(content !== undefined || body !== undefined ? { content: content ?? body ?? '' } : {}),
+      ...(content !== undefined || bodyText !== undefined ? { content: content ?? bodyText ?? '' } : {}),
       ...(category !== undefined ? { category } : {}),
       ...(language !== undefined ? { language, lang: language } : {}),
       ...(tags !== undefined ? { tags: parseTags(tags) } : {}),
@@ -645,12 +651,12 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
     let doc = null;
     try {
-      doc = await News.findByIdAndUpdate(id, update, { new: true });
+      doc = await News.findByIdAndUpdate(rawId, update, { new: true, runValidators: true });
     } catch (_) {
       // invalid ObjectId
     }
     if (!doc) {
-      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Route not found', path: req.originalUrl });
+      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
     }
 
     // Ensure other language slugs are kept in sync when translations exist.
@@ -705,6 +711,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       article: withCoverImageUrl(obj),
     });
   } catch (err) {
+    try { console.error('ArticleUpdate error:', err); } catch (_) {}
     if (err?.status === 409) {
       return res.status(409).json({ ok: false, success: false, message: err.message || 'Slug already exists' });
     }

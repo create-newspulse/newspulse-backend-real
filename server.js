@@ -564,6 +564,8 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 // Upload routes (must be mounted before global 404)
 const uploadRoutes = require('./routes/uploads.routes');
 app.use('/api/uploads', uploadRoutes);
+app.use('/admin-api/uploads', uploadRoutes);
+app.use('/admin-api/api/uploads', uploadRoutes);
 
 // Admin panel compat endpoints (fast fallbacks)
 const adminCompatRoutes = require('./src/routes/adminCompat.routes');
