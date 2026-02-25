@@ -7,7 +7,7 @@ const router = express.Router();
 
 const coverUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 },
+  limits: { fileSize: 10 * 1024 * 1024 },
 });
 
 function pickCoverFile(req) {
@@ -45,8 +45,7 @@ router.post(
       if (!file) {
         return res.status(400).json({
           ok: false,
-          success: false,
-          message: 'No file uploaded',
+          message: 'No file uploaded. Use field cover',
         });
       }
 
@@ -69,13 +68,13 @@ router.post(
       if (!isCloudinaryConfigured()) {
         return res.status(500).json({
           ok: false,
-          success: false,
           message: 'Cloudinary not configured',
         });
       }
 
       // lib/cloudinary.uploadFromBuffer() uses Cloudinary upload_stream internally.
-      const result = await uploadFromBuffer(file.buffer);
+      const folder = String(process.env.CLOUDINARY_FOLDER || 'newspulse/articles').trim() || 'newspulse/articles';
+      const result = await uploadFromBuffer(file.buffer, { folder });
       const url = result?.secure_url || result?.url || null;
       const publicId = result?.public_id || null;
       const width = typeof result?.width === 'number' ? result.width : null;
@@ -88,13 +87,12 @@ router.post(
         data: { url, publicId, width, height, format },
       });
     } catch (err) {
-      console.error('CoverUpload error:', err);
+      console.error('UploadCover error:', err);
 
       const code = err?.code;
       if (code === 'CLOUDINARY_NOT_CONFIGURED') {
         return res.status(500).json({
           ok: false,
-          success: false,
           message: 'Cloudinary not configured',
         });
       }
