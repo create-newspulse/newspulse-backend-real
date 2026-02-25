@@ -1,7 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 
-const { isCloudinaryConfigured, uploadFromBuffer } = require('../lib/cloudinary');
+const { isCloudinaryConfigured, uploadFromBuffer, uploadFromDataUri, cloudinaryPing } = require('../lib/cloudinary');
 
 const router = express.Router();
 
@@ -15,6 +15,15 @@ function pickCoverFile(req) {
 
   const files = req.files;
   if (!files) return null;
+
+  // upload.any() shape: File[]
+  if (Array.isArray(files)) {
+    const coverFirst = files.find(f => String(f?.fieldname || '') === 'cover');
+    if (coverFirst) return coverFirst;
+    const fileFallback = files.find(f => String(f?.fieldname || '') === 'file');
+    if (fileFallback) return fileFallback;
+    return files[0] || null;
+  }
 
   // multer.fields() shape: { [field]: File[] }
   const coverArr = files.cover;
@@ -32,6 +41,28 @@ function pickCoverFile(req) {
   return null;
 }
 
+// GET /api/uploads/ping -> Cloudinary connectivity diagnostics
+router.get('/ping', async (_req, res) => {
+  try {
+    if (!isCloudinaryConfigured()) {
+      return res.status(500).json({
+        ok: false,
+        message: 'Cloudinary not configured',
+      });
+    }
+
+    const out = await cloudinaryPing();
+    return res.status(200).json({ ok: true, success: true, data: out });
+  } catch (err) {
+    console.error('UploadCover error:', err);
+    return res.status(500).json({
+      ok: false,
+      message: 'Cloudinary ping failed',
+      error: err?.message || String(err),
+    });
+  }
+});
+
 // GET /api/uploads/cover -> 405 (explicitly disallow)
 router.get('/cover', (_req, res) => {
   return res.status(405).json({ ok: false, message: 'Method Not Allowed' });
@@ -40,17 +71,14 @@ router.get('/cover', (_req, res) => {
 // POST /api/uploads/cover
 router.post(
   '/cover',
-  coverUpload.fields([
-    { name: 'cover', maxCount: 1 },
-    { name: 'file', maxCount: 1 },
-  ]),
+  coverUpload.any(),
   async (req, res) => {
     try {
       const file = pickCoverFile(req);
       if (!file) {
         return res.status(400).json({
           ok: false,
-          message: 'No file uploaded. Use field cover',
+          message: "No file received. Use multipart field 'cover' (or 'file').",
         });
       }
 
@@ -77,9 +105,23 @@ router.post(
         });
       }
 
-      // lib/cloudinary.uploadFromBuffer() uses Cloudinary upload_stream internally.
+      // Primary: upload_stream via buffer (fast + avoids huge strings)
       const folder = String(process.env.CLOUDINARY_FOLDER || 'newspulse/articles').trim() || 'newspulse/articles';
-      const result = await uploadFromBuffer(file.buffer, { folder });
+      let result = null;
+      try {
+        result = await uploadFromBuffer(file.buffer, { folder });
+      } catch (streamErr) {
+        // Fallback: base64 data URI upload (sometimes stream errors show up in certain proxy/env combos)
+        try {
+          const mime = String(file.mimetype || 'application/octet-stream');
+          const dataUri = `data:${mime};base64,${file.buffer.toString('base64')}`;
+          result = await uploadFromDataUri(dataUri, { folder });
+        } catch (dataErr) {
+          // Prefer the original stream error if fallback also failed
+          throw streamErr || dataErr;
+        }
+      }
+
       const url = result?.secure_url || result?.url || null;
       const publicId = result?.public_id || null;
       const width = typeof result?.width === 'number' ? result.width : null;
@@ -106,7 +148,8 @@ router.post(
       return res.status(status).json({
         ok: false,
         success: false,
-        message: status === 400 ? (err?.message || 'Bad request') : 'Cover upload failed',
+        message: status === 400 ? (err?.message || 'Bad request') : 'Upload failed',
+        error: err?.message || String(err),
       });
     }
   }
