@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const { requireAdminAuth } = require('../../middleware/adminAuth');
 
-const { uploadCoverImageBuffer, deleteCoverByPublicId } = require('../../lib/cloudinary');
+const { deleteCoverByPublicId } = require('../../lib/cloudinary');
 
 const router = express.Router();
 
@@ -37,11 +37,6 @@ const upload = multer({
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
 });
 
-// Cover uploads should not hit local disk (Cloudinary only)
-const coverUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
-});
 
 // Build URLs safely behind proxies
 const buildUrls = (req, filename) => {
@@ -110,48 +105,7 @@ router.post('/media/upload', upload.fields([
   );
 });
 
-// --------------------- COVER UPLOAD ---------------------
-// supports field name: cover (preferred) OR file
-router.post('/uploads/cover', coverUpload.fields([
-  { name: 'cover', maxCount: 1 },
-  { name: 'file', maxCount: 1 },
-]), async (req, res) => {
-  const file = pickUploadedFile(req);
-  if (!file) return bad(res, 400, 'No cover uploaded (field: cover)', req.originalUrl);
-
-  if (!file.buffer || !Buffer.isBuffer(file.buffer)) {
-    return bad(res, 400, 'Invalid upload (missing file buffer)', req.originalUrl);
-  }
-  if (!String(file.mimetype || '').toLowerCase().startsWith('image/')) {
-    return bad(res, 400, 'Invalid file type (image required)', req.originalUrl);
-  }
-
-  try {
-    const result = await uploadCoverImageBuffer(file);
-    const url = result?.secure_url || result?.url || null;
-    const publicId = result?.public_id || null;
-    const width = typeof result?.width === 'number' ? result.width : null;
-    const height = typeof result?.height === 'number' ? result.height : null;
-    const format = result?.format ? String(result.format) : null;
-
-    return res.status(200).json({
-      ok: true,
-      success: true,
-      data: { url, publicId, width, height, format },
-    });
-  } catch (e) {
-    console.error('[uploads.cover] cloudinary upload failed', {
-      message: e?.message || String(e),
-      name: e?.name,
-    });
-    return res.status(500).json({
-      ok: false,
-      success: false,
-      message: 'Cover upload failed',
-      code: e?.code || undefined,
-    });
-  }
-});
+// NOTE: /api/uploads/cover is implemented in routes/uploads.routes.js
 
 // --------------------- COVER DELETE (optional) ---------------------
 // DELETE /api/uploads/cover/:publicId

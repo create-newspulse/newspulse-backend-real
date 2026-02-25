@@ -561,6 +561,10 @@ app.use(cookieParser());
 // Serve uploaded files publicly
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
+// Upload routes (must be mounted before global 404)
+const uploadRoutes = require('./routes/uploads.routes');
+app.use('/api/uploads', uploadRoutes);
+
 // Admin panel compat endpoints (fast fallbacks)
 const adminCompatRoutes = require('./src/routes/adminCompat.routes');
 app.use('/api', adminCompatRoutes);
