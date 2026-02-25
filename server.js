@@ -1230,6 +1230,19 @@ app.use('/api', articlesRoutes);
 app.use('/', articlesRoutes);
 // Admin panel compatibility: /api/admin/articles should behave like /api/articles
 app.use('/api/admin', articlesRoutes);
+// Explicit legacy alias: some admin autosave builds call /api/admin/articles/:id
+// Forward to the canonical /api/articles/:id handler.
+app.put('/api/admin/articles/:id', (req, res, next) => {
+  try {
+    const id = String(req.params.id || '').trim();
+    const qsIdx = String(req.url || '').indexOf('?');
+    const qs = qsIdx >= 0 ? String(req.url || '').slice(qsIdx) : '';
+    req.url = `/articles/${id}${qs}`;
+    return articlesRoutes.handle(req, res, next);
+  } catch (e) {
+    return next(e);
+  }
+});
 // Admin panel proxy basePath support (some frontends call /admin-api/*)
 app.use('/admin-api/admin', articlesRoutes);
 app.use('/admin-api/api/admin', articlesRoutes);

@@ -656,7 +656,72 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       // invalid ObjectId
     }
     if (!doc) {
-      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+      // Fallback: some admin builds operate on the public Article model instead of News.
+      const allowedArticleStatuses = new Set(['draft', 'published']);
+      const articleUpdate = {
+        ...(title !== undefined ? { title } : {}),
+        ...(summary !== undefined ? { summary } : {}),
+        ...(content !== undefined || bodyText !== undefined ? { content: content ?? bodyText ?? '' } : {}),
+        ...(category !== undefined ? { category } : {}),
+        ...(language !== undefined ? { language: normalizeLanguage(language) || undefined } : {}),
+        ...(tags !== undefined ? { tags: parseTags(tags) } : {}),
+        ...(status !== undefined && status !== null && String(status).trim() !== '' && allowedArticleStatuses.has(String(status).toLowerCase())
+          ? { status: String(status).toLowerCase() }
+          : {}),
+        ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
+      };
+
+      // coverImage (preferred) + legacy coverImageUrl/imageURL -> coverImage.url
+      const nextCoverForArticle = (() => {
+        const coverObj2 = (coverImage && typeof coverImage === 'object' && !Array.isArray(coverImage)) ? coverImage : null;
+        const urlFromLegacy = resolvedCoverImageUrl !== undefined ? absolutizeUploadsUrl(resolvedCoverImageUrl) : null;
+
+        if (!coverObj2 && urlFromLegacy === null) return null;
+
+        const out = { url: null, publicId: null, alt: null };
+        if (coverObj2) {
+          if (coverObj2.url !== undefined) out.url = absolutizeUploadsUrl(coverObj2.url);
+          if (coverObj2.publicId !== undefined) out.publicId = coverObj2.publicId ? String(coverObj2.publicId) : null;
+          if (coverObj2.alt !== undefined) out.alt = coverObj2.alt ? String(coverObj2.alt) : null;
+        }
+
+        if (out.url === null && urlFromLegacy) out.url = urlFromLegacy;
+        return out;
+      })();
+
+      if (nextCoverForArticle) {
+        articleUpdate.coverImage = nextCoverForArticle;
+      }
+
+      // Strip undefined fields so we don't unset enums accidentally.
+      for (const k of Object.keys(articleUpdate)) {
+        if (articleUpdate[k] === undefined) delete articleUpdate[k];
+      }
+
+      let articleDoc = null;
+      try {
+        articleDoc = await PublicArticle.findByIdAndUpdate(rawId, articleUpdate, { new: true, runValidators: true });
+      } catch (e) {
+        // Duplicate slug unique index
+        if (e && (e.code === 11000 || e.code === 11001)) {
+          return res.status(409).json({ ok: false, success: false, message: 'Slug already exists' });
+        }
+        throw e;
+      }
+
+      if (!articleDoc) {
+        return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+      }
+
+      const obj2 = articleDoc.toObject ? articleDoc.toObject({ virtuals: true }) : articleDoc;
+      return res.json({
+        ok: true,
+        success: true,
+        status: 200,
+        message: 'Article updated',
+        data: { article: withCoverImageUrl(obj2) },
+        article: withCoverImageUrl(obj2),
+      });
     }
 
     // Ensure other language slugs are kept in sync when translations exist.
