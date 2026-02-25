@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { canonicalizeSlug } = require('../lib/slug');
+const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 
 // Workflow stages
 // Admin panel (new) expects lowercase identifiers.
@@ -122,6 +122,16 @@ const newsSchema = new mongoose.Schema({
         return s ? s : null;
       },
     },
+    stateSlug: {
+      type: String,
+      default: null,
+      index: true,
+      set: (v) => {
+        if (v === null || v === undefined) return v;
+        const s = String(v).trim();
+        return s ? slugifyUnicode(s, { maxLength: 80 }) : null;
+      },
+    },
     city: {
       type: String,
       default: null,
@@ -131,6 +141,16 @@ const newsSchema = new mongoose.Schema({
         return s ? s : null;
       },
     },
+    citySlug: {
+      type: String,
+      default: null,
+      index: true,
+      set: (v) => {
+        if (v === null || v === undefined) return v;
+        const s = String(v).trim();
+        return s ? slugifyUnicode(s, { maxLength: 80 }) : null;
+      },
+    },
     district: {
       type: String,
       default: null,
@@ -138,6 +158,16 @@ const newsSchema = new mongoose.Schema({
         if (v === null || v === undefined) return v;
         const s = String(v).trim();
         return s ? s : null;
+      },
+    },
+    districtSlug: {
+      type: String,
+      default: null,
+      index: true,
+      set: (v) => {
+        if (v === null || v === undefined) return v;
+        const s = String(v).trim();
+        return s ? slugifyUnicode(s, { maxLength: 80 }) : null;
       },
     },
     isUT: { type: Boolean, default: null },
@@ -252,6 +282,34 @@ newsSchema.pre('validate', function preValidate(next) {
     const docLang = String(this.lang || this.language || 'en').trim().toLowerCase();
     if ((!this.slug || !String(this.slug).trim()) && this.slugs && this.slugs[docLang]) {
       this.slug = this.slugs[docLang];
+    }
+
+    // Normalize and store location slugs for stable regional filtering.
+    // Keep slugs aligned with the human-readable location fields.
+    if (!this.location || typeof this.location !== 'object') {
+      this.location = {};
+    }
+
+    const state = this.location.state;
+    const district = this.location.district;
+    const city = this.location.city;
+
+    if (state === null || state === undefined || String(state).trim() === '') {
+      this.location.stateSlug = null;
+    } else if (!this.location.stateSlug || this.isModified('location.state')) {
+      this.location.stateSlug = slugifyUnicode(String(state), { maxLength: 80 }) || null;
+    }
+
+    if (district === null || district === undefined || String(district).trim() === '') {
+      this.location.districtSlug = null;
+    } else if (!this.location.districtSlug || this.isModified('location.district')) {
+      this.location.districtSlug = slugifyUnicode(String(district), { maxLength: 80 }) || null;
+    }
+
+    if (city === null || city === undefined || String(city).trim() === '') {
+      this.location.citySlug = null;
+    } else if (!this.location.citySlug || this.isModified('location.city')) {
+      this.location.citySlug = slugifyUnicode(String(city), { maxLength: 80 }) || null;
     }
 
     return next();

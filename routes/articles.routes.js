@@ -68,6 +68,63 @@ function normalizeLanguage(v) {
   return null;
 }
 
+function _escapeRegex(s) {
+  return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function _normalizeLocationValue(v) {
+  if (v === null || v === undefined) return undefined;
+  const s = String(v).trim();
+  return s ? s : null;
+}
+
+function _locationSlugsFromValues({ state, district, city }) {
+  const stateVal = _normalizeLocationValue(state);
+  const districtVal = _normalizeLocationValue(district);
+  const cityVal = _normalizeLocationValue(city);
+
+  return {
+    state: stateVal,
+    district: districtVal,
+    city: cityVal,
+    stateSlug: stateVal ? slugifyUnicode(stateVal, { maxLength: 80 }) : (stateVal === null ? null : undefined),
+    districtSlug: districtVal ? slugifyUnicode(districtVal, { maxLength: 80 }) : (districtVal === null ? null : undefined),
+    citySlug: cityVal ? slugifyUnicode(cityVal, { maxLength: 80 }) : (cityVal === null ? null : undefined),
+  };
+}
+
+function _buildLocationQueryFromRequest(req) {
+  const stateRaw = (req.query.state ?? '').toString();
+  const districtRaw = (req.query.district ?? '').toString();
+  const cityRaw = (req.query.city ?? '').toString();
+
+  const state = stateRaw.trim();
+  const district = districtRaw.trim();
+  const city = cityRaw.trim();
+
+  const andClauses = [];
+
+  if (state) {
+    const slug = slugifyUnicode(state, { maxLength: 80 });
+    const rx = new RegExp(`^\\s*${_escapeRegex(state)}\\s*$`, 'i');
+    andClauses.push({ $or: [{ 'location.stateSlug': slug }, { 'location.state': rx }] });
+  }
+
+  if (district) {
+    const slug = slugifyUnicode(district, { maxLength: 80 });
+    const rx = new RegExp(`^\\s*${_escapeRegex(district)}\\s*$`, 'i');
+    andClauses.push({ $or: [{ 'location.districtSlug': slug }, { 'location.district': rx }] });
+  }
+
+  if (city) {
+    const slug = slugifyUnicode(city, { maxLength: 80 });
+    const rx = new RegExp(`^\\s*${_escapeRegex(city)}\\s*$`, 'i');
+    andClauses.push({ $or: [{ 'location.citySlug': slug }, { 'location.city': rx }] });
+  }
+
+  return andClauses;
+}
+
 function getTitleForLangFromDocLike(docLike, lang) {
   const desired = normalizeLanguage(lang);
   if (!desired) return '';
@@ -289,6 +346,15 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     const actor = getActor(req);
     const translationGroupId = (req.body && req.body.translationGroupId) ? String(req.body.translationGroupId).trim() : '';
 
+    const locationBody = (req.body && req.body.location && typeof req.body.location === 'object' && !Array.isArray(req.body.location))
+      ? req.body.location
+      : {};
+    const loc = _locationSlugsFromValues({
+      state: locationBody.state ?? req.body?.state,
+      district: locationBody.district ?? req.body?.district,
+      city: locationBody.city ?? req.body?.city,
+    });
+
     const langNorm = normalizeLanguage(language) || 'en';
     const slugs = { ...(req.body && req.body.slugs && typeof req.body.slugs === 'object' ? req.body.slugs : {}) };
     slugs[langNorm] = resolvedSlug;
@@ -310,6 +376,16 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       category,
       language: language || 'en',
       lang: language || 'en',
+      ...(loc.state !== undefined || loc.district !== undefined || loc.city !== undefined ? {
+        location: {
+          state: loc.state,
+          district: loc.district,
+          city: loc.city,
+          stateSlug: loc.stateSlug,
+          districtSlug: loc.districtSlug,
+          citySlug: loc.citySlug,
+        },
+      } : {}),
       translationGroupId: translationGroupId || new mongoose.Types.ObjectId().toString(),
       tags: parseTags(tags),
       status: initialStatus || 'draft',
@@ -386,7 +462,7 @@ router.get('/articles', requireAdminAuth, async (req, res, next) => {
     const allowedSortFields = new Set(['updatedAt', 'createdAt', 'publishedAt']);
     const sortParam = _parseSafeSort(req.query.sort, allowedSortFields, 'updatedAt', -1);
     const statusRaw = (req.query.status || '').toString();
-    const languageRaw = (req.query.language || '').toString().trim();
+    const langQueryRaw = (req.query.lang || req.query.language || '').toString().trim();
     const categoryRaw = (req.query.category || '').toString().trim();
     const qRaw = (req.query.q || '').toString().trim();
     const fromRaw = (req.query.from || '').toString().trim();
@@ -405,8 +481,32 @@ router.get('/articles', requireAdminAuth, async (req, res, next) => {
         ];
       }
     }
-    if (languageRaw) query.language = languageRaw;
-    if (categoryRaw) query.category = categoryRaw;
+
+    const locationAnd = _buildLocationQueryFromRequest(req);
+    if (locationAnd.length) {
+      query.$and = (query.$and || []).concat(locationAnd);
+
+      // For regional feeds, callers usually want published-only.
+      // Keep explicit status=... overriding this default.
+      if (!statusRaw) {
+        query.status = 'published';
+      }
+    }
+
+    const langNorm = normalizeLanguage(langQueryRaw);
+    if (langNorm) {
+      query.$and = (query.$and || []).concat([{ $or: [{ language: langNorm }, { lang: langNorm }] }]);
+    }
+
+    if (categoryRaw) {
+      const categoryNorm = String(categoryRaw).trim().toLowerCase();
+      if (categoryNorm === 'regional') {
+        // Regional listing should include breaking stories too.
+        query.category = { $in: ['regional', 'breaking'] };
+      } else {
+        query.category = categoryNorm;
+      }
+    }
     if (qRaw) {
       const rx = new RegExp(qRaw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       query.$and = (query.$and || []).concat([
@@ -485,13 +585,30 @@ router.get('/public/articles', async (req, res, next) => {
       return res.status(400).json({ ok: false, success: false, message: 'Only status=published is allowed' });
     }
 
-    const languageRaw = (req.query.language || '').toString().trim();
+    const langQueryRaw = (req.query.lang || req.query.language || '').toString().trim();
     const categoryRaw = (req.query.category || '').toString().trim();
     const qRaw = (req.query.q || '').toString().trim();
 
     const query = { status: 'published' };
-    if (languageRaw) query.language = languageRaw;
-    if (categoryRaw) query.category = categoryRaw;
+
+    const locationAnd = _buildLocationQueryFromRequest(req);
+    if (locationAnd.length) {
+      query.$and = (query.$and || []).concat(locationAnd);
+    }
+
+    const langNorm = normalizeLanguage(langQueryRaw);
+    if (langNorm) {
+      query.$and = (query.$and || []).concat([{ $or: [{ language: langNorm }, { lang: langNorm }] }]);
+    }
+
+    if (categoryRaw) {
+      const categoryNorm = String(categoryRaw).trim().toLowerCase();
+      if (categoryNorm === 'regional') {
+        query.category = { $in: ['regional', 'breaking'] };
+      } else {
+        query.category = categoryNorm;
+      }
+    }
     if (qRaw) {
       const rx = new RegExp(qRaw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       query.$or = [{ title: rx }, { description: rx }, { content: rx }];
@@ -579,6 +696,15 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       coverImage,
     } = requestBody;
 
+    const locationBody = (requestBody.location && typeof requestBody.location === 'object' && !Array.isArray(requestBody.location))
+      ? requestBody.location
+      : {};
+    const loc = _locationSlugsFromValues({
+      state: locationBody.state ?? requestBody.state,
+      district: locationBody.district ?? requestBody.district,
+      city: locationBody.city ?? requestBody.city,
+    });
+
     let scheduled = scheduledAt;
     if (scheduled) {
       const dt = new Date(scheduled);
@@ -638,6 +764,9 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       ...(content !== undefined || bodyText !== undefined ? { content: content ?? bodyText ?? '' } : {}),
       ...(category !== undefined ? { category } : {}),
       ...(language !== undefined ? { language, lang: language } : {}),
+      ...(loc.state !== undefined ? { 'location.state': loc.state, 'location.stateSlug': loc.stateSlug ?? null } : {}),
+      ...(loc.district !== undefined ? { 'location.district': loc.district, 'location.districtSlug': loc.districtSlug ?? null } : {}),
+      ...(loc.city !== undefined ? { 'location.city': loc.city, 'location.citySlug': loc.citySlug ?? null } : {}),
       ...(tags !== undefined ? { tags: parseTags(tags) } : {}),
       ...(status !== undefined && status !== null && String(status).trim() !== '' ? { status: String(status).toLowerCase() } : {}),
       ...(scheduled !== undefined ? { scheduledAt: scheduled } : {}),
