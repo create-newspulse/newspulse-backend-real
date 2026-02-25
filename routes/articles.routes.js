@@ -527,16 +527,23 @@ router.get('/news/all', (req, res, next) => {
 // GET /api/articles/:id → get single article by id
 router.get('/articles/:id', async (req, res, next) => {
   try {
-    const { id } = req.params;
-    let doc = null;
-    try {
-      doc = await News.findById(id);
-    } catch (_) {
-      // invalid ObjectId
+    const rawId = String(req.params.id || '').trim();
+    if (!mongoose.Types.ObjectId.isValid(rawId)) {
+      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
     }
+
+    // Primary: CMS/admin articles stored in News collection.
+    let doc = await News.findById(rawId).catch(() => null);
+
+    // Fallback: some deployments/edit flows reference the public Article model by id.
     if (!doc) {
-      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Route not found', path: req.originalUrl });
+      doc = await PublicArticle.findById(rawId).catch(() => null);
     }
+
+    if (!doc) {
+      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+    }
+
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
     const out = withCoverImageUrl(obj);
     // Compatibility: some admin frontends expect `data.article` (while others expect `article`).

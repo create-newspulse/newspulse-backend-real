@@ -1232,6 +1232,17 @@ app.use('/', articlesRoutes);
 app.use('/api/admin', articlesRoutes);
 // Explicit legacy alias: some admin autosave builds call /api/admin/articles/:id
 // Forward to the canonical /api/articles/:id handler.
+app.get('/api/admin/articles/:id', (req, res, next) => {
+  try {
+    const id = String(req.params.id || '').trim();
+    const qsIdx = String(req.url || '').indexOf('?');
+    const qs = qsIdx >= 0 ? String(req.url || '').slice(qsIdx) : '';
+    req.url = `/articles/${id}${qs}`;
+    return articlesRoutes.handle(req, res, next);
+  } catch (e) {
+    return next(e);
+  }
+});
 app.put('/api/admin/articles/:id', (req, res, next) => {
   try {
     const id = String(req.params.id || '').trim();

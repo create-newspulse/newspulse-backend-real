@@ -32,6 +32,11 @@ function pickCoverFile(req) {
   return null;
 }
 
+// GET /api/uploads/cover -> 405 (explicitly disallow)
+router.get('/cover', (_req, res) => {
+  return res.status(405).json({ ok: false, message: 'Method Not Allowed' });
+});
+
 // POST /api/uploads/cover
 router.post(
   '/cover',
