@@ -1259,6 +1259,25 @@ app.use('/admin-api/admin', articlesRoutes);
 app.use('/admin-api/api/admin', articlesRoutes);
 // Compatibility: some admin builds call /admin-api/articles directly
 app.use('/admin-api', articlesRoutes);
+
+// Extra safety: some admin edit pages call /admin-api/articles/:id (or /admin-api/api/articles/:id)
+// Forward explicitly to the canonical /api/articles/:id handler.
+const _forwardAdminArticleById = (req, res, next) => {
+  try {
+    const id = String(req.params.id || '').trim();
+    const qsIdx = String(req.url || '').indexOf('?');
+    const qs = qsIdx >= 0 ? String(req.url || '').slice(qsIdx) : '';
+    req.url = `/articles/${id}${qs}`;
+    return articlesRoutes.handle(req, res, next);
+  } catch (e) {
+    return next(e);
+  }
+};
+app.get('/admin-api/articles/:id', _forwardAdminArticleById);
+app.get('/admin-api/api/articles/:id', _forwardAdminArticleById);
+app.put('/admin-api/articles/:id', _forwardAdminArticleById);
+app.put('/admin-api/api/articles/:id', _forwardAdminArticleById);
+
 app.use('/api/community', communityRoutes);
 // Reporter portal: My Community Stories
 app.use('/api/community', communityStoriesRouter);
