@@ -103,12 +103,14 @@ function _buildNationalLocationValue({ categoryNorm, incoming, existing, incomin
     return { scope: 'ALL_INDIA', stateUtName: '', stateUtSlug: '', stateUtType: '' };
   }
 
-  const scope = _normalizeNationalScope(incoming && incoming.scope) || 'ALL_INDIA';
+  const scopeFromBody = _normalizeNationalScope(incoming && incoming.scope);
+  const slugFromBody = String(incoming && incoming.stateUtSlug ? incoming.stateUtSlug : '').trim();
+  const scope = scopeFromBody || (slugFromBody ? 'STATE_UT' : 'ALL_INDIA');
   if (scope === 'ALL_INDIA') {
     return { scope: 'ALL_INDIA', stateUtName: '', stateUtSlug: '', stateUtType: '' };
   }
 
-  const slug = String(incoming && incoming.stateUtSlug ? incoming.stateUtSlug : '').trim().toLowerCase();
+  const slug = slugFromBody.toLowerCase();
   if (!slug) {
     return { error: 'stateUtSlug is required when scope=STATE_UT' };
   }
@@ -658,9 +660,11 @@ router.get('/public/articles', async (req, res, next) => {
     const categoryRaw = (req.query.category || '').toString().trim();
     const qRaw = (req.query.q || '').toString().trim();
 
-    const stateUtRaw = (req.query.stateUt || '').toString().trim();
+    const stateUtRaw = (req.query.stateUt || req.query.state || '').toString().trim();
+    const onlyStateProvided = req.query.onlyState !== undefined;
     const onlyStateRaw = (req.query.onlyState ?? '').toString().trim();
-    const onlyState = onlyStateRaw === '1' || onlyStateRaw.toLowerCase() === 'true' || onlyStateRaw.toLowerCase() === 'yes';
+    const onlyStateParsed = onlyStateRaw === '1' || onlyStateRaw.toLowerCase() === 'true' || onlyStateRaw.toLowerCase() === 'yes';
+    const onlyState = onlyStateProvided ? onlyStateParsed : true;
 
     const query = { status: 'published' };
 
@@ -683,7 +687,7 @@ router.get('/public/articles', async (req, res, next) => {
       }
 
       // National state/UT filtering
-      // Applies only when category is National and stateUt is provided.
+      // Applies only when category is National and stateUt/state is provided.
       if (categoryNorm === 'national' && stateUtRaw) {
         const slug = stateUtRaw.toLowerCase();
         if (onlyState) {
