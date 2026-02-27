@@ -1,5 +1,7 @@
 const express = require('express');
 
+const indiaStatesUTs = require('../src/constants/indiaStatesUTs');
+
 const router = express.Router();
 
 function getSupportedLanguages() {
@@ -37,6 +39,16 @@ router.get('/meta/languages', (_req, res) => {
     success: true,
     status: 200,
     languages: getSupportedLanguages(),
+  });
+});
+
+// India states/UTs master list
+// - GET /api/meta/india-states-uts
+// - GET /admin-api/meta/india-states-uts
+router.get('/meta/india-states-uts', (_req, res) => {
+  return res.json({
+    success: true,
+    items: Array.isArray(indiaStatesUTs) ? indiaStatesUTs : [],
   });
 });
 

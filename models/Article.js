@@ -71,6 +71,14 @@ const articleSchema = new mongoose.Schema(
     },
     tags: { type: [String], default: [] },
 
+    // National category targeting within India.
+    nationalLocation: {
+      scope: { type: String, enum: ['ALL_INDIA', 'STATE_UT'], default: 'ALL_INDIA' },
+      stateUtName: { type: String, default: '' },
+      stateUtSlug: { type: String, default: '' },
+      stateUtType: { type: String, enum: ['STATE', 'UT', ''], default: '' },
+    },
+
     state: { type: String, default: null },
     district: { type: String, default: null },
     city: { type: String, default: null },
@@ -143,6 +151,7 @@ articleSchema.pre('save', function preSave(next) {
 articleSchema.index({ status: 1, category: 1, publishedAt: -1 });
 articleSchema.index({ status: 1, isBreaking: 1, publishedAt: -1 });
 articleSchema.index({ slug: 1 }, { unique: true });
+articleSchema.index({ category: 1, 'nationalLocation.stateUtSlug': 1 });
 articleSchema.index({ 'slugs.en': 1 });
 articleSchema.index({ 'slugs.hi': 1 });
 articleSchema.index({ 'slugs.gu': 1 });
