@@ -1,7 +1,6 @@
 const express = require('express');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
-const indiaStatesUTs = require('../src/constants/indiaStatesUTs');
 // CMS/admin "articles" are stored in the News collection in this codebase.
 // Keep an alias named Article for routes that treat these as "Articles".
 const Article = News;
@@ -67,57 +66,6 @@ function normalizeLanguage(v) {
   const s = String(v ?? '').trim().toLowerCase();
   if (s === 'en' || s === 'hi' || s === 'gu') return s;
   return null;
-}
-
-const _INDIA_STATE_UT_BY_SLUG = new Map(
-  (Array.isArray(indiaStatesUTs) ? indiaStatesUTs : [])
-    .filter((x) => x && typeof x === 'object')
-    .map((x) => [String(x.slug || '').trim().toLowerCase(), x])
-);
-
-function _normalizeNationalScope(v) {
-  const s = String(v ?? '').trim().toUpperCase();
-  if (s === 'ALL_INDIA' || s === 'STATE_UT') return s;
-  return null;
-}
-
-function _buildNationalLocationValue({ categoryNorm, incoming, existing, incomingProvided }) {
-  const isNational = categoryNorm === 'national';
-
-  // If category is not National, always force ALL_INDIA to avoid dirty data.
-  if (!isNational) {
-    return { scope: 'ALL_INDIA', stateUtName: '', stateUtSlug: '', stateUtType: '' };
-  }
-
-  // If caller did not provide a payload, keep an existing valid value if present.
-  if (!incomingProvided) {
-    const existingScope = _normalizeNationalScope(existing && existing.scope);
-    if (existingScope === 'STATE_UT') {
-      const slug = String(existing.stateUtSlug || '').trim().toLowerCase();
-      const hit = _INDIA_STATE_UT_BY_SLUG.get(slug);
-      if (hit) {
-        return { scope: 'STATE_UT', stateUtName: hit.name, stateUtSlug: hit.slug, stateUtType: hit.type };
-      }
-    }
-    // Default when missing/invalid.
-    return { scope: 'ALL_INDIA', stateUtName: '', stateUtSlug: '', stateUtType: '' };
-  }
-
-  const scope = _normalizeNationalScope(incoming && incoming.scope) || 'ALL_INDIA';
-  if (scope === 'ALL_INDIA') {
-    return { scope: 'ALL_INDIA', stateUtName: '', stateUtSlug: '', stateUtType: '' };
-  }
-
-  const slug = String(incoming && incoming.stateUtSlug ? incoming.stateUtSlug : '').trim().toLowerCase();
-  if (!slug) {
-    return { error: 'stateUtSlug is required when scope=STATE_UT' };
-  }
-
-  const hit = _INDIA_STATE_UT_BY_SLUG.get(slug);
-  if (!hit) {
-    return { error: 'Invalid stateUtSlug' };
-  }
-  return { scope: 'STATE_UT', stateUtName: hit.name, stateUtSlug: hit.slug, stateUtType: hit.type };
 }
 
 function _escapeRegex(s) {
@@ -316,7 +264,6 @@ async function syncArticleFromNews(doc) {
     isBreaking: String(doc.category || '').toLowerCase() === 'breaking',
     coverImage,
     tags: Array.isArray(doc.tags) ? doc.tags : [],
-    nationalLocation: doc.nationalLocation || { scope: 'ALL_INDIA', stateUtName: '', stateUtSlug: '', stateUtType: '' },
   };
 
   // Do not let this throw and break the CMS flow; log and move on.
@@ -408,20 +355,6 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       city: locationBody.city ?? req.body?.city,
     });
 
-    const categoryNorm = String(category || '').trim().toLowerCase();
-    const incomingNationalLocation = (req.body && req.body.nationalLocation && typeof req.body.nationalLocation === 'object' && !Array.isArray(req.body.nationalLocation))
-      ? req.body.nationalLocation
-      : undefined;
-    const nationalLocationValue = _buildNationalLocationValue({
-      categoryNorm,
-      incoming: incomingNationalLocation,
-      existing: null,
-      incomingProvided: incomingNationalLocation !== undefined,
-    });
-    if (nationalLocationValue && nationalLocationValue.error) {
-      return res.status(400).json({ ok: false, success: false, message: nationalLocationValue.error });
-    }
-
     const langNorm = normalizeLanguage(language) || 'en';
     const slugs = { ...(req.body && req.body.slugs && typeof req.body.slugs === 'object' ? req.body.slugs : {}) };
     slugs[langNorm] = resolvedSlug;
@@ -468,8 +401,6 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       } : {}),
       slug: resolvedSlug,
       slugs,
-
-      nationalLocation: nationalLocationValue,
 
       workflowStage,
       workflowUpdatedAt: now,
@@ -658,10 +589,6 @@ router.get('/public/articles', async (req, res, next) => {
     const categoryRaw = (req.query.category || '').toString().trim();
     const qRaw = (req.query.q || '').toString().trim();
 
-    const stateUtRaw = (req.query.stateUt || '').toString().trim();
-    const onlyStateRaw = (req.query.onlyState ?? '').toString().trim();
-    const onlyState = onlyStateRaw === '1' || onlyStateRaw.toLowerCase() === 'true' || onlyStateRaw.toLowerCase() === 'yes';
-
     const query = { status: 'published' };
 
     const locationAnd = _buildLocationQueryFromRequest(req);
@@ -680,31 +607,6 @@ router.get('/public/articles', async (req, res, next) => {
         query.category = { $in: ['regional', 'breaking'] };
       } else {
         query.category = categoryNorm;
-      }
-
-      // National state/UT filtering
-      // Applies only when category is National and stateUt is provided.
-      if (categoryNorm === 'national' && stateUtRaw) {
-        const slug = stateUtRaw.toLowerCase();
-        if (onlyState) {
-          query.$and = (query.$and || []).concat([
-            { 'nationalLocation.scope': 'STATE_UT' },
-            { 'nationalLocation.stateUtSlug': slug },
-          ]);
-        } else {
-          query.$and = (query.$and || []).concat([
-            {
-              $or: [
-                { 'nationalLocation.scope': 'STATE_UT', 'nationalLocation.stateUtSlug': slug },
-                { 'nationalLocation.scope': 'ALL_INDIA' },
-                { nationalLocation: { $exists: false } },
-                { 'nationalLocation.scope': { $exists: false } },
-                { 'nationalLocation.scope': null },
-                { 'nationalLocation.scope': '' },
-              ],
-            },
-          ]);
-        }
       }
     }
     if (qRaw) {
@@ -816,7 +718,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
     let before = null;
     try {
-      before = await News.findById(rawId).select('status translationGroupId lang language slugs coverImage coverImageUrl imageURL category nationalLocation').lean();
+      before = await News.findById(rawId).select('status translationGroupId lang language slugs coverImage coverImageUrl imageURL').lean();
     } catch (_) {
       // ignore
     }
@@ -836,20 +738,6 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const resolvedCoverImageUrl = coverImageUrl ?? imageURL;
-
-    const nextCategoryNorm = String((category !== undefined ? category : before?.category) || '').trim().toLowerCase();
-    const incomingNationalLocation = (requestBody.nationalLocation && typeof requestBody.nationalLocation === 'object' && !Array.isArray(requestBody.nationalLocation))
-      ? requestBody.nationalLocation
-      : undefined;
-    const nationalLocationValue = _buildNationalLocationValue({
-      categoryNorm: nextCategoryNorm,
-      incoming: incomingNationalLocation,
-      existing: before && before.nationalLocation ? before.nationalLocation : null,
-      incomingProvided: incomingNationalLocation !== undefined,
-    });
-    if (nationalLocationValue && nationalLocationValue.error) {
-      return res.status(400).json({ ok: false, success: false, message: nationalLocationValue.error });
-    }
 
     const coverObj = (coverImage && typeof coverImage === 'object' && !Array.isArray(coverImage)) ? coverImage : null;
     const prevCover = (() => {
@@ -895,7 +783,6 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         } : {}),
       } : {}),
       ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
-      ...(nationalLocationValue ? { nationalLocation: nationalLocationValue } : {}),
     };
 
     let doc = null;
@@ -918,7 +805,6 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
           ? { status: String(status).toLowerCase() }
           : {}),
         ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
-        ...(nationalLocationValue ? { nationalLocation: nationalLocationValue } : {}),
       };
 
       // coverImage (preferred) + legacy coverImageUrl/imageURL -> coverImage.url

@@ -181,15 +181,6 @@ const newsSchema = new mongoose.Schema({
       },
     },
   },
-
-  // National category targeting within India.
-  // scope=ALL_INDIA is the default; scope=STATE_UT targets a specific state/UT.
-  nationalLocation: {
-    scope: { type: String, enum: ['ALL_INDIA', 'STATE_UT'], default: 'ALL_INDIA' },
-    stateUtName: { type: String, default: '' },
-    stateUtSlug: { type: String, default: '' },
-    stateUtType: { type: String, enum: ['STATE', 'UT', ''], default: '' },
-  },
   date: { type: Date, default: Date.now },
   imageURL: String,
   coverImageUrl: String,
@@ -343,7 +334,6 @@ newsSchema.index({ translationKey: 1, lang: 1, status: 1, publishedAt: -1 });
 newsSchema.index({ translationGroupId: 1, lang: 1, status: 1, publishedAt: -1 });
 newsSchema.index({ topic: 1, status: 1, publishedAt: -1 });
 newsSchema.index({ 'location.state': 1, status: 1, publishedAt: -1 });
-newsSchema.index({ category: 1, 'nationalLocation.stateUtSlug': 1 });
 newsSchema.index({ 'slugs.en': 1 });
 newsSchema.index({ 'slugs.hi': 1 });
 newsSchema.index({ 'slugs.gu': 1 });
