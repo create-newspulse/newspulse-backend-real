@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
 
+const { getIstDateKey, formatIstTimeText } = require('../src/utils/istDate');
+
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 
 const BroadcastItemSchema = new mongoose.Schema(
@@ -70,6 +72,54 @@ const BroadcastItemSchema = new mongoose.Schema(
       default: Date.now,
       index: true,
     },
+
+    // Daily IST cycle support (YYYY-MM-DD in Asia/Kolkata).
+    // New code uses this for 24/7 tickers; older code can ignore.
+    dateKey: {
+      type: String,
+      required: false,
+      index: true,
+    },
+
+    // Optional display time text (IST), e.g. "10:35 AM".
+    timeText: {
+      type: String,
+      required: false,
+      trim: true,
+      maxlength: 16,
+      default: null,
+    },
+
+    // Optional link target for the ticker item.
+    linkUrl: {
+      type: String,
+      required: false,
+      trim: true,
+      maxlength: 2048,
+      default: null,
+    },
+
+    // Ordering controls (higher shows first).
+    priority: {
+      type: Number,
+      required: false,
+      default: 0,
+      index: true,
+    },
+    isPinned: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    // Soft disable without deleting.
+    isActive: {
+      type: Boolean,
+      // Leave unset for backward compatibility (older docs/clients only used isLive).
+      // Queries should treat missing isActive as active.
+      default: undefined,
+      index: true,
+    },
     isLive: {
       type: Boolean,
       default: false,
@@ -84,6 +134,25 @@ const BroadcastItemSchema = new mongoose.Schema(
 
 BroadcastItemSchema.pre('validate', function ensureLangFields(next) {
   try {
+    // Ensure daily dateKey/timeText for new ticker APIs.
+    if (!this.createdAt) this.createdAt = new Date();
+    if (!this.dateKey) {
+      const dk = getIstDateKey(this.createdAt);
+      if (dk) this.dateKey = dk;
+    }
+    if (!this.timeText) {
+      const tt = formatIstTimeText(this.createdAt);
+      if (tt) this.timeText = tt;
+    }
+
+    // Keep legacy isLive aligned with isActive if callers only set one.
+    if (typeof this.isActive === 'boolean' && (this.isLive === undefined || this.isLive === null)) {
+      this.isLive = this.isActive;
+    }
+    if (typeof this.isLive === 'boolean' && (this.isActive === undefined || this.isActive === null)) {
+      this.isActive = this.isLive;
+    }
+
     const sourceLang = SUPPORTED_LANGS.includes(String(this.sourceLang || '')) ? String(this.sourceLang) : 'gu';
     this.sourceLang = sourceLang;
 
@@ -154,5 +223,11 @@ BroadcastItemSchema.pre('validate', function ensureLangFields(next) {
 
 // Auto-delete after expiresAt.
 BroadcastItemSchema.index({ expiresAt: 1 }, { name: 'expiresAt_ttl', expireAfterSeconds: 0 });
+
+// Daily ticker query index (IST dateKey + ordering).
+BroadcastItemSchema.index(
+  { type: 1, dateKey: 1, isActive: 1, isPinned: -1, priority: -1, createdAt: -1 },
+  { name: 'ticker_day_order' },
+);
 
 module.exports = mongoose.models.BroadcastItem || mongoose.model('BroadcastItem', BroadcastItemSchema);

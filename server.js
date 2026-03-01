@@ -142,6 +142,7 @@ try { adminSiteSettingsHomeTopBarsRouter = require('./routes/adminSiteSettings.h
 try { publicHomeTopBarsRouter = require('./routes/publicHomeTopBars.routes'); } catch (_) { console.warn('[init] optional routes/publicHomeTopBars.routes not found; skipping'); }
 const broadcastRoutes = require('./routes/broadcast.routes');
 const adminBroadcastRouter = require('./routes/adminBroadcast.routes');
+const adminTickerRouter = require('./routes/adminTicker.routes');
 const adminGlossaryRouter = require('./routes/adminGlossary.routes');
 
 const authRoutes = require('./routes/auth.routes');
@@ -176,6 +177,7 @@ const publicTickersSettingsRouter = require('./routes/publicTickersSettings.rout
 const adminTickersSettingsRouter = require('./routes/adminTickersSettings.routes');
 const publicBroadcastRouter = require('./routes/publicBroadcast.routes');
 const publicApiBroadcastRouter = require('./routes/publicApiBroadcast.routes');
+const publicTickerRouter = require('./routes/publicTicker.routes');
 const debugRouter = require('./routes/_debug.routes');
 let adminWorkflowApiRouter = null;
 let adminPushHistoryApiRouter = null;
@@ -1181,6 +1183,15 @@ app.use('/admin-api/api/admin/broadcast', adminBroadcastRouter);
 // Legacy/alternate mount used by some reverse proxies
 app.use('/admin/broadcast', adminBroadcastRouter);
 
+// Standard Admin Ticker API
+// - Primary: /api/admin/ticker
+// - Admin panel proxy aliases: /admin-api/admin/ticker and /admin-api/api/admin/ticker
+app.use('/api/admin/ticker', adminTickerRouter);
+app.use('/admin-api/admin/ticker', adminTickerRouter);
+app.use('/admin-api/api/admin/ticker', adminTickerRouter);
+// Legacy/alternate mount
+app.use('/admin/ticker', adminTickerRouter);
+
 // Admin Glossary (Phase 1)
 app.use('/api/admin/glossary', adminGlossaryRouter);
 app.use('/admin-api/admin/glossary', adminGlossaryRouter);
@@ -1312,6 +1323,8 @@ app.use('/api/public', publicAdsRouter);
 app.use('/api/public', publicTickersSettingsRouter);
 // Public Broadcast Center tickers (Breaking + Live Updates)
 app.use('/api/public/broadcast', publicBroadcastRouter);
+// Public ticker items (Breaking + Live Updates) with IST daily cycle
+app.use('/api/ticker', publicTickerRouter);
 // New public-api translated tickers
 app.use('/public-api/broadcast', publicApiBroadcastRouter);
 // Safe debug/version endpoint (no secrets)
@@ -1319,6 +1332,9 @@ app.use('/_debug', debugRouter);
 // Admin panel proxy basePath support (some frontends call /admin-api/* even for public reads)
 app.use('/admin-api/public/broadcast', publicBroadcastRouter);
 app.use('/admin-api/api/public/broadcast', publicBroadcastRouter);
+// Admin panel proxy basePath support
+app.use('/admin-api/ticker', publicTickerRouter);
+app.use('/admin-api/api/ticker', publicTickerRouter);
 // Legacy/website path support
 app.use('/public/broadcast', publicBroadcastRouter);
 // Legacy/website path support

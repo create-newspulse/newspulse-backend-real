@@ -243,7 +243,6 @@ async function listItemsLast24hByChannel() {
   if (!isDbReady()) {
     return { breaking: [], live: [] };
   }
-
   const since = nowMinus24h();
   const now = new Date();
   const notExpired = {
