@@ -181,6 +181,10 @@ const newsSchema = new mongoose.Schema({
       },
     },
   },
+
+  // Auto-tags for National articles (used for state-wise national filtering)
+  stateTags: { type: [String], default: [], index: true },
+  stateNames: { type: [String], default: [] },
   date: { type: Date, default: Date.now },
   imageURL: String,
   coverImageUrl: String,
@@ -330,6 +334,7 @@ newsSchema.set('toObject', { virtuals: true });
 newsSchema.index({ workflowStage: 1, workflowUpdatedAt: -1 });
 newsSchema.index({ status: 1, createdAt: -1 });
 newsSchema.index({ scheduledAt: 1 });
+newsSchema.index({ category: 1, status: 1, stateTags: 1, publishedAt: -1 });
 newsSchema.index({ translationKey: 1, lang: 1, status: 1, publishedAt: -1 });
 newsSchema.index({ translationGroupId: 1, lang: 1, status: 1, publishedAt: -1 });
 newsSchema.index({ topic: 1, status: 1, publishedAt: -1 });

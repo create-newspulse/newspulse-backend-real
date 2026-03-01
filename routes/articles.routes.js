@@ -9,6 +9,7 @@ const { requireAdminAuth } = require('../middleware/adminAuth');
 const PushHistory = require('../models/PushHistory');
 const { canonicalizeSlug, getSlugCandidates, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
+const { tagStatesFromText, isValidStateSlug } = require('../src/utils/locationTagger');
 
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
@@ -66,6 +67,15 @@ function normalizeLanguage(v) {
   const s = String(v ?? '').trim().toLowerCase();
   if (s === 'en' || s === 'hi' || s === 'gu') return s;
   return null;
+}
+
+function _isNationalCategory(category) {
+  return String(category || '').trim().toLowerCase() === 'national';
+}
+
+function _computeNationalStateTags({ title, summary, content }) {
+  const text = `${title || ''} ${summary || ''} ${content || ''}`;
+  return tagStatesFromText(text);
 }
 
 function _escapeRegex(s) {
@@ -264,6 +274,10 @@ async function syncArticleFromNews(doc) {
     isBreaking: String(doc.category || '').toLowerCase() === 'breaking',
     coverImage,
     tags: Array.isArray(doc.tags) ? doc.tags : [],
+
+    // State-wise national tags (copied from News)
+    stateTags: Array.isArray(doc.stateTags) ? doc.stateTags : [],
+    stateNames: Array.isArray(doc.stateNames) ? doc.stateNames : [],
   };
 
   // Do not let this throw and break the CMS flow; log and move on.
@@ -369,6 +383,11 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       }
     }
 
+    const willBeNational = _isNationalCategory(category);
+    const { stateTags, stateNames } = willBeNational
+      ? _computeNationalStateTags({ title, summary: summary ?? '', content: content ?? body ?? '' })
+      : { stateTags: [], stateNames: [] };
+
     const doc = await News.create({
       title,
       description: summary ?? '',
@@ -376,6 +395,8 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       category,
       language: language || 'en',
       lang: language || 'en',
+      stateTags,
+      stateNames,
       ...(loc.state !== undefined || loc.district !== undefined || loc.city !== undefined ? {
         location: {
           state: loc.state,
@@ -627,6 +648,39 @@ router.get('/public/articles', async (req, res, next) => {
   }
 });
 
+// GET /api/articles/national/state/:stateSlug → published national articles filtered by stateTags
+router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
+  try {
+    const stateSlug = String(req.params.stateSlug || '').trim().toLowerCase();
+    if (!stateSlug) {
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'stateSlug is required' });
+    }
+    if (!isValidStateSlug(stateSlug)) {
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Invalid stateSlug' });
+    }
+
+    const page = Math.max(_parseIntOrDefault(req.query.page, 1), 1);
+    const limit = _clampInt(_parseIntOrDefault(req.query.limit, 20), 1, 100);
+    const skip = (page - 1) * limit;
+
+    const query = { status: 'published', category: 'national', stateTags: stateSlug };
+    const [itemsRaw, total] = await Promise.all([
+      News.find(query).sort({ publishedAt: -1, createdAt: -1 }).skip(skip).limit(limit).lean(),
+      News.countDocuments(query),
+    ]);
+
+    const items = (itemsRaw || []).map(withCoverImageUrl);
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: 200,
+      data: { items, page, limit, total, stateSlug },
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // Backward-compatible aliases for admin panel builds calling /api/news*
 router.get('/news', (req, res, next) => {
   req.url = '/articles' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '');
@@ -718,7 +772,9 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
     let before = null;
     try {
-      before = await News.findById(rawId).select('status translationGroupId lang language slugs coverImage coverImageUrl imageURL').lean();
+      before = await News.findById(rawId)
+        .select('title description content category status translationGroupId lang language slugs coverImage coverImageUrl imageURL')
+        .lean();
     } catch (_) {
       // ignore
     }
@@ -785,6 +841,29 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
     };
 
+    // Auto-tag National articles with state/UT slugs based on title+summary+content.
+    // Recompute when text fields or category changes; clear tags when category is explicitly set to non-national.
+    const nextCategory = category !== undefined
+      ? String(category || '').trim().toLowerCase()
+      : String(before?.category || '').trim().toLowerCase();
+    const willBeNational = _isNationalCategory(nextCategory);
+    const shouldRetag = willBeNational && (
+      category !== undefined || title !== undefined || summary !== undefined || content !== undefined || bodyText !== undefined
+    );
+    if (shouldRetag) {
+      const nextTitle = title !== undefined ? title : (before?.title || '');
+      const nextSummary = summary !== undefined ? summary : (before?.description || '');
+      const nextContent = (content !== undefined || bodyText !== undefined)
+        ? (content ?? bodyText ?? '')
+        : (before?.content || '');
+      const tagged = _computeNationalStateTags({ title: nextTitle, summary: nextSummary, content: nextContent });
+      update.stateTags = tagged.stateTags;
+      update.stateNames = tagged.stateNames;
+    } else if (category !== undefined && !willBeNational) {
+      update.stateTags = [];
+      update.stateNames = [];
+    }
+
     let doc = null;
     try {
       doc = await News.findByIdAndUpdate(rawId, update, { new: true, runValidators: true });
@@ -794,6 +873,22 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     if (!doc) {
       // Fallback: some admin builds operate on the public Article model instead of News.
       const allowedArticleStatuses = new Set(['draft', 'published']);
+
+      let articleBefore = null;
+      try {
+        articleBefore = await PublicArticle.findById(rawId).select('title summary content category').lean();
+      } catch (_) {
+        // ignore
+      }
+
+      const nextArticleCategory = category !== undefined
+        ? String(category || '').trim().toLowerCase()
+        : String(articleBefore?.category || '').trim().toLowerCase();
+      const willBeNationalArticle = _isNationalCategory(nextArticleCategory);
+      const shouldRetagArticle = willBeNationalArticle && (
+        category !== undefined || title !== undefined || summary !== undefined || content !== undefined || bodyText !== undefined
+      );
+
       const articleUpdate = {
         ...(title !== undefined ? { title } : {}),
         ...(summary !== undefined ? { summary } : {}),
@@ -806,6 +901,20 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
           : {}),
         ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
       };
+
+      if (shouldRetagArticle) {
+        const nextTitle = title !== undefined ? title : (articleBefore?.title || '');
+        const nextSummary = summary !== undefined ? summary : (articleBefore?.summary || '');
+        const nextContent = (content !== undefined || bodyText !== undefined)
+          ? (content ?? bodyText ?? '')
+          : (articleBefore?.content || '');
+        const tagged = _computeNationalStateTags({ title: nextTitle, summary: nextSummary, content: nextContent });
+        articleUpdate.stateTags = tagged.stateTags;
+        articleUpdate.stateNames = tagged.stateNames;
+      } else if (category !== undefined && !willBeNationalArticle) {
+        articleUpdate.stateTags = [];
+        articleUpdate.stateNames = [];
+      }
 
       // coverImage (preferred) + legacy coverImageUrl/imageURL -> coverImage.url
       const nextCoverForArticle = (() => {

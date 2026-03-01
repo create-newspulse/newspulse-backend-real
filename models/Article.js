@@ -71,6 +71,10 @@ const articleSchema = new mongoose.Schema(
     },
     tags: { type: [String], default: [] },
 
+    // Auto-tags for National articles (used for state-wise national filtering)
+    stateTags: { type: [String], default: [], index: true },
+    stateNames: { type: [String], default: [] },
+
     state: { type: String, default: null },
     district: { type: String, default: null },
     city: { type: String, default: null },
@@ -142,6 +146,7 @@ articleSchema.pre('save', function preSave(next) {
 // Required indexes
 articleSchema.index({ status: 1, category: 1, publishedAt: -1 });
 articleSchema.index({ status: 1, isBreaking: 1, publishedAt: -1 });
+articleSchema.index({ category: 1, status: 1, stateTags: 1, publishedAt: -1 });
 articleSchema.index({ slug: 1 }, { unique: true });
 articleSchema.index({ 'slugs.en': 1 });
 articleSchema.index({ 'slugs.hi': 1 });
