@@ -2,6 +2,7 @@ const express = require('express');
 
 const BroadcastItem = require('../models/BroadcastItem');
 const { getIstDateKey, isValidIstDateKey } = require('../src/utils/istDate');
+const { getNationalLiveTicker } = require('../controllers/publicTickerNationalLiveController');
 
 const router = express.Router();
 
@@ -130,6 +131,10 @@ router.get('/live', async (req, res) => {
     return res.status(500).json({ ok: false, code: 'SERVER_ERROR', message: 'Failed to load live updates ticker' });
   }
 });
+
+// GET /api/ticker/national-live?lang=en|hi|gu&limit=5&hours=24
+// National page live strip: returns a flat array (different contract from /live).
+router.get('/national-live', getNationalLiveTicker);
 
 // GET /api/ticker/live/all?date=YYYY-MM-DD&lang=en
 router.get('/live/all', async (req, res) => {
