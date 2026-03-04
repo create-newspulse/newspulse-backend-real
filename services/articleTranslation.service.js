@@ -181,7 +181,7 @@ function getMissingFields(bucket) {
 
 function localizeArticleFromTranslations(articleLike, requestedLang) {
   const desired = normalizeLang(requestedLang);
-  const baseLang = normalizeLang(articleLike?.originalLang) || normalizeLang(articleLike?.language) || detectLangFromContent(articleLike?.content) || 'en';
+  const baseLang = normalizeLang(articleLike?.originalLang) || detectLangFromContent(articleLike?.content) || normalizeLang(articleLike?.language) || 'en';
   if (!desired) return { out: articleLike, resolvedLang: baseLang, translationPending: false };
 
   const t = articleLike && articleLike.translations && typeof articleLike.translations === 'object' ? articleLike.translations[desired] : null;
@@ -207,7 +207,9 @@ function localizeArticleFromTranslations(articleLike, requestedLang) {
 async function ensureOnDemandArticleTranslation({ article, requestedLang, logger }) {
   const log = logger || console;
   const desired = normalizeLang(requestedLang);
-  const source = normalizeLang(article?.originalLang) || normalizeLang(article?.language) || detectLangFromContent(article?.content) || 'en';
+  // IMPORTANT: never trust a defaulted/stale `language` value as the source of truth.
+  // Prefer originalLang, else detect from content (Gujarati/Devanagari heuristics), else fall back.
+  const source = normalizeLang(article?.originalLang) || detectLangFromContent(article?.content) || normalizeLang(article?.language) || 'en';
   if (!desired) return { out: article, resolvedLang: source, translationPending: false };
 
   // No translation needed.
@@ -245,6 +247,16 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
       if (t.ok && _isNonEmptyString(t.text)) {
         bucketOut.title = t.text;
         dbSet[`translations.${desired}.title`] = t.text;
+      } else {
+        try {
+          log.warn?.('[i18n][article] title translation failed', {
+            id: String(article?._id || ''),
+            slug: String(article?.slug || ''),
+            from: source,
+            to: desired,
+            error: t && t.ok === false ? t.error : 'empty_output',
+          });
+        } catch (_) {}
       }
     }
 
@@ -253,6 +265,16 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
       if (s.ok && _isNonEmptyString(s.text)) {
         bucketOut.summary = s.text;
         dbSet[`translations.${desired}.summary`] = s.text;
+      } else {
+        try {
+          log.warn?.('[i18n][article] summary translation failed', {
+            id: String(article?._id || ''),
+            slug: String(article?.slug || ''),
+            from: source,
+            to: desired,
+            error: s && s.ok === false ? s.error : 'empty_output',
+          });
+        } catch (_) {}
       }
     }
 
@@ -261,6 +283,17 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
       if (c.ok && _isNonEmptyString(c.html)) {
         bucketOut.content = c.html;
         dbSet[`translations.${desired}.content`] = c.html;
+      } else {
+        // Never silently skip body translation: emit a warning when it fails.
+        try {
+          log.warn?.('[i18n][article] content translation failed', {
+            id: String(article?._id || ''),
+            slug: String(article?.slug || ''),
+            from: source,
+            to: desired,
+            error: c && c.ok === false ? c.error : 'empty_output',
+          });
+        } catch (_) {}
       }
     }
 
