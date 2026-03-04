@@ -35,6 +35,9 @@ async function translateMany(texts, targetLang, options = {}) {
   if (!arr.length) return { ok: true, items: [] };
   if (!lang) return { ok: false, error: 'Missing targetLang' };
 
+  const sourceLangRaw = String(options.sourceLang || options.source || '').trim().toLowerCase();
+  const sourceLang = sourceLangRaw ? sourceLangRaw.split(/[-_]/)[0] : '';
+
   const apiKey = options.apiKey || process.env.GOOGLE_TRANSLATE_API_KEY;
   if (!apiKey) return { ok: false, error: 'Missing GOOGLE_TRANSLATE_API_KEY' };
 
@@ -49,7 +52,7 @@ async function translateMany(texts, targetLang, options = {}) {
     const res = await fetchImpl(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ q: part, target: lang, format: 'text' }),
+      body: JSON.stringify({ q: part, target: lang, ...(sourceLang ? { source: sourceLang } : {}), format: 'text' }),
     });
 
     const json = await res.json().catch(() => null);

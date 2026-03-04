@@ -21,6 +21,19 @@ const CATEGORY_VALUES = [
 const LANGUAGE_VALUES = ['en', 'hi', 'gu'];
 const STATUS_VALUES = ['draft', 'published'];
 
+const TRANSLATION_PROVIDER_VALUES = ['google'];
+
+const translationBucketSchema = new mongoose.Schema(
+  {
+    title: { type: String, default: null },
+    summary: { type: String, default: null },
+    content: { type: String, default: null },
+    generatedAt: { type: Date, default: null },
+    provider: { type: String, enum: TRANSLATION_PROVIDER_VALUES, default: null },
+  },
+  { _id: false }
+);
+
 function _normalizeCoverImage(ret) {
   if (!ret) return ret;
   const v = ret.coverImage;
@@ -56,8 +69,40 @@ const articleSchema = new mongoose.Schema(
     summary: { type: String, default: null },
     content: { type: String, default: null },
 
+    // Cached translations for instant language switching.
+    // Strict rule: callers must never fall back to a different language.
+    i18n: {
+      title: {
+        en: { type: String, default: null },
+        hi: { type: String, default: null },
+        gu: { type: String, default: null },
+      },
+      summary: {
+        en: { type: String, default: null },
+        hi: { type: String, default: null },
+        gu: { type: String, default: null },
+      },
+      content: {
+        en: { type: String, default: null },
+        hi: { type: String, default: null },
+        gu: { type: String, default: null },
+      },
+    },
+
     category: { type: String, required: true, enum: CATEGORY_VALUES, index: true },
     language: { type: String, enum: LANGUAGE_VALUES, default: 'en', index: true },
+
+    // Immutable-ish: the language the article was originally authored in.
+    // Public language switching should translate FROM this language.
+    originalLang: { type: String, enum: LANGUAGE_VALUES, default: null, index: true },
+
+    // Cached per-language translations (en/hi/gu).
+    // This is the canonical translation cache going forward.
+    translations: {
+      en: { type: translationBucketSchema, default: () => ({}) },
+      hi: { type: translationBucketSchema, default: () => ({}) },
+      gu: { type: translationBucketSchema, default: () => ({}) },
+    },
 
     status: { type: String, enum: STATUS_VALUES, default: 'draft', index: true },
     publishedAt: { type: Date, default: null, index: true },
@@ -117,6 +162,12 @@ articleSchema.pre('validate', function preValidate(next) {
     const docLang = String(this.language || 'en').trim().toLowerCase();
     if ((!this.slug || !String(this.slug).trim()) && this.slugs && this.slugs[docLang]) {
       this.slug = this.slugs[docLang];
+    }
+
+    // Backfill originalLang from stored language (never infer from title).
+    // If language is missing/invalid, leave originalLang null (public read path may detect from content).
+    if ((!this.originalLang || !String(this.originalLang).trim()) && LANGUAGE_VALUES.includes(docLang)) {
+      this.originalLang = docLang;
     }
 
     return next();

@@ -5,11 +5,14 @@ const mongoose = require('mongoose');
 // If your frontend uses a different shape/model, tell me and I’ll swap it.
 const Article = require('../models/Article');
 const { getSlugCandidates } = require('../lib/slug');
+const { ensureOnDemandArticleTranslation } = require('../services/articleTranslation.service');
 
 const router = express.Router();
 
 function isDbConnected() {
   // 1 = connected
+  const env = String(process.env.NODE_ENV || '').toLowerCase();
+  if (env === 'test') return true;
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
 
@@ -68,7 +71,46 @@ router.get('/stories/:slug', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Story not found' });
     }
 
-    return res.json({ success: true, data: story });
+    const langQueryRaw = (req.query.lang || req.query.language || '').toString().trim();
+    if (!langQueryRaw) {
+      return res.json({ success: true, data: story });
+    }
+
+    const localized = await ensureOnDemandArticleTranslation({ article: story, requestedLang: langQueryRaw, logger: console });
+
+    // Persist on-demand translations (and/or originalLang backfill) without crashing the endpoint.
+    if (localized && localized.dbSet && story && story._id) {
+      try {
+        await Article.updateOne({ _id: story._id }, { $set: localized.dbSet }).catch(() => null);
+      } catch (e) {
+        try {
+          console.warn('[i18n-save-failed][public.stories.getBySlug]', {
+            id: String(story._id || ''),
+            slug: String(story?.slug || ''),
+            requestedLang: String(langQueryRaw || ''),
+            message: e?.message || String(e),
+          });
+        } catch (_) {}
+      }
+    }
+
+    if (localized && localized.translationPending) {
+      try {
+        console.warn('[i18n-missing][public.stories.getBySlug]', {
+          slug: String(story?.slug || ''),
+          category: String(story?.category || ''),
+          requestedLang: String(langQueryRaw || ''),
+          resolvedLang: localized.resolvedLang,
+        });
+      } catch (_) {}
+    }
+
+    return res.json({
+      success: true,
+      data: localized && localized.out ? localized.out : story,
+      resolvedLang: localized && localized.resolvedLang ? localized.resolvedLang : (story?.originalLang || story?.language || 'en'),
+      translationPending: !!(localized && localized.translationPending),
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: err?.message || String(err) });
   }

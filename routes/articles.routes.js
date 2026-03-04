@@ -10,6 +10,11 @@ const PushHistory = require('../models/PushHistory');
 const { canonicalizeSlug, getSlugCandidates, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 const { tagStatesFromText, isValidStateSlug } = require('../src/utils/locationTagger');
+const {
+  ensureNewsHasFullTranslations,
+  localizeFromNewsTranslations,
+  localizeFromArticleI18n,
+} = require('../services/newsI18n.service');
 
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
@@ -267,6 +272,46 @@ async function syncArticleFromNews(doc) {
     slugs: doc.slugs || null,
     summary: doc.description || null,
     content: doc.content || null,
+
+    originalLang: doc.language || 'en',
+
+    // Canonical cached translations (en/hi/gu)
+    translations: {
+      en: {
+        title: doc?.translations?.en?.title ? String(doc.translations.en.title) : null,
+        summary: doc?.translations?.en?.summary ? String(doc.translations.en.summary) : null,
+        content: doc?.translations?.en?.content ? String(doc.translations.en.content) : null,
+      },
+      hi: {
+        title: doc?.translations?.hi?.title ? String(doc.translations.hi.title) : null,
+        summary: doc?.translations?.hi?.summary ? String(doc.translations.hi.summary) : null,
+        content: doc?.translations?.hi?.content ? String(doc.translations.hi.content) : null,
+      },
+      gu: {
+        title: doc?.translations?.gu?.title ? String(doc.translations.gu.title) : null,
+        summary: doc?.translations?.gu?.summary ? String(doc.translations.gu.summary) : null,
+        content: doc?.translations?.gu?.content ? String(doc.translations.gu.content) : null,
+      },
+    },
+
+    // Store full i18n buckets for instant language switching on public story endpoints.
+    i18n: {
+      title: {
+        en: doc?.translations?.en?.title ? String(doc.translations.en.title) : null,
+        hi: doc?.translations?.hi?.title ? String(doc.translations.hi.title) : null,
+        gu: doc?.translations?.gu?.title ? String(doc.translations.gu.title) : null,
+      },
+      summary: {
+        en: doc?.translations?.en?.summary ? String(doc.translations.en.summary) : null,
+        hi: doc?.translations?.hi?.summary ? String(doc.translations.hi.summary) : null,
+        gu: doc?.translations?.gu?.summary ? String(doc.translations.gu.summary) : null,
+      },
+      content: {
+        en: doc?.translations?.en?.content ? String(doc.translations.en.content) : null,
+        hi: doc?.translations?.hi?.content ? String(doc.translations.hi.content) : null,
+        gu: doc?.translations?.gu?.content ? String(doc.translations.gu.content) : null,
+      },
+    },
     category: doc.category,
     language: doc.language || 'en',
     status: isPublished ? 'published' : 'draft',
@@ -703,6 +748,9 @@ router.get('/articles/:id', async (req, res, next) => {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
     }
 
+    const langQueryRaw = (req.query.lang || req.query.language || '').toString().trim();
+    const langNorm = normalizeLanguage(langQueryRaw);
+
     // Primary: CMS/admin articles stored in News collection.
     let doc = await News.findById(rawId).catch(() => null);
 
@@ -716,9 +764,44 @@ router.get('/articles/:id', async (req, res, next) => {
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    const out = withCoverImageUrl(obj);
+    const out0 = withCoverImageUrl(obj);
+
+    const localized = (() => {
+      if (!langNorm) return { out: out0, resolvedLang: normalizeLanguage(out0?.lang) || normalizeLanguage(out0?.language) || 'en', translationPending: false };
+
+      // News docs use `translations`; public Article uses `i18n`.
+      if (out0 && out0.translations && typeof out0.translations === 'object') {
+        return localizeFromNewsTranslations(out0, langNorm);
+      }
+      if (out0 && out0.i18n && typeof out0.i18n === 'object') {
+        return localizeFromArticleI18n(out0, langNorm);
+      }
+
+      return { out: out0, resolvedLang: langNorm, translationPending: false };
+    })();
+
+    const out = localized.out;
+
+    if (langNorm && localized.translationPending) {
+      try {
+        console.warn('[i18n-missing][articles.getById]', {
+          id: rawId,
+          slug: String(out0?.slug || ''),
+          category: String(out0?.category || ''),
+          requestedLang: langNorm,
+          resolvedLang: localized.resolvedLang,
+        });
+      } catch (_) {}
+    }
     // Compatibility: some admin frontends expect `data.article` (while others expect `article`).
-    return res.json({ ok: true, success: true, status: 200, article: out, data: { article: out } });
+    return res.json({
+      ok: true,
+      success: true,
+      status: 200,
+      article: out,
+      data: { article: out },
+      ...(langNorm ? { resolvedLang: localized.resolvedLang, translationPending: localized.translationPending } : {}),
+    });
   } catch (err) {
     return next(err);
   }
@@ -840,6 +923,83 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       } : {}),
       ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
     };
+
+    const beforeStatusNorm = String(before && before.status ? before.status : '').toLowerCase();
+    const nextStatusNorm = update.status ? String(update.status).toLowerCase() : '';
+    const isPublishingNow = beforeStatusNorm !== 'published' && nextStatusNorm === 'published';
+
+    // Strict publish rule: if publishing via status update, translations must include full content for en/hi/gu.
+    // Block publish if translation fails so we never publish title-only translations.
+    if (isPublishingNow) {
+      const doc = await News.findById(rawId);
+      if (!doc) {
+        return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+      }
+
+      doc.set(update);
+      ensureTranslationGroupIdForDoc(doc);
+      doc.lang = doc.lang || doc.language;
+      doc.language = doc.language || doc.lang;
+
+      // Align publish timestamps similarly to the dedicated publish endpoint.
+      const now = new Date();
+      doc.publishedAt = doc.publishedAt || now;
+      doc.publishAt = null;
+      doc.scheduledAt = null;
+
+      const tr = await ensureNewsHasFullTranslations(doc, { logger: console });
+      if (!tr || tr.ok !== true) {
+        try {
+          console.warn('[articles.update->publish] blocked', {
+            id: rawId,
+            slug: String(doc.slug || ''),
+            category: String(doc.category || ''),
+            error: tr && tr.error ? tr.error : 'translation_failed',
+          });
+        } catch (_) {}
+        return res.status(502).json({
+          ok: false,
+          success: false,
+          status: 502,
+          message: 'Publish blocked: content translation failed',
+          error: tr && tr.error ? tr.error : 'translation_failed',
+        });
+      }
+
+      ensureNewsSlugs(doc);
+
+      // Keep workflow stage aligned.
+      const stage = mapStatusToWorkflowStage('published');
+      if (doc.workflowStage !== stage) {
+        const actor = getActor(req);
+        const prevStage = String(doc.workflowStage || 'DRAFT');
+        doc.workflowStage = stage;
+        doc.workflowUpdatedAt = now;
+        doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
+        doc.workflowHistory.push({
+          at: now,
+          byUserId: actor.byUserId,
+          byRole: actor.byRole,
+          action: 'MOVE_STAGE',
+          fromStage: prevStage,
+          toStage: stage,
+          note: 'Status updated',
+        });
+      }
+
+      await doc.save();
+      await syncArticleFromNews(doc);
+
+      const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+      return res.json({
+        ok: true,
+        success: true,
+        status: 200,
+        message: 'Article updated',
+        data: { article: withCoverImageUrl(obj) },
+        article: withCoverImageUrl(obj),
+      });
+    }
 
     // Auto-tag National articles with state/UT slugs based on title+summary+content.
     // Recompute when text fields or category changes; clear tags when category is explicitly set to non-national.
@@ -998,17 +1158,20 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
 
-    // If an editor published via status update, enqueue translations.
+    // If an editor published via status update, ensure translations exist.
     try {
-      const beforeStatus = String(before && before.status ? before.status : '').toLowerCase();
       const afterStatus = String(doc.status || '').toLowerCase();
-      if (beforeStatus !== 'published' && afterStatus === 'published') {
-        // Ensure group id exists for translations.
+      if (afterStatus === 'published') {
         ensureTranslationGroupIdForDoc(doc);
         doc.lang = doc.lang || doc.language;
         doc.language = doc.language || doc.lang;
-        await doc.save();
-        // Translation queue/review system removed.
+
+        const tr = await ensureNewsHasFullTranslations(doc, { logger: console });
+        if (tr && tr.ok === true) {
+          ensureNewsSlugs(doc);
+          await doc.save();
+          await syncArticleFromNews(doc);
+        }
       }
     } catch (_) {}
 
@@ -1055,6 +1218,25 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     ensureTranslationGroupIdForDoc(doc);
     doc.lang = doc.lang || doc.language;
     doc.language = doc.language || doc.lang;
+
+    const tr = await ensureNewsHasFullTranslations(doc, { logger: console });
+    if (!tr || tr.ok !== true) {
+      try {
+        console.warn('[articles.publish] blocked', {
+          id: String(doc._id || ''),
+          slug: String(doc.slug || ''),
+          category: String(doc.category || ''),
+          error: tr && tr.error ? tr.error : 'translation_failed',
+        });
+      } catch (_) {}
+      return res.status(502).json({
+        ok: false,
+        success: false,
+        status: 502,
+        message: 'Publish blocked: content translation failed',
+        error: tr && tr.error ? tr.error : 'translation_failed',
+      });
+    }
 
     ensureNewsSlugs(doc);
 
