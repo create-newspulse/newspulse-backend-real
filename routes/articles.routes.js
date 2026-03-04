@@ -30,6 +30,18 @@ function parseTags(tags) {
     .filter(Boolean);
 }
 
+function _stripUndefinedKeysInPlace(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  for (const k of Object.keys(obj)) {
+    if (obj[k] === undefined) delete obj[k];
+  }
+  return obj;
+}
+
+function _isBlankString(v) {
+  return v === '' || (typeof v === 'string' && v.trim() === '');
+}
+
 function _parseIntOrDefault(v, fallback) {
   const n = parseInt(String(v ?? ''), 10);
   return Number.isFinite(n) ? n : fallback;
@@ -341,10 +353,17 @@ async function syncArticleFromNews(doc) {
 // POST /api/articles → create a new article (CMS/admin)
 router.post('/articles', requireAdminAuth, async (req, res, next) => {
   try {
+    const body0 = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
+    // Normalize legacy payloads: CMS sends `summary`, schema requires `description`.
+    if (body0.summary !== undefined && body0.description === undefined) {
+      body0.description = body0.summary;
+    }
+
     const {
       title,
       slug,
       summary,
+      description,
       content,
       body,
       category,
@@ -355,11 +374,17 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       imageURL,
       coverImageUrl,
       coverImage,
-    } = req.body || {};
+    } = body0;
 
     if (!title) {
       return res.status(400).json({ ok: false, success: false, message: 'Title is required' });
     }
+
+    const summaryOrDescription = summary !== undefined ? summary : description;
+    if (summaryOrDescription === undefined || summaryOrDescription === null || _isBlankString(String(summaryOrDescription))) {
+      return res.status(400).json({ ok: false, success: false, message: 'Summary (description) is required' });
+    }
+    const normalizedDescription = String(summaryOrDescription).trim();
 
     let scheduled = scheduledAt;
     if (scheduled) {
@@ -430,12 +455,12 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
 
     const willBeNational = _isNationalCategory(category);
     const { stateTags, stateNames } = willBeNational
-      ? _computeNationalStateTags({ title, summary: summary ?? '', content: content ?? body ?? '' })
+      ? _computeNationalStateTags({ title, summary: normalizedDescription, content: content ?? body ?? '' })
       : { stateTags: [], stateNames: [] };
 
     const doc = await News.create({
       title,
-      description: summary ?? '',
+      description: normalizedDescription,
       content: content ?? body ?? '',
       category,
       language: language || 'en',
@@ -816,11 +841,16 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const requestBody = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
+    // Normalize legacy payloads: CMS sends `summary`, schema requires `description`.
+    if (requestBody.summary !== undefined && requestBody.description === undefined) {
+      requestBody.description = requestBody.summary;
+    }
 
     const {
       title,
       slug,
       summary,
+      description,
       content,
       body: bodyText,
       category,
@@ -832,6 +862,12 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       coverImageUrl,
       coverImage,
     } = requestBody;
+
+    const summaryOrDescription = summary !== undefined ? summary : description;
+    // Prevent wiping required field: if provided, description must be non-empty.
+    if (summaryOrDescription !== undefined && (summaryOrDescription === null || _isBlankString(String(summaryOrDescription)))) {
+      return res.status(400).json({ ok: false, success: false, message: 'Summary (description) cannot be empty' });
+    }
 
     const locationBody = (requestBody.location && typeof requestBody.location === 'object' && !Array.isArray(requestBody.location))
       ? requestBody.location
@@ -856,7 +892,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     let before = null;
     try {
       before = await News.findById(rawId)
-        .select('title description content category status translationGroupId lang language slugs coverImage coverImageUrl imageURL')
+        .select('title description content category status workflowStage translationGroupId lang language slugs coverImage coverImageUrl imageURL')
         .lean();
     } catch (_) {
       // ignore
@@ -899,7 +935,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
     const update = {
       ...(title !== undefined ? { title } : {}),
-      ...(summary !== undefined ? { description: summary } : {}),
+      ...(summaryOrDescription !== undefined ? { description: String(summaryOrDescription).trim() } : {}),
       ...(content !== undefined || bodyText !== undefined ? { content: content ?? bodyText ?? '' } : {}),
       ...(category !== undefined ? { category } : {}),
       ...(language !== undefined ? { language, lang: language } : {}),
@@ -923,6 +959,9 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       } : {}),
       ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
     };
+
+    // Defensive: remove any accidental undefined keys before updates.
+    _stripUndefinedKeysInPlace(update);
 
     const beforeStatusNorm = String(before && before.status ? before.status : '').toLowerCase();
     const nextStatusNorm = update.status ? String(update.status).toLowerCase() : '';
@@ -1008,11 +1047,11 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       : String(before?.category || '').trim().toLowerCase();
     const willBeNational = _isNationalCategory(nextCategory);
     const shouldRetag = willBeNational && (
-      category !== undefined || title !== undefined || summary !== undefined || content !== undefined || bodyText !== undefined
+      category !== undefined || title !== undefined || summaryOrDescription !== undefined || content !== undefined || bodyText !== undefined
     );
     if (shouldRetag) {
       const nextTitle = title !== undefined ? title : (before?.title || '');
-      const nextSummary = summary !== undefined ? summary : (before?.description || '');
+      const nextSummary = summaryOrDescription !== undefined ? String(summaryOrDescription).trim() : (before?.description || '');
       const nextContent = (content !== undefined || bodyText !== undefined)
         ? (content ?? bodyText ?? '')
         : (before?.content || '');
@@ -1024,11 +1063,53 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       update.stateNames = [];
     }
 
+    const updateKeys = Object.keys(update);
+    const META_ONLY_KEYS = new Set(['status', 'scheduledAt', 'publishAt', 'publishedAt', 'deletedAt']);
+    const isMetaOnlyUpdate = updateKeys.length > 0 && updateKeys.every((k) => META_ONLY_KEYS.has(k));
+
+    let didMetaOnlyUpdate = false;
     let doc = null;
     try {
-      doc = await News.findByIdAndUpdate(rawId, update, { new: true, runValidators: true });
-    } catch (_) {
-      // invalid ObjectId
+      if (isMetaOnlyUpdate && nextStatusNorm !== 'published') {
+        // Meta-only status/schedule updates: avoid full schema validation.
+        const actor = getActor(req);
+        const now = new Date();
+        const stage = update.status ? mapStatusToWorkflowStage(update.status) : null;
+        const beforeStage = String(before?.workflowStage || 'DRAFT');
+        const updateOp = { $set: { ...update } };
+
+        if (stage && beforeStage !== stage) {
+          updateOp.$set.workflowStage = stage;
+          updateOp.$set.workflowUpdatedAt = now;
+          updateOp.$push = {
+            workflowHistory: {
+              at: now,
+              byUserId: actor.byUserId,
+              byRole: actor.byRole,
+              action: 'MOVE_STAGE',
+              fromStage: beforeStage,
+              toStage: stage,
+              note: 'Status updated',
+            },
+          };
+        }
+
+        doc = await News.findByIdAndUpdate(rawId, updateOp, { new: true, runValidators: false });
+        didMetaOnlyUpdate = !!doc;
+      } else {
+        // Full edit update: validate only modified paths.
+        doc = await News.findById(rawId);
+        if (doc) {
+          doc.set(update);
+          ensureNewsSlugs(doc);
+          await doc.save({ validateModifiedOnly: true });
+        }
+      }
+    } catch (err) {
+      if (err && err.name === 'ValidationError') {
+        return res.status(400).json({ ok: false, success: false, status: 400, message: err.message || 'Validation failed' });
+      }
+      throw err;
     }
     if (!doc) {
       // Fallback: some admin builds operate on the public Article model instead of News.
@@ -1129,9 +1210,22 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       });
     }
 
+    // Meta-only updates are intentionally returned early to avoid later full-document validation.
+    if (didMetaOnlyUpdate) {
+      const obj0 = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+      return res.json({
+        ok: true,
+        success: true,
+        status: 200,
+        message: 'Article updated',
+        data: { article: withCoverImageUrl(obj0) },
+        article: withCoverImageUrl(obj0),
+      });
+    }
+
     // Ensure other language slugs are kept in sync when translations exist.
     ensureNewsSlugs(doc);
-    await doc.save();
+    await doc.save({ validateModifiedOnly: true });
     // If status changed, keep workflow stage aligned (non-breaking)
     if (update.status) {
       const stage = mapStatusToWorkflowStage(update.status);
@@ -1152,7 +1246,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
           note: 'Status updated',
         });
         ensureNewsSlugs(doc);
-        await doc.save();
+        await doc.save({ validateModifiedOnly: true });
       }
     }
 
@@ -1169,7 +1263,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         const tr = await ensureNewsHasFullTranslations(doc, { logger: console });
         if (tr && tr.ok === true) {
           ensureNewsSlugs(doc);
-          await doc.save();
+          await doc.save({ validateModifiedOnly: true });
           await syncArticleFromNews(doc);
         }
       }
@@ -1444,28 +1538,36 @@ router.post('/articles/:id/archive', requireAdminAuth, async (req, res) => {
     }
 
     const { id } = req.params;
-    const doc = await News.findById(id);
-    if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+    const before = await News.findById(id).select('workflowStage slug title coverImage coverImageUrl imageURL').lean();
+    if (!before) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
 
     const now = new Date();
-    const fromStage = String(doc.workflowStage || 'DRAFT');
-    doc.status = 'archived';
-    doc.workflowStage = 'ARCHIVED';
-    doc.workflowUpdatedAt = now;
-
+    const fromStage = String(before.workflowStage || 'DRAFT');
     const actor = getActor(req);
-    doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
-    doc.workflowHistory.push({
-      at: now,
-      byUserId: actor.byUserId,
-      byRole: actor.byRole,
-      action: 'MOVE_STAGE',
-      fromStage,
-      toStage: 'ARCHIVED',
-      note: null,
-    });
 
-    await doc.save();
+    const doc = await News.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          status: 'archived',
+          workflowStage: 'ARCHIVED',
+          workflowUpdatedAt: now,
+        },
+        $push: {
+          workflowHistory: {
+            at: now,
+            byUserId: actor.byUserId,
+            byRole: actor.byRole,
+            action: 'MOVE_STAGE',
+            fromStage,
+            toStage: 'ARCHIVED',
+            note: null,
+          },
+        },
+      },
+      { new: true, runValidators: false }
+    );
+    if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
 
     try {
       await PushHistory.create({
@@ -1496,30 +1598,42 @@ router.post('/articles/:id/archive', requireAdminAuth, async (req, res) => {
 router.delete('/articles/:id', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    const doc = await News.findById(id);
-    if (!doc) {
+    const before = await News.findById(id).select('workflowStage slug title coverImage coverImageUrl imageURL').lean();
+    if (!before) {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
     }
 
     const now = new Date();
-    const fromStage = String(doc.workflowStage || 'DRAFT');
-    doc.status = 'deleted';
-    doc.deletedAt = now;
-    doc.workflowStage = 'REJECTED';
-    doc.workflowUpdatedAt = now;
+    const fromStage = String(before.workflowStage || 'DRAFT');
     const actor = getActor(req);
-    doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
-    doc.workflowHistory.push({
-      at: now,
-      byUserId: actor.byUserId,
-      byRole: actor.byRole,
-      action: 'REJECT',
-      fromStage,
-      toStage: 'REJECTED',
-      note: 'Deleted',
-    });
 
-    await doc.save();
+    const doc = await News.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          status: 'deleted',
+          deletedAt: now,
+          workflowStage: 'REJECTED',
+          workflowUpdatedAt: now,
+        },
+        $push: {
+          workflowHistory: {
+            at: now,
+            byUserId: actor.byUserId,
+            byRole: actor.byRole,
+            action: 'REJECT',
+            fromStage,
+            toStage: 'REJECTED',
+            note: 'Deleted',
+          },
+        },
+      },
+      { new: true, runValidators: false }
+    );
+
+    if (!doc) {
+      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+    }
 
     try {
       await PushHistory.create({
@@ -1552,6 +1666,27 @@ router.delete('/articles/:id', requireAdminAuth, async (req, res) => {
     return res
       .status(500)
       .json({ ok: false, success: false, status: 500, message: 'Internal server error' });
+  }
+});
+
+// DELETE /api/articles/:id/permanent → permanent delete (CMS/admin)
+// No schema validation (physical delete).
+router.delete('/articles/:id/permanent', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    let doc = null;
+    try {
+      doc = await News.findByIdAndDelete(id);
+    } catch (_) {
+      // invalid ObjectId
+    }
+    if (!doc) {
+      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+    }
+    return res.status(200).json({ ok: true, success: true, status: 200, message: 'Article permanently deleted.' });
+  } catch (err) {
+    console.error('[articles.permanent-delete] error:', err?.message || err);
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal server error' });
   }
 });
 
