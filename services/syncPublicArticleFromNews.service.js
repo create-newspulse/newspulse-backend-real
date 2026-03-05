@@ -87,6 +87,7 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
 
     translationStatus: newsDoc.translationStatus || null,
     translationError: newsDoc.translationError || null,
+    translationNextRetryAt: newsDoc.translationNextRetryAt || null,
 
     category: newsDoc.category,
     language: newsDoc.language || 'en',

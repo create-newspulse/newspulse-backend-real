@@ -5,7 +5,7 @@ const mongoose = require('mongoose');
 // If your frontend uses a different shape/model, tell me and I’ll swap it.
 const Article = require('../models/Article');
 const { getSlugCandidates } = require('../lib/slug');
-const { ensureOnDemandArticleTranslation } = require('../services/articleTranslation.service');
+const { ensureOnDemandArticleTranslation, normalizeLang, detectLangFromContent } = require('../services/articleTranslation.service');
 
 const router = express.Router();
 
@@ -76,7 +76,82 @@ router.get('/stories/:slug', async (req, res) => {
       return res.json({ success: true, data: story });
     }
 
-    const localized = await ensureOnDemandArticleTranslation({ article: story, requestedLang: langQueryRaw, logger: console });
+    const desired = normalizeLang(langQueryRaw);
+    if (!desired) {
+      return res.json({ success: true, data: story });
+    }
+
+    const source = normalizeLang(story?.originalLang) || detectLangFromContent(story?.content) || normalizeLang(story?.language) || 'en';
+    const existingBucket = story?.translations?.[desired];
+    const hasAll = Boolean(existingBucket && String(existingBucket.title || '').trim() && String(existingBucket.summary || '').trim() && String(existingBucket.content || '').trim());
+    const now = new Date();
+
+    // If translation is needed and missing, acquire an atomic pending lock to avoid stampede.
+    let lockOwner = false;
+    if (desired !== source && !hasAll) {
+      const status = story?.translationStatus?.[desired] || null;
+      const retryAtRaw = story?.translationNextRetryAt?.[desired] || null;
+      const retryAt = retryAtRaw ? new Date(retryAtRaw) : null;
+
+      if (status === 'pending' || (status === 'failed' && retryAt && now < retryAt)) {
+        return res.json({
+          success: true,
+          data: story,
+          resolvedLang: source,
+          translationPending: true,
+        });
+      }
+
+      try {
+        const lockRes = await Article.updateOne(
+          {
+            _id: story._id,
+            $and: [
+              { [`translationStatus.${desired}`]: { $ne: 'pending' } },
+              {
+                $or: [
+                  { [`translationStatus.${desired}`]: { $ne: 'failed' } },
+                  { [`translationNextRetryAt.${desired}`]: { $exists: false } },
+                  { [`translationNextRetryAt.${desired}`]: null },
+                  { [`translationNextRetryAt.${desired}`]: { $lte: now } },
+                ],
+              },
+            ],
+          },
+          {
+            $set: {
+              [`translationStatus.${desired}`]: 'pending',
+              [`translationError.${desired}`]: null,
+              [`translationNextRetryAt.${desired}`]: null,
+            },
+          }
+        );
+
+        const modified = typeof lockRes?.modifiedCount === 'number'
+          ? lockRes.modifiedCount
+          : (typeof lockRes?.nModified === 'number' ? lockRes.nModified : 0);
+        lockOwner = modified === 1;
+      } catch (_) {
+        lockOwner = false;
+      }
+
+      if (!lockOwner) {
+        return res.json({
+          success: true,
+          data: story,
+          resolvedLang: source,
+          translationPending: true,
+        });
+      }
+    }
+
+    const localized = await ensureOnDemandArticleTranslation({
+      article: story,
+      requestedLang: langQueryRaw,
+      logger: console,
+      lockOwner,
+      now,
+    });
 
     // Persist on-demand translations (and/or originalLang backfill) without crashing the endpoint.
     if (localized && localized.dbSet && story && story._id) {

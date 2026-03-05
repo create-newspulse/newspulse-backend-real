@@ -115,6 +115,11 @@ const articleSchema = new mongoose.Schema(
       hi: { type: String, default: null },
       gu: { type: String, default: null },
     },
+    translationNextRetryAt: {
+      en: { type: Date, default: null },
+      hi: { type: Date, default: null },
+      gu: { type: Date, default: null },
+    },
 
     status: { type: String, enum: STATUS_VALUES, default: 'draft', index: true },
     publishedAt: { type: Date, default: null, index: true },

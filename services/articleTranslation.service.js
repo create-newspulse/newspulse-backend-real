@@ -17,6 +17,15 @@ function _safeText(v) {
   return String(v ?? '').trim();
 }
 
+function _isRateLimitErrorMessage(msg) {
+  return /rate\s*limit\s*exceeded/i.test(String(msg || ''));
+}
+
+function _addMinutes(d, minutes) {
+  const dt = d instanceof Date ? d : new Date(d);
+  return new Date(dt.getTime() + (minutes * 60 * 1000));
+}
+
 function detectLangFromContent(textOrHtml) {
   // Lightweight, offline detection. Do not infer from title.
   // - Gujarati block: U+0A80..U+0AFF
@@ -204,8 +213,9 @@ function localizeArticleFromTranslations(articleLike, requestedLang) {
  * }} params
  * @returns {Promise<{ out: any, resolvedLang: string, translationPending: boolean, dbSet?: Record<string, any> }>} 
  */
-async function ensureOnDemandArticleTranslation({ article, requestedLang, logger }) {
+async function ensureOnDemandArticleTranslation({ article, requestedLang, logger, lockOwner = false, now = new Date() }) {
   const log = logger || console;
+  const nowDt = now instanceof Date ? now : new Date(now);
   const desired = normalizeLang(requestedLang);
   // IMPORTANT: never trust a defaulted/stale `language` value as the source of truth.
   // Prefer originalLang, else detect from content (Gujarati/Devanagari heuristics), else fall back.
@@ -225,9 +235,27 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
     return localizeArticleFromTranslations(article, desired);
   }
 
+  // Status-based caching/locking/cooldown.
+  // - If pending: do not re-run translation; return original.
+  // - If failed and still in cooldown: skip; return original.
+  if (!lockOwner) {
+    const status = article?.translationStatus?.[desired] || null;
+    const retryAtRaw = article?.translationNextRetryAt?.[desired] || null;
+    const retryAt = retryAtRaw ? new Date(retryAtRaw) : null;
+
+    if (status === 'pending') {
+      const out = { ...article, originalLang: article?.originalLang || source };
+      return { out, resolvedLang: source, translationPending: true };
+    }
+
+    if (status === 'failed' && retryAt && nowDt < retryAt) {
+      const out = { ...article, originalLang: article?.originalLang || source };
+      return { out, resolvedLang: source, translationPending: true };
+    }
+  }
+
   // Translate missing fields.
   const dbSet = {};
-  const now = new Date();
   const provider = 'google';
 
   // Always persist originalLang when absent.
@@ -241,6 +269,9 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
     content: _safeText(existingBucket?.content),
   };
 
+  let firstErrorMessage = null;
+  let sawRateLimit = false;
+
   try {
     if (missing.includes('title')) {
       const t = await translateTextStrict({ text: article?.title, sourceLang: source, targetLang: desired });
@@ -248,13 +279,16 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
         bucketOut.title = t.text;
         dbSet[`translations.${desired}.title`] = t.text;
       } else {
+        const msg = t && t.ok === false ? t.error : 'empty_output';
+        if (!firstErrorMessage) firstErrorMessage = msg;
+        if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
         try {
           log.warn?.('[i18n][article] title translation failed', {
             id: String(article?._id || ''),
             slug: String(article?.slug || ''),
             from: source,
             to: desired,
-            error: t && t.ok === false ? t.error : 'empty_output',
+            error: msg,
           });
         } catch (_) {}
       }
@@ -266,13 +300,16 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
         bucketOut.summary = s.text;
         dbSet[`translations.${desired}.summary`] = s.text;
       } else {
+        const msg = s && s.ok === false ? s.error : 'empty_output';
+        if (!firstErrorMessage) firstErrorMessage = msg;
+        if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
         try {
           log.warn?.('[i18n][article] summary translation failed', {
             id: String(article?._id || ''),
             slug: String(article?.slug || ''),
             from: source,
             to: desired,
-            error: s && s.ok === false ? s.error : 'empty_output',
+            error: msg,
           });
         } catch (_) {}
       }
@@ -284,6 +321,9 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
         bucketOut.content = c.html;
         dbSet[`translations.${desired}.content`] = c.html;
       } else {
+        const msg = c && c.ok === false ? c.error : 'empty_output';
+        if (!firstErrorMessage) firstErrorMessage = msg;
+        if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
         // Never silently skip body translation: emit a warning when it fails.
         try {
           log.warn?.('[i18n][article] content translation failed', {
@@ -291,7 +331,7 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
             slug: String(article?.slug || ''),
             from: source,
             to: desired,
-            error: c && c.ok === false ? c.error : 'empty_output',
+            error: msg,
           });
         } catch (_) {}
       }
@@ -300,10 +340,13 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
     // Only set metadata if we translated at least one field.
     const didTranslate = Object.keys(dbSet).some((k) => k.startsWith(`translations.${desired}.`) && !k.endsWith('.generatedAt') && !k.endsWith('.provider'));
     if (didTranslate) {
-      dbSet[`translations.${desired}.generatedAt`] = now;
+      dbSet[`translations.${desired}.generatedAt`] = nowDt;
       dbSet[`translations.${desired}.provider`] = provider;
     }
   } catch (e) {
+    const msg = e?.message || String(e);
+    if (!firstErrorMessage) firstErrorMessage = msg;
+    if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
     try {
       log.warn?.('[i18n][article] on-demand translation failed', {
         id: String(article?._id || ''),
@@ -311,7 +354,7 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
         from: source,
         to: desired,
         missing,
-        message: e?.message || String(e),
+        message: msg,
       });
     } catch (_) {}
   }
@@ -319,9 +362,18 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
   const hasAllTranslated = _isNonEmptyString(bucketOut.title) && _isNonEmptyString(bucketOut.summary) && _isNonEmptyString(bucketOut.content);
 
   if (hasAllTranslated) {
+    dbSet[`translationStatus.${desired}`] = 'ready';
+    dbSet[`translationError.${desired}`] = null;
+    dbSet[`translationNextRetryAt.${desired}`] = null;
     const out = { ...article, title: bucketOut.title, summary: bucketOut.summary, content: bucketOut.content, originalLang: article?.originalLang || source };
     return { out, resolvedLang: desired, translationPending: false, ...(Object.keys(dbSet).length ? { dbSet } : {}) };
   }
+
+  // Mark failure + cooldown (rate-limit only) so we don't retry repeatedly.
+  const errMsg = firstErrorMessage || 'incomplete_translation';
+  dbSet[`translationStatus.${desired}`] = 'failed';
+  dbSet[`translationError.${desired}`] = errMsg;
+  dbSet[`translationNextRetryAt.${desired}`] = sawRateLimit ? _addMinutes(nowDt, 30) : null;
 
   // Strict: never mix languages at field-level. Serve original fields if translation incomplete.
   const out = { ...article, originalLang: article?.originalLang || source };

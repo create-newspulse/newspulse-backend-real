@@ -78,9 +78,17 @@ test('GET /api/public/stories/:slug?lang=hi auto-generates missing fields, saves
       translations: {},
     };
 
-    let updateArgs = null;
+    const updateCalls = [];
     Article.updateOne = async (filter, update) => {
-      updateArgs = { filter, update };
+      updateCalls.push({ filter, update });
+
+      // First call is the atomic lock (sets translationStatus.<lang>=pending)
+      const set = update && update.$set ? update.$set : {};
+      if (set['translationStatus.hi'] === 'pending') {
+        return { acknowledged: true, modifiedCount: 1 };
+      }
+
+      // Second call persists translated fields/status.
       return { acknowledged: true, modifiedCount: 1 };
     };
     Article.findOne = () => ({ lean: async () => story });
@@ -92,17 +100,24 @@ test('GET /api/public/stories/:slug?lang=hi auto-generates missing fields, saves
     assert.ok(String(res.body.data.summary).startsWith('T:'), 'summary should be translated');
     assert.ok(String(res.body.data.content).startsWith('T:'), 'content should be translated');
 
-    assert.ok(updateArgs, 'should persist translations via updateOne');
-    assert.deepEqual(updateArgs.filter, { _id: '507f1f77bcf86cd799439011' });
-    assert.ok(updateArgs.update && updateArgs.update.$set, 'should use $set update');
+    // Should have lock + persist calls.
+    assert.ok(updateCalls.length >= 2, 'should call updateOne to lock + persist');
+    const persist = updateCalls[updateCalls.length - 1];
+    assert.deepEqual(persist.filter, { _id: '507f1f77bcf86cd799439011' });
+    assert.ok(persist.update && persist.update.$set, 'should use $set update');
 
-    const set = updateArgs.update.$set;
+    const set = persist.update.$set;
     assert.equal(set.originalLang, 'en');
     assert.ok(set['translations.hi.title']);
     assert.ok(set['translations.hi.summary']);
     assert.ok(set['translations.hi.content']);
     assert.equal(set['translations.hi.provider'], 'google');
     assert.ok(set['translations.hi.generatedAt']);
+
+    // Status should become ready (and cooldown cleared) on success.
+    assert.equal(set['translationStatus.hi'], 'ready');
+    assert.equal(set['translationError.hi'], null);
+    assert.equal(set['translationNextRetryAt.hi'], null);
 
     // Ensure HTML translation uses format: 'html'
     assert.ok(fetchBodies.some((b) => b && b.format === 'html'), 'should call Google Translate with format=html for content');
@@ -141,7 +156,11 @@ test('GET /api/public/stories/:slug detects source language from content when or
       translations: {},
     };
 
-    Article.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+    let callCount = 0;
+    Article.updateOne = async () => {
+      callCount++;
+      return { acknowledged: true, modifiedCount: 1 };
+    };
     Article.findOne = () => ({ lean: async () => story });
 
     const res = await request(app).get('/api/public/stories/test-story-2?lang=en');
@@ -150,6 +169,7 @@ test('GET /api/public/stories/:slug detects source language from content when or
 
     // At least one translate call should include source:'hi'
     assert.ok(fetchBodies.some((b) => b && b.source === 'hi'), 'should use detected source lang hi');
+    assert.ok(callCount >= 2, 'should lock + persist');
   } finally {
     restore(originals);
     global.fetch = prevFetch;
@@ -177,7 +197,11 @@ test('GET /api/public/stories/:slug does not crash when translation fails (falls
       translations: {},
     };
 
-    Article.updateOne = async () => ({ acknowledged: true, modifiedCount: 0 });
+    let callCount = 0;
+    Article.updateOne = async () => {
+      callCount++;
+      return { acknowledged: true, modifiedCount: 1 };
+    };
     Article.findOne = () => ({ lean: async () => story });
 
     const res = await request(app).get('/api/public/stories/test-story-3?lang=hi');
@@ -187,6 +211,7 @@ test('GET /api/public/stories/:slug does not crash when translation fails (falls
     assert.equal(res.body.data.summary, 'Summary');
     assert.equal(res.body.data.content, '<p>Body</p>');
     assert.equal(res.body.translationPending, true);
+    assert.ok(callCount >= 1, 'should attempt lock (and may persist failure state)');
   } finally {
     restore(originals);
     global.fetch = prevFetch;

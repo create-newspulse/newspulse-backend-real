@@ -18,6 +18,7 @@ const {
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
 const {
   buildPendingTranslationState,
+  buildPublishTranslationState,
   markPublishTranslationPending,
   enqueueTranslateAndSave,
 } = require('../services/publishAsyncTranslation.service');
@@ -840,7 +841,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     let before = null;
     try {
       before = await News.findById(rawId)
-        .select('title description content category status workflowStage translationGroupId lang language slugs coverImage coverImageUrl imageURL')
+        .select('title description content translations translationStatus translationError translationNextRetryAt category status workflowStage translationGroupId lang language slugs coverImage coverImageUrl imageURL')
         .lean();
     } catch (_) {
       // ignore
@@ -933,7 +934,14 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       const baseTitle = update.title !== undefined ? update.title : (before.title || '');
       const baseSummary = update.description !== undefined ? update.description : (before.description || '');
       const baseContent = update.content !== undefined ? update.content : (before.content || '');
-      const pending = buildPendingTranslationState({ baseLang, title: baseTitle, summary: baseSummary, content: baseContent });
+      const pending = buildPublishTranslationState({
+        baseLang,
+        title: baseTitle,
+        summary: baseSummary,
+        content: baseContent,
+        existing: before,
+        now,
+      });
 
       const updateOp = {
         $set: {
@@ -948,6 +956,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
           translations: pending.translations,
           translationStatus: pending.translationStatus,
           translationError: pending.translationError,
+          translationNextRetryAt: pending.translationNextRetryAt,
           // Keep workflow stage aligned.
           workflowStage: stage,
           workflowUpdatedAt: now,
@@ -1332,6 +1341,7 @@ router.post('/articles/:id/retry-translation', requireAdminAuth, async (req, res
           translations: pending.translations,
           translationStatus: pending.translationStatus,
           translationError: pending.translationError,
+          translationNextRetryAt: pending.translationNextRetryAt,
         },
       },
       { new: true, runValidators: false }

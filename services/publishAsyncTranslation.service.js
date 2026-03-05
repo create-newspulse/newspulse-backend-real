@@ -37,6 +37,25 @@ function _ensureTranslationBuckets(doc) {
 function _ensureStatusBuckets(doc) {
   _ensureObjectField(doc, 'translationStatus');
   _ensureObjectField(doc, 'translationError');
+  _ensureObjectField(doc, 'translationNextRetryAt');
+}
+
+function _isNonEmptyString(v) {
+  return typeof v === 'string' && v.trim().length > 0;
+}
+
+function _hasFullBucket(bucket) {
+  const b = bucket && typeof bucket === 'object' ? bucket : {};
+  return _isNonEmptyString(b.title) && _isNonEmptyString(b.summary) && _isNonEmptyString(b.content);
+}
+
+function _isRateLimitErrorMessage(msg) {
+  return /rate\s*limit\s*exceeded/i.test(String(msg || ''));
+}
+
+function _addMinutes(d, minutes) {
+  const dt = d instanceof Date ? d : new Date(d);
+  return new Date(dt.getTime() + (minutes * 60 * 1000));
 }
 
 function buildPendingTranslationState({ baseLang, title, summary, content }) {
@@ -44,6 +63,7 @@ function buildPendingTranslationState({ baseLang, title, summary, content }) {
   const translations = {};
   const translationStatus = {};
   const translationError = {};
+  const translationNextRetryAt = {};
 
   for (const lang of SUPPORTED_LANGS) {
     if (lang === base) {
@@ -54,14 +74,76 @@ function buildPendingTranslationState({ baseLang, title, summary, content }) {
       };
       translationStatus[lang] = 'ready';
       translationError[lang] = null;
+      translationNextRetryAt[lang] = null;
     } else {
       translations[lang] = { title: '', summary: '', content: '' };
       translationStatus[lang] = 'pending';
       translationError[lang] = null;
+      translationNextRetryAt[lang] = null;
     }
   }
 
-  return { baseLang: base, translations, translationStatus, translationError };
+  return { baseLang: base, translations, translationStatus, translationError, translationNextRetryAt };
+}
+
+function buildPublishTranslationState({ baseLang, title, summary, content, existing, now }) {
+  const base = normalizeLang(baseLang) || 'en';
+  const at = now instanceof Date ? now : new Date();
+
+  const translations = { ...(existing?.translations && typeof existing.translations === 'object' ? existing.translations : {}) };
+  const translationStatus = { ...(existing?.translationStatus && typeof existing.translationStatus === 'object' ? existing.translationStatus : {}) };
+  const translationError = { ...(existing?.translationError && typeof existing.translationError === 'object' ? existing.translationError : {}) };
+  const translationNextRetryAt = { ...(existing?.translationNextRetryAt && typeof existing.translationNextRetryAt === 'object' ? existing.translationNextRetryAt : {}) };
+
+  for (const lang of SUPPORTED_LANGS) {
+    const existingBucket = existing?.translations?.[lang];
+    const existingStatus = existing?.translationStatus?.[lang] || null;
+    const existingRetryAtRaw = existing?.translationNextRetryAt?.[lang] || null;
+    const existingRetryAt = existingRetryAtRaw ? new Date(existingRetryAtRaw) : null;
+
+    if (lang === base) {
+      translations[lang] = {
+        title: _safeText(title),
+        summary: _safeText(summary),
+        content: _safeText(content),
+      };
+      translationStatus[lang] = 'ready';
+      translationError[lang] = null;
+      translationNextRetryAt[lang] = null;
+      continue;
+    }
+
+    // Preserve any fully translated bucket as a cache hit.
+    if (_hasFullBucket(existingBucket)) {
+      translations[lang] = existingBucket;
+      translationStatus[lang] = 'ready';
+      translationError[lang] = null;
+      translationNextRetryAt[lang] = null;
+      continue;
+    }
+
+    // If translation is already in-flight, preserve pending to avoid stampede.
+    if (existingStatus === 'pending') {
+      if (!translations[lang] || typeof translations[lang] !== 'object') translations[lang] = { title: '', summary: '', content: '' };
+      continue;
+    }
+
+    // If in cooldown due to rate-limiting, preserve failed + nextRetryAt.
+    if (existingStatus === 'failed' && existingRetryAt && at < existingRetryAt) {
+      if (!translations[lang] || typeof translations[lang] !== 'object') translations[lang] = { title: '', summary: '', content: '' };
+      translationStatus[lang] = 'failed';
+      translationNextRetryAt[lang] = existingRetryAt;
+      continue;
+    }
+
+    // Otherwise, mark pending and clear stale errors/cooldowns.
+    translations[lang] = { title: '', summary: '', content: '' };
+    translationStatus[lang] = 'pending';
+    translationError[lang] = null;
+    translationNextRetryAt[lang] = null;
+  }
+
+  return { baseLang: base, translations, translationStatus, translationError, translationNextRetryAt };
 }
 
 function markPublishTranslationPending(doc) {
@@ -71,22 +153,31 @@ function markPublishTranslationPending(doc) {
   _ensureTranslationBuckets(doc);
   _ensureStatusBuckets(doc);
 
-  const pending = buildPendingTranslationState({
+  const pending = buildPublishTranslationState({
     baseLang,
     title: doc.title,
     summary: doc.description,
     content: doc.content,
+    existing: {
+      translations: doc.translations,
+      translationStatus: doc.translationStatus,
+      translationError: doc.translationError,
+      translationNextRetryAt: doc.translationNextRetryAt,
+    },
+    now: new Date(),
   });
 
   doc.translations = pending.translations;
   doc.translationStatus = pending.translationStatus;
   doc.translationError = pending.translationError;
+  doc.translationNextRetryAt = pending.translationNextRetryAt;
 
   try {
     if (typeof doc.markModified === 'function') {
       doc.markModified('translations');
       doc.markModified('translationStatus');
       doc.markModified('translationError');
+      doc.markModified('translationNextRetryAt');
     }
   } catch (_) {}
 }
@@ -218,7 +309,9 @@ async function translateAndSave(newsId, options = {}) {
   /** @type {any} */
   let doc0;
   try {
-    doc0 = await News.findById(id).lean();
+    doc0 = await News.findById(id)
+      .select('title description content lang language slug slugs')
+      .lean();
   } catch (e) {
     try { logger.error?.('[i18n][publish] load failed', { id, message: e?.message || String(e) }); } catch (_) {}
     return { ok: false, error: 'Load failed' };
@@ -235,6 +328,7 @@ async function translateAndSave(newsId, options = {}) {
       if (lang === baseLang) continue;
       setFail[`translationStatus.${lang}`] = 'failed';
       setFail[`translationError.${lang}`] = 'Missing GOOGLE_TRANSLATE_API_KEY';
+      setFail[`translationNextRetryAt.${lang}`] = null;
     }
 
     try {
@@ -256,11 +350,101 @@ async function translateAndSave(newsId, options = {}) {
   for (const dst of SUPPORTED_LANGS) {
     if (dst === baseLang) continue;
 
+    const now = new Date();
+
+    /** @type {any} */
+    let current;
+    try {
+      current = await News.findById(id)
+        .select([
+          'title',
+          'description',
+          'content',
+          'lang',
+          'language',
+          'slug',
+          'slugs',
+          `translations.${dst}`,
+          `translationStatus.${dst}`,
+          `translationError.${dst}`,
+          `translationNextRetryAt.${dst}`,
+        ].join(' '))
+        .lean();
+    } catch (_) {
+      current = null;
+    }
+
+    if (!current) continue;
+
+    const status = current?.translationStatus?.[dst] || null;
+    const retryAt = current?.translationNextRetryAt?.[dst] ? new Date(current.translationNextRetryAt[dst]) : null;
+    const bucket = current?.translations?.[dst];
+    const hasFull = _hasFullBucket(bucket);
+
+    // Cache hit: translation already complete.
+    if (hasFull) {
+      if (status !== 'ready' || current?.translationError?.[dst] || retryAt) {
+        try {
+          const docUpdated = await News.findByIdAndUpdate(
+            id,
+            {
+              $set: {
+                [`translationStatus.${dst}`]: 'ready',
+                [`translationError.${dst}`]: null,
+                [`translationNextRetryAt.${dst}`]: null,
+              },
+            },
+            { new: true, runValidators: false }
+          );
+          if (docUpdated) await syncPublicArticleFromNews(docUpdated, { logger });
+        } catch (_) {}
+      }
+      continue;
+    }
+
+    // If someone else is already translating, do not stampede.
+    if (status === 'pending') continue;
+
+    // Cooldown: do not retry until nextRetryAt.
+    if (status === 'failed' && retryAt && now < retryAt) continue;
+
+    // Acquire an atomic "pending" lock to prevent duplicate background jobs.
+    let locked = null;
+    try {
+      locked = await News.findOneAndUpdate(
+        {
+          _id: id,
+          $and: [
+            { [`translationStatus.${dst}`]: { $ne: 'pending' } },
+            {
+              $or: [
+                { [`translationStatus.${dst}`]: { $ne: 'failed' } },
+                { [`translationNextRetryAt.${dst}`]: { $exists: false } },
+                { [`translationNextRetryAt.${dst}`]: null },
+                { [`translationNextRetryAt.${dst}`]: { $lte: now } },
+              ],
+            },
+          ],
+        },
+        {
+          $set: {
+            [`translationStatus.${dst}`]: 'pending',
+            [`translationError.${dst}`]: null,
+            [`translationNextRetryAt.${dst}`]: null,
+          },
+        },
+        { new: true, runValidators: false }
+      );
+    } catch (_) {
+      locked = null;
+    }
+    if (!locked) continue;
+
     try {
       // Prepare batch: title + summary + chunked content.
-      const title = _safeText(doc0.title);
-      const summary = _safeText(doc0.description);
-      const { chunks, joiner } = chunkContentSafely(doc0.content, 4200);
+      const title = _safeText(current.title);
+      const summary = _safeText(current.description);
+      const { chunks, joiner } = chunkContentSafely(current.content, 4200);
 
       const q = [title, summary, ...chunks];
       const tr = await googleTranslate.translateMany(q, dst, { sourceLang: baseLang, apiKey, format: 'html' });
@@ -284,12 +468,14 @@ async function translateAndSave(newsId, options = {}) {
         [`translations.${dst}.content`]: contentT,
         [`translationStatus.${dst}`]: 'ready',
         [`translationError.${dst}`]: null,
+        [`translationNextRetryAt.${dst}`]: null,
         [`slugs.${dst}`]: slugifyUnicode(titleT),
       };
 
       // Always keep base language status as ready.
       setOk[`translationStatus.${baseLang}`] = 'ready';
       setOk[`translationError.${baseLang}`] = null;
+      setOk[`translationNextRetryAt.${baseLang}`] = null;
       setOk[`translations.${baseLang}.title`] = _safeText(doc0.title);
       setOk[`translations.${baseLang}.summary`] = _safeText(doc0.description);
       setOk[`translations.${baseLang}.content`] = _safeText(doc0.content);
@@ -298,6 +484,7 @@ async function translateAndSave(newsId, options = {}) {
       if (docUpdated) await syncPublicArticleFromNews(docUpdated, { logger });
     } catch (e) {
       const msg = e?.message || String(e);
+      const isRateLimit = _isRateLimitErrorMessage(msg);
       try {
         const docUpdated = await News.findByIdAndUpdate(
           id,
@@ -305,6 +492,7 @@ async function translateAndSave(newsId, options = {}) {
             $set: {
               [`translationStatus.${dst}`]: 'failed',
               [`translationError.${dst}`]: msg,
+              ...(isRateLimit ? { [`translationNextRetryAt.${dst}`]: _addMinutes(now, 30) } : { [`translationNextRetryAt.${dst}`]: null }),
             },
           },
           { new: true, runValidators: false }
@@ -345,6 +533,7 @@ module.exports = {
   SUPPORTED_LANGS,
   normalizeLang,
   buildPendingTranslationState,
+  buildPublishTranslationState,
   markPublishTranslationPending,
   enqueueTranslateAndSave,
   translateAndSave,
