@@ -87,6 +87,35 @@ function applyLangFilter(filter, lang) {
   }
 }
 
+function buildOriginalLangMatch(lang) {
+  const lower = String(lang).trim().toLowerCase();
+  const upper = lower.toUpperCase();
+  return {
+    $or: [
+      { originalLang: { $in: [lower, upper] } },
+      // Backward compatibility: many older docs only have lang/language.
+      { $and: [
+        { $or: [{ originalLang: null }, { originalLang: { $exists: false } }] },
+        { $or: [{ lang: { $in: [lower, upper] } }, { language: { $in: [lower, upper] } }] },
+      ] },
+    ],
+  };
+}
+
+function buildReadyTranslationMatch(lang) {
+  const desired = String(lang).trim().toLowerCase();
+  // Feed must never include placeholder/pending translations.
+  // Require: translationStatus.<lang> === 'ready' and full bucket fields exist.
+  return {
+    $and: [
+      { [`translationStatus.${desired}`]: 'ready' },
+      { [`translations.${desired}.title`]: { $exists: true, $ne: '' } },
+      { [`translations.${desired}.summary`]: { $exists: true, $ne: '' } },
+      { [`translations.${desired}.content`]: { $exists: true, $ne: '' } },
+    ],
+  };
+}
+
 function isPlainTextBody(content) {
   const s = String(content || '');
   if (!s.trim()) return true;
@@ -499,11 +528,18 @@ async function listPublicNews(req, res) {
 
     // Feed rules:
     // - Gujarati feed shows originals immediately (legacy behavior).
-    // - Hindi/English feeds only show items when translationStatus.<lang> === 'ready'.
+    // - Hindi/English feeds only show items when either:
+    //   - the original is authored in that language, OR
+    //   - the cached translation bucket is fully ready (no placeholders).
     if (desired === 'gu') {
       applyLangFilter(filter, 'gu');
     } else if (desired === 'hi' || desired === 'en') {
-      filter.$and.push({ [`translationStatus.${desired}`]: 'ready' });
+      filter.$and.push({
+        $or: [
+          buildOriginalLangMatch(desired),
+          buildReadyTranslationMatch(desired),
+        ],
+      });
     }
 
     const skip = (page - 1) * limit;

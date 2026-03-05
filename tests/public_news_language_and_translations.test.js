@@ -34,15 +34,57 @@ function extractTranslationReadyFilter(filter, lang) {
   for (const c of ands) {
     if (!c || typeof c !== 'object') continue;
     if (Object.prototype.hasOwnProperty.call(c, key) && c[key] === 'ready') return c;
+    if (Array.isArray(c.$and) && c.$and.some((x) => x && typeof x === 'object' && Object.prototype.hasOwnProperty.call(x, key) && x[key] === 'ready')) {
+      return c;
+    }
+  }
+  return null;
+}
+
+function containsTranslationReady(filter, lang) {
+  const desired = String(lang || '').trim().toLowerCase();
+  const key = `translationStatus.${desired}`;
+
+  function walk(node) {
+    if (!node || typeof node !== 'object') return false;
+    if (Object.prototype.hasOwnProperty.call(node, key) && node[key] === 'ready') return true;
+    if (Array.isArray(node)) return node.some(walk);
+    if (Array.isArray(node.$and) && node.$and.some(walk)) return true;
+    if (Array.isArray(node.$or) && node.$or.some(walk)) return true;
+    return Object.values(node).some(walk);
+  }
+
+  return walk(filter);
+}
+
+function extractHiEnFeedOrFilter(filter) {
+  const ands = filter?.$and || [];
+  for (const c of ands) {
+    if (!c || typeof c !== 'object') continue;
+    if (Array.isArray(c.$or) && c.$or.length >= 2) return c;
   }
   return null;
 }
 
 function applyTranslationReadyFilter(items, filter, lang) {
   const desired = String(lang || '').trim().toLowerCase();
-  const clause = extractTranslationReadyFilter(filter, desired);
-  if (!clause) return items;
-  return items.filter((doc) => doc && doc.translationStatus && doc.translationStatus[desired] === 'ready');
+  const orClause = extractHiEnFeedOrFilter(filter);
+  if (!orClause) return items;
+
+  return items.filter((doc) => {
+    if (!doc) return false;
+
+    const isOriginalInLang =
+      String(doc.originalLang || '').toLowerCase() === desired ||
+      (!doc.originalLang && (String(doc.lang || '').toLowerCase() === desired || String(doc.language || '').toLowerCase() === desired));
+
+    const t = doc.translations && doc.translations[desired] ? doc.translations[desired] : null;
+    const hasFullBucket = Boolean(t && String(t.title || '').trim() && String(t.summary || '').trim() && String(t.content || '').trim());
+    const isReady = doc.translationStatus && doc.translationStatus[desired] === 'ready';
+
+    const isReadyTranslated = Boolean(isReady && hasFullBucket);
+    return isOriginalInLang || isReadyTranslated;
+  });
 }
 
 function containsLangKeys(expr) {
@@ -165,7 +207,16 @@ test('GET /api/public/news returns hi when lang=hi', async () => {
 
     const dataset = [
       { title: 'gu story', description: 'd', lang: 'gu', status: 'published', translationStatus: { hi: 'pending' } },
-      { title: 'hi story', description: 'd', lang: 'hi', status: 'published', translationStatus: { hi: 'ready' } },
+      { title: 'hi original', description: 'd', originalLang: 'hi', lang: 'hi', status: 'published', translationStatus: { hi: 'pending' } },
+      {
+        title: 'gu with hi translation',
+        description: 'd',
+        originalLang: 'gu',
+        lang: 'gu',
+        status: 'published',
+        translationStatus: { hi: 'ready' },
+        translations: { hi: { title: 'hi t', summary: 'hi s', content: 'hi c' } },
+      },
       { title: 'missing lang', description: 'd', status: 'published', translationStatus: {} },
     ];
 
@@ -183,12 +234,15 @@ test('GET /api/public/news returns hi when lang=hi', async () => {
     assert.equal(res.status, 200);
     assert.ok(Array.isArray(res.body.items));
 
-    const readyCond = extractTranslationReadyFilter(lastFilter, 'hi');
-    assert.ok(readyCond, 'expected a translationStatus.hi=ready filter to be present');
+    const orCond = extractHiEnFeedOrFilter(lastFilter);
+    assert.ok(orCond, 'expected an $or filter for hi feed to be present');
+    assert.ok(containsTranslationReady(lastFilter, 'hi'), 'expected translation readiness to be referenced in filter');
 
-    assert.equal(res.body.items.length, 1);
-    assert.equal(res.body.items[0].lang, 'hi');
-    assert.equal(res.body.items[0].title, 'hi story');
+    // With our stubbed data, both the original-Hindi doc and the translated doc are eligible.
+    assert.equal(res.body.items.length, 2);
+    assert.ok(res.body.items.every((it) => it.lang === 'hi'));
+    assert.ok(res.body.items.some((it) => it.title === 'hi original'));
+    assert.ok(res.body.items.some((it) => it.title === 'hi t'));
   } finally {
     News.find = prevFind;
     News.countDocuments = prevCount;
