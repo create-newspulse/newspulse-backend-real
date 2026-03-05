@@ -227,6 +227,8 @@ async function translatePublicNews(req, res) {
       doc: { ...obj0, title, description: summary, content },
       requestedLang: target,
       logger: console,
+      lockOwner: true,
+      now: new Date(),
     });
 
     doc.translations = doc.translations || {};
@@ -582,7 +584,58 @@ async function getPublicNewsBySlugOrId(req, res) {
     // Language switching: prefer cached translations; if missing, generate + persist.
     const target = normalizeLang(requestedLang);
     if (target) {
-      const localized = await ensureOnDemandNewsTranslation({ doc: out, requestedLang: target, logger: console });
+      const source = normalizeLang(out?.originalLang) || detectLangFromContent(out?.content) || normalizeLang(out?.lang || out?.language) || 'en';
+      const b = out?.translations?.[target];
+      const hasAll = Boolean(b && String(b.title || '').trim() && String(b.summary || '').trim() && String(b.content || '').trim());
+
+      const now = new Date();
+      let lockOwner = false;
+      if (target !== source && !hasAll && out && out._id) {
+        try {
+          const lockRes = await News.updateOne(
+            {
+              _id: out._id,
+              $and: [
+                { [`translationStatus.${target}`]: { $ne: 'pending' } },
+                {
+                  $or: [
+                    { [`translationStatus.${target}`]: { $ne: 'failed' } },
+                    { [`translationNextRetryAt.${target}`]: { $exists: false } },
+                    { [`translationNextRetryAt.${target}`]: null },
+                    { [`translationNextRetryAt.${target}`]: { $lte: now } },
+                  ],
+                },
+              ],
+            },
+            {
+              $set: {
+                [`translationStatus.${target}`]: 'pending',
+                [`translationError.${target}`]: null,
+                [`translationNextRetryAt.${target}`]: null,
+              },
+            }
+          );
+
+          const modified = typeof lockRes?.modifiedCount === 'number'
+            ? lockRes.modifiedCount
+            : (typeof lockRes?.nModified === 'number' ? lockRes.nModified : 0);
+          lockOwner = modified === 1;
+        } catch (_) {
+          lockOwner = false;
+        }
+
+        if (!lockOwner) {
+          // Another request/worker is translating (or we're in cooldown). Return original fields.
+          try { delete out.translations; } catch (_) {}
+          attachLocalizationFields(out, target);
+          return res.status(200).json(out);
+        }
+      } else {
+        // No translation needed (or already cached); allow service to localize.
+        lockOwner = true;
+      }
+
+      const localized = await ensureOnDemandNewsTranslation({ doc: out, requestedLang: target, logger: console, lockOwner, now });
       if (localized && localized.dbSet && out && out._id) {
         try {
           await News.updateOne({ _id: out._id }, { $set: localized.dbSet }).catch(() => null);
@@ -682,7 +735,57 @@ async function getPublicNewsBySlug(req, res) {
 
     const target = normalizeLang(requestedLang);
     if (target) {
-      const localized = await ensureOnDemandNewsTranslation({ doc: out, requestedLang: target, logger: console });
+      const source = normalizeLang(out?.originalLang) || detectLangFromContent(out?.content) || normalizeLang(out?.lang || out?.language) || 'en';
+      const b = out?.translations?.[target];
+      const hasAll = Boolean(b && String(b.title || '').trim() && String(b.summary || '').trim() && String(b.content || '').trim());
+
+      const now = new Date();
+      let lockOwner = false;
+      if (target !== source && !hasAll && out && out._id) {
+        try {
+          const lockRes = await News.updateOne(
+            {
+              _id: out._id,
+              $and: [
+                { [`translationStatus.${target}`]: { $ne: 'pending' } },
+                {
+                  $or: [
+                    { [`translationStatus.${target}`]: { $ne: 'failed' } },
+                    { [`translationNextRetryAt.${target}`]: { $exists: false } },
+                    { [`translationNextRetryAt.${target}`]: null },
+                    { [`translationNextRetryAt.${target}`]: { $lte: now } },
+                  ],
+                },
+              ],
+            },
+            {
+              $set: {
+                [`translationStatus.${target}`]: 'pending',
+                [`translationError.${target}`]: null,
+                [`translationNextRetryAt.${target}`]: null,
+              },
+            }
+          );
+
+          const modified = typeof lockRes?.modifiedCount === 'number'
+            ? lockRes.modifiedCount
+            : (typeof lockRes?.nModified === 'number' ? lockRes.nModified : 0);
+          lockOwner = modified === 1;
+        } catch (_) {
+          lockOwner = false;
+        }
+
+        if (!lockOwner) {
+          // Another request/worker is translating (or we're in cooldown). Return original fields.
+          try { delete out.translations; } catch (_) {}
+          attachLocalizationFields(out, target);
+          return res.status(200).json(out);
+        }
+      } else {
+        lockOwner = true;
+      }
+
+      const localized = await ensureOnDemandNewsTranslation({ doc: out, requestedLang: target, logger: console, lockOwner, now });
 
       if (localized && localized.dbSet && out && out._id) {
         try {

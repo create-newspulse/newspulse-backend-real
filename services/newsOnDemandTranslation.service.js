@@ -19,6 +19,15 @@ function _safeText(v) {
   return String(v ?? '').trim();
 }
 
+function _isRateLimitErrorMessage(msg) {
+  return /rate\s*limit\s*exceeded/i.test(String(msg || ''));
+}
+
+function _addMinutes(d, minutes) {
+  const dt = d instanceof Date ? d : new Date(d);
+  return new Date(dt.getTime() + (minutes * 60 * 1000));
+}
+
 function isHtmlBody(content) {
   const s = String(content || '');
   if (!s.trim()) return false;
@@ -95,8 +104,11 @@ function localizeNewsFromTranslations(docLike, requestedLang) {
  * - If translation is incomplete, do not mix languages in the response.
  * - Persist any successfully generated fields via $set (best-effort).
  */
-async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger }) {
+async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger, lockOwner = false, now = new Date() }) {
   const log = logger || console;
+  // NOTE: Public news endpoints can be hit at high QPS.
+  // Callers should pass lockOwner=true only after acquiring an atomic DB lock.
+  const nowDt = now instanceof Date ? now : new Date(now);
   const desired = normalizeLang(requestedLang);
 
   const source =
@@ -117,12 +129,33 @@ async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger }) {
     return localizeNewsFromTranslations(doc, desired);
   }
 
+  // Without lock ownership, never attempt translation (prevents stampede).
+  if (!lockOwner) {
+    const status = doc?.translationStatus?.[desired] || null;
+    const retryAtRaw = doc?.translationNextRetryAt?.[desired] || null;
+    const retryAt = retryAtRaw ? new Date(retryAtRaw) : null;
+
+    if (status === 'pending') {
+      return { out: doc, resolvedLang: source, translationPending: true };
+    }
+
+    if (status === 'failed' && retryAt && nowDt < retryAt) {
+      return { out: doc, resolvedLang: source, translationPending: true };
+    }
+
+    // Default: treat as pending if missing (caller should lock).
+    return { out: doc, resolvedLang: source, translationPending: true };
+  }
+
   const dbSet = {};
   const bucketOut = {
     title: _safeText(existingBucket?.title),
     summary: _safeText(existingBucket?.summary),
     content: _safeText(existingBucket?.content),
   };
+
+  let firstErrorMessage = null;
+  let sawRateLimit = false;
 
   try {
     if (missing.includes('title')) {
@@ -131,13 +164,16 @@ async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger }) {
         bucketOut.title = t.text;
         dbSet[`translations.${desired}.title`] = t.text;
       } else {
+        const msg = t && t.ok === false ? t.error : 'empty_output';
+        if (!firstErrorMessage) firstErrorMessage = msg;
+        if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
         try {
           log.warn?.('[i18n][news] title translation failed', {
             id: String(doc?._id || ''),
             slug: String(doc?.slug || ''),
             from: source,
             to: desired,
-            error: t && t.ok === false ? t.error : 'empty_output',
+            error: msg,
           });
         } catch (_) {}
       }
@@ -149,13 +185,16 @@ async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger }) {
         bucketOut.summary = s.text;
         dbSet[`translations.${desired}.summary`] = s.text;
       } else {
+        const msg = s && s.ok === false ? s.error : 'empty_output';
+        if (!firstErrorMessage) firstErrorMessage = msg;
+        if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
         try {
           log.warn?.('[i18n][news] summary translation failed', {
             id: String(doc?._id || ''),
             slug: String(doc?.slug || ''),
             from: source,
             to: desired,
-            error: s && s.ok === false ? s.error : 'empty_output',
+            error: msg,
           });
         } catch (_) {}
       }
@@ -169,13 +208,16 @@ async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger }) {
           bucketOut.content = c.html;
           dbSet[`translations.${desired}.content`] = c.html;
         } else {
+          const msg = c && c.ok === false ? c.error : 'empty_output';
+          if (!firstErrorMessage) firstErrorMessage = msg;
+          if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
           try {
             log.warn?.('[i18n][news] content translation failed', {
               id: String(doc?._id || ''),
               slug: String(doc?.slug || ''),
               from: source,
               to: desired,
-              error: c && c.ok === false ? c.error : 'empty_output',
+              error: msg,
             });
           } catch (_) {}
         }
@@ -185,19 +227,25 @@ async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger }) {
           bucketOut.content = c.text;
           dbSet[`translations.${desired}.content`] = c.text;
         } else {
+          const msg = c && c.ok === false ? c.error : 'empty_output';
+          if (!firstErrorMessage) firstErrorMessage = msg;
+          if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
           try {
             log.warn?.('[i18n][news] content translation failed', {
               id: String(doc?._id || ''),
               slug: String(doc?.slug || ''),
               from: source,
               to: desired,
-              error: c && c.ok === false ? c.error : 'empty_output',
+              error: msg,
             });
           } catch (_) {}
         }
       }
     }
   } catch (e) {
+    const msg = e?.message || String(e);
+    if (!firstErrorMessage) firstErrorMessage = msg;
+    if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
     try {
       log.warn?.('[i18n][news] on-demand translation threw', {
         id: String(doc?._id || ''),
@@ -205,7 +253,7 @@ async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger }) {
         from: source,
         to: desired,
         missing,
-        message: e?.message || String(e),
+        message: msg,
       });
     } catch (_) {}
   }
@@ -213,6 +261,9 @@ async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger }) {
   const hasAllTranslated = _isNonEmptyString(bucketOut.title) && _isNonEmptyString(bucketOut.summary) && _isNonEmptyString(bucketOut.content);
 
   if (hasAllTranslated) {
+    dbSet[`translationStatus.${desired}`] = 'ready';
+    dbSet[`translationError.${desired}`] = null;
+    dbSet[`translationNextRetryAt.${desired}`] = null;
     const out = { ...doc, title: bucketOut.title, description: bucketOut.summary, content: bucketOut.content };
     return {
       out,
@@ -221,6 +272,12 @@ async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger }) {
       ...(Object.keys(dbSet).length ? { dbSet } : {}),
     };
   }
+
+  // Mark failure + cooldown (rate-limit only) so we don't retry repeatedly.
+  const errMsg = firstErrorMessage || 'incomplete_translation';
+  dbSet[`translationStatus.${desired}`] = 'failed';
+  dbSet[`translationError.${desired}`] = errMsg;
+  dbSet[`translationNextRetryAt.${desired}`] = sawRateLimit ? _addMinutes(nowDt, 30) : null;
 
   // Strict: never mix languages at field-level.
   return {
