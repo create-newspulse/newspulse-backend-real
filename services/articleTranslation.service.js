@@ -1,4 +1,5 @@
 const googleTranslate = require('./googleTranslate.service');
+const { isGoogleTranslateConfigured } = require('./translationEnabled');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 
@@ -18,7 +19,7 @@ function _safeText(v) {
 }
 
 function _isRateLimitErrorMessage(msg) {
-  return /rate\s*limit\s*exceeded/i.test(String(msg || ''));
+  return /(rate\s*limit\s*exceeded|too\s*many\s*requests|resource\s*exhausted|http[_\s-]*429|\b429\b)/i.test(String(msg || ''));
 }
 
 function _addMinutes(d, minutes) {
@@ -188,14 +189,18 @@ function getMissingFields(bucket) {
   return missing;
 }
 
+function hasFullTranslation(bucket) {
+  const b = bucket && typeof bucket === 'object' ? bucket : {};
+  return _isNonEmptyString(b.title) && _isNonEmptyString(b.summary) && _isNonEmptyString(b.content);
+}
+
 function localizeArticleFromTranslations(articleLike, requestedLang) {
   const desired = normalizeLang(requestedLang);
   const baseLang = normalizeLang(articleLike?.originalLang) || detectLangFromContent(articleLike?.content) || normalizeLang(articleLike?.language) || 'en';
   if (!desired) return { out: articleLike, resolvedLang: baseLang, translationPending: false };
 
   const t = articleLike && articleLike.translations && typeof articleLike.translations === 'object' ? articleLike.translations[desired] : null;
-  const hasAll = _isNonEmptyString(t?.title) && _isNonEmptyString(t?.summary) && _isNonEmptyString(t?.content);
-  if (!hasAll) {
+  if (!hasFullTranslation(t)) {
     return { out: articleLike, resolvedLang: baseLang, translationPending: desired !== baseLang };
   }
 
@@ -235,6 +240,17 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
     return localizeArticleFromTranslations(article, desired);
   }
 
+  // If translation is disabled/misconfigured, serve original (or cached full bucket) without attempting.
+  // Still allow returning cached translations if they are complete.
+  if (!isGoogleTranslateConfigured()) {
+    const cached = localizeArticleFromTranslations(article, desired);
+    if (cached && cached.resolvedLang === desired && cached.translationPending === false) return cached;
+
+    const out = { ...article, originalLang: article?.originalLang || source };
+    const dbSet = (!normalizeLang(article?.originalLang) && normalizeLang(source)) ? { originalLang: source } : undefined;
+    return { out, resolvedLang: source, translationPending: false, ...(dbSet ? { dbSet } : {}) };
+  }
+
   // Status-based caching/locking/cooldown.
   // - If pending: do not re-run translation; return original.
   // - If failed and still in cooldown: skip; return original.
@@ -255,6 +271,7 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
   }
 
   // Translate missing fields.
+  // Strict: do not persist partial buckets created by a failing attempt.
   const dbSet = {};
   const provider = 'google';
 
@@ -272,25 +289,31 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
   let firstErrorMessage = null;
   let sawRateLimit = false;
 
+  async function _fail(msg, context) {
+    const m = String(msg || 'translate_failed');
+    if (!firstErrorMessage) firstErrorMessage = m;
+    if (_isRateLimitErrorMessage(m)) sawRateLimit = true;
+    try {
+      log.warn?.('[i18n][article] on-demand translation failed', {
+        id: String(article?._id || ''),
+        slug: String(article?.slug || ''),
+        from: source,
+        to: desired,
+        ...context,
+        error: m,
+      });
+    } catch (_) {}
+  }
+
   try {
     if (missing.includes('title')) {
       const t = await translateTextStrict({ text: article?.title, sourceLang: source, targetLang: desired });
       if (t.ok && _isNonEmptyString(t.text)) {
         bucketOut.title = t.text;
-        dbSet[`translations.${desired}.title`] = t.text;
       } else {
         const msg = t && t.ok === false ? t.error : 'empty_output';
-        if (!firstErrorMessage) firstErrorMessage = msg;
-        if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
-        try {
-          log.warn?.('[i18n][article] title translation failed', {
-            id: String(article?._id || ''),
-            slug: String(article?.slug || ''),
-            from: source,
-            to: desired,
-            error: msg,
-          });
-        } catch (_) {}
+        await _fail(msg, { field: 'title' });
+        throw new Error(msg);
       }
     }
 
@@ -298,20 +321,10 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
       const s = await translateTextStrict({ text: article?.summary, sourceLang: source, targetLang: desired });
       if (s.ok && _isNonEmptyString(s.text)) {
         bucketOut.summary = s.text;
-        dbSet[`translations.${desired}.summary`] = s.text;
       } else {
         const msg = s && s.ok === false ? s.error : 'empty_output';
-        if (!firstErrorMessage) firstErrorMessage = msg;
-        if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
-        try {
-          log.warn?.('[i18n][article] summary translation failed', {
-            id: String(article?._id || ''),
-            slug: String(article?.slug || ''),
-            from: source,
-            to: desired,
-            error: msg,
-          });
-        } catch (_) {}
+        await _fail(msg, { field: 'summary' });
+        throw new Error(msg);
       }
     }
 
@@ -319,49 +332,27 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
       const c = await translateHtmlStrict({ html: article?.content, sourceLang: source, targetLang: desired });
       if (c.ok && _isNonEmptyString(c.html)) {
         bucketOut.content = c.html;
-        dbSet[`translations.${desired}.content`] = c.html;
       } else {
         const msg = c && c.ok === false ? c.error : 'empty_output';
-        if (!firstErrorMessage) firstErrorMessage = msg;
-        if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
-        // Never silently skip body translation: emit a warning when it fails.
-        try {
-          log.warn?.('[i18n][article] content translation failed', {
-            id: String(article?._id || ''),
-            slug: String(article?.slug || ''),
-            from: source,
-            to: desired,
-            error: msg,
-          });
-        } catch (_) {}
+        await _fail(msg, { field: 'content' });
+        throw new Error(msg);
       }
-    }
-
-    // Only set metadata if we translated at least one field.
-    const didTranslate = Object.keys(dbSet).some((k) => k.startsWith(`translations.${desired}.`) && !k.endsWith('.generatedAt') && !k.endsWith('.provider'));
-    if (didTranslate) {
-      dbSet[`translations.${desired}.generatedAt`] = nowDt;
-      dbSet[`translations.${desired}.provider`] = provider;
     }
   } catch (e) {
     const msg = e?.message || String(e);
     if (!firstErrorMessage) firstErrorMessage = msg;
     if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
-    try {
-      log.warn?.('[i18n][article] on-demand translation failed', {
-        id: String(article?._id || ''),
-        slug: String(article?.slug || ''),
-        from: source,
-        to: desired,
-        missing,
-        message: msg,
-      });
-    } catch (_) {}
   }
 
-  const hasAllTranslated = _isNonEmptyString(bucketOut.title) && _isNonEmptyString(bucketOut.summary) && _isNonEmptyString(bucketOut.content);
+  const hasAllTranslated = hasFullTranslation(bucketOut);
 
   if (hasAllTranslated) {
+    // Persist the full bucket atomically.
+    dbSet[`translations.${desired}.title`] = bucketOut.title;
+    dbSet[`translations.${desired}.summary`] = bucketOut.summary;
+    dbSet[`translations.${desired}.content`] = bucketOut.content;
+    dbSet[`translations.${desired}.generatedAt`] = nowDt;
+    dbSet[`translations.${desired}.provider`] = provider;
     dbSet[`translationStatus.${desired}`] = 'ready';
     dbSet[`translationError.${desired}`] = null;
     dbSet[`translationNextRetryAt.${desired}`] = null;
@@ -386,6 +377,7 @@ module.exports = {
   detectLangFromContent,
   chunkHtmlByClosingP,
   translateHtmlStrict,
+  hasFullTranslation,
   localizeArticleFromTranslations,
   ensureOnDemandArticleTranslation,
 };

@@ -1,6 +1,7 @@
 const googleTranslate = require('./googleTranslate.service');
 const { chunkTextByParagraphs } = require('./newsI18n.service');
 const { detectLangFromContent, translateHtmlStrict } = require('./articleTranslation.service');
+const { isGoogleTranslateConfigured } = require('./translationEnabled');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 
@@ -20,7 +21,7 @@ function _safeText(v) {
 }
 
 function _isRateLimitErrorMessage(msg) {
-  return /rate\s*limit\s*exceeded/i.test(String(msg || ''));
+  return /(rate\s*limit\s*exceeded|too\s*many\s*requests|resource\s*exhausted|http[_\s-]*429|\b429\b)/i.test(String(msg || ''));
 }
 
 function _addMinutes(d, minutes) {
@@ -127,6 +128,13 @@ async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger, lockO
   const missing = getMissingFields(existingBucket);
   if (!missing.length) {
     return localizeNewsFromTranslations(doc, desired);
+  }
+
+  // Translation disabled/misconfigured: serve cached full translations if present; otherwise originals.
+  if (!isGoogleTranslateConfigured()) {
+    const cached = localizeNewsFromTranslations(doc, desired);
+    if (cached && cached.resolvedLang === desired && cached.translationPending === false) return cached;
+    return { out: doc, resolvedLang: source, translationPending: false };
   }
 
   // Without lock ownership, never attempt translation (prevents stampede).

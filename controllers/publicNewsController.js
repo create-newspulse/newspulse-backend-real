@@ -4,6 +4,7 @@ const News = require('../models/News');
 const { safeTranslateText, normalizeLang } = require('../services/translate/safeTranslate');
 const { ensureOnDemandNewsTranslation } = require('../services/newsOnDemandTranslation.service');
 const { translateHtmlStrict, detectLangFromContent } = require('../services/articleTranslation.service');
+const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
 const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 
 function isDbReady() {
@@ -589,6 +590,13 @@ async function getPublicNewsBySlugOrId(req, res) {
       const hasAll = Boolean(b && String(b.title || '').trim() && String(b.summary || '').trim() && String(b.content || '').trim());
 
       const now = new Date();
+
+      if (!isGoogleTranslateConfigured() && target !== source && !hasAll) {
+        try { delete out.translations; } catch (_) {}
+        attachLocalizationFields(out, target);
+        return res.status(200).json(out);
+      }
+
       let lockOwner = false;
       if (target !== source && !hasAll && out && out._id) {
         try {
@@ -740,6 +748,13 @@ async function getPublicNewsBySlug(req, res) {
       const hasAll = Boolean(b && String(b.title || '').trim() && String(b.summary || '').trim() && String(b.content || '').trim());
 
       const now = new Date();
+
+      if (!isGoogleTranslateConfigured() && target !== source && !hasAll) {
+        try { delete out.translations; } catch (_) {}
+        attachLocalizationFields(out, target);
+        return res.status(200).json(out);
+      }
+
       let lockOwner = false;
       if (target !== source && !hasAll && out && out._id) {
         try {

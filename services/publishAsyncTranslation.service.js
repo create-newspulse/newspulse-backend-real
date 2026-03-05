@@ -2,6 +2,7 @@ const News = require('../models/News');
 const { slugifyUnicode } = require('../lib/slug');
 const googleTranslate = require('./googleTranslate.service');
 const { syncPublicArticleFromNews } = require('./syncPublicArticleFromNews.service');
+const { isGoogleTranslateConfigured } = require('./translationEnabled');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 
@@ -50,7 +51,7 @@ function _hasFullBucket(bucket) {
 }
 
 function _isRateLimitErrorMessage(msg) {
-  return /rate\s*limit\s*exceeded/i.test(String(msg || ''));
+  return /(rate\s*limit\s*exceeded|too\s*many\s*requests|resource\s*exhausted|http[_\s-]*429|\b429\b)/i.test(String(msg || ''));
 }
 
 function _addMinutes(d, minutes) {
@@ -86,7 +87,7 @@ function buildPendingTranslationState({ baseLang, title, summary, content }) {
   return { baseLang: base, translations, translationStatus, translationError, translationNextRetryAt };
 }
 
-function buildPublishTranslationState({ baseLang, title, summary, content, existing, now }) {
+function buildPublishTranslationState({ baseLang, title, summary, content, existing, now, translationEnabled = true }) {
   const base = normalizeLang(baseLang) || 'en';
   const at = now instanceof Date ? now : new Date();
 
@@ -110,6 +111,25 @@ function buildPublishTranslationState({ baseLang, title, summary, content, exist
       translationStatus[lang] = 'ready';
       translationError[lang] = null;
       translationNextRetryAt[lang] = null;
+      continue;
+    }
+
+    // If translation is disabled/misconfigured, do not enqueue/persist pending.
+    // Preserve any full cached bucket; otherwise leave status null.
+    if (!translationEnabled) {
+      if (_hasFullBucket(existingBucket)) {
+        translations[lang] = existingBucket;
+        translationStatus[lang] = 'ready';
+        translationError[lang] = null;
+        translationNextRetryAt[lang] = null;
+      } else {
+        translations[lang] = (existingBucket && typeof existingBucket === 'object' && !Array.isArray(existingBucket))
+          ? existingBucket
+          : { title: '', summary: '', content: '' };
+        translationStatus[lang] = null;
+        translationError[lang] = null;
+        translationNextRetryAt[lang] = null;
+      }
       continue;
     }
 
@@ -150,6 +170,8 @@ function markPublishTranslationPending(doc) {
   if (!doc) return;
   const baseLang = normalizeLang(doc.lang) || normalizeLang(doc.language) || 'en';
 
+  const translationEnabled = isGoogleTranslateConfigured();
+
   _ensureTranslationBuckets(doc);
   _ensureStatusBuckets(doc);
 
@@ -165,6 +187,7 @@ function markPublishTranslationPending(doc) {
       translationNextRetryAt: doc.translationNextRetryAt,
     },
     now: new Date(),
+    translationEnabled,
   });
 
   doc.translations = pending.translations;
@@ -303,6 +326,10 @@ function ensureNewsSlugsFromTranslations(doc) {
 
 async function translateAndSave(newsId, options = {}) {
   const logger = options.logger || console;
+
+  if (!isGoogleTranslateConfigured()) {
+    return { ok: true, skipped: true };
+  }
   const id = String(newsId || '').trim();
   if (!id) return { ok: false, error: 'Missing newsId' };
 
@@ -519,6 +546,8 @@ function enqueueTranslateAndSave(newsId, options = {}) {
   const logger = options.logger || console;
   const id = String(newsId || '').trim();
   if (!id) return;
+
+  if (!isGoogleTranslateConfigured()) return;
 
   setImmediate(() => {
     translateAndSave(id, { logger }).catch((e) => {

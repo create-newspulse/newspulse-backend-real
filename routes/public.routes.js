@@ -5,7 +5,8 @@ const mongoose = require('mongoose');
 // If your frontend uses a different shape/model, tell me and I’ll swap it.
 const Article = require('../models/Article');
 const { getSlugCandidates } = require('../lib/slug');
-const { ensureOnDemandArticleTranslation, normalizeLang, detectLangFromContent } = require('../services/articleTranslation.service');
+const { ensureOnDemandArticleTranslation, normalizeLang, detectLangFromContent, hasFullTranslation } = require('../services/articleTranslation.service');
+const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
 
 const router = express.Router();
 
@@ -83,8 +84,56 @@ router.get('/stories/:slug', async (req, res) => {
 
     const source = normalizeLang(story?.originalLang) || detectLangFromContent(story?.content) || normalizeLang(story?.language) || 'en';
     const existingBucket = story?.translations?.[desired];
-    const hasAll = Boolean(existingBucket && String(existingBucket.title || '').trim() && String(existingBucket.summary || '').trim() && String(existingBucket.content || '').trim());
+    const hasAll = hasFullTranslation(existingBucket);
     const now = new Date();
+
+    // No translation needed (always serve original fields).
+    if (desired === source) {
+      const localized = await ensureOnDemandArticleTranslation({
+        article: story,
+        requestedLang: langQueryRaw,
+        logger: console,
+        lockOwner: false,
+        now,
+      });
+
+      if (localized && localized.dbSet && story && story._id) {
+        try {
+          await Article.updateOne({ _id: story._id }, { $set: localized.dbSet }).catch(() => null);
+        } catch (_) {}
+      }
+
+      return res.json({
+        success: true,
+        data: localized && localized.out ? localized.out : story,
+        resolvedLang: source,
+        translationPending: false,
+      });
+    }
+
+    // If translation is disabled or misconfigured, only serve cached full translations; never attempt a lock/translate.
+    if (!isGoogleTranslateConfigured() && !hasAll) {
+      const localized = await ensureOnDemandArticleTranslation({
+        article: story,
+        requestedLang: langQueryRaw,
+        logger: console,
+        lockOwner: false,
+        now,
+      });
+
+      if (localized && localized.dbSet && story && story._id) {
+        try {
+          await Article.updateOne({ _id: story._id }, { $set: localized.dbSet }).catch(() => null);
+        } catch (_) {}
+      }
+
+      return res.json({
+        success: true,
+        data: localized && localized.out ? localized.out : story,
+        resolvedLang: localized && localized.resolvedLang ? localized.resolvedLang : source,
+        translationPending: false,
+      });
+    }
 
     // If translation is needed and missing, acquire an atomic pending lock to avoid stampede.
     let lockOwner = false;
