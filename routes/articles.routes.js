@@ -895,8 +895,15 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
         __isTranslated: Boolean(mapped.isTranslated),
       };
 
+      const canonicalSlug = (() => {
+        const slugs = doc && doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
+        const v = slugs && slugs[desired] ? String(slugs[desired]).trim() : '';
+        return v || '';
+      })();
       const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
-      const key = groupKey ? `group:${groupKey}` : (out.slug ? `slug:${out.slug}` : `id:${out._id}`);
+      const key = groupKey
+        ? `group:${groupKey}`
+        : (canonicalSlug ? `cslug:${canonicalSlug}` : (out.slug ? `slug:${out.slug}` : `id:${out._id}`));
       const prev = bestByKey.get(key);
       if (!prev) {
         bestByKey.set(key, out);
@@ -1028,8 +1035,15 @@ router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
         out.translationGeneratedAt = mapped.generatedAt || null;
         out.__isTranslated = Boolean(mapped.isTranslated);
 
+        const canonicalSlug = (() => {
+          const slugs = doc && doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
+          const v = slugs && slugs[desired] ? String(slugs[desired]).trim() : '';
+          return v || '';
+        })();
         const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
-        const key = groupKey ? `group:${groupKey}` : (out.slug ? `slug:${out.slug}` : `id:${String(out._id || '')}`);
+        const key = groupKey
+          ? `group:${groupKey}`
+          : (canonicalSlug ? `cslug:${canonicalSlug}` : (out.slug ? `slug:${out.slug}` : `id:${String(out._id || '')}`));
         const prev = bestByKey.get(key);
         if (!prev) {
           bestByKey.set(key, out);

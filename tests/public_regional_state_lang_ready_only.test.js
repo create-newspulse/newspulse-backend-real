@@ -228,6 +228,68 @@ test('GET /api/public/regional dedupes items by translationGroupId (prefers orig
   }
 });
 
+test('GET /api/public/regional dedupes items by slugs.en when translationGroupId is missing', async () => {
+  const prevFind = Article.find;
+  const prevCount = Article.countDocuments;
+
+  const capture = { query: null, selectArg: null, sortArg: null, skip: null, limit: null };
+
+  try {
+    const dataset = [
+      {
+        _id: '507f1f77bcf86cd799439031',
+        slug: 'gujarati-slug-1',
+        slugs: { en: 'final-result-of-unarmed-psi', gu: 'gujarati-slug-1' },
+        category: 'regional',
+        originalLang: 'gu',
+        language: 'gu',
+        title: 'મૂળ',
+        summary: 'મૂળ',
+        content: 'મૂળ',
+        geo: { state: 'gujarat', district: 'gandhinagar', city: null },
+        tags: ['state:gujarat', 'district:gandhinagar'],
+        translationStatus: { en: 'ready' },
+        translations: {
+          en: { title: 'Translated A', summary: 'Translated A', content: 'Translated A', provider: 'google' },
+        },
+      },
+      {
+        _id: '507f1f77bcf86cd799439032',
+        slug: 'english-slug-1',
+        slugs: { en: 'final-result-of-unarmed-psi', gu: 'gujarati-slug-1' },
+        category: 'regional',
+        originalLang: 'en',
+        language: 'en',
+        title: 'Original English',
+        summary: 'Original English',
+        content: 'Original English',
+        geo: { state: 'gujarat', district: 'gandhinagar', city: null },
+        tags: ['state:gujarat', 'district:gandhinagar'],
+        translationStatus: { en: 'ready' },
+        translations: {},
+      },
+    ];
+
+    Article.find = (q) => {
+      capture.query = q;
+      return makeChainableQuery(dataset, capture);
+    };
+    Article.countDocuments = async () => dataset.length;
+
+    const res = await request(app).get('/api/public/regional?state=gujarat&district=gandhinagar&lang=en&page=1&limit=20');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.data.lang, 'en');
+    assert.equal(res.body.data.items.length, 1);
+    // Prefer original-in-lang
+    assert.equal(res.body.data.items[0].slug, 'english-slug-1');
+    assert.equal(res.body.data.items[0].title, 'Original English');
+  } finally {
+    Article.find = prevFind;
+    Article.countDocuments = prevCount;
+  }
+});
+
 test('GET /api/public/regional/:state rejects invalid state (400)', async () => {
   const res = await request(app).get('/api/public/regional/not-a-real-state?lang=gu');
   assert.equal(res.status, 400);
