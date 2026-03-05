@@ -484,7 +484,9 @@ function _applyCachedTranslationInPlace(doc, desired) {
   doc.requestedLang = desired;
   doc.resolvedLang = desired;
   doc.isTranslated = true;
-  doc.translationProvider = t.provider || null;
+  doc.translationProvider = (t.provider === null || t.provider === undefined || String(t.provider).trim() === '')
+    ? 'google'
+    : String(t.provider).trim().toLowerCase();
   doc.translationGeneratedAt = t.generatedAt || null;
   doc.lang = desired;
   doc.language = desired;

@@ -348,11 +348,15 @@ async function ensureOnDemandArticleTranslation({ article, requestedLang, logger
 
   if (hasAllTranslated) {
     // Persist the full bucket atomically.
+    const providerFixed = (provider === null || provider === undefined || String(provider).trim() === '')
+      ? 'google'
+      : String(provider).trim().toLowerCase();
+
     dbSet[`translations.${desired}.title`] = bucketOut.title;
     dbSet[`translations.${desired}.summary`] = bucketOut.summary;
     dbSet[`translations.${desired}.content`] = bucketOut.content;
     dbSet[`translations.${desired}.generatedAt`] = nowDt;
-    dbSet[`translations.${desired}.provider`] = provider;
+    dbSet[`translations.${desired}.provider`] = providerFixed;
     dbSet[`translationStatus.${desired}`] = 'ready';
     dbSet[`translationError.${desired}`] = null;
     dbSet[`translationNextRetryAt.${desired}`] = null;

@@ -15,6 +15,8 @@ const {
   localizeFromArticleI18n,
 } = require('../services/newsI18n.service');
 
+const { mapArticleForLang } = require('../services/mapArticleForLang');
+
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
 const {
   buildPendingTranslationState,
@@ -798,30 +800,6 @@ function _buildGeoOrTagClause(field, tagPrefix, valueSlug) {
   };
 }
 
-function _buildGeoOrTagClauseDistrictOrCity(valueSlug) {
-  const v = String(valueSlug || '').trim();
-  if (!v) return null;
-
-  const valueRx = _buildFlexibleSlugValueRegex(v);
-  const valuePattern = _buildFlexibleSlugValuePattern(v) || _escapeRegex(v);
-  const districtTagRx = new RegExp(`^\\s*district\\s*:\\s*${valuePattern}\\s*$`, 'i');
-  const cityTagRx = new RegExp(`^\\s*city\\s*:\\s*${valuePattern}\\s*$`, 'i');
-
-  const or = [
-    { 'geo.district': v },
-    { 'geo.city': v },
-    { tags: districtTagRx },
-    { tags: cityTagRx },
-  ];
-
-  if (valueRx) {
-    or.push({ 'geo.district': valueRx });
-    or.push({ 'geo.city': valueRx });
-  }
-
-  return { $or: or };
-}
-
 async function _handlePublicRegionalQuery(req, res, next, options = {}) {
   try {
     const stateInput = options.stateRawOverride !== undefined
@@ -856,7 +834,7 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
     const stateClause = _buildGeoOrTagClause('state', 'state', stateSlug);
     if (stateClause) andClauses.push(stateClause);
     if (districtSlug) {
-      const districtClause = _buildGeoOrTagClauseDistrictOrCity(districtSlug);
+      const districtClause = _buildGeoOrTagClause('district', 'district', districtSlug);
       if (districtClause) andClauses.push(districtClause);
     }
     if (citySlug) {
@@ -892,50 +870,32 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
       PublicArticle.countDocuments(filter),
     ]);
 
-    const items = (itemsRaw || []).map((doc) => {
-      const baseLang = _normalizeOriginalLang(doc?.originalLang) || _normalizeOriginalLang(doc?.language) || 'gu';
-      const imageUrl = _resolveImageUrlFromNewsDoc(doc);
-
-      if (baseLang === desired) {
-        return {
+    const seen = new Set();
+    const items = (itemsRaw || [])
+      .map((doc) => {
+        const imageUrl = _resolveImageUrlFromNewsDoc(doc);
+        const mapped = mapArticleForLang(doc, desired);
+        if (!mapped) return null;
+        const out = {
           _id: String(doc._id),
           slug: doc.slug || null,
           slugs: doc.slugs || null,
           category: doc.category || null,
           stateSlug,
           imageUrl,
-          title: doc.title || '',
-          summary: doc.summary || '',
-          content: doc.content || '',
-          generatedAt: null,
-          provider: null,
+          title: mapped.title,
+          summary: mapped.summary,
+          content: mapped.content,
+          generatedAt: mapped.generatedAt || null,
+          provider: mapped.provider || 'google',
         };
-      }
 
-      const status = doc?.translationStatus?.[desired] || null;
-      const t = doc?.translations?.[desired];
-      const title = t && typeof t.title === 'string' ? t.title : '';
-      const summary = t && typeof t.summary === 'string' ? t.summary : '';
-      const content = t && typeof t.content === 'string' ? t.content : '';
-
-      if (status !== 'ready' || !title.trim() || !summary.trim() || !content.trim()) {
-        return null;
-      }
-
-      return {
-        _id: String(doc._id),
-        slug: doc.slug || null,
-        slugs: doc.slugs || null,
-        category: doc.category || null,
-        stateSlug,
-        imageUrl,
-        title,
-        summary,
-        content,
-        generatedAt: t && t.generatedAt ? t.generatedAt : null,
-        provider: t && t.provider ? t.provider : null,
-      };
-    }).filter(Boolean);
+        const key = out.slug ? `slug:${out.slug}` : `id:${out._id}`;
+        if (seen.has(key)) return null;
+        seen.add(key);
+        return out;
+      })
+      .filter(Boolean);
 
     return res.status(200).json({ ok: true, success: true, status: 200, data: { items, page, limit, total, stateSlug, lang: desired } });
   } catch (err) {
@@ -1012,22 +972,57 @@ router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
       return res.status(400).json({ ok: false, success: false, status: 400, message: 'Invalid stateSlug' });
     }
 
+    const requestedLang = normalizeLanguage(req.query.lang || req.query.language);
+    const desired = requestedLang || null;
+
     const page = Math.max(_parseIntOrDefault(req.query.page, 1), 1);
     const limit = _clampInt(_parseIntOrDefault(req.query.limit, 20), 1, 100);
     const skip = (page - 1) * limit;
 
     const query = { status: 'published', category: 'national', stateTags: stateSlug };
+    if (desired === 'gu') {
+      const originalMatch = _buildOriginalLangMatch('gu');
+      if (originalMatch) query.$and = (query.$and || []).concat([originalMatch]);
+    } else if (desired === 'hi' || desired === 'en') {
+      const originalMatch = _buildOriginalLangMatch(desired);
+      const readyMatch = _buildReadyTranslationMatch(desired);
+      query.$and = (query.$and || []).concat([{ $or: [originalMatch, readyMatch].filter(Boolean) }]);
+    }
     const [itemsRaw, total] = await Promise.all([
       News.find(query).sort({ publishedAt: -1, createdAt: -1 }).skip(skip).limit(limit).lean(),
       News.countDocuments(query),
     ]);
 
-    const items = (itemsRaw || []).map(withCoverImageUrl);
+    let items = (itemsRaw || []).map(withCoverImageUrl);
+    if (desired) {
+      const seen = new Set();
+      items = items
+        .map((doc) => {
+          const mapped = mapArticleForLang(doc, desired);
+          if (!mapped) return null;
+
+          // Preserve the existing payload shape but localize fields.
+          const out = { ...doc };
+          out.title = mapped.title;
+          out.description = mapped.summary;
+          out.content = mapped.content;
+          out.lang = desired;
+          out.language = desired;
+          out.translationProvider = mapped.provider || 'google';
+          out.translationGeneratedAt = mapped.generatedAt || null;
+
+          const key = out.slug ? `slug:${out.slug}` : `id:${String(out._id || '')}`;
+          if (seen.has(key)) return null;
+          seen.add(key);
+          return out;
+        })
+        .filter(Boolean);
+    }
     return res.status(200).json({
       ok: true,
       success: true,
       status: 200,
-      data: { items, page, limit, total, stateSlug },
+      data: { items, page, limit, total, stateSlug, ...(desired ? { lang: desired } : {}) },
     });
   } catch (err) {
     return next(err);
