@@ -832,7 +832,19 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
       console.warn('[startup] Ad index sync failed', e?.message || e);
     }
 
-    // Translation queue/worker removed.
+    // Publish-time translation queue worker (Mongo-backed).
+    try {
+      const TranslationJob = require('./models/TranslationJob');
+      await TranslationJob.syncIndexes();
+    } catch (e) {
+      console.warn('[startup] TranslationJob index sync failed', e?.message || e);
+    }
+    try {
+      const { startPublishTranslationWorker } = require('./services/publishAsyncTranslation.service');
+      startPublishTranslationWorker({ logger: console });
+    } catch (e) {
+      console.warn('[startup] Translation worker failed to start', e?.message || e);
+    }
   }
 
   async function _connectMongoOnce() {

@@ -39,6 +39,15 @@ const WORKFLOW_CHAIN_STAGES = [
   'PUBLISHED',
 ];
 
+const TRANSLATION_PROVIDER_VALUES = ['google', 'openai', 'manual'];
+
+function normalizeTranslationProvider(v) {
+  if (v === null || v === undefined) return undefined;
+  const s = String(v).trim().toLowerCase();
+  if (!s) return undefined;
+  return s;
+}
+
 const newsSchema = new mongoose.Schema({
   title: { type: String, required: true },
   description: { type: String, required: true },
@@ -91,18 +100,39 @@ const newsSchema = new mongoose.Schema({
       title: { type: String, default: '' },
       summary: { type: String, default: '' },
       content: { type: String, default: '' },
+      provider: {
+        type: String,
+        enum: TRANSLATION_PROVIDER_VALUES,
+        default: 'google',
+        required: false,
+        set: normalizeTranslationProvider,
+      },
       generatedAt: { type: Date, default: null },
     },
     hi: {
       title: { type: String, default: '' },
       summary: { type: String, default: '' },
       content: { type: String, default: '' },
+      provider: {
+        type: String,
+        enum: TRANSLATION_PROVIDER_VALUES,
+        default: 'google',
+        required: false,
+        set: normalizeTranslationProvider,
+      },
       generatedAt: { type: Date, default: null },
     },
     gu: {
       title: { type: String, default: '' },
       summary: { type: String, default: '' },
       content: { type: String, default: '' },
+      provider: {
+        type: String,
+        enum: TRANSLATION_PROVIDER_VALUES,
+        default: 'google',
+        required: false,
+        set: normalizeTranslationProvider,
+      },
       generatedAt: { type: Date, default: null },
     },
   },
@@ -340,6 +370,25 @@ newsSchema.pre('validate', function preValidate(next) {
     } else if (!this.location.citySlug || this.isModified('location.city')) {
       this.location.citySlug = slugifyUnicode(String(city), { maxLength: 80 }) || null;
     }
+
+    // Legacy repair: provider=null is not valid for enum provider.
+    // Ensure any full translation bucket has provider + generatedAt.
+    try {
+      const translations = this.translations && typeof this.translations === 'object' ? this.translations : null;
+      if (translations) {
+        const hasFull = (b) => {
+          const bucket = b && typeof b === 'object' ? b : {};
+          return Boolean(String(bucket.title || '').trim() && String(bucket.summary || '').trim() && String(bucket.content || '').trim());
+        };
+
+        for (const lang of ['en', 'hi', 'gu']) {
+          const b = translations[lang];
+          if (!b || typeof b !== 'object') continue;
+          if (b.provider === null) b.provider = 'google';
+          if (hasFull(b) && !b.generatedAt) b.generatedAt = new Date();
+        }
+      }
+    } catch (_) {}
 
     return next();
   } catch (e) {

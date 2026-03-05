@@ -10,6 +10,54 @@ function _safeStr(v) {
   return s.trim() ? s : '';
 }
 
+function _normalizeProvider(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim().toLowerCase();
+  if (!s) return null;
+  if (s === 'google' || s === 'openai' || s === 'manual') return s;
+  return null;
+}
+
+function _isNonEmptyString(v) {
+  return typeof v === 'string' && v.trim().length > 0;
+}
+
+function _hasFullTranslationBucket(b) {
+  const bucket = b && typeof b === 'object' && !Array.isArray(b) ? b : {};
+  return _isNonEmptyString(bucket.title) && _isNonEmptyString(bucket.summary) && _isNonEmptyString(bucket.content);
+}
+
+function _buildTranslationBucket(src, options = {}) {
+  const now = options.now instanceof Date ? options.now : new Date();
+  const s = src && typeof src === 'object' && !Array.isArray(src) ? src : {};
+
+  const out = {
+    title: _safeStr(s.title) || null,
+    summary: _safeStr(s.summary) || null,
+    content: _safeStr(s.content) || null,
+  };
+
+  const full = _hasFullTranslationBucket(out);
+
+  const rawGeneratedAt = s.generatedAt;
+  const generatedAt = rawGeneratedAt ? new Date(rawGeneratedAt) : null;
+  if (generatedAt && !Number.isNaN(generatedAt.getTime())) {
+    out.generatedAt = generatedAt;
+  } else if (full) {
+    out.generatedAt = now;
+  }
+
+  const provider = _normalizeProvider(s.provider);
+  if (provider) {
+    out.provider = provider;
+  } else if (full) {
+    // Ensure provider is always valid for a full bucket.
+    out.provider = 'google';
+  }
+
+  return out;
+}
+
 async function syncPublicArticleFromNews(newsDoc, options = {}) {
   const logger = options.logger || console;
   if (!newsDoc) return null;
@@ -39,31 +87,13 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     summary: newsDoc.description || null,
     content: newsDoc.content || null,
 
-    originalLang: newsDoc.language || 'en',
+    originalLang: newsDoc.originalLang || newsDoc.language || newsDoc.lang || 'en',
 
     // Canonical cached translations (en/hi/gu)
     translations: {
-      en: {
-        title: _safeStr(newsDoc?.translations?.en?.title) || null,
-        summary: _safeStr(newsDoc?.translations?.en?.summary) || null,
-        content: _safeStr(newsDoc?.translations?.en?.content) || null,
-        generatedAt: null,
-        provider: null,
-      },
-      hi: {
-        title: _safeStr(newsDoc?.translations?.hi?.title) || null,
-        summary: _safeStr(newsDoc?.translations?.hi?.summary) || null,
-        content: _safeStr(newsDoc?.translations?.hi?.content) || null,
-        generatedAt: null,
-        provider: null,
-      },
-      gu: {
-        title: _safeStr(newsDoc?.translations?.gu?.title) || null,
-        summary: _safeStr(newsDoc?.translations?.gu?.summary) || null,
-        content: _safeStr(newsDoc?.translations?.gu?.content) || null,
-        generatedAt: null,
-        provider: null,
-      },
+      en: _buildTranslationBucket(newsDoc?.translations?.en, { now: new Date() }),
+      hi: _buildTranslationBucket(newsDoc?.translations?.hi, { now: new Date() }),
+      gu: _buildTranslationBucket(newsDoc?.translations?.gu, { now: new Date() }),
     },
 
     // Store full i18n buckets for instant language switching on public story endpoints.
@@ -103,14 +133,20 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
   };
 
   try {
-    return await PublicArticle.findOneAndUpdate(
+    const saved = await PublicArticle.findOneAndUpdate(
       { slug },
       { $set: update },
       { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
     ).lean();
+
+    return saved;
   } catch (e) {
     try {
-      logger.warn?.('[articles.syncPublicArticleFromNews] failed', { slug, message: e?.message || String(e) });
+      logger.warn?.('[articles.syncPublicArticleFromNews] failed', {
+        slug,
+        message: e?.message || String(e),
+        errorName: e?.name,
+      });
     } catch (_) {}
     return null;
   }

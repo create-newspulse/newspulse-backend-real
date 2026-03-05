@@ -21,7 +21,14 @@ const CATEGORY_VALUES = [
 const LANGUAGE_VALUES = ['en', 'hi', 'gu'];
 const STATUS_VALUES = ['draft', 'published'];
 
-const TRANSLATION_PROVIDER_VALUES = ['google'];
+const TRANSLATION_PROVIDER_VALUES = ['google', 'openai', 'manual'];
+
+function normalizeTranslationProvider(v) {
+  if (v === null || v === undefined) return undefined;
+  const s = String(v).trim().toLowerCase();
+  if (!s) return undefined;
+  return s;
+}
 
 const translationBucketSchema = new mongoose.Schema(
   {
@@ -29,7 +36,13 @@ const translationBucketSchema = new mongoose.Schema(
     summary: { type: String, default: null },
     content: { type: String, default: null },
     generatedAt: { type: Date, default: null },
-    provider: { type: String, enum: TRANSLATION_PROVIDER_VALUES, default: null },
+    provider: {
+      type: String,
+      enum: TRANSLATION_PROVIDER_VALUES,
+      default: 'google',
+      required: false,
+      set: normalizeTranslationProvider,
+    },
   },
   { _id: false }
 );
@@ -186,6 +199,25 @@ articleSchema.pre('validate', function preValidate(next) {
     if ((!this.originalLang || !String(this.originalLang).trim()) && LANGUAGE_VALUES.includes(docLang)) {
       this.originalLang = docLang;
     }
+
+    // Legacy repair: provider=null is not valid for enum provider.
+    // Ensure any full translation bucket has provider + generatedAt.
+    try {
+      const translations = this.translations && typeof this.translations === 'object' ? this.translations : null;
+      if (translations) {
+        const hasFull = (b) => {
+          const bucket = b && typeof b === 'object' ? b : {};
+          return Boolean(String(bucket.title || '').trim() && String(bucket.summary || '').trim() && String(bucket.content || '').trim());
+        };
+
+        for (const lang of ['en', 'hi', 'gu']) {
+          const b = translations[lang];
+          if (!b || typeof b !== 'object') continue;
+          if (b.provider === null) b.provider = 'google';
+          if (hasFull(b) && !b.generatedAt) b.generatedAt = new Date();
+        }
+      }
+    } catch (_) {}
 
     return next();
   } catch (e) {

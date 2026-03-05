@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const News = require('../models/News');
 const { safeTranslateText, normalizeLang } = require('../services/translate/safeTranslate');
-const { ensureOnDemandNewsTranslation } = require('../services/newsOnDemandTranslation.service');
+const { ensureOnDemandNewsTranslation, hasFullTranslation } = require('../services/newsOnDemandTranslation.service');
 const { translateHtmlStrict, detectLangFromContent } = require('../services/articleTranslation.service');
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
 const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
@@ -233,7 +233,9 @@ async function translatePublicNews(req, res) {
     });
 
     doc.translations = doc.translations || {};
-    doc.translations[target] = doc.translations[target] || { title: '', summary: '', content: '' };
+    doc.translations[target] = doc.translations[target] || { title: '', summary: '', content: '', generatedAt: null };
+    const prevProvider = doc.translations[target] && doc.translations[target].provider ? doc.translations[target].provider : undefined;
+    const prevGeneratedAt = doc.translations[target] && doc.translations[target].generatedAt ? doc.translations[target].generatedAt : undefined;
 
     const newBucket = {
       title: String(localized?.out?.title || '').trim(),
@@ -244,7 +246,11 @@ async function translatePublicNews(req, res) {
     // If translation failed (strict fallback), keep previous values (or original) but log.
     const resolvedToTarget = Boolean(localized && localized.resolvedLang === target && localized.translationPending === false);
     if (resolvedToTarget && newBucket.title && newBucket.summary && newBucket.content) {
-      doc.translations[target] = newBucket;
+      doc.translations[target] = {
+        ...newBucket,
+        provider: 'google',
+        generatedAt: new Date(),
+      };
     } else {
       try {
         console.warn('[i18n][news] translate endpoint did not produce full translation', {
@@ -260,6 +266,10 @@ async function translatePublicNews(req, res) {
         summary: (doc.translations[target] && doc.translations[target].summary) ? doc.translations[target].summary : summary,
         content: (doc.translations[target] && doc.translations[target].content) ? doc.translations[target].content : content,
       };
+
+      // Never persist provider: null (schema enum rejects it). Preserve existing values only when set.
+      if (prevProvider) doc.translations[target].provider = prevProvider;
+      if (prevGeneratedAt) doc.translations[target].generatedAt = prevGeneratedAt;
     }
 
     // Keep per-language slugs in sync with stored translations.
@@ -269,7 +279,22 @@ async function translatePublicNews(req, res) {
       doc.slugs[target] = slugifyUnicode(titleForSlug);
     }
 
-    await doc.save();
+    try {
+      await doc.save();
+      try {
+        console.info('[i18n][news] saved translation via public translate endpoint', { id, slug: String(doc.slug || ''), target });
+      } catch (_) {}
+    } catch (e) {
+      try {
+        console.warn('[i18n][news] failed saving translation via public translate endpoint', {
+          id,
+          slug: String(doc.slug || ''),
+          target,
+          message: e?.message || String(e),
+        });
+      } catch (_) {}
+      throw e;
+    }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
     return res.status(200).json({ success: true, data: { ...obj, activeLang: target } });
@@ -363,7 +388,10 @@ const PUBLIC_SELECT = [
 ].join(' ');
 
 // Detail endpoints need `translations` for caching + instant language switching.
-const PUBLIC_DETAIL_SELECT = `${PUBLIC_SELECT} translations`;
+const PUBLIC_DETAIL_SELECT = `${PUBLIC_SELECT} originalLang translations translationStatus translationError translationNextRetryAt`;
+
+// Feed needs translationStatus to filter and translations to localize.
+const PUBLIC_FEED_SELECT = `${PUBLIC_SELECT} originalLang translations translationStatus`;
 
 function withCoverImageUrl(obj) {
   const out = { ...(obj || {}) };
@@ -391,6 +419,47 @@ function attachLocalizationFields(doc, requestedLang) {
   return doc;
 }
 
+function buildPendingTranslationResponse(doc, requestedLang) {
+  const desired = normalizeLang(requestedLang);
+  const source =
+    normalizeLang(doc?.originalLang) ||
+    detectLangFromContent(doc?.content) ||
+    normalizeLang(doc?.lang || doc?.language) ||
+    'en';
+
+  return {
+    status: 'pending',
+    requestedLang: desired || null,
+    resolvedLang: source,
+    canonicalSlug: pickCanonicalSlug(doc, desired || source),
+    slug: doc?.slug || null,
+    _id: doc?._id || null,
+    translationKey: doc?.translationKey || doc?.translationGroupId || null,
+  };
+}
+
+function _resolveBaseLang(doc) {
+  return normalizeLang(doc?.originalLang) || normalizeLang(doc?.lang || doc?.language) || detectLangFromContent(doc?.content) || 'en';
+}
+
+function _applyCachedTranslationInPlace(doc, desired) {
+  const t = doc?.translations?.[desired];
+  if (!hasFullTranslation(t)) return false;
+  const status = doc?.translationStatus?.[desired] || null;
+  if (status !== 'ready') return false;
+
+  doc.title = t.title;
+  doc.description = t.summary;
+  doc.summary = t.summary;
+  doc.content = t.content;
+  doc.requestedLang = desired;
+  doc.resolvedLang = desired;
+  doc.isTranslated = true;
+  doc.translationProvider = t.provider || null;
+  doc.translationGeneratedAt = t.generatedAt || null;
+  return true;
+}
+
 // GET /api/public/news?category=&type=video&founderOnly=true&limit=30&page=1
 async function listPublicNews(req, res) {
   try {
@@ -407,6 +476,7 @@ async function listPublicNews(req, res) {
 
     // Default language for public story feed is Gujarati (backward compatible).
     const requestedLang = getRequestedLang(req) || 'gu';
+    const desired = normalizeLang(requestedLang) || 'gu';
 
     let q = String(req.query.q || '').trim();
     // Keep keyword search safe and bounded
@@ -416,49 +486,65 @@ async function listPublicNews(req, res) {
       return res.status(200).json({ items: [], page, limit, total: 0, totalPages: 1 });
     }
 
-    const buildFilterForLang = (lang) => {
-      const f = buildPublicPublishedFilter({
-        category: category || undefined,
-        q: q || undefined,
-        founderOnly,
-        type,
-      });
-      if (topic) f.$and.push({ topic: new RegExp(`^${escapeRegExp(topic)}$`, 'i') });
-      if (state) f.$and.push({ 'location.state': new RegExp(`^${escapeRegExp(state)}$`, 'i') });
-      applyLangFilter(f, lang);
-      return f;
-    };
+    const filter = buildPublicPublishedFilter({
+      category: category || undefined,
+      q: q || undefined,
+      founderOnly,
+      type,
+    });
+    if (topic) filter.$and.push({ topic: new RegExp(`^${escapeRegExp(topic)}$`, 'i') });
+    if (state) filter.$and.push({ 'location.state': new RegExp(`^${escapeRegExp(state)}$`, 'i') });
 
-    const filter = buildFilterForLang(requestedLang);
+    // Strict language rule for feeds:
+    // - If desired == baseLang => serve originals.
+    // - Else only include docs where translationStatus[desired] == 'ready' (and we will map from translations[desired]).
+    const lower = desired;
+    const upper = lower.toUpperCase();
+    filter.$and.push({
+      $or: [
+        { originalLang: lower },
+        { lang: { $in: [lower, upper] } },
+        { language: { $in: [lower, upper] } },
+        { [`translationStatus.${lower}`]: 'ready' },
+      ],
+    });
 
     const skip = (page - 1) * limit;
     const sort = { publishedAt: -1, createdAt: -1 };
 
-    let [itemsRaw, total] = await Promise.all([
-      News.find(filter).select(PUBLIC_SELECT).sort(sort).skip(skip).limit(limit).lean(),
+    const [itemsRaw, total] = await Promise.all([
+      News.find(filter).select(PUBLIC_FEED_SELECT).sort(sort).skip(skip).limit(limit).lean(),
       News.countDocuments(filter),
     ]);
 
-    // If the requested language has no docs, fall back to Gujarati and translate server-side.
-    const shouldFallbackTranslate = total === 0 && requestedLang !== 'gu';
-    if (shouldFallbackTranslate) {
-      const fallbackFilter = buildFilterForLang('gu');
-      [itemsRaw, total] = await Promise.all([
-        News.find(fallbackFilter).select(PUBLIC_SELECT).sort(sort).skip(skip).limit(limit).lean(),
-        News.countDocuments(fallbackFilter),
-      ]);
-    }
-
     let items = (itemsRaw || []).map(withCoverImageUrl);
 
-    if (shouldFallbackTranslate && items.length) {
-      items = await Promise.all(
-        items.map(async (it) => {
-          const out = { ...it };
-          await translateNewsDocFields(out, requestedLang, { contextPrefix: 'news:list', strict: false });
+    // Localize strictly from cached buckets.
+    items = items
+      .map((it) => {
+        const out = { ...it };
+        const base = _resolveBaseLang(out);
+
+        if (desired === base) {
+          out.summary = out.description || '';
+          out.requestedLang = desired;
+          out.resolvedLang = base;
+          out.isTranslated = false;
           return out;
-        })
-      );
+        }
+
+        const ok = _applyCachedTranslationInPlace(out, desired);
+        if (!ok) return null;
+        return out;
+      })
+      .filter(Boolean);
+
+    // Keep response payload stable (don’t emit translation cache).
+    for (const it of items) {
+      try { delete it.translations; } catch (_) {}
+      try { delete it.translationStatus; } catch (_) {}
+      try { delete it.translationError; } catch (_) {}
+      try { delete it.translationNextRetryAt; } catch (_) {}
     }
     const totalPages = Math.max(Math.ceil(total / limit), 1);
 
@@ -583,90 +669,51 @@ async function getPublicNewsBySlugOrId(req, res) {
 
     let out = withCoverImageUrl(doc);
 
-    // Language switching: prefer cached translations; if missing, generate + persist.
     const target = normalizeLang(requestedLang);
-    if (target) {
-      const source = normalizeLang(out?.originalLang) || detectLangFromContent(out?.content) || normalizeLang(out?.lang || out?.language) || 'en';
-      const b = out?.translations?.[target];
-      const hasAll = Boolean(b && String(b.title || '').trim() && String(b.summary || '').trim() && String(b.content || '').trim());
-
-      const now = new Date();
-
-      if (!isGoogleTranslateConfigured() && target !== source && !hasAll) {
-        try { delete out.translations; } catch (_) {}
-        attachLocalizationFields(out, target);
-        return res.status(200).json(out);
-      }
-
-      let lockOwner = false;
-      if (target !== source && !hasAll && out && out._id) {
-        try {
-          const lockRes = await News.updateOne(
-            {
-              _id: out._id,
-              $and: [
-                { [`translationStatus.${target}`]: { $ne: 'pending' } },
-                {
-                  $or: [
-                    { [`translationStatus.${target}`]: { $ne: 'failed' } },
-                    { [`translationNextRetryAt.${target}`]: { $exists: false } },
-                    { [`translationNextRetryAt.${target}`]: null },
-                    { [`translationNextRetryAt.${target}`]: { $lte: now } },
-                  ],
-                },
-              ],
-            },
-            {
-              $set: {
-                [`translationStatus.${target}`]: 'pending',
-                [`translationError.${target}`]: null,
-                [`translationNextRetryAt.${target}`]: null,
-              },
-            }
-          );
-
-          const modified = typeof lockRes?.modifiedCount === 'number'
-            ? lockRes.modifiedCount
-            : (typeof lockRes?.nModified === 'number' ? lockRes.nModified : 0);
-          lockOwner = modified === 1;
-        } catch (_) {
-          lockOwner = false;
-        }
-
-        if (!lockOwner) {
-          // Another request/worker is translating (or we're in cooldown). Return original fields.
-          try { delete out.translations; } catch (_) {}
-          attachLocalizationFields(out, target);
-          return res.status(200).json(out);
-        }
-      } else {
-        // No translation needed (or already cached); allow service to localize.
-        lockOwner = true;
-      }
-
-      const localized = await ensureOnDemandNewsTranslation({ doc: out, requestedLang: target, logger: console, lockOwner, now });
-      if (localized && localized.dbSet && out && out._id) {
-        try {
-          await News.updateOne({ _id: out._id }, { $set: localized.dbSet }).catch(() => null);
-        } catch (e) {
-          try {
-            console.warn('[i18n-save-failed][public.news.getBySlugOrId]', {
-              id: String(out._id || ''),
-              slug: String(out?.slug || ''),
-              requestedLang: String(target || ''),
-              message: e?.message || String(e),
-            });
-          } catch (_) {}
-        }
-      }
-
-      out = (localized && localized.out) ? localized.out : out;
+    if (!target) {
+      try { delete out.translations; } catch (_) {}
+      try { delete out.translationStatus; } catch (_) {}
+      attachLocalizationFields(out, null);
+      out.resolvedLang = _resolveBaseLang(out);
+      out.isTranslated = false;
+      return res.status(200).json(out);
     }
 
-    // Keep response payload stable (don’t emit full translation cache).
-    try { delete out.translations; } catch (_) {}
+    const source = _resolveBaseLang(out);
+    if (target === source) {
+      try { delete out.translations; } catch (_) {}
+      try { delete out.translationStatus; } catch (_) {}
+      attachLocalizationFields(out, target);
+      out.requestedLang = target;
+      out.resolvedLang = source;
+      out.isTranslated = false;
+      out.summary = out.description || '';
+      return res.status(200).json(out);
+    }
 
-    attachLocalizationFields(out, target || requestedLang);
+    // If translation is disabled/misconfigured, return originals (cannot satisfy strict language).
+    if (!isGoogleTranslateConfigured()) {
+      try { delete out.translations; } catch (_) {}
+      try { delete out.translationStatus; } catch (_) {}
+      attachLocalizationFields(out, target);
+      out.requestedLang = target;
+      out.resolvedLang = source;
+      out.isTranslated = false;
+      out.summary = out.description || '';
+      return res.status(200).json(out);
+    }
+
+    // Serve cached translation if ready; otherwise pending.
+    const applied = _applyCachedTranslationInPlace(out, target);
+    if (!applied) {
+      return res.status(200).json(buildPendingTranslationResponse(out, target));
+    }
+
+    try { delete out.translations; } catch (_) {}
+    try { delete out.translationStatus; } catch (_) {}
+    try { delete out.translationError; } catch (_) {}
+    try { delete out.translationNextRetryAt; } catch (_) {}
+    attachLocalizationFields(out, target);
     return res.status(200).json(out);
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
@@ -743,87 +790,48 @@ async function getPublicNewsBySlug(req, res) {
     let out = withCoverImageUrl(doc);
 
     const target = normalizeLang(requestedLang);
-    if (target) {
-      const source = normalizeLang(out?.originalLang) || detectLangFromContent(out?.content) || normalizeLang(out?.lang || out?.language) || 'en';
-      const b = out?.translations?.[target];
-      const hasAll = Boolean(b && String(b.title || '').trim() && String(b.summary || '').trim() && String(b.content || '').trim());
+    if (!target) {
+      try { delete out.translations; } catch (_) {}
+      try { delete out.translationStatus; } catch (_) {}
+      attachLocalizationFields(out, null);
+      out.resolvedLang = _resolveBaseLang(out);
+      out.isTranslated = false;
+      return res.status(200).json(out);
+    }
 
-      const now = new Date();
+    const source = _resolveBaseLang(out);
+    if (target === source) {
+      try { delete out.translations; } catch (_) {}
+      try { delete out.translationStatus; } catch (_) {}
+      attachLocalizationFields(out, target);
+      out.requestedLang = target;
+      out.resolvedLang = source;
+      out.isTranslated = false;
+      out.summary = out.description || '';
+      return res.status(200).json(out);
+    }
 
-      if (!isGoogleTranslateConfigured() && target !== source && !hasAll) {
-        try { delete out.translations; } catch (_) {}
-        attachLocalizationFields(out, target);
-        return res.status(200).json(out);
-      }
+    if (!isGoogleTranslateConfigured()) {
+      try { delete out.translations; } catch (_) {}
+      try { delete out.translationStatus; } catch (_) {}
+      attachLocalizationFields(out, target);
+      out.requestedLang = target;
+      out.resolvedLang = source;
+      out.isTranslated = false;
+      out.summary = out.description || '';
+      return res.status(200).json(out);
+    }
 
-      let lockOwner = false;
-      if (target !== source && !hasAll && out && out._id) {
-        try {
-          const lockRes = await News.updateOne(
-            {
-              _id: out._id,
-              $and: [
-                { [`translationStatus.${target}`]: { $ne: 'pending' } },
-                {
-                  $or: [
-                    { [`translationStatus.${target}`]: { $ne: 'failed' } },
-                    { [`translationNextRetryAt.${target}`]: { $exists: false } },
-                    { [`translationNextRetryAt.${target}`]: null },
-                    { [`translationNextRetryAt.${target}`]: { $lte: now } },
-                  ],
-                },
-              ],
-            },
-            {
-              $set: {
-                [`translationStatus.${target}`]: 'pending',
-                [`translationError.${target}`]: null,
-                [`translationNextRetryAt.${target}`]: null,
-              },
-            }
-          );
-
-          const modified = typeof lockRes?.modifiedCount === 'number'
-            ? lockRes.modifiedCount
-            : (typeof lockRes?.nModified === 'number' ? lockRes.nModified : 0);
-          lockOwner = modified === 1;
-        } catch (_) {
-          lockOwner = false;
-        }
-
-        if (!lockOwner) {
-          // Another request/worker is translating (or we're in cooldown). Return original fields.
-          try { delete out.translations; } catch (_) {}
-          attachLocalizationFields(out, target);
-          return res.status(200).json(out);
-        }
-      } else {
-        lockOwner = true;
-      }
-
-      const localized = await ensureOnDemandNewsTranslation({ doc: out, requestedLang: target, logger: console, lockOwner, now });
-
-      if (localized && localized.dbSet && out && out._id) {
-        try {
-          await News.updateOne({ _id: out._id }, { $set: localized.dbSet }).catch(() => null);
-        } catch (e) {
-          try {
-            console.warn('[i18n-save-failed][public.news.getBySlug]', {
-              id: String(out._id || ''),
-              slug: String(out?.slug || ''),
-              requestedLang: String(target || ''),
-              message: e?.message || String(e),
-            });
-          } catch (_) {}
-        }
-      }
-
-      out = (localized && localized.out) ? localized.out : out;
+    const applied = _applyCachedTranslationInPlace(out, target);
+    if (!applied) {
+      return res.status(200).json(buildPendingTranslationResponse(out, target));
     }
 
     try { delete out.translations; } catch (_) {}
-
-    attachLocalizationFields(out, target || requestedLang);
+    try { delete out.translationStatus; } catch (_) {}
+    try { delete out.translationError; } catch (_) {}
+    try { delete out.translationNextRetryAt; } catch (_) {}
+    attachLocalizationFields(out, target);
     return res.status(200).json(out);
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });

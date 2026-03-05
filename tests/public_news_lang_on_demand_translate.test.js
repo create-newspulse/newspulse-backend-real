@@ -50,6 +50,7 @@ test('GET /api/public/news/:slugOrId?lang=hi returns cached translations when pr
       translations: {
         hi: { title: 'नमस्ते', summary: 'सारांश', content: 'शरीर', generatedAt: new Date().toISOString() },
       },
+      translationStatus: { hi: 'ready' },
     };
 
     News.findOne = () => makeFindOneResult(doc);
@@ -59,6 +60,9 @@ test('GET /api/public/news/:slugOrId?lang=hi returns cached translations when pr
     assert.equal(res.body.title, 'नमस्ते');
     assert.equal(res.body.description, 'सारांश');
     assert.equal(res.body.content, 'शरीर');
+    assert.equal(res.body.requestedLang, 'hi');
+    assert.equal(res.body.resolvedLang, 'hi');
+    assert.equal(res.body.isTranslated, true);
     assert.equal(updateCalls, 0);
   } finally {
     restore(originals);
@@ -66,24 +70,9 @@ test('GET /api/public/news/:slugOrId?lang=hi returns cached translations when pr
   }
 });
 
-test('GET /api/public/news/:slugOrId?lang=hi generates missing translation, caches atomically, and returns translated fields', async () => {
+test('GET /api/public/news/:slugOrId?lang=hi returns pending when translation is missing (no on-demand translate)', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { findOne: News.findOne, updateOne: News.updateOne };
-  const prevFetch = global.fetch;
-
-  const fetchBodies = [];
-  let fetchCalls = 0;
-  global.fetch = async (_url, opts) => {
-    fetchCalls++;
-    const body = JSON.parse(String(opts && opts.body ? opts.body : '{}'));
-    fetchBodies.push(body);
-    const q = Array.isArray(body.q) ? body.q : [];
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ data: { translations: q.map((txt) => ({ translatedText: `T:${txt}` })) } }),
-    };
-  };
 
   try {
     mongoose.connection.readyState = 1;
@@ -104,15 +93,9 @@ test('GET /api/public/news/:slugOrId?lang=hi generates missing translation, cach
       translationNextRetryAt: {},
     };
 
-    const updateCalls = [];
-    News.updateOne = async (filter, update) => {
-      updateCalls.push({ filter, update });
-
-      const set = update && update.$set ? update.$set : {};
-      if (set['translationStatus.hi'] === 'pending') {
-        return { acknowledged: true, modifiedCount: 1 };
-      }
-
+    let updateCalls = 0;
+    News.updateOne = async () => {
+      updateCalls++;
       return { acknowledged: true, modifiedCount: 1 };
     };
 
@@ -120,51 +103,19 @@ test('GET /api/public/news/:slugOrId?lang=hi generates missing translation, cach
 
     const res = await request(app).get('/api/public/news/s2?lang=hi');
     assert.equal(res.statusCode, 200);
-    assert.ok(String(res.body.title).startsWith('T:'), 'title should be translated');
-    assert.ok(String(res.body.description).startsWith('T:'), 'summary should be translated');
-    assert.ok(String(res.body.content).startsWith('T:'), 'content should be translated');
-
-    // Should have lock + persist calls.
-    assert.ok(updateCalls.length >= 2, 'should lock + persist');
-    const persist = updateCalls[updateCalls.length - 1];
-    assert.deepEqual(persist.filter, { _id: '507f1f77bcf86cd799439012' });
-    assert.ok(persist.update && persist.update.$set);
-
-    const set = persist.update.$set;
-    assert.equal(set.originalLang, 'en');
-    assert.ok(set['translations.hi.title']);
-    assert.ok(set['translations.hi.summary']);
-    assert.ok(set['translations.hi.content']);
-    assert.ok(set['translations.hi.generatedAt']);
-
-    assert.equal(set['translationStatus.hi'], 'ready');
-    assert.equal(set['translationError.hi'], null);
-    assert.equal(set['translationNextRetryAt.hi'], null);
-
-    // Ensure HTML translation uses format: 'html' for content.
-    assert.ok(fetchBodies.some((b) => b && b.format === 'html'), 'should call Google Translate with format=html');
-
-    // Expect 3 translate calls: title, summary, content.
-    assert.equal(fetchCalls, 3);
+    assert.equal(res.body.status, 'pending');
+    assert.equal(res.body.requestedLang, 'hi');
+    assert.equal(res.body.resolvedLang, 'en');
+    assert.equal(updateCalls, 0);
   } finally {
     restore(originals);
-    global.fetch = prevFetch;
     mongoose.connection.readyState = prevReadyState;
   }
 });
 
-test('GET /api/public/news/:slugOrId?lang=hi marks failed + cooldown on 429 and returns originals', async () => {
+test('GET /api/public/news/:slugOrId?lang=hi returns pending when translation failed/cooldown', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { findOne: News.findOne, updateOne: News.updateOne };
-  const prevFetch = global.fetch;
-
-  global.fetch = async () => {
-    return {
-      ok: false,
-      status: 429,
-      json: async () => ({ error: { message: 'Rate limit exceeded' } }),
-    };
-  };
 
   try {
     mongoose.connection.readyState = 1;
@@ -181,42 +132,27 @@ test('GET /api/public/news/:slugOrId?lang=hi marks failed + cooldown on 429 and 
       description: 'Summary',
       content: 'Body',
       translations: {},
-      translationStatus: {},
-      translationNextRetryAt: {},
+      translationStatus: { hi: 'failed' },
+      translationNextRetryAt: { hi: new Date(Date.now() + 30 * 60 * 1000) },
     };
 
-    const updateCalls = [];
-    News.updateOne = async (filter, update) => {
-      updateCalls.push({ filter, update });
-      const set = update && update.$set ? update.$set : {};
-      if (set['translationStatus.hi'] === 'pending') {
-        return { acknowledged: true, modifiedCount: 1 };
-      }
+    let updateCalls = 0;
+    News.updateOne = async () => {
+      updateCalls++;
       return { acknowledged: true, modifiedCount: 1 };
     };
 
     News.findOne = () => makeFindOneResult(doc);
 
-    const before = Date.now();
     const res = await request(app).get('/api/public/news/s3?lang=hi');
     assert.equal(res.statusCode, 200);
 
-    // Strict fallback: originals (no mixing).
-    assert.equal(res.body.title, 'Hello');
-    assert.equal(res.body.description, 'Summary');
-    assert.equal(res.body.content, 'Body');
-
-    const persist = updateCalls[updateCalls.length - 1];
-    const set = persist.update.$set;
-    assert.equal(set['translationStatus.hi'], 'failed');
-    assert.ok(set['translationNextRetryAt.hi'] instanceof Date, 'nextRetryAt should be a Date');
-    const after = Date.now();
-
-    const dt = set['translationNextRetryAt.hi'].getTime();
-    assert.ok(dt >= before + (25 * 60 * 1000) && dt <= after + (35 * 60 * 1000), 'cooldown should be ~30 minutes');
+    assert.equal(res.body.status, 'pending');
+    assert.equal(res.body.requestedLang, 'hi');
+    assert.equal(res.body.resolvedLang, 'en');
+    assert.equal(updateCalls, 0);
   } finally {
     restore(originals);
-    global.fetch = prevFetch;
     mongoose.connection.readyState = prevReadyState;
   }
 });

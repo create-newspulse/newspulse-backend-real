@@ -85,14 +85,18 @@ function getMissingFields(bucket) {
   return missing;
 }
 
+function hasFullTranslation(bucket) {
+  const b = bucket && typeof bucket === 'object' ? bucket : {};
+  return _isNonEmptyString(b.title) && _isNonEmptyString(b.summary) && _isNonEmptyString(b.content);
+}
+
 function localizeNewsFromTranslations(docLike, requestedLang) {
   const desired = normalizeLang(requestedLang);
   const baseLang = normalizeLang(docLike?.lang || docLike?.language) || detectLangFromContent(docLike?.content) || 'en';
   if (!desired) return { out: docLike, resolvedLang: baseLang, translationPending: false };
 
   const t = docLike?.translations?.[desired];
-  const hasAll = _isNonEmptyString(t?.title) && _isNonEmptyString(t?.summary) && _isNonEmptyString(t?.content);
-  if (!hasAll) return { out: docLike, resolvedLang: baseLang, translationPending: desired !== baseLang };
+  if (!hasFullTranslation(t)) return { out: docLike, resolvedLang: baseLang, translationPending: desired !== baseLang };
 
   const out = { ...docLike, title: t.title, description: t.summary, content: t.content };
   return { out, resolvedLang: desired, translationPending: false };
@@ -233,6 +237,7 @@ async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger, lockO
     dbSet[`translations.${desired}.title`] = bucketOut.title;
     dbSet[`translations.${desired}.summary`] = bucketOut.summary;
     dbSet[`translations.${desired}.content`] = bucketOut.content;
+    dbSet[`translations.${desired}.provider`] = 'google';
     dbSet[`translations.${desired}.generatedAt`] = nowDt;
     dbSet[`translationStatus.${desired}`] = 'ready';
     dbSet[`translationError.${desired}`] = null;
@@ -251,6 +256,7 @@ async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger, lockO
 
 module.exports = {
   normalizeLang,
+  hasFullTranslation,
   localizeNewsFromTranslations,
   ensureOnDemandNewsTranslation,
 };
