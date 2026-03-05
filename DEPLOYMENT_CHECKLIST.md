@@ -61,6 +61,7 @@ Server allows these origins (via `CORS_ORIGIN` env var or hardcoded):
    - [ ] `JWT_SECRET` - Token signing secret
    - [ ] `FOUNDER_EMAIL` - Admin email
    - [ ] `FOUNDER_PASSWORD` - Admin password
+    - [ ] `GOOGLE_TRANSLATE_API_KEY` - Google Translate v2 API key (required for background content translation)
    - [ ] `CORS_ORIGIN` - Comma-separated allowed origins:
      ```
      http://localhost:5173,https://admin.newspulse.co.in,https://newspulse.co.in

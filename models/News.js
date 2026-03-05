@@ -99,6 +99,19 @@ const newsSchema = new mongoose.Schema({
       content: { type: String, default: '' },
     },
   },
+
+  // Background translation status (publish should never block on translation).
+  // NOTE: Stored on the CMS/admin News doc; public Article copy is synced separately.
+  translationStatus: {
+    en: { type: String, enum: ['pending', 'ready', 'failed', null], default: null },
+    hi: { type: String, enum: ['pending', 'ready', 'failed', null], default: null },
+    gu: { type: String, enum: ['pending', 'ready', 'failed', null], default: null },
+  },
+  translationError: {
+    en: { type: String, default: null },
+    hi: { type: String, default: null },
+    gu: { type: String, default: null },
+  },
   // New canonical group key for translations. Keep translationGroupId for backward compatibility.
   translationKey: { type: String, index: true },
   translationGroupId: { type: String, index: true },

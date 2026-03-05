@@ -11,10 +11,16 @@ const { canonicalizeSlug, getSlugCandidates, slugifyUnicode } = require('../lib/
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 const { tagStatesFromText, isValidStateSlug } = require('../src/utils/locationTagger');
 const {
-  ensureNewsHasFullTranslations,
   localizeFromNewsTranslations,
   localizeFromArticleI18n,
 } = require('../services/newsI18n.service');
+
+const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
+const {
+  buildPendingTranslationState,
+  markPublishTranslationPending,
+  enqueueTranslateAndSave,
+} = require('../services/publishAsyncTranslation.service');
 
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
@@ -40,6 +46,15 @@ function _stripUndefinedKeysInPlace(obj) {
 
 function _isBlankString(v) {
   return v === '' || (typeof v === 'string' && v.trim() === '');
+}
+
+function _normalizeOptionalString(v) {
+  if (v === undefined || v === null) return undefined;
+  const s = typeof v === 'string' ? v.trim() : String(v).trim();
+  if (!s) return undefined;
+  const lowered = s.toLowerCase();
+  if (lowered === 'undefined' || lowered === 'null') return undefined;
+  return typeof v === 'string' ? v : s;
 }
 
 function _parseIntOrDefault(v, fallback) {
@@ -261,91 +276,9 @@ function getActor(req) {
 }
 
 async function syncArticleFromNews(doc) {
-  if (!doc) return null;
-  const slug = normalizeSlug(doc.slug);
-  if (!slug) return null;
-
-  const isPublished = String(doc.status || '').toLowerCase() === 'published';
-  const coverUrl =
-    (doc.coverImage && typeof doc.coverImage === 'object' && !Array.isArray(doc.coverImage) ? doc.coverImage.url : null) ||
-    doc.coverImageUrl ||
-    doc.imageURL ||
-    null;
-  const coverImage = coverUrl
-    ? {
-        url: coverUrl,
-        publicId: doc.coverImage && typeof doc.coverImage === 'object' ? (doc.coverImage.publicId || null) : null,
-        alt: doc.coverImage && typeof doc.coverImage === 'object' ? (doc.coverImage.alt || null) : null,
-      }
-    : { url: null, publicId: null, alt: null };
-  const update = {
-    title: doc.title,
-    slug,
-    slugs: doc.slugs || null,
-    summary: doc.description || null,
-    content: doc.content || null,
-
-    originalLang: doc.language || 'en',
-
-    // Canonical cached translations (en/hi/gu)
-    translations: {
-      en: {
-        title: doc?.translations?.en?.title ? String(doc.translations.en.title) : null,
-        summary: doc?.translations?.en?.summary ? String(doc.translations.en.summary) : null,
-        content: doc?.translations?.en?.content ? String(doc.translations.en.content) : null,
-      },
-      hi: {
-        title: doc?.translations?.hi?.title ? String(doc.translations.hi.title) : null,
-        summary: doc?.translations?.hi?.summary ? String(doc.translations.hi.summary) : null,
-        content: doc?.translations?.hi?.content ? String(doc.translations.hi.content) : null,
-      },
-      gu: {
-        title: doc?.translations?.gu?.title ? String(doc.translations.gu.title) : null,
-        summary: doc?.translations?.gu?.summary ? String(doc.translations.gu.summary) : null,
-        content: doc?.translations?.gu?.content ? String(doc.translations.gu.content) : null,
-      },
-    },
-
-    // Store full i18n buckets for instant language switching on public story endpoints.
-    i18n: {
-      title: {
-        en: doc?.translations?.en?.title ? String(doc.translations.en.title) : null,
-        hi: doc?.translations?.hi?.title ? String(doc.translations.hi.title) : null,
-        gu: doc?.translations?.gu?.title ? String(doc.translations.gu.title) : null,
-      },
-      summary: {
-        en: doc?.translations?.en?.summary ? String(doc.translations.en.summary) : null,
-        hi: doc?.translations?.hi?.summary ? String(doc.translations.hi.summary) : null,
-        gu: doc?.translations?.gu?.summary ? String(doc.translations.gu.summary) : null,
-      },
-      content: {
-        en: doc?.translations?.en?.content ? String(doc.translations.en.content) : null,
-        hi: doc?.translations?.hi?.content ? String(doc.translations.hi.content) : null,
-        gu: doc?.translations?.gu?.content ? String(doc.translations.gu.content) : null,
-      },
-    },
-    category: doc.category,
-    language: doc.language || 'en',
-    status: isPublished ? 'published' : 'draft',
-    publishedAt: isPublished ? (doc.publishedAt || new Date()) : null,
-    isBreaking: String(doc.category || '').toLowerCase() === 'breaking',
-    coverImage,
-    tags: Array.isArray(doc.tags) ? doc.tags : [],
-
-    // State-wise national tags (copied from News)
-    stateTags: Array.isArray(doc.stateTags) ? doc.stateTags : [],
-    stateNames: Array.isArray(doc.stateNames) ? doc.stateNames : [],
-  };
-
-  // Do not let this throw and break the CMS flow; log and move on.
   try {
-    return await PublicArticle.findOneAndUpdate(
-      { slug },
-      { $set: update },
-      { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
-    ).lean();
-  } catch (e) {
-    console.warn('[articles.syncArticleFromNews] failed', { slug, message: e?.message || String(e) });
+    return await syncPublicArticleFromNews(doc, { logger: console });
+  } catch (_) {
     return null;
   }
 }
@@ -360,7 +293,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     }
 
     const {
-      title,
+      title: titleRaw,
       slug,
       summary,
       description,
@@ -379,6 +312,9 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     if (!title) {
       return res.status(400).json({ ok: false, success: false, message: 'Title is required' });
     }
+
+    // Guard against accidental "undefined"/null-ish values from form-data payloads.
+    const title = _normalizeOptionalString(titleRaw);
 
     const summaryOrDescription = summary !== undefined ? summary : description;
     if (summaryOrDescription === undefined || summaryOrDescription === null || _isBlankString(String(summaryOrDescription))) {
@@ -847,21 +783,33 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const {
-      title,
-      slug,
-      summary,
-      description,
-      content,
-      body: bodyText,
-      category,
-      language,
+      title: titleRaw,
+      slug: slugRaw,
+      summary: summaryRaw,
+      description: descriptionRaw,
+      content: contentRaw,
+      body: bodyRaw,
+      category: categoryRaw,
+      language: languageRaw,
       tags,
       status,
       scheduledAt,
-      imageURL,
-      coverImageUrl,
+      imageURL: imageURLRaw,
+      coverImageUrl: coverImageUrlRaw,
       coverImage,
     } = requestBody;
+
+    // Guard against accidental "undefined"/"null" string inputs from form-data payloads.
+    const title = _normalizeOptionalString(titleRaw);
+    const slug = _normalizeOptionalString(slugRaw);
+    const summary = _normalizeOptionalString(summaryRaw);
+    const description = _normalizeOptionalString(descriptionRaw);
+    const content = _normalizeOptionalString(contentRaw);
+    const bodyText = _normalizeOptionalString(bodyRaw);
+    const category = _normalizeOptionalString(categoryRaw);
+    const language = _normalizeOptionalString(languageRaw);
+    const imageURL = _normalizeOptionalString(imageURLRaw);
+    const coverImageUrl = _normalizeOptionalString(coverImageUrlRaw);
 
     const summaryOrDescription = summary !== undefined ? summary : description;
     // Prevent wiping required field: if provided, description must be non-empty.
@@ -967,67 +915,64 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     const nextStatusNorm = update.status ? String(update.status).toLowerCase() : '';
     const isPublishingNow = beforeStatusNorm !== 'published' && nextStatusNorm === 'published';
 
-    // Strict publish rule: if publishing via status update, translations must include full content for en/hi/gu.
-    // Block publish if translation fails so we never publish title-only translations.
+    // Publish must never block on translation. Translation runs asynchronously after we persist the publish.
     if (isPublishingNow) {
-      const doc = await News.findById(rawId);
-      if (!doc) {
+      if (!before) {
         return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
       }
 
-      doc.set(update);
-      ensureTranslationGroupIdForDoc(doc);
-      doc.lang = doc.lang || doc.language;
-      doc.language = doc.language || doc.lang;
-
-      // Align publish timestamps similarly to the dedicated publish endpoint.
       const now = new Date();
-      doc.publishedAt = doc.publishedAt || now;
-      doc.publishAt = null;
-      doc.scheduledAt = null;
-
-      const tr = await ensureNewsHasFullTranslations(doc, { logger: console });
-      if (!tr || tr.ok !== true) {
-        try {
-          console.warn('[articles.update->publish] blocked', {
-            id: rawId,
-            slug: String(doc.slug || ''),
-            category: String(doc.category || ''),
-            error: tr && tr.error ? tr.error : 'translation_failed',
-          });
-        } catch (_) {}
-        return res.status(502).json({
-          ok: false,
-          success: false,
-          status: 502,
-          message: 'Publish blocked: content translation failed',
-          error: tr && tr.error ? tr.error : 'translation_failed',
-        });
-      }
-
-      ensureNewsSlugs(doc);
-
-      // Keep workflow stage aligned.
       const stage = mapStatusToWorkflowStage('published');
-      if (doc.workflowStage !== stage) {
-        const actor = getActor(req);
-        const prevStage = String(doc.workflowStage || 'DRAFT');
-        doc.workflowStage = stage;
-        doc.workflowUpdatedAt = now;
-        doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
-        doc.workflowHistory.push({
-          at: now,
-          byUserId: actor.byUserId,
-          byRole: actor.byRole,
-          action: 'MOVE_STAGE',
-          fromStage: prevStage,
-          toStage: stage,
-          note: 'Status updated',
-        });
-      }
+      const actor = getActor(req);
+      const prevStage = String(before.workflowStage || 'DRAFT');
 
-      await doc.save();
+      // Ensure translationGroupId exists (do not rely on doc mutation to avoid accidental overwrites).
+      const translationGroupId = String(before.translationGroupId || '').trim() || new mongoose.Types.ObjectId().toString();
+
+      const baseLang = normalizeLanguage(update.lang || update.language || before.lang || before.language) || 'en';
+      const baseTitle = update.title !== undefined ? update.title : (before.title || '');
+      const baseSummary = update.description !== undefined ? update.description : (before.description || '');
+      const baseContent = update.content !== undefined ? update.content : (before.content || '');
+      const pending = buildPendingTranslationState({ baseLang, title: baseTitle, summary: baseSummary, content: baseContent });
+
+      const updateOp = {
+        $set: {
+          ...update,
+          translationGroupId,
+          // Align publish timestamps similarly to the dedicated publish endpoint.
+          status: 'published',
+          publishedAt: now,
+          publishAt: null,
+          scheduledAt: null,
+          // Mark translations pending for non-base languages.
+          translations: pending.translations,
+          translationStatus: pending.translationStatus,
+          translationError: pending.translationError,
+          // Keep workflow stage aligned.
+          workflowStage: stage,
+          workflowUpdatedAt: now,
+        },
+        $push: {
+          workflowHistory: {
+            at: now,
+            byUserId: actor.byUserId,
+            byRole: actor.byRole,
+            action: 'MOVE_STAGE',
+            fromStage: prevStage,
+            toStage: stage,
+            note: 'Status updated',
+          },
+        },
+      };
+
+      const doc = await News.findByIdAndUpdate(rawId, updateOp, { new: true, runValidators: true });
+      if (!doc) {
+        return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+      }
       await syncArticleFromNews(doc);
+
+      // Fire-and-forget: never await translation in the request.
+      enqueueTranslateAndSave(doc._id, { logger: console });
 
       const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
       return res.json({
@@ -1097,12 +1042,12 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         doc = await News.findByIdAndUpdate(rawId, updateOp, { new: true, runValidators: false });
         didMetaOnlyUpdate = !!doc;
       } else {
-        // Full edit update: validate only modified paths.
-        doc = await News.findById(rawId);
+        // Full edit update: apply only $set fields (never replace the document).
+        doc = await News.findByIdAndUpdate(rawId, { $set: { ...update } }, { new: true, runValidators: true });
         if (doc) {
-          doc.set(update);
+          // Keep slugs aligned with current titles/translations.
           ensureNewsSlugs(doc);
-          await doc.save({ validateModifiedOnly: true });
+          doc = await News.findByIdAndUpdate(rawId, { $set: { slug: doc.slug, slugs: doc.slugs } }, { new: true, runValidators: false });
         }
       }
     } catch (err) {
@@ -1186,7 +1131,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
       let articleDoc = null;
       try {
-        articleDoc = await PublicArticle.findByIdAndUpdate(rawId, articleUpdate, { new: true, runValidators: true });
+        articleDoc = await PublicArticle.findByIdAndUpdate(rawId, { $set: articleUpdate }, { new: true, runValidators: true });
       } catch (e) {
         // Duplicate slug unique index
         if (e && (e.code === 11000 || e.code === 11001)) {
@@ -1252,23 +1197,6 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
 
-    // If an editor published via status update, ensure translations exist.
-    try {
-      const afterStatus = String(doc.status || '').toLowerCase();
-      if (afterStatus === 'published') {
-        ensureTranslationGroupIdForDoc(doc);
-        doc.lang = doc.lang || doc.language;
-        doc.language = doc.language || doc.lang;
-
-        const tr = await ensureNewsHasFullTranslations(doc, { logger: console });
-        if (tr && tr.ok === true) {
-          ensureNewsSlugs(doc);
-          await doc.save({ validateModifiedOnly: true });
-          await syncArticleFromNews(doc);
-        }
-      }
-    } catch (_) {}
-
     return res.json({
       ok: true,
       success: true,
@@ -1313,24 +1241,9 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     doc.lang = doc.lang || doc.language;
     doc.language = doc.language || doc.lang;
 
-    const tr = await ensureNewsHasFullTranslations(doc, { logger: console });
-    if (!tr || tr.ok !== true) {
-      try {
-        console.warn('[articles.publish] blocked', {
-          id: String(doc._id || ''),
-          slug: String(doc.slug || ''),
-          category: String(doc.category || ''),
-          error: tr && tr.error ? tr.error : 'translation_failed',
-        });
-      } catch (_) {}
-      return res.status(502).json({
-        ok: false,
-        success: false,
-        status: 502,
-        message: 'Publish blocked: content translation failed',
-        error: tr && tr.error ? tr.error : 'translation_failed',
-      });
-    }
+    // Publish must never block on translation.
+    // Mark translations pending for non-base languages and translate asynchronously.
+    markPublishTranslationPending(doc);
 
     ensureNewsSlugs(doc);
 
@@ -1352,6 +1265,9 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     await doc.save();
 
     await syncArticleFromNews(doc);
+
+    // Fire-and-forget background translation.
+    enqueueTranslateAndSave(doc._id, { logger: console });
 
     // Phase 2: enqueue translations on publish.
     // Translation queue/review system removed.
@@ -1386,6 +1302,57 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     if (e?.status === 409) return res.status(409).json({ ok: false, success: false, status: 409, message: e.message || 'Slug already exists' });
     console.error('[articles.publish] error:', e?.message || e);
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to publish article' });
+  }
+});
+
+// POST /api/articles/:id/retry-translation → re-run background translation (Editor/Founder)
+router.post('/articles/:id/retry-translation', requireAdminAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const before = await News.findById(id)
+      .select('title description content translationGroupId lang language slug slugs status')
+      .lean();
+    if (!before) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+
+    const baseLang = normalizeLanguage(before.lang || before.language) || 'en';
+    const pending = buildPendingTranslationState({
+      baseLang,
+      title: before.title,
+      summary: before.description,
+      content: before.content,
+    });
+
+    const translationGroupId = String(before.translationGroupId || '').trim() || new mongoose.Types.ObjectId().toString();
+
+    const doc = await News.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          translationGroupId,
+          translations: pending.translations,
+          translationStatus: pending.translationStatus,
+          translationError: pending.translationError,
+        },
+      },
+      { new: true, runValidators: false }
+    );
+    if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+
+    await syncArticleFromNews(doc);
+    enqueueTranslateAndSave(doc._id, { logger: console });
+
+    const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+    return res.json({
+      ok: true,
+      success: true,
+      status: 200,
+      message: 'Translation retry queued',
+      data: { article: withCoverImageUrl(obj) },
+      article: withCoverImageUrl(obj),
+    });
+  } catch (e) {
+    console.error('[articles.retry-translation] error:', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to retry translation' });
   }
 });
 

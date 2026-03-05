@@ -45,6 +45,8 @@ async function translateMany(texts, targetLang, options = {}) {
   if (typeof fetchImpl !== 'function') return { ok: false, error: 'fetch is not available' };
 
   const chunkSize = Number.isFinite(Number(options.chunkSize)) ? Number(options.chunkSize) : 50;
+  const formatRaw = String(options.format || '').trim().toLowerCase();
+  const format = formatRaw === 'html' ? 'html' : 'text';
 
   const out = [];
   for (const part of chunk(arr, chunkSize)) {
@@ -52,7 +54,7 @@ async function translateMany(texts, targetLang, options = {}) {
     const res = await fetchImpl(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ q: part, target: lang, ...(sourceLang ? { source: sourceLang } : {}), format: 'text' }),
+      body: JSON.stringify({ q: part, target: lang, ...(sourceLang ? { source: sourceLang } : {}), format }),
     });
 
     const json = await res.json().catch(() => null);

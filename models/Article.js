@@ -104,6 +104,18 @@ const articleSchema = new mongoose.Schema(
       gu: { type: translationBucketSchema, default: () => ({}) },
     },
 
+    // Background translation status synced from the CMS/admin News document.
+    translationStatus: {
+      en: { type: String, enum: ['pending', 'ready', 'failed', null], default: null },
+      hi: { type: String, enum: ['pending', 'ready', 'failed', null], default: null },
+      gu: { type: String, enum: ['pending', 'ready', 'failed', null], default: null },
+    },
+    translationError: {
+      en: { type: String, default: null },
+      hi: { type: String, default: null },
+      gu: { type: String, default: null },
+    },
+
     status: { type: String, enum: STATUS_VALUES, default: 'draft', index: true },
     publishedAt: { type: Date, default: null, index: true },
 
