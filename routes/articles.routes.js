@@ -45,6 +45,27 @@ function _stripUndefinedKeysInPlace(obj) {
   return obj;
 }
 
+function _stripHtmlToText(input) {
+  if (input === undefined || input === null) return '';
+  const raw = String(input);
+  // Remove tags; keep plain text. (Lightweight; avoids new deps.)
+  const noTags = raw
+    .replace(/<\s*script\b[^>]*>[\s\S]*?<\s*\/\s*script\s*>/gi, ' ')
+    .replace(/<\s*style\b[^>]*>[\s\S]*?<\s*\/\s*style\s*>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ');
+  return noTags
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function _excerptFromRichText(input, maxLen = 180) {
+  const text = _stripHtmlToText(input);
+  if (!text) return '';
+  const out = text.length > maxLen ? text.slice(0, maxLen) : text;
+  return out.trim();
+}
+
 function _isBlankString(v) {
   return v === '' || (typeof v === 'string' && v.trim() === '');
 }
@@ -296,10 +317,10 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     const {
       title: titleRaw,
       slug,
-      summary,
-      description,
-      content,
-      body,
+      summary: summaryRaw,
+      description: descriptionRaw,
+      content: contentRaw,
+      body: bodyRaw,
       category,
       language,
       tags,
@@ -310,18 +331,27 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       coverImage,
     } = body0;
 
+    // Guard against accidental "undefined"/"null" string inputs from form-data payloads.
+    const title = _normalizeOptionalString(titleRaw);
+    const summary = _normalizeOptionalString(summaryRaw);
+    const description = _normalizeOptionalString(descriptionRaw);
+    const content = _normalizeOptionalString(contentRaw);
+    const body = _normalizeOptionalString(bodyRaw);
+
     if (!title) {
       return res.status(400).json({ ok: false, success: false, message: 'Title is required' });
     }
 
-    // Guard against accidental "undefined"/null-ish values from form-data payloads.
-    const title = _normalizeOptionalString(titleRaw);
-
-    const summaryOrDescription = summary !== undefined ? summary : description;
-    if (summaryOrDescription === undefined || summaryOrDescription === null || _isBlankString(String(summaryOrDescription))) {
+    let normalizedDescription = summary !== undefined ? summary : description;
+    // If summary/description missing, derive from content/body.
+    if (normalizedDescription === undefined) {
+      const excerpt = _excerptFromRichText(content ?? body ?? '', 180);
+      if (excerpt) normalizedDescription = excerpt;
+    }
+    if (normalizedDescription === undefined || normalizedDescription === null || _isBlankString(String(normalizedDescription))) {
       return res.status(400).json({ ok: false, success: false, message: 'Summary (description) is required' });
     }
-    const normalizedDescription = String(summaryOrDescription).trim();
+    normalizedDescription = String(normalizedDescription).trim();
 
     let scheduled = scheduledAt;
     if (scheduled) {
@@ -395,7 +425,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       ? _computeNationalStateTags({ title, summary: normalizedDescription, content: content ?? body ?? '' })
       : { stateTags: [], stateNames: [] };
 
-    const doc = await News.create({
+    const createDoc = {
       title,
       description: normalizedDescription,
       content: content ?? body ?? '',
@@ -441,7 +471,10 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
         toStage: workflowStage,
         note: 'Created',
       }],
-    });
+    };
+    _stripUndefinedKeysInPlace(createDoc);
+
+    const doc = await News.create(createDoc);
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
 
@@ -702,6 +735,69 @@ router.get('/news/all', (req, res, next) => {
   return router.handle(req, res, next);
 });
 
+// GET /api/articles/slug/:slug → lookup by slug (admin UI compatibility)
+router.get('/articles/slug/:slug', async (req, res, next) => {
+  try {
+    const raw = String(req.params.slug || '');
+    let decoded = raw;
+    try { decoded = decodeURIComponent(raw); } catch (_) {}
+    const slugNorm = normalizeSlug(decoded) || normalizeSlug(raw) || String(decoded || '').trim();
+    if (!slugNorm) return res.status(200).json({ exists: false });
+
+    // If DB is unavailable, don't 500 the admin UI.
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      return res.status(200).json({ exists: false });
+    }
+
+    const query = {
+      $or: [
+        { slug: slugNorm },
+        { 'slugs.en': slugNorm },
+        { 'slugs.hi': slugNorm },
+        { 'slugs.gu': slugNorm },
+      ],
+    };
+    const doc = await News.findOne(query).lean().catch(() => null);
+    const fallback = doc ? null : await PublicArticle.findOne(query).lean().catch(() => null);
+    const out = doc || fallback;
+    if (!out) return res.status(200).json({ exists: false });
+    return res.status(200).json(withCoverImageUrl(out));
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// GET /api/articles/by-slug/:slug → alias (some admin builds use this path)
+router.get('/articles/by-slug/:slug', async (req, res, next) => {
+  try {
+    const raw = String(req.params.slug || '');
+    let decoded = raw;
+    try { decoded = decodeURIComponent(raw); } catch (_) {}
+    const slugNorm = normalizeSlug(decoded) || normalizeSlug(raw) || String(decoded || '').trim();
+    if (!slugNorm) return res.status(200).json({ exists: false });
+
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      return res.status(200).json({ exists: false });
+    }
+
+    const query = {
+      $or: [
+        { slug: slugNorm },
+        { 'slugs.en': slugNorm },
+        { 'slugs.hi': slugNorm },
+        { 'slugs.gu': slugNorm },
+      ],
+    };
+    const doc = await News.findOne(query).lean().catch(() => null);
+    const fallback = doc ? null : await PublicArticle.findOne(query).lean().catch(() => null);
+    const out = doc || fallback;
+    if (!out) return res.status(200).json({ exists: false });
+    return res.status(200).json(withCoverImageUrl(out));
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // GET /api/articles/:id → get single article by id
 router.get('/articles/:id', async (req, res, next) => {
   try {
@@ -812,9 +908,9 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     const imageURL = _normalizeOptionalString(imageURLRaw);
     const coverImageUrl = _normalizeOptionalString(coverImageUrlRaw);
 
-    const summaryOrDescription = summary !== undefined ? summary : description;
+    const summaryOrDescription0 = summary !== undefined ? summary : description;
     // Prevent wiping required field: if provided, description must be non-empty.
-    if (summaryOrDescription !== undefined && (summaryOrDescription === null || _isBlankString(String(summaryOrDescription)))) {
+    if (summaryOrDescription0 !== undefined && (summaryOrDescription0 === null || _isBlankString(String(summaryOrDescription0)))) {
       return res.status(400).json({ ok: false, success: false, message: 'Summary (description) cannot be empty' });
     }
 
@@ -848,6 +944,17 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const effectiveLang = normalizeLanguage(language) || normalizeLanguage(before?.lang || before?.language) || 'en';
+
+    // If description is missing in the update payload AND the existing doc is missing it too,
+    // fall back to a stripped excerpt of content/body (<= 180 chars).
+    let summaryOrDescription = summaryOrDescription0;
+    const beforeDesc = before && before.description !== undefined ? String(before.description || '') : '';
+    const beforeDescBlank = _isBlankString(beforeDesc);
+    const contentWasProvided = (content !== undefined || bodyText !== undefined);
+    if (summaryOrDescription === undefined && beforeDescBlank && contentWasProvided) {
+      const excerpt = _excerptFromRichText(content ?? bodyText ?? '', 180);
+      if (excerpt) summaryOrDescription = excerpt;
+    }
 
     // On update: if slug is provided, use it. Otherwise if title is updated, regenerate slug for that language.
     const resolvedSlug = slug !== undefined

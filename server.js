@@ -1205,6 +1205,14 @@ app.use('/admin/ticker', adminTickerRouter);
 app.use('/api/admin/glossary', adminGlossaryRouter);
 app.use('/admin-api/admin/glossary', adminGlossaryRouter);
 app.use('/admin-api/api/admin/glossary', adminGlossaryRouter);
+
+// Admin panel compatibility: some builds call this translation glossary endpoint.
+// Keep it as a lightweight 200 stub so the Add News page doesn't break.
+const _translationGlossaryStub = (_req, res) => {
+  return res.status(200).json({ success: true, glossary: [], enabled: false });
+};
+app.get('/api/admin/translation/glossary', _translationGlossaryStub);
+app.get('/admin-api/admin/translation/glossary', _translationGlossaryStub);
 // Site settings: simple public endpoint (stub)
 // Placed here (before router mounts) to guarantee frontend never sees a 404.
 app.get('/api/site-settings/public', (req, res) => {
