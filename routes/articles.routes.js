@@ -1734,6 +1734,52 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
 
     await syncArticleFromNews(doc);
 
+    // Legacy safety net:
+    // Ensure any existing public copies reachable by slug/slugs.* are marked published
+    // and have geo.* populated from News location slugs.
+    try {
+      const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
+      const slugs = new Set();
+      if (doc.slug) slugs.add(String(doc.slug).trim());
+      const slugsObj = doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
+      for (const k of ['en', 'hi', 'gu']) {
+        const v = slugsObj && slugsObj[k] ? String(slugsObj[k]).trim() : '';
+        if (v) slugs.add(v);
+      }
+      const slugList = Array.from(slugs).filter(Boolean);
+
+      const or = [];
+      if (slugList.length) {
+        or.push({ slug: { $in: slugList } });
+        or.push({ 'slugs.en': { $in: slugList } });
+        or.push({ 'slugs.hi': { $in: slugList } });
+        or.push({ 'slugs.gu': { $in: slugList } });
+      }
+      if (groupKey) {
+        or.push({ translationKey: groupKey });
+        or.push({ translationGroupId: groupKey });
+      }
+
+      const geoState = doc?.geo?.state ?? doc?.location?.stateSlug;
+      const geoDistrict = doc?.geo?.district ?? doc?.location?.districtSlug;
+      const geoCity = doc?.geo?.city ?? doc?.location?.citySlug;
+      const geoSet = {
+        ...(geoState ? { 'geo.state': geoState } : {}),
+        ...(geoDistrict ? { 'geo.district': geoDistrict } : {}),
+        ...(geoCity ? { 'geo.city': geoCity } : {}),
+      };
+
+      if (or.length) {
+        await PublicArticle.updateMany(
+          { $or: or },
+          { $set: { status: 'published', publishedAt: now, category: doc.category, ...geoSet } },
+          { runValidators: false }
+        );
+      }
+    } catch (e) {
+      console.warn('[articles.publish] public legacy publish fallback failed', e?.message || e);
+    }
+
     // Fire-and-forget background translation.
     enqueueTranslateAndSave(doc._id, { logger: console });
 

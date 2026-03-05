@@ -1,6 +1,15 @@
 const PublicArticle = require('../models/Article');
 const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 
+const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
+
+function normalizeLang(v) {
+  const s0 = String(v ?? '').trim().toLowerCase();
+  if (!s0) return null;
+  const s = s0.split(/[-_]/)[0];
+  return SUPPORTED_LANGS.includes(s) ? s : null;
+}
+
 function normalizeSlug(slug) {
   return canonicalizeSlug(slug);
 }
@@ -115,6 +124,8 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
   if (!slug) return null;
 
   const isPublished = String(newsDoc.status || '').toLowerCase() === 'published';
+  const language = normalizeLang(newsDoc.language || newsDoc.lang) || 'en';
+  const originalLang = normalizeLang(newsDoc.originalLang) || language;
   const coverUrl =
     (newsDoc.coverImage && typeof newsDoc.coverImage === 'object' && !Array.isArray(newsDoc.coverImage) ? newsDoc.coverImage.url : null) ||
     newsDoc.coverImageUrl ||
@@ -140,7 +151,8 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     translationGroupId: _safeStr(newsDoc.translationGroupId) || (_safeStr(newsDoc.translationKey) || null),
     sourceNewsId: newsDoc._id || null,
 
-    originalLang: newsDoc.originalLang || newsDoc.language || newsDoc.lang || 'en',
+    language,
+    originalLang,
 
     // Canonical cached translations (en/hi/gu)
     translations: {
@@ -174,7 +186,6 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     translationUpdatedAt: _pickPerLangObj(newsDoc.translationUpdatedAt, (v) => _normalizeNullableDate(v), null),
 
     category: newsDoc.category,
-    language: newsDoc.language || 'en',
     status: isPublished ? 'published' : 'draft',
     publishedAt: isPublished ? (newsDoc.publishedAt || new Date()) : null,
     isBreaking: String(newsDoc.category || '').toLowerCase() === 'breaking',
@@ -184,10 +195,17 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     geo: (() => {
       const fromDoc = newsDoc.geo && typeof newsDoc.geo === 'object' && !Array.isArray(newsDoc.geo) ? newsDoc.geo : null;
       const fromTags = _geoFromTags(Array.isArray(newsDoc.tags) ? newsDoc.tags : []);
+      const fromLocation = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location) ? newsDoc.location : null;
       return {
-        state: fromDoc && fromDoc.state !== undefined ? fromDoc.state : fromTags.state,
-        district: fromDoc && fromDoc.district !== undefined ? fromDoc.district : fromTags.district,
-        city: fromDoc && fromDoc.city !== undefined ? fromDoc.city : fromTags.city,
+        state: fromDoc && fromDoc.state !== undefined
+          ? fromDoc.state
+          : ((fromLocation && fromLocation.stateSlug !== undefined) ? fromLocation.stateSlug : fromTags.state),
+        district: fromDoc && fromDoc.district !== undefined
+          ? fromDoc.district
+          : ((fromLocation && fromLocation.districtSlug !== undefined) ? fromLocation.districtSlug : fromTags.district),
+        city: fromDoc && fromDoc.city !== undefined
+          ? fromDoc.city
+          : ((fromLocation && fromLocation.citySlug !== undefined) ? fromLocation.citySlug : fromTags.city),
       };
     })(),
 
