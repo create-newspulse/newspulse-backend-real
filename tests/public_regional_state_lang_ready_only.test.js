@@ -133,6 +133,16 @@ test('GET /api/public/regional supports district + city filters via geo+tag fall
     assert.ok(asJson.includes('geo.state'));
     assert.ok(asJson.includes('geo.district'));
     assert.ok(asJson.includes('geo.city'));
+
+    // District param may represent either a district OR a city in URL segments.
+    // Ensure the district clause includes both geo.district and geo.city/tag fallbacks.
+    const districtClause = andClauses.find((c) => JSON.stringify(c).toLowerCase().includes('geo.district'));
+    assert.ok(districtClause);
+    const districtJson = JSON.stringify(districtClause).toLowerCase();
+    assert.ok(districtJson.includes('geo.city'));
+    assert.ok(districtJson.includes('tags'));
+    assert.ok(districtJson.includes('district'));
+    assert.ok(districtJson.includes('city'));
   } finally {
     Article.find = prevFind;
     Article.countDocuments = prevCount;

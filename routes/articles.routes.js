@@ -770,16 +770,56 @@ function _resolveImageUrlFromNewsDoc(doc) {
   return coverUrl ? String(coverUrl) : null;
 }
 
+function _buildFlexibleSlugValuePattern(valueSlug) {
+  const v = String(valueSlug || '').trim();
+  if (!v) return '';
+  // Accept either hyphen or spaces (or nothing) between slug segments.
+  return _escapeRegex(v).replace(/-/g, '(?:-|\\s)*');
+}
+
+function _buildFlexibleSlugValueRegex(valueSlug) {
+  const flexible = _buildFlexibleSlugValuePattern(valueSlug);
+  if (!flexible) return null;
+  return new RegExp(`^\\s*${flexible}\\s*$`, 'i');
+}
+
 function _buildGeoOrTagClause(field, tagPrefix, valueSlug) {
   const v = String(valueSlug || '').trim();
   if (!v) return null;
-  const tagRx = new RegExp(`^\\s*${_escapeRegex(tagPrefix)}\\s*:\\s*${_escapeRegex(v)}\\s*$`, 'i');
+  const valueRx = _buildFlexibleSlugValueRegex(v);
+  const valuePattern = _buildFlexibleSlugValuePattern(v) || _escapeRegex(v);
+  const tagRx = new RegExp(`^\\s*${_escapeRegex(tagPrefix)}\\s*:\\s*${valuePattern}\\s*$`, 'i');
   return {
     $or: [
       { [`geo.${field}`]: v },
+      ...(valueRx ? [{ [`geo.${field}`]: valueRx }] : []),
       { tags: tagRx },
     ],
   };
+}
+
+function _buildGeoOrTagClauseDistrictOrCity(valueSlug) {
+  const v = String(valueSlug || '').trim();
+  if (!v) return null;
+
+  const valueRx = _buildFlexibleSlugValueRegex(v);
+  const valuePattern = _buildFlexibleSlugValuePattern(v) || _escapeRegex(v);
+  const districtTagRx = new RegExp(`^\\s*district\\s*:\\s*${valuePattern}\\s*$`, 'i');
+  const cityTagRx = new RegExp(`^\\s*city\\s*:\\s*${valuePattern}\\s*$`, 'i');
+
+  const or = [
+    { 'geo.district': v },
+    { 'geo.city': v },
+    { tags: districtTagRx },
+    { tags: cityTagRx },
+  ];
+
+  if (valueRx) {
+    or.push({ 'geo.district': valueRx });
+    or.push({ 'geo.city': valueRx });
+  }
+
+  return { $or: or };
 }
 
 async function _handlePublicRegionalQuery(req, res, next, options = {}) {
@@ -816,7 +856,7 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
     const stateClause = _buildGeoOrTagClause('state', 'state', stateSlug);
     if (stateClause) andClauses.push(stateClause);
     if (districtSlug) {
-      const districtClause = _buildGeoOrTagClause('district', 'district', districtSlug);
+      const districtClause = _buildGeoOrTagClauseDistrictOrCity(districtSlug);
       if (districtClause) andClauses.push(districtClause);
     }
     if (citySlug) {
