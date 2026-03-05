@@ -696,6 +696,170 @@ router.get('/public/articles', async (req, res, next) => {
   }
 });
 
+function _normalizeOriginalLang(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (s === 'en' || s === 'hi' || s === 'gu') return s;
+  return null;
+}
+
+function _buildOriginalLangMatch(desiredLang) {
+  const desired = _normalizeOriginalLang(desiredLang);
+  if (!desired) return null;
+  const upper = desired.toUpperCase();
+  return {
+    $or: [
+      { originalLang: { $in: [desired, upper] } },
+      // Backward compatibility: older docs may only have lang/language.
+      {
+        $and: [
+          { $or: [{ originalLang: null }, { originalLang: { $exists: false } }] },
+          { $or: [{ lang: { $in: [desired, upper] } }, { language: { $in: [desired, upper] } }] },
+        ],
+      },
+    ],
+  };
+}
+
+function _buildReadyTranslationMatch(desiredLang) {
+  const desired = _normalizeOriginalLang(desiredLang);
+  if (!desired) return null;
+  // Clean UX: include ONLY fully-ready translations.
+  return {
+    $and: [
+      { [`translationStatus.${desired}`]: 'ready' },
+      { [`translations.${desired}.title`]: { $exists: true, $ne: '' } },
+      { [`translations.${desired}.summary`]: { $exists: true, $ne: '' } },
+      { [`translations.${desired}.content`]: { $exists: true, $ne: '' } },
+    ],
+  };
+}
+
+function _resolveImageUrlFromNewsDoc(doc) {
+  if (!doc || typeof doc !== 'object') return null;
+  const coverUrl =
+    (doc.coverImage && typeof doc.coverImage === 'object' && !Array.isArray(doc.coverImage) ? doc.coverImage.url : null) ||
+    doc.coverImageUrl ||
+    doc.imageURL ||
+    doc.imageUrl ||
+    null;
+  return coverUrl ? String(coverUrl) : null;
+}
+
+// GET /api/public/regional/:state?lang=en|hi|gu
+router.get('/public/regional/:state', async (req, res, next) => {
+  try {
+    const rawState = String(req.params.state || '').trim();
+    if (!rawState) {
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'state is required' });
+    }
+
+    const stateSlug = String(slugifyUnicode(rawState) || '').trim().toLowerCase();
+    if (!stateSlug) {
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Invalid state' });
+    }
+    if (!isValidStateSlug(stateSlug)) {
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Invalid state' });
+    }
+
+    const desired = normalizeLanguage(req.query.lang || req.query.language) || 'gu';
+
+    const page = Math.max(_parseIntOrDefault(req.query.page, 1), 1);
+    const limit = _clampInt(_parseIntOrDefault(req.query.limit, 20), 1, 100);
+    const skip = (page - 1) * limit;
+
+    const stateRx = new RegExp(`^${_escapeRegex(rawState)}$`, 'i');
+    const stateSlugRx = new RegExp(`^${_escapeRegex(stateSlug)}$`, 'i');
+
+    const filter = {
+      status: 'published',
+      // Regional feed includes both regional + breaking (consistent with existing category handling).
+      category: { $in: ['regional', 'breaking'] },
+      $and: [
+        {
+          $or: [
+            { 'location.stateSlug': stateSlug },
+            { 'location.state': stateRx },
+            // Backward compatibility: some docs may store slug-like strings in location.state.
+            { 'location.state': stateSlugRx },
+          ],
+        },
+      ],
+    };
+
+    // Query rules:
+    // - If requested lang matches the original language => show originals
+    // - Else => show ONLY fully-ready cached translations for that language
+    if (desired === 'gu') {
+      const originalMatch = _buildOriginalLangMatch('gu');
+      if (originalMatch) filter.$and.push(originalMatch);
+    } else if (desired === 'hi' || desired === 'en') {
+      const originalMatch = _buildOriginalLangMatch(desired);
+      const readyMatch = _buildReadyTranslationMatch(desired);
+      filter.$and.push({ $or: [originalMatch, readyMatch].filter(Boolean) });
+    }
+
+    const [itemsRaw, total] = await Promise.all([
+      News.find(filter)
+        .select('title description content slug slugs lang language originalLang translations translationStatus coverImage coverImageUrl imageURL publishedAt createdAt updatedAt location category')
+        .sort({ publishedAt: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      News.countDocuments(filter),
+    ]);
+
+    const items = (itemsRaw || []).map((doc) => {
+      const baseLang = _normalizeOriginalLang(doc?.originalLang) || _normalizeOriginalLang(doc?.lang) || _normalizeOriginalLang(doc?.language) || 'gu';
+      const imageUrl = _resolveImageUrlFromNewsDoc(doc);
+
+      if (baseLang === desired) {
+        return {
+          _id: String(doc._id),
+          slug: doc.slug || null,
+          slugs: doc.slugs || null,
+          category: doc.category || null,
+          stateSlug,
+          imageUrl,
+          title: doc.title || '',
+          summary: doc.description || '',
+          content: doc.content || '',
+          generatedAt: null,
+          provider: null,
+        };
+      }
+
+      const status = doc?.translationStatus?.[desired] || null;
+      const t = doc?.translations?.[desired];
+      const title = t && typeof t.title === 'string' ? t.title : '';
+      const summary = t && typeof t.summary === 'string' ? t.summary : '';
+      const content = t && typeof t.content === 'string' ? t.content : '';
+
+      if (status !== 'ready' || !title.trim() || !summary.trim() || !content.trim()) {
+        // Defense-in-depth: never emit pending/placeholder content.
+        return null;
+      }
+
+      return {
+        _id: String(doc._id),
+        slug: doc.slug || null,
+        slugs: doc.slugs || null,
+        category: doc.category || null,
+        stateSlug,
+        imageUrl,
+        title,
+        summary,
+        content,
+        generatedAt: t && t.generatedAt ? t.generatedAt : null,
+        provider: t && t.provider ? t.provider : null,
+      };
+    }).filter(Boolean);
+
+    return res.status(200).json({ ok: true, success: true, status: 200, data: { items, page, limit, total, stateSlug, lang: desired } });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 // GET /api/admin/articles/:id/translation-status
 router.get('/articles/:id/translation-status', requireAdminAuth, async (req, res) => {
   try {
