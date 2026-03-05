@@ -121,7 +121,9 @@ async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger, lockO
   if (!desired) return { out: doc, resolvedLang: source, translationPending: false };
 
   if (desired === source) {
-    return { out: doc, resolvedLang: desired, translationPending: false };
+    const out = { ...doc, originalLang: doc?.originalLang || source };
+    const dbSet = (!normalizeLang(doc?.originalLang) && normalizeLang(source)) ? { originalLang: source } : undefined;
+    return { out, resolvedLang: desired, translationPending: false, ...(dbSet ? { dbSet } : {}) };
   }
 
   const existingBucket = doc?.translations?.[desired];
@@ -155,145 +157,96 @@ async function ensureOnDemandNewsTranslation({ doc, requestedLang, logger, lockO
     return { out: doc, resolvedLang: source, translationPending: true };
   }
 
+  // Translate as a unit and persist atomically only when all fields succeed.
   const dbSet = {};
-  const bucketOut = {
-    title: _safeText(existingBucket?.title),
-    summary: _safeText(existingBucket?.summary),
-    content: _safeText(existingBucket?.content),
-  };
+  if (!normalizeLang(doc?.originalLang) && normalizeLang(source)) {
+    dbSet.originalLang = source;
+  }
 
   let firstErrorMessage = null;
   let sawRateLimit = false;
 
+  async function _fail(msg, context) {
+    const m = String(msg || 'translate_failed');
+    if (!firstErrorMessage) firstErrorMessage = m;
+    if (_isRateLimitErrorMessage(m)) sawRateLimit = true;
+    try {
+      log.warn?.('[i18n][news] on-demand translation failed', {
+        id: String(doc?._id || ''),
+        slug: String(doc?.slug || ''),
+        from: source,
+        to: desired,
+        ...context,
+        error: m,
+      });
+    } catch (_) {}
+  }
+
+  const title0 = _safeText(doc?.title);
+  const summary0 = _safeText(doc?.description || doc?.summary);
+  const rawBody = String(doc?.content || doc?.body || '');
+
+  const bucketOut = { title: '', summary: '', content: '' };
   try {
-    if (missing.includes('title')) {
-      const t = await translateTextStrict({ text: doc?.title, sourceLang: source, targetLang: desired });
-      if (t.ok && _isNonEmptyString(t.text)) {
-        bucketOut.title = t.text;
-        dbSet[`translations.${desired}.title`] = t.text;
-      } else {
-        const msg = t && t.ok === false ? t.error : 'empty_output';
-        if (!firstErrorMessage) firstErrorMessage = msg;
-        if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
-        try {
-          log.warn?.('[i18n][news] title translation failed', {
-            id: String(doc?._id || ''),
-            slug: String(doc?.slug || ''),
-            from: source,
-            to: desired,
-            error: msg,
-          });
-        } catch (_) {}
-      }
+    const t = await translateTextStrict({ text: title0, sourceLang: source, targetLang: desired });
+    if (!t.ok || !_isNonEmptyString(t.text)) {
+      const msg = t && t.ok === false ? t.error : 'empty_output';
+      await _fail(msg, { field: 'title' });
+      throw new Error(msg);
     }
+    bucketOut.title = t.text;
 
-    if (missing.includes('summary')) {
-      const s = await translateTextStrict({ text: doc?.description || doc?.summary, sourceLang: source, targetLang: desired });
-      if (s.ok && _isNonEmptyString(s.text)) {
-        bucketOut.summary = s.text;
-        dbSet[`translations.${desired}.summary`] = s.text;
-      } else {
-        const msg = s && s.ok === false ? s.error : 'empty_output';
-        if (!firstErrorMessage) firstErrorMessage = msg;
-        if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
-        try {
-          log.warn?.('[i18n][news] summary translation failed', {
-            id: String(doc?._id || ''),
-            slug: String(doc?.slug || ''),
-            from: source,
-            to: desired,
-            error: msg,
-          });
-        } catch (_) {}
-      }
+    const s = await translateTextStrict({ text: summary0, sourceLang: source, targetLang: desired });
+    if (!s.ok || !_isNonEmptyString(s.text)) {
+      const msg = s && s.ok === false ? s.error : 'empty_output';
+      await _fail(msg, { field: 'summary' });
+      throw new Error(msg);
     }
+    bucketOut.summary = s.text;
 
-    if (missing.includes('content')) {
-      const rawBody = String(doc?.content || doc?.body || '');
-      if (isHtmlBody(rawBody)) {
-        const c = await translateHtmlStrict({ html: rawBody, sourceLang: source, targetLang: desired });
-        if (c.ok && _isNonEmptyString(c.html)) {
-          bucketOut.content = c.html;
-          dbSet[`translations.${desired}.content`] = c.html;
-        } else {
-          const msg = c && c.ok === false ? c.error : 'empty_output';
-          if (!firstErrorMessage) firstErrorMessage = msg;
-          if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
-          try {
-            log.warn?.('[i18n][news] content translation failed', {
-              id: String(doc?._id || ''),
-              slug: String(doc?.slug || ''),
-              from: source,
-              to: desired,
-              error: msg,
-            });
-          } catch (_) {}
-        }
-      } else {
-        const c = await translateLongTextStrict({ text: rawBody, sourceLang: source, targetLang: desired });
-        if (c.ok && _isNonEmptyString(c.text)) {
-          bucketOut.content = c.text;
-          dbSet[`translations.${desired}.content`] = c.text;
-        } else {
-          const msg = c && c.ok === false ? c.error : 'empty_output';
-          if (!firstErrorMessage) firstErrorMessage = msg;
-          if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
-          try {
-            log.warn?.('[i18n][news] content translation failed', {
-              id: String(doc?._id || ''),
-              slug: String(doc?.slug || ''),
-              from: source,
-              to: desired,
-              error: msg,
-            });
-          } catch (_) {}
-        }
+    if (isHtmlBody(rawBody)) {
+      const c = await translateHtmlStrict({ html: rawBody, sourceLang: source, targetLang: desired });
+      if (!c.ok || !_isNonEmptyString(c.html)) {
+        const msg = c && c.ok === false ? c.error : 'empty_output';
+        await _fail(msg, { field: 'content' });
+        throw new Error(msg);
       }
+      bucketOut.content = c.html;
+    } else {
+      const c = await translateLongTextStrict({ text: rawBody, sourceLang: source, targetLang: desired });
+      if (!c.ok || !_isNonEmptyString(c.text)) {
+        const msg = c && c.ok === false ? c.error : 'empty_output';
+        await _fail(msg, { field: 'content' });
+        throw new Error(msg);
+      }
+      bucketOut.content = c.text;
     }
   } catch (e) {
     const msg = e?.message || String(e);
     if (!firstErrorMessage) firstErrorMessage = msg;
     if (_isRateLimitErrorMessage(msg)) sawRateLimit = true;
-    try {
-      log.warn?.('[i18n][news] on-demand translation threw', {
-        id: String(doc?._id || ''),
-        slug: String(doc?.slug || ''),
-        from: source,
-        to: desired,
-        missing,
-        message: msg,
-      });
-    } catch (_) {}
   }
 
   const hasAllTranslated = _isNonEmptyString(bucketOut.title) && _isNonEmptyString(bucketOut.summary) && _isNonEmptyString(bucketOut.content);
 
   if (hasAllTranslated) {
+    dbSet[`translations.${desired}.title`] = bucketOut.title;
+    dbSet[`translations.${desired}.summary`] = bucketOut.summary;
+    dbSet[`translations.${desired}.content`] = bucketOut.content;
+    dbSet[`translations.${desired}.generatedAt`] = nowDt;
     dbSet[`translationStatus.${desired}`] = 'ready';
     dbSet[`translationError.${desired}`] = null;
     dbSet[`translationNextRetryAt.${desired}`] = null;
-    const out = { ...doc, title: bucketOut.title, description: bucketOut.summary, content: bucketOut.content };
-    return {
-      out,
-      resolvedLang: desired,
-      translationPending: false,
-      ...(Object.keys(dbSet).length ? { dbSet } : {}),
-    };
+    const out = { ...doc, title: bucketOut.title, description: bucketOut.summary, content: bucketOut.content, originalLang: doc?.originalLang || source };
+    return { out, resolvedLang: desired, translationPending: false, ...(Object.keys(dbSet).length ? { dbSet } : {}) };
   }
 
-  // Mark failure + cooldown (rate-limit only) so we don't retry repeatedly.
-  const errMsg = firstErrorMessage || 'incomplete_translation';
+  const errMsg = firstErrorMessage || 'translate_failed';
   dbSet[`translationStatus.${desired}`] = 'failed';
   dbSet[`translationError.${desired}`] = errMsg;
   dbSet[`translationNextRetryAt.${desired}`] = sawRateLimit ? _addMinutes(nowDt, 30) : null;
-
-  // Strict: never mix languages at field-level.
-  return {
-    out: doc,
-    resolvedLang: source,
-    translationPending: desired !== source,
-    ...(Object.keys(dbSet).length ? { dbSet } : {}),
-  };
+  const out = { ...doc, originalLang: doc?.originalLang || source };
+  return { out, resolvedLang: source, translationPending: true, ...(Object.keys(dbSet).length ? { dbSet } : {}) };
 }
 
 module.exports = {

@@ -351,6 +351,7 @@ const PUBLIC_SELECT = [
   'location',
   'lang',
   'language',
+  'originalLang',
   'translationKey',
   'translationGroupId',
   'imageURL',

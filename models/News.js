@@ -80,6 +80,10 @@ const newsSchema = new mongoose.Schema({
       return String(v || 'en').trim().toLowerCase();
     },
   },
+
+  // Language of the original authored content (source for translations).
+  // Keep nullable for legacy docs; public read path may detect from content.
+  originalLang: { type: String, enum: ['en', 'hi', 'gu', null], default: null, index: true },
   // Cached translations to make language switching instant.
   // NOTE: Summary is stored as `description` in this model, but clients may treat it as summary.
   translations: {
@@ -87,16 +91,19 @@ const newsSchema = new mongoose.Schema({
       title: { type: String, default: '' },
       summary: { type: String, default: '' },
       content: { type: String, default: '' },
+      generatedAt: { type: Date, default: null },
     },
     hi: {
       title: { type: String, default: '' },
       summary: { type: String, default: '' },
       content: { type: String, default: '' },
+      generatedAt: { type: Date, default: null },
     },
     gu: {
       title: { type: String, default: '' },
       summary: { type: String, default: '' },
       content: { type: String, default: '' },
+      generatedAt: { type: Date, default: null },
     },
   },
 

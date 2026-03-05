@@ -430,8 +430,9 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       description: normalizedDescription,
       content: content ?? body ?? '',
       category,
-      language: language || 'en',
-      lang: language || 'en',
+      language: langNorm,
+      lang: langNorm,
+      originalLang: langNorm,
       stateTags,
       stateNames,
       ...(loc.state !== undefined || loc.district !== undefined || loc.city !== undefined ? {
