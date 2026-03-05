@@ -809,6 +809,15 @@ function _sanitizeOptionalQueryParam(v) {
   return s;
 }
 
+function _stripLocationPrefix(v, prefix) {
+  const s = String(v || '').trim();
+  if (!s) return '';
+  const p = String(prefix || '').trim().toLowerCase();
+  if (!p) return s;
+  const rx = new RegExp(`^\s*${_escapeRegex(p)}\s*:\s*`, 'i');
+  return s.replace(rx, '').trim();
+}
+
 async function _handlePublicRegionalQuery(req, res, next, options = {}) {
   try {
     res.set('Cache-Control', 'no-store');
@@ -817,7 +826,8 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
       ? options.stateRawOverride
       : (req.query.state || req.query.stateSlug || '');
 
-    const rawState = String(safeDecodeURIComponent(stateInput || '') || '').trim();
+    const rawState0 = _sanitizeOptionalQueryParam(safeDecodeURIComponent(stateInput || ''));
+    const rawState = _stripLocationPrefix(rawState0, 'state');
     if (!rawState) {
       return res.status(400).json({ ok: false, success: false, status: 400, message: 'state is required' });
     }
@@ -832,8 +842,10 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
 
     const desired = normalizeLanguage(req.query.lang || req.query.language) || 'gu';
 
-    const rawDistrict = _sanitizeOptionalQueryParam(safeDecodeURIComponent(req.query.district || ''));
-    const rawCity = _sanitizeOptionalQueryParam(safeDecodeURIComponent(req.query.city || ''));
+    const rawDistrict0 = _sanitizeOptionalQueryParam(safeDecodeURIComponent(req.query.district || ''));
+    const rawCity0 = _sanitizeOptionalQueryParam(safeDecodeURIComponent(req.query.city || ''));
+    const rawDistrict = _stripLocationPrefix(rawDistrict0, 'district');
+    const rawCity = _stripLocationPrefix(rawCity0, 'city');
     const districtSlug = rawDistrict ? String(slugifyUnicode(rawDistrict, { maxLength: 80 }) || '').trim().toLowerCase() : '';
     const citySlug = rawCity ? String(slugifyUnicode(rawCity, { maxLength: 80 }) || '').trim().toLowerCase() : '';
 
