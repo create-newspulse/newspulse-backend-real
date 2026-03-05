@@ -1,5 +1,5 @@
 const PublicArticle = require('../models/Article');
-const { canonicalizeSlug } = require('../lib/slug');
+const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 
 function normalizeSlug(slug) {
   return canonicalizeSlug(slug);
@@ -52,6 +52,29 @@ function _normalizeNullableDate(v) {
   if (!v) return null;
   const dt = new Date(v);
   return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
+function _geoFromTags(tagsArr) {
+  const tags = Array.isArray(tagsArr) ? tagsArr : [];
+  const out = { state: null, district: null, city: null };
+
+  for (const t0 of tags) {
+    const t = typeof t0 === 'string' ? t0.trim() : '';
+    if (!t) continue;
+    const idx = t.indexOf(':');
+    if (idx <= 0) continue;
+
+    const k = t.slice(0, idx).trim().toLowerCase();
+    const vRaw = t.slice(idx + 1).trim();
+    if (!vRaw) continue;
+
+    if (k !== 'state' && k !== 'district' && k !== 'city') continue;
+    const v = slugifyUnicode(vRaw, { maxLength: 80 });
+    if (!v) continue;
+    out[k] = v;
+  }
+
+  return out;
 }
 
 function _buildTranslationBucket(src, options = {}) {
@@ -153,6 +176,16 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     isBreaking: String(newsDoc.category || '').toLowerCase() === 'breaking',
     coverImage,
     tags: Array.isArray(newsDoc.tags) ? newsDoc.tags : [],
+
+    geo: (() => {
+      const fromDoc = newsDoc.geo && typeof newsDoc.geo === 'object' && !Array.isArray(newsDoc.geo) ? newsDoc.geo : null;
+      const fromTags = _geoFromTags(Array.isArray(newsDoc.tags) ? newsDoc.tags : []);
+      return {
+        state: fromDoc && fromDoc.state !== undefined ? fromDoc.state : fromTags.state,
+        district: fromDoc && fromDoc.district !== undefined ? fromDoc.district : fromTags.district,
+        city: fromDoc && fromDoc.city !== undefined ? fromDoc.city : fromTags.city,
+      };
+    })(),
 
     // State-wise national tags (copied from News)
     stateTags: Array.isArray(newsDoc.stateTags) ? newsDoc.stateTags : [],

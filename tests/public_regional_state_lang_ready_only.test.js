@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
-const News = require('../models/News');
+const Article = require('../models/Article');
 
 process.env.NODE_ENV = 'test';
 const app = require('../server');
@@ -29,8 +29,8 @@ function makeChainableQuery(items, capture) {
 }
 
 test('GET /api/public/regional/:state?lang=en returns ready-only translations and maps translated fields', async () => {
-  const prevFind = News.find;
-  const prevCount = News.countDocuments;
+  const prevFind = Article.find;
+  const prevCount = Article.countDocuments;
 
   const capture = { query: null, selectArg: null, sortArg: null, skip: null, limit: null };
 
@@ -43,10 +43,11 @@ test('GET /api/public/regional/:state?lang=en returns ready-only translations an
         category: 'regional',
         originalLang: 'gu',
         title: 'મૂળ શીર્ષક',
-        description: 'મૂળ સારાંશ',
+        summary: 'મૂળ સારાંશ',
         content: 'મૂળ સામગ્રી',
-        imageURL: 'https://img.example/1.jpg',
-        location: { state: 'Gujarat', stateSlug: 'gujarat' },
+        coverImage: { url: 'https://img.example/1.jpg', publicId: null, alt: null },
+        geo: { state: 'gujarat', district: null, city: null },
+        tags: ['state:gujarat'],
         translationStatus: { en: 'ready', hi: 'pending', gu: 'ready' },
         translations: {
           en: {
@@ -60,13 +61,13 @@ test('GET /api/public/regional/:state?lang=en returns ready-only translations an
       },
     ];
 
-    News.find = (q) => {
+    Article.find = (q) => {
       capture.query = q;
       return makeChainableQuery(dataset, capture);
     };
-    News.countDocuments = async () => dataset.length;
+    Article.countDocuments = async () => dataset.length;
 
-    const res = await request(app).get('/api/public/regional/gujarat?lang=en&page=1&limit=20');
+    const res = await request(app).get('/api/public/regional?state=gujarat&lang=en&page=1&limit=20');
 
     assert.equal(res.status, 200);
     assert.equal(res.body.ok, true);
@@ -86,6 +87,7 @@ test('GET /api/public/regional/:state?lang=en returns ready-only translations an
     // Query should include ready-only translation match for the requested lang.
     assert.ok(capture.query);
     assert.equal(capture.query.status, 'published');
+    assert.equal(capture.query.category, 'regional');
     assert.deepEqual(capture.sortArg, { publishedAt: -1, createdAt: -1 });
     assert.equal(capture.skip, 0);
     assert.equal(capture.limit, 20);
@@ -93,30 +95,33 @@ test('GET /api/public/regional/:state?lang=en returns ready-only translations an
     // Ensure the filter requires translationStatus.en === 'ready'.
     const andClauses = Array.isArray(capture.query.$and) ? capture.query.$and : [];
     const asJson = JSON.stringify(andClauses);
+    // Ensure state clause matches geo.state OR state:<slug> tag
+    assert.ok(asJson.includes('geo.state'));
+    assert.ok(asJson.toLowerCase().includes('state'));
     assert.ok(asJson.includes('translationStatus.en'));
     assert.ok(asJson.includes('ready'));
   } finally {
-    News.find = prevFind;
-    News.countDocuments = prevCount;
+    Article.find = prevFind;
+    Article.countDocuments = prevCount;
   }
 });
 
-test('GET /api/public/regional/:state supports district-only fallback when state tag is missing', async () => {
-  const prevFind = News.find;
-  const prevCount = News.countDocuments;
+test('GET /api/public/regional supports district + city filters via geo+tag fallback', async () => {
+  const prevFind = Article.find;
+  const prevCount = Article.countDocuments;
 
   const capture = { query: null, selectArg: null, sortArg: null, skip: null, limit: null };
 
   try {
     const dataset = [];
 
-    News.find = (q) => {
+    Article.find = (q) => {
       capture.query = q;
       return makeChainableQuery(dataset, capture);
     };
-    News.countDocuments = async () => dataset.length;
+    Article.countDocuments = async () => dataset.length;
 
-    const res = await request(app).get('/api/public/regional/Gujarat%20?lang=gu&district=Ahmedabad%20&page=1&limit=20');
+    const res = await request(app).get('/api/public/regional?state=Gujarat%20&district=Ahmedabad%20&city=Gandhinagar&lang=gu&page=1&limit=20');
 
     assert.equal(res.status, 200);
     assert.equal(res.body.ok, true);
@@ -124,31 +129,13 @@ test('GET /api/public/regional/:state supports district-only fallback when state
 
     assert.ok(capture.query);
     const andClauses = Array.isArray(capture.query.$and) ? capture.query.$and : [];
-    assert.ok(andClauses.length >= 1);
-
-    const locationClause = andClauses[0];
-    assert.ok(locationClause);
-    assert.ok(Array.isArray(locationClause.$or));
-    assert.equal(locationClause.$or.length, 2);
-
-    const withState = locationClause.$or[0];
-    const fallback = locationClause.$or[1];
-
-    assert.ok(Array.isArray(withState.$and));
-    assert.ok(Array.isArray(fallback.$and));
-
-    const withStateJson = JSON.stringify(withState);
-    const fallbackJson = JSON.stringify(fallback);
-
-    assert.ok(withStateJson.includes('location.stateSlug'));
-    assert.ok(withStateJson.includes('location.district'));
-
-    assert.ok(fallbackJson.includes('location.district'));
-    assert.ok(!fallbackJson.includes('location.stateSlug'));
-    assert.ok(!fallbackJson.includes('location.state'));
+    const asJson = JSON.stringify(andClauses).toLowerCase();
+    assert.ok(asJson.includes('geo.state'));
+    assert.ok(asJson.includes('geo.district'));
+    assert.ok(asJson.includes('geo.city'));
   } finally {
-    News.find = prevFind;
-    News.countDocuments = prevCount;
+    Article.find = prevFind;
+    Article.countDocuments = prevCount;
   }
 });
 

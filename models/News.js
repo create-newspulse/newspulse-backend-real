@@ -68,6 +68,41 @@ const newsSchema = new mongoose.Schema({
     gu: { type: String, default: null, index: true },
   },
   tags: [String],
+
+  // Canonical geo slugs for regional lookups.
+  // Populated from tags like "state:gujarat", "district:gandhinagar", "city:gandhinagar".
+  geo: {
+    state: {
+      type: String,
+      default: null,
+      index: true,
+      set: (v) => {
+        if (v === null || v === undefined) return v;
+        const s = String(v).trim();
+        return s ? slugifyUnicode(s, { maxLength: 80 }) : null;
+      },
+    },
+    district: {
+      type: String,
+      default: null,
+      index: true,
+      set: (v) => {
+        if (v === null || v === undefined) return v;
+        const s = String(v).trim();
+        return s ? slugifyUnicode(s, { maxLength: 80 }) : null;
+      },
+    },
+    city: {
+      type: String,
+      default: null,
+      index: true,
+      set: (v) => {
+        if (v === null || v === undefined) return v;
+        const s = String(v).trim();
+        return s ? slugifyUnicode(s, { maxLength: 80 }) : null;
+      },
+    },
+  },
   category: {
     type: String,
     index: true,
@@ -434,6 +469,7 @@ newsSchema.index({ workflowStage: 1, workflowUpdatedAt: -1 });
 newsSchema.index({ status: 1, createdAt: -1 });
 newsSchema.index({ scheduledAt: 1 });
 newsSchema.index({ category: 1, status: 1, stateTags: 1, publishedAt: -1 });
+newsSchema.index({ status: 1, category: 1, 'geo.state': 1, 'geo.district': 1, 'geo.city': 1, publishedAt: -1 });
 newsSchema.index({ translationKey: 1, lang: 1, status: 1, publishedAt: -1 });
 newsSchema.index({ translationGroupId: 1, lang: 1, status: 1, publishedAt: -1 });
 newsSchema.index({ topic: 1, status: 1, publishedAt: -1 });

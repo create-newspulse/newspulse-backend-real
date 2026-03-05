@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { canonicalizeSlug } = require('../lib/slug');
+const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 
 const CATEGORY_VALUES = [
   'breaking',
@@ -160,6 +160,41 @@ const articleSchema = new mongoose.Schema(
     },
     tags: { type: [String], default: [] },
 
+    // Canonical geo slugs for regional lookups.
+    // Populated from tags like "state:gujarat", "district:gandhinagar", "city:gandhinagar".
+    geo: {
+      state: {
+        type: String,
+        default: null,
+        index: true,
+        set: (v) => {
+          if (v === null || v === undefined) return v;
+          const s = String(v).trim();
+          return s ? slugifyUnicode(s, { maxLength: 80 }) : null;
+        },
+      },
+      district: {
+        type: String,
+        default: null,
+        index: true,
+        set: (v) => {
+          if (v === null || v === undefined) return v;
+          const s = String(v).trim();
+          return s ? slugifyUnicode(s, { maxLength: 80 }) : null;
+        },
+      },
+      city: {
+        type: String,
+        default: null,
+        index: true,
+        set: (v) => {
+          if (v === null || v === undefined) return v;
+          const s = String(v).trim();
+          return s ? slugifyUnicode(s, { maxLength: 80 }) : null;
+        },
+      },
+    },
+
     // Auto-tags for National articles (used for state-wise national filtering)
     stateTags: { type: [String], default: [], index: true },
     stateNames: { type: [String], default: [] },
@@ -272,6 +307,7 @@ articleSchema.pre('save', function preSave(next) {
 articleSchema.index({ status: 1, category: 1, publishedAt: -1 });
 articleSchema.index({ status: 1, isBreaking: 1, publishedAt: -1 });
 articleSchema.index({ category: 1, status: 1, stateTags: 1, publishedAt: -1 });
+articleSchema.index({ status: 1, category: 1, 'geo.state': 1, 'geo.district': 1, 'geo.city': 1, publishedAt: -1 });
 articleSchema.index({ slug: 1 }, { unique: true });
 articleSchema.index({ 'slugs.en': 1 });
 articleSchema.index({ 'slugs.hi': 1 });

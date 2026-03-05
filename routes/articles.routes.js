@@ -37,6 +37,27 @@ function parseTags(tags) {
     .filter(Boolean);
 }
 
+function _geoFromTags(tagsArr) {
+  const tags = Array.isArray(tagsArr) ? tagsArr : [];
+  const out = { state: null, district: null, city: null };
+
+  for (const t0 of tags) {
+    const t = typeof t0 === 'string' ? t0.trim() : '';
+    if (!t) continue;
+    const idx = t.indexOf(':');
+    if (idx <= 0) continue;
+    const k = t.slice(0, idx).trim().toLowerCase();
+    const vRaw = t.slice(idx + 1).trim();
+    if (!vRaw) continue;
+    if (k !== 'state' && k !== 'district' && k !== 'city') continue;
+    const v = slugifyUnicode(vRaw, { maxLength: 80 });
+    if (!v) continue;
+    out[k] = v;
+  }
+
+  return out;
+}
+
 function _stripUndefinedKeysInPlace(obj) {
   if (!obj || typeof obj !== 'object') return obj;
   for (const k of Object.keys(obj)) {
@@ -338,6 +359,9 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       coverImage,
     } = body0;
 
+    const tagsArr = parseTags(tags);
+    const geo = _geoFromTags(tagsArr);
+
     // Guard against accidental "undefined"/"null" string inputs from form-data payloads.
     const title = _normalizeOptionalString(titleRaw);
     const summary = _normalizeOptionalString(summaryRaw);
@@ -453,7 +477,8 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
         },
       } : {}),
       translationGroupId: translationGroupId || new mongoose.Types.ObjectId().toString(),
-      tags: parseTags(tags),
+      tags: tagsArr,
+      geo,
       status: initialStatus || 'draft',
       scheduledAt: scheduled,
       imageURL: imageURL ?? resolvedCoverImageUrl,
@@ -745,15 +770,30 @@ function _resolveImageUrlFromNewsDoc(doc) {
   return coverUrl ? String(coverUrl) : null;
 }
 
-// GET /api/public/regional/:state?lang=en|hi|gu
-router.get('/public/regional/:state', async (req, res, next) => {
+function _buildGeoOrTagClause(field, tagPrefix, valueSlug) {
+  const v = String(valueSlug || '').trim();
+  if (!v) return null;
+  const tagRx = new RegExp(`^\\s*${_escapeRegex(tagPrefix)}\\s*:\\s*${_escapeRegex(v)}\\s*$`, 'i');
+  return {
+    $or: [
+      { [`geo.${field}`]: v },
+      { tags: tagRx },
+    ],
+  };
+}
+
+async function _handlePublicRegionalQuery(req, res, next, options = {}) {
   try {
-    const rawState = String(safeDecodeURIComponent(req.params.state || '') || '').trim();
+    const stateInput = options.stateRawOverride !== undefined
+      ? options.stateRawOverride
+      : (req.query.state || req.query.stateSlug || '');
+
+    const rawState = String(safeDecodeURIComponent(stateInput || '') || '').trim();
     if (!rawState) {
       return res.status(400).json({ ok: false, success: false, status: 400, message: 'state is required' });
     }
 
-    const stateSlug = String(slugifyUnicode(rawState) || '').trim().toLowerCase();
+    const stateSlug = String(slugifyUnicode(rawState, { maxLength: 80 }) || '').trim().toLowerCase();
     if (!stateSlug) {
       return res.status(400).json({ ok: false, success: false, status: 400, message: 'Invalid state' });
     }
@@ -772,58 +812,22 @@ router.get('/public/regional/:state', async (req, res, next) => {
     const limit = _clampInt(_parseIntOrDefault(req.query.limit, 20), 1, 100);
     const skip = (page - 1) * limit;
 
-    const stateRx = new RegExp(`^${_escapeRegex(rawState)}$`, 'i');
-    const stateSlugRx = new RegExp(`^${_escapeRegex(stateSlug)}$`, 'i');
-
-    const districtRx = rawDistrict ? new RegExp(`^\\s*${_escapeRegex(rawDistrict)}\\s*$`, 'i') : null;
-    const districtSlugRx = districtSlug ? new RegExp(`^\\s*${_escapeRegex(districtSlug)}\\s*$`, 'i') : null;
-    const cityRx = rawCity ? new RegExp(`^\\s*${_escapeRegex(rawCity)}\\s*$`, 'i') : null;
-    const citySlugRx = citySlug ? new RegExp(`^\\s*${_escapeRegex(citySlug)}\\s*$`, 'i') : null;
-
-    const stateClause = {
-      $or: [
-        { 'location.stateSlug': stateSlug },
-        { 'location.state': stateRx },
-        // Backward compatibility: some docs may store slug-like strings in location.state.
-        { 'location.state': stateSlugRx },
-      ],
-    };
-
-    const districtClause = rawDistrict ? {
-      $or: [
-        ...(districtSlug ? [{ 'location.districtSlug': districtSlug }] : []),
-        { 'location.district': districtRx },
-        ...(districtSlugRx ? [{ 'location.district': districtSlugRx }] : []),
-      ],
-    } : null;
-
-    const cityClause = rawCity ? {
-      $or: [
-        ...(citySlug ? [{ 'location.citySlug': citySlug }] : []),
-        { 'location.city': cityRx },
-        ...(citySlugRx ? [{ 'location.city': citySlugRx }] : []),
-      ],
-    } : null;
-
-    // Matching rules:
-    // - Prefer (state AND district/city)
-    // - Fallback to (district/city) alone for legacy docs missing state tags
-    const locationClause = (districtClause || cityClause)
-      ? {
-        $or: [
-          { $and: [stateClause, districtClause, cityClause].filter(Boolean) },
-          { $and: [districtClause, cityClause].filter(Boolean) },
-        ],
-      }
-      : stateClause;
+    const andClauses = [];
+    const stateClause = _buildGeoOrTagClause('state', 'state', stateSlug);
+    if (stateClause) andClauses.push(stateClause);
+    if (districtSlug) {
+      const districtClause = _buildGeoOrTagClause('district', 'district', districtSlug);
+      if (districtClause) andClauses.push(districtClause);
+    }
+    if (citySlug) {
+      const cityClause = _buildGeoOrTagClause('city', 'city', citySlug);
+      if (cityClause) andClauses.push(cityClause);
+    }
 
     const filter = {
       status: 'published',
-      // Regional feed includes both regional + breaking (consistent with existing category handling).
-      category: { $in: ['regional', 'breaking'] },
-      $and: [
-        locationClause,
-      ],
+      category: 'regional',
+      ...(andClauses.length ? { $and: andClauses } : {}),
     };
 
     // Query rules:
@@ -831,25 +835,25 @@ router.get('/public/regional/:state', async (req, res, next) => {
     // - Else => show ONLY fully-ready cached translations for that language
     if (desired === 'gu') {
       const originalMatch = _buildOriginalLangMatch('gu');
-      if (originalMatch) filter.$and.push(originalMatch);
+      if (originalMatch) filter.$and = (filter.$and || []).concat([originalMatch]);
     } else if (desired === 'hi' || desired === 'en') {
       const originalMatch = _buildOriginalLangMatch(desired);
       const readyMatch = _buildReadyTranslationMatch(desired);
-      filter.$and.push({ $or: [originalMatch, readyMatch].filter(Boolean) });
+      filter.$and = (filter.$and || []).concat([{ $or: [originalMatch, readyMatch].filter(Boolean) }]);
     }
 
     const [itemsRaw, total] = await Promise.all([
-      News.find(filter)
-        .select('title description content slug slugs lang language originalLang translations translationStatus coverImage coverImageUrl imageURL publishedAt createdAt updatedAt location category')
+      PublicArticle.find(filter)
+        .select('title summary content slug slugs language originalLang translations translationStatus coverImage publishedAt createdAt updatedAt geo tags category')
         .sort({ publishedAt: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
-      News.countDocuments(filter),
+      PublicArticle.countDocuments(filter),
     ]);
 
     const items = (itemsRaw || []).map((doc) => {
-      const baseLang = _normalizeOriginalLang(doc?.originalLang) || _normalizeOriginalLang(doc?.lang) || _normalizeOriginalLang(doc?.language) || 'gu';
+      const baseLang = _normalizeOriginalLang(doc?.originalLang) || _normalizeOriginalLang(doc?.language) || 'gu';
       const imageUrl = _resolveImageUrlFromNewsDoc(doc);
 
       if (baseLang === desired) {
@@ -861,7 +865,7 @@ router.get('/public/regional/:state', async (req, res, next) => {
           stateSlug,
           imageUrl,
           title: doc.title || '',
-          summary: doc.description || '',
+          summary: doc.summary || '',
           content: doc.content || '',
           generatedAt: null,
           provider: null,
@@ -875,7 +879,6 @@ router.get('/public/regional/:state', async (req, res, next) => {
       const content = t && typeof t.content === 'string' ? t.content : '';
 
       if (status !== 'ready' || !title.trim() || !summary.trim() || !content.trim()) {
-        // Defense-in-depth: never emit pending/placeholder content.
         return null;
       }
 
@@ -898,6 +901,16 @@ router.get('/public/regional/:state', async (req, res, next) => {
   } catch (err) {
     return next(err);
   }
+}
+
+// GET /api/public/regional?state=&district=&city=&lang=en|hi|gu
+router.get('/public/regional', async (req, res, next) => {
+  return _handlePublicRegionalQuery(req, res, next);
+});
+
+// GET /api/public/regional/:state?district=&city=&lang=en|hi|gu (legacy)
+router.get('/public/regional/:state', async (req, res, next) => {
+  return _handlePublicRegionalQuery(req, res, next, { stateRawOverride: req.params.state });
 });
 
 // GET /api/admin/articles/:id/translation-status
@@ -1249,6 +1262,9 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       if (coverObj.alt !== undefined) nextCover.alt = coverObj.alt ? String(coverObj.alt) : null;
     }
 
+    const tagsArr = tags !== undefined ? parseTags(tags) : null;
+    const geo = tagsArr ? _geoFromTags(tagsArr) : null;
+
     const update = {
       ...(title !== undefined ? { title } : {}),
       ...(summaryOrDescription !== undefined ? { description: String(summaryOrDescription).trim() } : {}),
@@ -1258,7 +1274,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       ...(loc.state !== undefined ? { 'location.state': loc.state, 'location.stateSlug': loc.stateSlug ?? null } : {}),
       ...(loc.district !== undefined ? { 'location.district': loc.district, 'location.districtSlug': loc.districtSlug ?? null } : {}),
       ...(loc.city !== undefined ? { 'location.city': loc.city, 'location.citySlug': loc.citySlug ?? null } : {}),
-      ...(tags !== undefined ? { tags: parseTags(tags) } : {}),
+      ...(tagsArr ? { tags: tagsArr, geo } : {}),
       ...(status !== undefined && status !== null && String(status).trim() !== '' ? { status: String(status).toLowerCase() } : {}),
       ...(scheduled !== undefined ? { scheduledAt: scheduled } : {}),
       ...(imageURL !== undefined ? { imageURL } : {}),
@@ -1457,7 +1473,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         ...(content !== undefined || bodyText !== undefined ? { content: content ?? bodyText ?? '' } : {}),
         ...(category !== undefined ? { category } : {}),
         ...(language !== undefined ? { language: normalizeLanguage(language) || undefined } : {}),
-        ...(tags !== undefined ? { tags: parseTags(tags) } : {}),
+        ...(tagsArr ? { tags: tagsArr, geo } : {}),
         ...(status !== undefined && status !== null && String(status).trim() !== '' && allowedArticleStatuses.has(String(status).toLowerCase())
           ? { status: String(status).toLowerCase() }
           : {}),
