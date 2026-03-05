@@ -800,6 +800,15 @@ function _buildGeoOrTagClause(field, tagPrefix, valueSlug) {
   };
 }
 
+function _sanitizeOptionalQueryParam(v) {
+  if (v === undefined || v === null) return '';
+  const s = String(v).trim();
+  if (!s) return '';
+  const lower = s.toLowerCase();
+  if (lower === 'undefined' || lower === 'null') return '';
+  return s;
+}
+
 async function _handlePublicRegionalQuery(req, res, next, options = {}) {
   try {
     res.set('Cache-Control', 'no-store');
@@ -823,8 +832,8 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
 
     const desired = normalizeLanguage(req.query.lang || req.query.language) || 'gu';
 
-    const rawDistrict = String(safeDecodeURIComponent(req.query.district || '') || '').trim();
-    const rawCity = String(safeDecodeURIComponent(req.query.city || '') || '').trim();
+    const rawDistrict = _sanitizeOptionalQueryParam(safeDecodeURIComponent(req.query.district || ''));
+    const rawCity = _sanitizeOptionalQueryParam(safeDecodeURIComponent(req.query.city || ''));
     const districtSlug = rawDistrict ? String(slugifyUnicode(rawDistrict, { maxLength: 80 }) || '').trim().toLowerCase() : '';
     const citySlug = rawCity ? String(slugifyUnicode(rawCity, { maxLength: 80 }) || '').trim().toLowerCase() : '';
 
