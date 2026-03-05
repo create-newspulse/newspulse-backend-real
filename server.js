@@ -557,6 +557,15 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json());
+// Friendly error for invalid JSON bodies (e.g. bad Unicode escapes like "\\u0" without 4 hex digits).
+app.use((err, req, res, next) => {
+  try {
+    if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError)) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid JSON body' });
+    }
+  } catch (_) {}
+  return next(err);
+});
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 

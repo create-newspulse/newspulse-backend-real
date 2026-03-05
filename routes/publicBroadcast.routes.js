@@ -39,23 +39,21 @@ function _resolvePublicItemText(doc, lang) {
   const d = doc && typeof doc === 'object' ? doc : {};
   const target = _normalizeLang(lang, 'gu');
 
+  const bucket = d.i18n && typeof d.i18n === 'object' ? d.i18n[target] : null;
+  if (bucket && typeof bucket.text === 'string' && bucket.text.trim()) {
+    return String(bucket.text).trim();
+  }
+
   const i18n = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
   const legacy = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
 
   const pickFrom = (obj, k) =>
     (obj && typeof obj[k] === 'string' && obj[k].trim() ? String(obj[k]).trim() : null);
 
-  // Requested Phase 1 fallback order:
-  // requested -> en -> hi -> gu -> sourceText
+  // Strict: requested -> original text (no cross-language fallback).
   const pick =
     pickFrom(i18n, target) ||
     pickFrom(legacy, target) ||
-    pickFrom(i18n, 'en') ||
-    pickFrom(legacy, 'en') ||
-    pickFrom(i18n, 'hi') ||
-    pickFrom(legacy, 'hi') ||
-    pickFrom(i18n, 'gu') ||
-    pickFrom(legacy, 'gu') ||
     (typeof d.text === 'string' && d.text.trim() ? String(d.text).trim() : '');
 
   return String(pick || '').trim();

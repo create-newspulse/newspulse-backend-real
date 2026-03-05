@@ -1,8 +1,18 @@
 const { computePublicEnabled, listItemsLast24hByChannel, getOrCreateSettings, adminSettingsResponse } = require('./broadcastCenter.service');
 const { getBroadcastVersion, bumpBroadcastVersion } = require('./broadcastVersion.service');
 const googleTranslate = require('./googleTranslate.service');
+const mongoose = require('mongoose');
+const BroadcastItem = require('../models/BroadcastItem');
+const { isGoogleTranslateConfigured } = require('./translationEnabled');
 
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
+
+function normalizeLangOrNull(v) {
+  const s0 = String(v || '').trim().toLowerCase();
+  if (!s0) return null;
+  const s = s0.split(/[-_]/)[0];
+  return SUPPORTED_LANGS.has(s) ? s : null;
+}
 
 function normalizeLang(v, fallback = 'gu') {
   const s0 = String(v || '').trim().toLowerCase();
@@ -15,27 +25,18 @@ function resolvePublicText(doc, lang) {
   const d = doc && typeof doc === 'object' ? doc : {};
   const target = normalizeLang(lang, 'gu');
 
-  const src = SUPPORTED_LANGS.has(String(d.sourceLang || ''))
-    ? String(d.sourceLang)
-    : (SUPPORTED_LANGS.has(String(d.language || '')) ? String(d.language) : null);
+  // IMPORTANT: never fall back to a different language in the response.
+  // If target text is missing, callers should translate (and cache) or return original.
+  const bucket = d.i18n && typeof d.i18n === 'object' ? d.i18n[target] : null;
+  if (bucket && typeof bucket.text === 'string' && bucket.text.trim()) return String(bucket.text).trim();
 
-  const translations = d.translations && typeof d.translations === 'object' ? d.translations : null;
-  const i18n = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
-  const legacy = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
+  const legacyI18n = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
+  if (legacyI18n && typeof legacyI18n[target] === 'string' && legacyI18n[target].trim()) return String(legacyI18n[target]).trim();
 
-  const pick =
-    (translations && typeof translations[target] === 'string' && translations[target].trim() ? translations[target] : null) ||
-    (i18n && typeof i18n[target] === 'string' && i18n[target].trim() ? i18n[target] : null) ||
-    (legacy && typeof legacy[target] === 'string' && legacy[target].trim() ? legacy[target] : null) ||
-    (src && translations && typeof translations[src] === 'string' && translations[src].trim() ? translations[src] : null) ||
-    (src && i18n && typeof i18n[src] === 'string' && i18n[src].trim() ? i18n[src] : null) ||
-    (src && legacy && typeof legacy[src] === 'string' && legacy[src].trim() ? legacy[src] : null) ||
-    (i18n && typeof i18n.gu === 'string' && i18n.gu.trim() ? i18n.gu : null) ||
-    (i18n && typeof i18n.hi === 'string' && i18n.hi.trim() ? i18n.hi : null) ||
-    (i18n && typeof i18n.en === 'string' && i18n.en.trim() ? i18n.en : null) ||
-    (typeof d.text === 'string' && d.text.trim() ? d.text : '');
+  const legacyTranslations = d.translations && typeof d.translations === 'object' ? d.translations : null;
+  if (legacyTranslations && typeof legacyTranslations[target] === 'string' && legacyTranslations[target].trim()) return String(legacyTranslations[target]).trim();
 
-  return String(pick || '').trim();
+  return typeof d.text === 'string' ? String(d.text).trim() : '';
 }
 
 // Snapshot cache: key -> { exp, payload }
@@ -68,6 +69,8 @@ function setSnapshotCached(key, payload) {
 function pickLangText(doc, lang) {
   const d = doc && typeof doc === 'object' ? doc : {};
   const l = normalizeLang(lang, 'gu');
+  const bucket = d.i18n && typeof d.i18n === 'object' ? d.i18n[l] : null;
+  if (bucket && typeof bucket.text === 'string' && bucket.text.trim()) return String(bucket.text).trim();
   const i18n = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
   const legacy = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
   const from = (obj) => (obj && typeof obj[l] === 'string' && obj[l].trim() ? String(obj[l]).trim() : null);
@@ -75,56 +78,231 @@ function pickLangText(doc, lang) {
 }
 
 function pickSourceText(doc) {
-  // Prefer Gujarati as the canonical stored source for tickers.
   const d = doc && typeof doc === 'object' ? doc : {};
+  const src = normalizeLangOrNull(d.lang) || normalizeLangOrNull(d.sourceLang) || normalizeLangOrNull(d.language);
+  if (src) {
+    const srcBucket = d.i18n && typeof d.i18n === 'object' ? d.i18n[src] : null;
+    if (srcBucket && typeof srcBucket.text === 'string' && srcBucket.text.trim()) return String(srcBucket.text).trim();
+    const srcLegacy = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
+    if (srcLegacy && typeof srcLegacy[src] === 'string' && srcLegacy[src].trim()) return String(srcLegacy[src]).trim();
+  }
+
   const i18n = d.text_i18n && typeof d.text_i18n === 'object' ? d.text_i18n : null;
   const legacy = d.textByLang && typeof d.textByLang === 'object' ? d.textByLang : null;
   const pick =
+    (d.i18n && typeof d.i18n === 'object' && d.i18n.gu && typeof d.i18n.gu.text === 'string' && d.i18n.gu.text.trim() ? d.i18n.gu.text : null) ||
+    (d.i18n && typeof d.i18n === 'object' && d.i18n.hi && typeof d.i18n.hi.text === 'string' && d.i18n.hi.text.trim() ? d.i18n.hi.text : null) ||
+    (d.i18n && typeof d.i18n === 'object' && d.i18n.en && typeof d.i18n.en.text === 'string' && d.i18n.en.text.trim() ? d.i18n.en.text : null) ||
     (i18n && typeof i18n.gu === 'string' && i18n.gu.trim() ? i18n.gu : null) ||
     (legacy && typeof legacy.gu === 'string' && legacy.gu.trim() ? legacy.gu : null) ||
+    (i18n && typeof i18n.hi === 'string' && i18n.hi.trim() ? i18n.hi : null) ||
+    (legacy && typeof legacy.hi === 'string' && legacy.hi.trim() ? legacy.hi : null) ||
     (typeof d.text === 'string' && d.text.trim() ? d.text : '');
   return String(pick || '').trim();
+}
+
+function _isRateLimitErrorMessage(msg) {
+  return /(rate\s*limit\s*exceeded|too\s*many\s*requests|resource\s*exhausted|http[_\s-]*429|\b429\b)/i.test(String(msg || ''));
+}
+
+function _addMinutes(d, minutes) {
+  const dt = d instanceof Date ? d : new Date(d);
+  return new Date(dt.getTime() + (minutes * 60 * 1000));
+}
+
+function _canWriteDb() {
+  // Avoid Mongoose buffering/hanging in test/import mode.
+  const env = String(process.env.NODE_ENV || '').trim().toLowerCase();
+  if (env === 'test') return false;
+  return Boolean(mongoose.connection && mongoose.connection.readyState === 1);
+}
+
+function _getI18nBucket(doc, lang) {
+  const d = doc && typeof doc === 'object' ? doc : {};
+  const l = normalizeLangOrNull(lang);
+  if (!l) return null;
+  const i18n = d.i18n && typeof d.i18n === 'object' ? d.i18n : null;
+  const b = i18n && typeof i18n[l] === 'object' ? i18n[l] : null;
+  return b && !Array.isArray(b) ? b : null;
 }
 
 async function resolveTextsWithTranslation(docs, targetLang) {
   const dst = normalizeLang(targetLang, 'gu');
   const items = Array.isArray(docs) ? docs : [];
 
-  // Start with best available stored translation.
+  const now = new Date();
+
+  // Start with stored translation (canonical i18n -> legacy).
   const resolved = items.map((d) => pickLangText(d, dst));
 
-  // No translation needed for Gujarati.
-  if (dst === 'gu') {
-    return resolved.map((t, i) => (t && t.trim() ? t : pickSourceText(items[i])));
-  }
+  // Identify which items need translation.
+  const needs = [];
+  for (let i = 0; i < items.length; i++) {
+    const d = items[i];
+    const srcLang =
+      normalizeLangOrNull(d?.lang) ||
+      normalizeLangOrNull(d?.sourceLang) ||
+      normalizeLangOrNull(d?.language) ||
+      (pickLangText(d, 'gu') ? 'gu' : (pickLangText(d, 'hi') ? 'hi' : (pickLangText(d, 'en') ? 'en' : null))) ||
+      'gu';
 
-  const missingIdx = [];
-  const missingSrc = [];
-  for (let i = 0; i < resolved.length; i++) {
+    const srcText = pickSourceText(d);
     const t = resolved[i];
+
+    // If we have target stored, or no source, just use what we have.
     if (typeof t === 'string' && t.trim()) continue;
-    const srcText = pickSourceText(items[i]);
-    resolved[i] = srcText;
-    if (srcText) {
-      missingIdx.push(i);
-      missingSrc.push(srcText);
+    if (!srcText) {
+      resolved[i] = '';
+      continue;
     }
+
+    // If target is the source lang, return original.
+    if (dst === srcLang) {
+      resolved[i] = srcText;
+      continue;
+    }
+
+    // Cooldown/locking state from canonical bucket only.
+    const bucket = _getI18nBucket(d, dst);
+    const status = bucket && typeof bucket.status === 'string' ? bucket.status : null;
+    const retryAtRaw = bucket ? bucket.nextRetryAt : null;
+    const retryAt = retryAtRaw ? new Date(retryAtRaw) : null;
+
+    if (status === 'pending' || (status === 'failed' && retryAt && now < retryAt)) {
+      resolved[i] = srcText;
+      continue;
+    }
+
+    // Translation disabled/misconfigured: return original.
+    if (!isGoogleTranslateConfigured()) {
+      resolved[i] = srcText;
+      continue;
+    }
+
+    needs.push({ idx: i, id: d && d._id ? String(d._id) : null, srcLang, srcText });
+    resolved[i] = srcText;
   }
 
-  if (!missingSrc.length) return resolved;
+  if (!needs.length) return resolved;
 
-  const tr = await googleTranslate.translateMany(missingSrc, dst).catch((e) => ({ ok: false, error: e?.message || String(e) }));
-  if (!tr || !tr.ok || !Array.isArray(tr.items)) {
+  // Acquire atomic locks (best-effort). If DB isn't writable, translate without persisting.
+  const lockable = [];
+  if (_canWriteDb()) {
+    for (const n of needs) {
+      if (!n.id) continue;
+      try {
+        const lockRes = await BroadcastItem.updateOne(
+          {
+            _id: n.id,
+            $and: [
+              { [`i18n.${dst}.status`]: { $ne: 'pending' } },
+              {
+                $or: [
+                  { [`i18n.${dst}.status`]: { $ne: 'failed' } },
+                  { [`i18n.${dst}.nextRetryAt`]: { $exists: false } },
+                  { [`i18n.${dst}.nextRetryAt`]: null },
+                  { [`i18n.${dst}.nextRetryAt`]: { $lte: now } },
+                ],
+              },
+            ],
+          },
+          {
+            $set: {
+              [`i18n.${dst}.status`]: 'pending',
+              [`i18n.${dst}.error`]: null,
+              [`i18n.${dst}.nextRetryAt`]: null,
+              [`i18n.${dst}.updatedAt`]: now,
+            },
+          }
+        );
+
+        const modified = typeof lockRes?.modifiedCount === 'number'
+          ? lockRes.modifiedCount
+          : (typeof lockRes?.nModified === 'number' ? lockRes.nModified : 0);
+        if (modified === 1) lockable.push(n);
+      } catch (_) {
+        // ignore
+      }
+    }
+  } else {
+    lockable.push(...needs);
+  }
+
+  if (!lockable.length) return resolved;
+
+  // Group by source lang so we can pass sourceLang to the API.
+  const groups = new Map();
+  for (const n of lockable) {
+    const k = normalizeLangOrNull(n.srcLang) || 'auto';
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(n);
+  }
+
+  for (const [srcLang, arr] of groups.entries()) {
+    const texts = arr.map((n) => String(n.srcText || '').trim().slice(0, 160));
+    let tr = null;
     try {
-      console.warn('[broadcast] translateMany fallback', { lang: dst, count: missingSrc.length, error: tr && tr.error ? tr.error : 'translate_failed' });
-    } catch (_) {}
-    return resolved;
-  }
+      tr = await googleTranslate.translateMany(texts, dst, { ...(srcLang !== 'auto' ? { sourceLang: srcLang } : {}) });
+    } catch (e) {
+      tr = { ok: false, error: e?.message || String(e) };
+    }
 
-  for (let j = 0; j < missingIdx.length; j++) {
-    const i = missingIdx[j];
-    const v = tr.items[j];
-    if (typeof v === 'string' && v.trim()) resolved[i] = v.trim().slice(0, 160);
+    if (!tr || tr.ok !== true || !Array.isArray(tr.items) || tr.items.length !== texts.length) {
+      const errMsg = tr && tr.error ? tr.error : 'Translate failed';
+      const isRateLimit = _isRateLimitErrorMessage(errMsg);
+      if (_canWriteDb()) {
+        await Promise.all(arr.map(async (n) => {
+          if (!n.id) return;
+          try {
+            await BroadcastItem.updateOne(
+              { _id: n.id },
+              {
+                $set: {
+                  [`i18n.${dst}.status`]: 'failed',
+                  [`i18n.${dst}.error`]: errMsg,
+                  [`i18n.${dst}.nextRetryAt`]: isRateLimit ? _addMinutes(now, 30) : null,
+                  [`i18n.${dst}.updatedAt`]: now,
+                },
+              }
+            );
+          } catch (_) {}
+        }));
+      }
+      continue;
+    }
+
+    // Persist + apply to response.
+    const writes = [];
+    for (let j = 0; j < arr.length; j++) {
+      const n = arr[j];
+      const translated = typeof tr.items[j] === 'string' ? tr.items[j].trim().slice(0, 160) : '';
+      if (!translated) continue;
+
+      resolved[n.idx] = translated;
+
+      if (_canWriteDb() && n.id) {
+        writes.push(
+          BroadcastItem.updateOne(
+            { _id: n.id },
+            {
+              $set: {
+                [`i18n.${dst}.text`]: translated,
+                [`i18n.${dst}.status`]: 'ready',
+                [`i18n.${dst}.error`]: null,
+                [`i18n.${dst}.nextRetryAt`]: null,
+                [`i18n.${dst}.updatedAt`]: now,
+                // Backward-compat caches
+                [`text_i18n.${dst}`]: translated,
+                [`translations.${dst}`]: translated,
+                [`textByLang.${dst}`]: translated,
+              },
+            }
+          ).catch(() => null)
+        );
+      }
+    }
+
+    if (writes.length) await Promise.all(writes);
   }
 
   return resolved;

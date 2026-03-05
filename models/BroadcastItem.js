@@ -4,6 +4,19 @@ const { getIstDateKey, formatIstTimeText } = require('../src/utils/istDate');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 
+const I18N_STATUS_VALUES = ['pending', 'ready', 'failed', null];
+
+const i18nBucketSchema = new mongoose.Schema(
+  {
+    text: { type: String, required: false, maxlength: 160, trim: true, default: null },
+    status: { type: String, enum: I18N_STATUS_VALUES, default: null },
+    updatedAt: { type: Date, default: null },
+    error: { type: String, default: null },
+    nextRetryAt: { type: Date, default: null },
+  },
+  { _id: false }
+);
+
 const BroadcastItemSchema = new mongoose.Schema(
   {
     type: {
@@ -34,6 +47,23 @@ const BroadcastItemSchema = new mongoose.Schema(
       enum: SUPPORTED_LANGS,
       default: 'gu',
       index: true,
+    },
+
+    // Canonical contract: original/authored language.
+    // Keep in sync with legacy `sourceLang`.
+    lang: {
+      type: String,
+      enum: SUPPORTED_LANGS,
+      default: null,
+      index: true,
+    },
+
+    // Canonical i18n cache for public read paths.
+    // i18n.{en|hi|gu}.{text,status,updatedAt,error,nextRetryAt}
+    i18n: {
+      en: { type: i18nBucketSchema, default: () => ({}) },
+      hi: { type: i18nBucketSchema, default: () => ({}) },
+      gu: { type: i18nBucketSchema, default: () => ({}) },
     },
 
     // Simplified i18n storage (Phase 1/2 simplification): one document contains all langs.
@@ -153,8 +183,14 @@ BroadcastItemSchema.pre('validate', function ensureLangFields(next) {
       this.isActive = this.isLive;
     }
 
-    const sourceLang = SUPPORTED_LANGS.includes(String(this.sourceLang || '')) ? String(this.sourceLang) : 'gu';
-    this.sourceLang = sourceLang;
+    const resolvedLang =
+      (SUPPORTED_LANGS.includes(String(this.lang || '')) ? String(this.lang) : null) ||
+      (SUPPORTED_LANGS.includes(String(this.sourceLang || '')) ? String(this.sourceLang) : null) ||
+      (SUPPORTED_LANGS.includes(String(this.language || '')) ? String(this.language) : null) ||
+      'gu';
+
+    this.lang = resolvedLang;
+    this.sourceLang = resolvedLang;
 
     const rawText = typeof this.text === 'string' ? this.text.trim() : '';
 
@@ -166,16 +202,34 @@ BroadcastItemSchema.pre('validate', function ensureLangFields(next) {
     if (!this.statusByLang || typeof this.statusByLang !== 'object') this.statusByLang = {};
     if (!this.qualityByLang || typeof this.qualityByLang !== 'object') this.qualityByLang = {};
 
+    // Ensure canonical i18n object exists.
+    if (!this.i18n || typeof this.i18n !== 'object') this.i18n = {};
+    for (const l of SUPPORTED_LANGS) {
+      if (!this.i18n[l] || typeof this.i18n[l] !== 'object' || Array.isArray(this.i18n[l])) {
+        this.i18n[l] = { text: null, status: null, updatedAt: null, error: null, nextRetryAt: null };
+      }
+    }
+
     // Always persist the source language text.
     if (rawText) {
-      if (!this.text_i18n[sourceLang]) {
-        this.text_i18n[sourceLang] = rawText;
+      if (!this.text_i18n[resolvedLang]) {
+        this.text_i18n[resolvedLang] = rawText;
       }
-      if (!this.translations[sourceLang]) {
-        this.translations[sourceLang] = rawText;
+      if (!this.translations[resolvedLang]) {
+        this.translations[resolvedLang] = rawText;
       }
-      if (!this.textByLang[sourceLang]) {
-        this.textByLang[sourceLang] = rawText;
+      if (!this.textByLang[resolvedLang]) {
+        this.textByLang[resolvedLang] = rawText;
+      }
+
+      if (!this.i18n[resolvedLang].text) {
+        this.i18n[resolvedLang].text = rawText;
+      }
+      if (!this.i18n[resolvedLang].status) {
+        this.i18n[resolvedLang].status = 'ready';
+      }
+      if (!this.i18n[resolvedLang].updatedAt) {
+        this.i18n[resolvedLang].updatedAt = this.updatedAt || this.createdAt || new Date();
       }
     }
 
@@ -183,7 +237,7 @@ BroadcastItemSchema.pre('validate', function ensureLangFields(next) {
     if (rawText) {
       const hasAny = SUPPORTED_LANGS.some(l => typeof this.textByLang[l] === 'string' && this.textByLang[l].trim());
       if (!hasAny) {
-        this.textByLang[sourceLang] = rawText;
+        this.textByLang[resolvedLang] = rawText;
       }
     }
 
@@ -204,6 +258,25 @@ BroadcastItemSchema.pre('validate', function ensureLangFields(next) {
       }
     }
 
+    // Keep canonical i18n.text aligned with legacy fields.
+    for (const l of SUPPORTED_LANGS) {
+      const legacyText =
+        (typeof this.text_i18n[l] === 'string' && this.text_i18n[l].trim() ? this.text_i18n[l].trim() : null) ||
+        (typeof this.translations[l] === 'string' && this.translations[l].trim() ? this.translations[l].trim() : null) ||
+        (typeof this.textByLang[l] === 'string' && this.textByLang[l].trim() ? this.textByLang[l].trim() : null);
+
+      if (legacyText && !this.i18n[l].text) {
+        this.i18n[l].text = legacyText;
+        if (!this.i18n[l].status) this.i18n[l].status = 'ready';
+        if (!this.i18n[l].updatedAt) this.i18n[l].updatedAt = this.updatedAt || this.createdAt || new Date();
+      }
+      if (this.i18n[l].text && (!legacyText || legacyText !== this.i18n[l].text)) {
+        if (!this.text_i18n[l]) this.text_i18n[l] = this.i18n[l].text;
+        if (!this.translations[l]) this.translations[l] = this.i18n[l].text;
+        if (!this.textByLang[l]) this.textByLang[l] = this.i18n[l].text;
+      }
+    }
+
     // Keep textByLang aligned for any code paths still reading it.
     for (const l of SUPPORTED_LANGS) {
       if (!this.textByLang[l] && typeof this.text_i18n[l] === 'string' && this.text_i18n[l].trim()) {
@@ -212,8 +285,8 @@ BroadcastItemSchema.pre('validate', function ensureLangFields(next) {
     }
 
     // Default the source language status/quality.
-    if (!this.statusByLang[sourceLang]) this.statusByLang[sourceLang] = 'APPROVED';
-    if (typeof this.qualityByLang[sourceLang] !== 'number') this.qualityByLang[sourceLang] = 100;
+    if (!this.statusByLang[resolvedLang]) this.statusByLang[resolvedLang] = 'APPROVED';
+    if (typeof this.qualityByLang[resolvedLang] !== 'number') this.qualityByLang[resolvedLang] = 100;
 
     return next();
   } catch (e) {
