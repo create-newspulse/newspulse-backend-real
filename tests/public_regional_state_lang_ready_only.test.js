@@ -152,6 +152,82 @@ test('GET /api/public/regional supports district + city filters via geo+tag fall
   }
 });
 
+test('GET /api/public/regional dedupes items by translationGroupId (prefers original-in-lang)', async () => {
+  const prevFind = Article.find;
+  const prevCount = Article.countDocuments;
+
+  const capture = { query: null, selectArg: null, sortArg: null, skip: null, limit: null };
+
+  try {
+    const dataset = [
+      {
+        _id: '507f1f77bcf86cd799439021',
+        slug: 'story-en',
+        slugs: { en: 'story-en', gu: 'story-gu' },
+        translationGroupId: 'grp-1',
+        category: 'regional',
+        originalLang: 'en',
+        language: 'en',
+        title: 'Original English title',
+        summary: 'Original English summary',
+        content: 'Original English content',
+        coverImage: { url: 'https://img.example/1.jpg', publicId: null, alt: null },
+        geo: { state: 'gujarat', district: null, city: 'gandhinagar' },
+        tags: ['state:gujarat', 'city:gandhinagar'],
+        translationStatus: { en: 'ready', hi: 'pending', gu: 'pending' },
+        translations: {},
+      },
+      {
+        _id: '507f1f77bcf86cd799439022',
+        slug: 'story-gu',
+        slugs: { en: 'story-en', gu: 'story-gu' },
+        translationGroupId: 'grp-1',
+        category: 'regional',
+        originalLang: 'gu',
+        language: 'gu',
+        title: 'મૂળ',
+        summary: 'મૂળ',
+        content: 'મૂળ',
+        coverImage: { url: 'https://img.example/2.jpg', publicId: null, alt: null },
+        geo: { state: 'gujarat', district: null, city: 'gandhinagar' },
+        tags: ['state:gujarat', 'city:gandhinagar'],
+        translationStatus: { en: 'ready', hi: 'pending', gu: 'ready' },
+        translations: {
+          en: {
+            title: 'Translated title',
+            summary: 'Translated summary',
+            content: 'Translated content',
+            provider: 'google',
+            generatedAt: new Date('2026-03-06T00:00:00.000Z'),
+          },
+        },
+      },
+    ];
+
+    Article.find = (q) => {
+      capture.query = q;
+      return makeChainableQuery(dataset, capture);
+    };
+    Article.countDocuments = async () => dataset.length;
+
+    const res = await request(app).get('/api/public/regional?state=gujarat&city=gandhinagar&lang=en&page=1&limit=20');
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.data.lang, 'en');
+    assert.equal(res.body.data.items.length, 1);
+
+    const item = res.body.data.items[0];
+    assert.equal(item.slug, 'story-en');
+    assert.equal(item.title, 'Original English title');
+    assert.equal(item.summary, 'Original English summary');
+    assert.equal(item.content, 'Original English content');
+  } finally {
+    Article.find = prevFind;
+    Article.countDocuments = prevCount;
+  }
+});
+
 test('GET /api/public/regional/:state rejects invalid state (400)', async () => {
   const res = await request(app).get('/api/public/regional/not-a-real-state?lang=gu');
   assert.equal(res.status, 400);

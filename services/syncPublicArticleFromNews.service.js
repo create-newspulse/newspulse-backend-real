@@ -136,6 +136,10 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     summary: newsDoc.description || null,
     content: newsDoc.content || null,
 
+    translationKey: _safeStr(newsDoc.translationKey) || null,
+    translationGroupId: _safeStr(newsDoc.translationGroupId) || (_safeStr(newsDoc.translationKey) || null),
+    sourceNewsId: newsDoc._id || null,
+
     originalLang: newsDoc.originalLang || newsDoc.language || newsDoc.lang || 'en',
 
     // Canonical cached translations (en/hi/gu)
@@ -193,8 +197,11 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
   };
 
   try {
+    const or = [{ slug }];
+    if (newsDoc._id) or.unshift({ sourceNewsId: newsDoc._id });
+
     const saved = await PublicArticle.findOneAndUpdate(
-      { slug },
+      { $or: or },
       { $set: update },
       { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
     ).lean();

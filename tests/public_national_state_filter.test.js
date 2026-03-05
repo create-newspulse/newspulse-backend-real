@@ -75,6 +75,7 @@ test('GET /api/articles/national/state/:stateSlug?lang=en returns ready-only tra
       {
         _id: '507f1f77bcf86cd799439011',
         slug: 'gu-1',
+        translationGroupId: 'grp-1',
         category: 'national',
         status: 'published',
         stateTags: ['gujarat'],
@@ -96,8 +97,25 @@ test('GET /api/articles/national/state/:stateSlug?lang=en returns ready-only tra
         },
       },
       {
+        _id: '507f1f77bcf86cd799439013',
+        slug: 'en-1',
+        translationGroupId: 'grp-1',
+        category: 'national',
+        status: 'published',
+        stateTags: ['gujarat'],
+        originalLang: 'en',
+        lang: 'en',
+        language: 'en',
+        title: 'Original English title',
+        description: 'Original English summary',
+        content: 'Original English content',
+        translationStatus: { en: 'ready' },
+        translations: {},
+      },
+      {
         _id: '507f1f77bcf86cd799439012',
         slug: 'gu-2',
+        translationGroupId: 'grp-2',
         category: 'national',
         status: 'published',
         stateTags: ['gujarat'],
@@ -148,15 +166,13 @@ test('GET /api/articles/national/state/:stateSlug?lang=en returns ready-only tra
     assert.equal(res.body.data.items.length, 1);
 
     const item = res.body.data.items[0];
-    assert.equal(item.slug, 'gu-1');
+    // Dedupe by translationGroupId should prefer the original-in-lang variant.
+    assert.equal(item.slug, 'en-1');
     assert.equal(item.lang, 'en');
     assert.equal(item.language, 'en');
-    assert.equal(item.title, 'Translated title');
-    assert.equal(item.description, 'Translated summary');
-    assert.equal(item.content, 'Translated content');
-    // Provider defaults to google when legacy provider is null.
-    assert.equal(item.translationProvider, 'google');
-    assert.equal(new Date(item.translationGeneratedAt).toISOString(), '2026-03-06T00:00:00.000Z');
+    assert.equal(item.title, 'Original English title');
+    assert.equal(item.description, 'Original English summary');
+    assert.equal(item.content, 'Original English content');
 
     assert.ok(capture.query);
     assert.equal(capture.query.status, 'published');

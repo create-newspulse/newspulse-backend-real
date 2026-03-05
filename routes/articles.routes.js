@@ -802,6 +802,8 @@ function _buildGeoOrTagClause(field, tagPrefix, valueSlug) {
 
 async function _handlePublicRegionalQuery(req, res, next, options = {}) {
   try {
+    res.set('Cache-Control', 'no-store');
+
     const stateInput = options.stateRawOverride !== undefined
       ? options.stateRawOverride
       : (req.query.state || req.query.stateSlug || '');
@@ -862,7 +864,7 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
 
     const [itemsRaw, total] = await Promise.all([
       PublicArticle.find(filter)
-        .select('title summary content slug slugs language originalLang translations translationStatus coverImage publishedAt createdAt updatedAt geo tags category')
+        .select('title summary content slug slugs language originalLang translations translationStatus coverImage publishedAt createdAt updatedAt geo tags category translationKey translationGroupId')
         .sort({ publishedAt: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -870,32 +872,45 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
       PublicArticle.countDocuments(filter),
     ]);
 
-    const seen = new Set();
-    const items = (itemsRaw || [])
-      .map((doc) => {
-        const imageUrl = _resolveImageUrlFromNewsDoc(doc);
-        const mapped = mapArticleForLang(doc, desired);
-        if (!mapped) return null;
-        const out = {
-          _id: String(doc._id),
-          slug: doc.slug || null,
-          slugs: doc.slugs || null,
-          category: doc.category || null,
-          stateSlug,
-          imageUrl,
-          title: mapped.title,
-          summary: mapped.summary,
-          content: mapped.content,
-          generatedAt: mapped.generatedAt || null,
-          provider: mapped.provider || 'google',
-        };
+    // Dedupe across language-variants of the same story.
+    // Prefer originals in the requested lang over translated variants.
+    const bestByKey = new Map();
+    for (const doc of (itemsRaw || [])) {
+      const imageUrl = _resolveImageUrlFromNewsDoc(doc);
+      const mapped = mapArticleForLang(doc, desired);
+      if (!mapped) continue;
 
-        const key = out.slug ? `slug:${out.slug}` : `id:${out._id}`;
-        if (seen.has(key)) return null;
-        seen.add(key);
-        return out;
-      })
-      .filter(Boolean);
+      const out = {
+        _id: String(doc._id),
+        slug: doc.slug || null,
+        slugs: doc.slugs || null,
+        category: doc.category || null,
+        stateSlug,
+        imageUrl,
+        title: mapped.title,
+        summary: mapped.summary,
+        content: mapped.content,
+        generatedAt: mapped.generatedAt || null,
+        provider: mapped.provider || 'google',
+        __isTranslated: Boolean(mapped.isTranslated),
+      };
+
+      const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
+      const key = groupKey ? `group:${groupKey}` : (out.slug ? `slug:${out.slug}` : `id:${out._id}`);
+      const prev = bestByKey.get(key);
+      if (!prev) {
+        bestByKey.set(key, out);
+        continue;
+      }
+      if (prev.__isTranslated && !out.__isTranslated) {
+        bestByKey.set(key, out);
+      }
+    }
+
+    const items = Array.from(bestByKey.values()).map((it) => {
+      try { delete it.__isTranslated; } catch (_) {}
+      return it;
+    });
 
     return res.status(200).json({ ok: true, success: true, status: 200, data: { items, page, limit, total, stateSlug, lang: desired } });
   } catch (err) {
@@ -964,6 +979,8 @@ router.get('/articles/:id/translation-status', requireAdminAuth, async (req, res
 // GET /api/articles/national/state/:stateSlug → published national articles filtered by stateTags
 router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
   try {
+    res.set('Cache-Control', 'no-store');
+
     const stateSlug = String(req.params.stateSlug || '').trim().toLowerCase();
     if (!stateSlug) {
       return res.status(400).json({ ok: false, success: false, status: 400, message: 'stateSlug is required' });
@@ -995,28 +1012,38 @@ router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
 
     let items = (itemsRaw || []).map(withCoverImageUrl);
     if (desired) {
-      const seen = new Set();
-      items = items
-        .map((doc) => {
-          const mapped = mapArticleForLang(doc, desired);
-          if (!mapped) return null;
+      const bestByKey = new Map();
+      for (const doc of items) {
+        const mapped = mapArticleForLang(doc, desired);
+        if (!mapped) continue;
 
-          // Preserve the existing payload shape but localize fields.
-          const out = { ...doc };
-          out.title = mapped.title;
-          out.description = mapped.summary;
-          out.content = mapped.content;
-          out.lang = desired;
-          out.language = desired;
-          out.translationProvider = mapped.provider || 'google';
-          out.translationGeneratedAt = mapped.generatedAt || null;
+        // Preserve the existing payload shape but localize fields.
+        const out = { ...doc };
+        out.title = mapped.title;
+        out.description = mapped.summary;
+        out.content = mapped.content;
+        out.lang = desired;
+        out.language = desired;
+        out.translationProvider = mapped.provider || 'google';
+        out.translationGeneratedAt = mapped.generatedAt || null;
+        out.__isTranslated = Boolean(mapped.isTranslated);
 
-          const key = out.slug ? `slug:${out.slug}` : `id:${String(out._id || '')}`;
-          if (seen.has(key)) return null;
-          seen.add(key);
-          return out;
-        })
-        .filter(Boolean);
+        const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
+        const key = groupKey ? `group:${groupKey}` : (out.slug ? `slug:${out.slug}` : `id:${String(out._id || '')}`);
+        const prev = bestByKey.get(key);
+        if (!prev) {
+          bestByKey.set(key, out);
+          continue;
+        }
+        if (prev.__isTranslated && !out.__isTranslated) {
+          bestByKey.set(key, out);
+        }
+      }
+
+      items = Array.from(bestByKey.values()).map((it) => {
+        try { delete it.__isTranslated; } catch (_) {}
+        return it;
+      });
     }
     return res.status(200).json({
       ok: true,
@@ -1822,30 +1849,38 @@ router.post('/articles/:id/unpublish', requireAdminAuth, async (req, res) => {
     const doc = await News.findById(id);
     if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
 
+    const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
+    const groupDocs = groupKey
+      ? await News.find({ $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }] })
+      : [doc];
+
     const now = new Date();
-    const fromStage = String(doc.workflowStage || 'DRAFT');
-    doc.status = toStatus;
-    doc.publishedAt = null;
-    doc.publishAt = null;
-    doc.scheduledAt = null;
-    doc.workflowStage = toStatus === 'archived' ? 'ARCHIVED' : 'DRAFT';
-    doc.workflowUpdatedAt = now;
-
     const actor = getActor(req);
-    doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
-    doc.workflowHistory.push({
-      at: now,
-      byUserId: actor.byUserId,
-      byRole: actor.byRole,
-      action: 'UNPUBLISH',
-      fromStage,
-      toStage: doc.workflowStage,
-      note: null,
-    });
 
-    await doc.save();
+    // Unpublish all variants in the group (prevents duplicates / stale language variants).
+    for (const d of groupDocs) {
+      const fromStage = String(d.workflowStage || 'DRAFT');
+      d.status = toStatus;
+      d.publishedAt = null;
+      d.publishAt = null;
+      d.scheduledAt = null;
+      d.workflowStage = toStatus === 'archived' ? 'ARCHIVED' : 'DRAFT';
+      d.workflowUpdatedAt = now;
 
-    await syncArticleFromNews(doc);
+      d.workflowHistory = Array.isArray(d.workflowHistory) ? d.workflowHistory : [];
+      d.workflowHistory.push({
+        at: now,
+        byUserId: actor.byUserId,
+        byRole: actor.byRole,
+        action: 'UNPUBLISH',
+        fromStage,
+        toStage: d.workflowStage,
+        note: null,
+      });
+
+      await d.save();
+      await syncArticleFromNews(d);
+    }
 
     try {
       await PushHistory.create({

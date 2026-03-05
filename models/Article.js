@@ -116,6 +116,14 @@ const articleSchema = new mongoose.Schema(
     // Public language switching should translate FROM this language.
     originalLang: { type: String, enum: LANGUAGE_VALUES, default: null, index: true },
 
+    // Translation grouping key from the CMS/admin News document.
+    // Used to dedupe feed items across language variants.
+    translationKey: { type: String, default: null, index: true },
+    translationGroupId: { type: String, default: null, index: true },
+
+    // Stable pointer back to the source News document (so slug changes don't orphan public copies).
+    sourceNewsId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
+
     // Cached per-language translations (en/hi/gu).
     // This is the canonical translation cache going forward.
     translations: {
@@ -308,6 +316,9 @@ articleSchema.index({ status: 1, category: 1, publishedAt: -1 });
 articleSchema.index({ status: 1, isBreaking: 1, publishedAt: -1 });
 articleSchema.index({ category: 1, status: 1, stateTags: 1, publishedAt: -1 });
 articleSchema.index({ status: 1, category: 1, 'geo.state': 1, 'geo.district': 1, 'geo.city': 1, publishedAt: -1 });
+articleSchema.index({ translationGroupId: 1, language: 1, status: 1, publishedAt: -1 });
+articleSchema.index({ translationKey: 1, language: 1, status: 1, publishedAt: -1 });
+articleSchema.index({ sourceNewsId: 1, status: 1, publishedAt: -1 });
 articleSchema.index({ slug: 1 }, { unique: true });
 articleSchema.index({ 'slugs.en': 1 });
 articleSchema.index({ 'slugs.hi': 1 });
