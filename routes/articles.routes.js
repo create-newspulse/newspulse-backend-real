@@ -1896,6 +1896,42 @@ router.post('/articles/:id/unpublish', requireAdminAuth, async (req, res) => {
       await syncArticleFromNews(d);
     }
 
+    // Legacy cleanup:
+    // Older public Article copies may not be linked via sourceNewsId/translationGroupId.
+    // Ensure any public copies reachable by slug/slugs.* are also marked as draft.
+    try {
+      const slugs = new Set();
+      if (doc.slug) slugs.add(String(doc.slug).trim());
+      const slugsObj = doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
+      for (const k of ['en', 'hi', 'gu']) {
+        const v = slugsObj && slugsObj[k] ? String(slugsObj[k]).trim() : '';
+        if (v) slugs.add(v);
+      }
+
+      const slugList = Array.from(slugs).filter(Boolean);
+      const or = [];
+      if (slugList.length) {
+        or.push({ slug: { $in: slugList } });
+        or.push({ 'slugs.en': { $in: slugList } });
+        or.push({ 'slugs.hi': { $in: slugList } });
+        or.push({ 'slugs.gu': { $in: slugList } });
+      }
+      if (groupKey) {
+        or.push({ translationKey: groupKey });
+        or.push({ translationGroupId: groupKey });
+      }
+
+      if (or.length) {
+        await PublicArticle.updateMany(
+          { $or: or },
+          { $set: { status: 'draft', publishedAt: null } },
+          { runValidators: false }
+        );
+      }
+    } catch (e) {
+      console.warn('[articles.unpublish] public cleanup failed', e?.message || e);
+    }
+
     try {
       await PushHistory.create({
         articleId: doc._id,
