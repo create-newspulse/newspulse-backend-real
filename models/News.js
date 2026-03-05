@@ -154,6 +154,13 @@ const newsSchema = new mongoose.Schema({
     hi: { type: Date, default: null },
     gu: { type: Date, default: null },
   },
+
+  // Timestamp for last status transition per language (used to detect stuck pending states).
+  translationUpdatedAt: {
+    en: { type: Date, default: null },
+    hi: { type: Date, default: null },
+    gu: { type: Date, default: null },
+  },
   // New canonical group key for translations. Keep translationGroupId for backward compatibility.
   translationKey: { type: String, index: true },
   translationGroupId: { type: String, index: true },

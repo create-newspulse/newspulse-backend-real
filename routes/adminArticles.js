@@ -2,8 +2,22 @@ const express = require('express');
 const News = require('../models/News');
 const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
+const { enqueueTranslateAndSave } = require('../services/publishAsyncTranslation.service');
 
 const router = express.Router();
+
+function normalizeLangParam(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (s === 'en' || s === 'hi' || s === 'gu') return s;
+  return null;
+}
+
+function normalizeRetryLang(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (s === 'en' || s === 'hi') return s;
+  if (s === 'all') return 'all';
+  return null;
+}
 
 // Helper: build Mongo filter from query params
 function buildFilter(query) {
@@ -115,6 +129,100 @@ router.get('/articles', requireAdminAuth, async (req, res) => {
       path: req.originalUrl,
       ...(isProd ? {} : { error: e?.message || String(e) }),
     });
+  }
+});
+
+// GET /api/admin/articles/:id/translation-status
+router.get('/articles/:id/translation-status', requireAdminAuth, async (req, res) => {
+  try {
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      return res.status(503).json({ ok: false, success: false, message: 'DB unavailable' });
+    }
+
+    const id = String(req.params.id || '').trim();
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid id' });
+    }
+
+    const doc = await News.findById(id)
+      .select('title slug lang language originalLang translationStatus translationError translationUpdatedAt translationNextRetryAt')
+      .lean();
+    if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
+
+    const out = {
+      id: String(doc._id),
+      slug: doc.slug || null,
+      title: doc.title || null,
+      baseLang: normalizeLangParam(doc.originalLang) || normalizeLangParam(doc.lang) || normalizeLangParam(doc.language) || 'en',
+      perLang: {},
+    };
+
+    for (const l of ['en', 'hi', 'gu']) {
+      out.perLang[l] = {
+        status: doc?.translationStatus?.[l] ?? null,
+        error: doc?.translationError?.[l] ?? null,
+        updatedAt: doc?.translationUpdatedAt?.[l] ?? null,
+        nextRetryAt: doc?.translationNextRetryAt?.[l] ?? null,
+      };
+    }
+
+    return res.json({ ok: true, success: true, data: out });
+  } catch (e) {
+    console.error('[ADMIN_ARTICLES][translation-status-error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Internal error' });
+  }
+});
+
+// POST /api/admin/articles/:id/retry-translation?lang=hi|en|all
+router.post('/articles/:id/retry-translation', requireAdminAuth, async (req, res) => {
+  try {
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      return res.status(503).json({ ok: false, success: false, message: 'DB unavailable' });
+    }
+
+    const id = String(req.params.id || '').trim();
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid id' });
+    }
+
+    const langParam = normalizeRetryLang(req.query.lang);
+    if (!langParam) {
+      return res.status(400).json({ ok: false, success: false, message: 'Missing/invalid lang (use hi, en, or all)' });
+    }
+
+    const before = await News.findById(id)
+      .select('lang language originalLang translationStatus translationError translationUpdatedAt translationNextRetryAt')
+      .lean();
+    if (!before) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
+
+    const baseLang = normalizeLangParam(before.originalLang) || normalizeLangParam(before.lang) || normalizeLangParam(before.language) || 'en';
+    const targets = langParam === 'all' ? ['en', 'hi'] : [langParam];
+    const now = new Date();
+
+    const set = {};
+    // Always keep base language as ready.
+    set[`translationStatus.${baseLang}`] = 'ready';
+    set[`translationError.${baseLang}`] = null;
+    set[`translationNextRetryAt.${baseLang}`] = null;
+    set[`translationUpdatedAt.${baseLang}`] = now;
+
+    for (const t of targets) {
+      if (t === baseLang) continue;
+      set[`translationStatus.${t}`] = 'pending';
+      set[`translationError.${t}`] = null;
+      set[`translationNextRetryAt.${t}`] = null;
+      set[`translationUpdatedAt.${t}`] = now;
+    }
+
+    const doc = await News.findByIdAndUpdate(id, { $set: set }, { new: true, runValidators: false }).lean();
+    if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
+
+    enqueueTranslateAndSave(id, { logger: console });
+
+    return res.json({ ok: true, success: true, message: 'Translation retry queued', data: { id, baseLang, targets } });
+  } catch (e) {
+    console.error('[ADMIN_ARTICLES][retry-translation-error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Internal error' });
   }
 });
 

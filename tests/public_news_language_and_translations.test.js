@@ -27,6 +27,24 @@ function extractLangFilter(filter) {
   return null;
 }
 
+function extractTranslationReadyFilter(filter, lang) {
+  const desired = String(lang || '').trim().toLowerCase();
+  const key = `translationStatus.${desired}`;
+  const ands = filter?.$and || [];
+  for (const c of ands) {
+    if (!c || typeof c !== 'object') continue;
+    if (Object.prototype.hasOwnProperty.call(c, key) && c[key] === 'ready') return c;
+  }
+  return null;
+}
+
+function applyTranslationReadyFilter(items, filter, lang) {
+  const desired = String(lang || '').trim().toLowerCase();
+  const clause = extractTranslationReadyFilter(filter, desired);
+  if (!clause) return items;
+  return items.filter((doc) => doc && doc.translationStatus && doc.translationStatus[desired] === 'ready');
+}
+
 function containsLangKeys(expr) {
   if (!expr || typeof expr !== 'object') return false;
   if (Object.prototype.hasOwnProperty.call(expr, 'lang') || Object.prototype.hasOwnProperty.call(expr, 'language')) return true;
@@ -146,27 +164,27 @@ test('GET /api/public/news returns hi when lang=hi', async () => {
     mongoose.connection.readyState = 1;
 
     const dataset = [
-      { title: 'gu story', description: 'd', lang: 'gu', status: 'published' },
-      { title: 'hi story', description: 'd', lang: 'hi', status: 'published' },
-      { title: 'missing lang', description: 'd', status: 'published' },
+      { title: 'gu story', description: 'd', lang: 'gu', status: 'published', translationStatus: { hi: 'pending' } },
+      { title: 'hi story', description: 'd', lang: 'hi', status: 'published', translationStatus: { hi: 'ready' } },
+      { title: 'missing lang', description: 'd', status: 'published', translationStatus: {} },
     ];
 
     let lastFilter = null;
     News.find = (filter) => {
       lastFilter = filter;
-      return makeChainableQuery(applyLangFilter(dataset, filter));
+      return makeChainableQuery(applyTranslationReadyFilter(dataset, filter, 'hi'));
     };
     News.countDocuments = async (filter) => {
       lastFilter = filter;
-      return applyLangFilter(dataset, filter).length;
+      return applyTranslationReadyFilter(dataset, filter, 'hi').length;
     };
 
     const res = await request(app).get('/api/public/news?lang=hi&limit=10');
     assert.equal(res.status, 200);
     assert.ok(Array.isArray(res.body.items));
 
-    const langCond = extractLangFilter(lastFilter);
-    assert.ok(langCond, 'expected a lang filter to be present');
+    const readyCond = extractTranslationReadyFilter(lastFilter, 'hi');
+    assert.ok(readyCond, 'expected a translationStatus.hi=ready filter to be present');
 
     assert.equal(res.body.items.length, 1);
     assert.equal(res.body.items[0].lang, 'hi');

@@ -134,6 +134,13 @@ const articleSchema = new mongoose.Schema(
       gu: { type: Date, default: null },
     },
 
+    // Timestamp for last status transition per language (used to detect stuck pending states).
+    translationUpdatedAt: {
+      en: { type: Date, default: null },
+      hi: { type: Date, default: null },
+      gu: { type: Date, default: null },
+    },
+
     status: { type: String, enum: STATUS_VALUES, default: 'draft', index: true },
     publishedAt: { type: Date, default: null, index: true },
 

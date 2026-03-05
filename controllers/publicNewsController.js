@@ -457,6 +457,8 @@ function _applyCachedTranslationInPlace(doc, desired) {
   doc.isTranslated = true;
   doc.translationProvider = t.provider || null;
   doc.translationGeneratedAt = t.generatedAt || null;
+  doc.lang = desired;
+  doc.language = desired;
   return true;
 }
 
@@ -495,19 +497,14 @@ async function listPublicNews(req, res) {
     if (topic) filter.$and.push({ topic: new RegExp(`^${escapeRegExp(topic)}$`, 'i') });
     if (state) filter.$and.push({ 'location.state': new RegExp(`^${escapeRegExp(state)}$`, 'i') });
 
-    // Strict language rule for feeds:
-    // - If desired == baseLang => serve originals.
-    // - Else only include docs where translationStatus[desired] == 'ready' (and we will map from translations[desired]).
-    const lower = desired;
-    const upper = lower.toUpperCase();
-    filter.$and.push({
-      $or: [
-        { originalLang: lower },
-        { lang: { $in: [lower, upper] } },
-        { language: { $in: [lower, upper] } },
-        { [`translationStatus.${lower}`]: 'ready' },
-      ],
-    });
+    // Feed rules:
+    // - Gujarati feed shows originals immediately (legacy behavior).
+    // - Hindi/English feeds only show items when translationStatus.<lang> === 'ready'.
+    if (desired === 'gu') {
+      applyLangFilter(filter, 'gu');
+    } else if (desired === 'hi' || desired === 'en') {
+      filter.$and.push({ [`translationStatus.${desired}`]: 'ready' });
+    }
 
     const skip = (page - 1) * limit;
     const sort = { publishedAt: -1, createdAt: -1 };
@@ -530,6 +527,8 @@ async function listPublicNews(req, res) {
           out.requestedLang = desired;
           out.resolvedLang = base;
           out.isTranslated = false;
+          out.lang = desired;
+          out.language = desired;
           return out;
         }
 
