@@ -1524,6 +1524,12 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       }
       throw err;
     }
+
+    // Keep the public Article copy in sync when editing already-published CMS News.
+    // (Draft/scheduled edits should not affect the public site.)
+    if (doc && String(doc.status || '').toLowerCase() === 'published') {
+      await syncArticleFromNews(doc);
+    }
     if (!doc) {
       // Fallback: some admin builds operate on the public Article model instead of News.
       const allowedArticleStatuses = new Set(['draft', 'published']);
