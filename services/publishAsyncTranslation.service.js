@@ -529,7 +529,12 @@ async function translateAndSave(newsId, options = {}) {
 
     // Cache hit: translation already complete.
     if (hasFull) {
-      if (status !== 'ready' || current?.translationError?.[dst] || retryAt) {
+      // Repair legacy/partial metadata: full bucket must always have provider+generatedAt.
+      const providerFixed = _normalizeProvider(bucket?.provider) || 'google';
+      const generatedAtFixed = bucket?.generatedAt ? new Date(bucket.generatedAt) : null;
+      const needsGeneratedAt = !generatedAtFixed || Number.isNaN(generatedAtFixed.getTime());
+
+      if (status !== 'ready' || current?.translationError?.[dst] || retryAt || providerFixed !== bucket?.provider || needsGeneratedAt) {
         try {
           const docUpdated = await News.findByIdAndUpdate(
             id,
@@ -538,6 +543,9 @@ async function translateAndSave(newsId, options = {}) {
                 [`translationStatus.${dst}`]: 'ready',
                 [`translationError.${dst}`]: null,
                 [`translationNextRetryAt.${dst}`]: null,
+                [`translations.${dst}.provider`]: providerFixed,
+                [`translations.${dst}.generatedAt`]: needsGeneratedAt ? now : generatedAtFixed,
+                [`translationUpdatedAt.${dst}`]: now,
               },
             },
             { new: true, runValidators: false }
@@ -607,6 +615,8 @@ async function translateAndSave(newsId, options = {}) {
       setOk[`translations.${baseLang}.title`] = _safeText(doc0.title);
       setOk[`translations.${baseLang}.summary`] = _safeText(doc0.description);
       setOk[`translations.${baseLang}.content`] = _safeText(doc0.content);
+      setOk[`translations.${baseLang}.provider`] = 'manual';
+      setOk[`translations.${baseLang}.generatedAt`] = now;
 
       // Ensure source language is persisted.
       setOk.originalLang = baseLang;

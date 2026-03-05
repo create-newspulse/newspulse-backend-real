@@ -11,11 +11,11 @@ function _safeStr(v) {
 }
 
 function _normalizeProvider(v) {
-  if (v === null || v === undefined) return null;
+  if (v === null || v === undefined) return 'google';
   const s = String(v).trim().toLowerCase();
-  if (!s) return null;
+  if (!s) return 'google';
   if (s === 'google' || s === 'openai' || s === 'manual') return s;
-  return null;
+  return 'google';
 }
 
 function _isNonEmptyString(v) {
@@ -47,13 +47,12 @@ function _buildTranslationBucket(src, options = {}) {
     out.generatedAt = now;
   }
 
-  const provider = _normalizeProvider(s.provider);
-  if (provider) {
-    out.provider = provider;
-  } else if (full) {
-    // Ensure provider is always valid for a full bucket.
-    out.provider = 'google';
-  }
+  // Never store provider=null; always default to google.
+  // Even empty buckets get provider=google so schema enums never see null.
+  out.provider = _normalizeProvider(s.provider);
+
+  // Only stamp generatedAt when a full translation exists.
+  if (!full) out.generatedAt = null;
 
   return out;
 }
