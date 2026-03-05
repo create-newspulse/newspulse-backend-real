@@ -27,6 +27,33 @@ function _hasFullTranslationBucket(b) {
   return _isNonEmptyString(bucket.title) && _isNonEmptyString(bucket.summary) && _isNonEmptyString(bucket.content);
 }
 
+function _normalizeStatus(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (s === 'ready' || s === 'failed' || s === 'pending') return s;
+  return 'pending';
+}
+
+function _pickPerLangObj(src, normalizeFn, fallback) {
+  const s = src && typeof src === 'object' && !Array.isArray(src) ? src : {};
+  return {
+    en: normalizeFn(s.en, 'en', fallback),
+    hi: normalizeFn(s.hi, 'hi', fallback),
+    gu: normalizeFn(s.gu, 'gu', fallback),
+  };
+}
+
+function _normalizeNullableString(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  return s ? s : null;
+}
+
+function _normalizeNullableDate(v) {
+  if (!v) return null;
+  const dt = new Date(v);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
 function _buildTranslationBucket(src, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const s = src && typeof src === 'object' && !Array.isArray(src) ? src : {};
@@ -114,10 +141,10 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
       },
     },
 
-    translationStatus: newsDoc.translationStatus || null,
-    translationError: newsDoc.translationError || null,
-    translationNextRetryAt: newsDoc.translationNextRetryAt || null,
-    translationUpdatedAt: newsDoc.translationUpdatedAt || null,
+    translationStatus: _pickPerLangObj(newsDoc.translationStatus, (v) => _normalizeStatus(v), 'pending'),
+    translationError: _pickPerLangObj(newsDoc.translationError, (v) => _normalizeNullableString(v), null),
+    translationNextRetryAt: _pickPerLangObj(newsDoc.translationNextRetryAt, (v) => _normalizeNullableDate(v), null),
+    translationUpdatedAt: _pickPerLangObj(newsDoc.translationUpdatedAt, (v) => _normalizeNullableDate(v), null),
 
     category: newsDoc.category,
     language: newsDoc.language || 'en',

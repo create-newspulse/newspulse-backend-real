@@ -123,6 +123,13 @@ function normalizeLanguage(v) {
   return null;
 }
 
+function normalizeRetryLang(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (s === 'en' || s === 'hi') return s;
+  if (s === 'all' || s === '') return 'all';
+  return null;
+}
+
 function _isNationalCategory(category) {
   return String(category || '').trim().toLowerCase() === 'national';
 }
@@ -686,6 +693,54 @@ router.get('/public/articles', async (req, res, next) => {
     return res.status(200).json({ ok: true, success: true, status: 200, data: { items, page, limit, total } });
   } catch (err) {
     return next(err);
+  }
+});
+
+// GET /api/admin/articles/:id/translation-status
+router.get('/articles/:id/translation-status', requireAdminAuth, async (req, res) => {
+  try {
+    const rawId = String(req.params.id || '').trim();
+    if (!mongoose.Types.ObjectId.isValid(rawId)) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid id' });
+    }
+
+    const doc = await News.findById(rawId)
+      .select('title slug lang language originalLang translationStatus translationError translationUpdatedAt translationNextRetryAt')
+      .lean();
+    if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
+
+    const baseLang = normalizeLanguage(doc.originalLang) || normalizeLanguage(doc.lang) || normalizeLanguage(doc.language) || 'en';
+    const out = {
+      id: String(doc._id),
+      slug: doc.slug || null,
+      title: doc.title || null,
+      baseLang,
+      perLang: {
+        en: {
+          status: doc?.translationStatus?.en ?? null,
+          error: doc?.translationError?.en ?? null,
+          updatedAt: doc?.translationUpdatedAt?.en ?? null,
+          nextRetryAt: doc?.translationNextRetryAt?.en ?? null,
+        },
+        hi: {
+          status: doc?.translationStatus?.hi ?? null,
+          error: doc?.translationError?.hi ?? null,
+          updatedAt: doc?.translationUpdatedAt?.hi ?? null,
+          nextRetryAt: doc?.translationNextRetryAt?.hi ?? null,
+        },
+        gu: {
+          status: doc?.translationStatus?.gu ?? null,
+          error: doc?.translationError?.gu ?? null,
+          updatedAt: doc?.translationUpdatedAt?.gu ?? null,
+          nextRetryAt: doc?.translationNextRetryAt?.gu ?? null,
+        },
+      },
+    };
+
+    return res.json({ ok: true, success: true, data: out });
+  } catch (e) {
+    console.error('[ADMIN_ARTICLES][translation-status-error]', e?.message || e);
+    return res.status(500).json({ ok: false, success: false, message: 'Internal error' });
   }
 });
 
@@ -1422,38 +1477,59 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
   }
 });
 
-// POST /api/articles/:id/retry-translation → re-run background translation (Editor/Founder)
+// POST /api/admin/articles/:id/retry-translation?lang=hi|en|all
+// Backward compatible: if lang is omitted, defaults to all.
 router.post('/articles/:id/retry-translation', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(String(id || '').trim())) {
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Invalid id' });
+    }
+
+    const langParam = normalizeRetryLang(req.query.lang);
+    if (!langParam) {
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Missing/invalid lang (use hi, en, or all)' });
+    }
+
     const before = await News.findById(id)
-      .select('title description content translationGroupId lang language slug slugs status')
+      .select('title description content translationGroupId lang language originalLang translationStatus translationError translationNextRetryAt translationUpdatedAt translations slug slugs status')
       .lean();
     if (!before) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
 
-    const baseLang = normalizeLanguage(before.lang || before.language) || 'en';
-    const pending = buildPendingTranslationState({
-      baseLang,
-      title: before.title,
-      summary: before.description,
-      content: before.content,
-    });
+    const baseLang = normalizeLanguage(before.originalLang) || normalizeLanguage(before.lang || before.language) || 'en';
+    const targets = langParam === 'all' ? ['en', 'hi'] : [langParam];
+    const now = new Date();
 
     const translationGroupId = String(before.translationGroupId || '').trim() || new mongoose.Types.ObjectId().toString();
 
-    const doc = await News.findByIdAndUpdate(
-      id,
-      {
-        $set: {
-          translationGroupId,
-          translations: pending.translations,
-          translationStatus: pending.translationStatus,
-          translationError: pending.translationError,
-          translationNextRetryAt: pending.translationNextRetryAt,
-        },
-      },
-      { new: true, runValidators: false }
-    );
+    const set = {
+      translationGroupId,
+      originalLang: baseLang,
+      [`translationStatus.${baseLang}`]: 'ready',
+      [`translationError.${baseLang}`]: null,
+      [`translationNextRetryAt.${baseLang}`]: null,
+      [`translationUpdatedAt.${baseLang}`]: now,
+      [`translations.${baseLang}.title`]: String(before.title || '').trim(),
+      [`translations.${baseLang}.summary`]: String(before.description || '').trim(),
+      [`translations.${baseLang}.content`]: String(before.content || '').trim(),
+      [`translations.${baseLang}.provider`]: 'manual',
+      [`translations.${baseLang}.generatedAt`]: now,
+    };
+
+    for (const t of targets) {
+      if (t === baseLang) continue;
+      set[`translationStatus.${t}`] = 'pending';
+      set[`translationError.${t}`] = null;
+      set[`translationNextRetryAt.${t}`] = null;
+      set[`translationUpdatedAt.${t}`] = now;
+      set[`translations.${t}.title`] = '';
+      set[`translations.${t}.summary`] = '';
+      set[`translations.${t}.content`] = '';
+      set[`translations.${t}.provider`] = 'google';
+      set[`translations.${t}.generatedAt`] = null;
+    }
+
+    const doc = await News.findByIdAndUpdate(id, { $set: set }, { new: true, runValidators: false });
     if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
 
     await syncArticleFromNews(doc);

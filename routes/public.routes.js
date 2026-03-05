@@ -17,6 +17,61 @@ function isDbConnected() {
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
 
+function buildOriginalLangMatch(lang) {
+  const desired = normalizeLang(lang);
+  if (!desired) return null;
+  const lower = desired;
+  const upper = desired.toUpperCase();
+  return {
+    $or: [
+      { originalLang: { $in: [lower, upper] } },
+      // Backward compatibility: older docs may only have `language`.
+      {
+        $and: [
+          { $or: [{ originalLang: null }, { originalLang: { $exists: false } }] },
+          { language: { $in: [lower, upper] } },
+        ],
+      },
+    ],
+  };
+}
+
+function buildReadyTranslationMatch(lang) {
+  const desired = normalizeLang(lang);
+  if (!desired) return null;
+  return {
+    $and: [
+      { [`translationStatus.${desired}`]: 'ready' },
+      { [`translations.${desired}.title`]: { $exists: true, $nin: [null, ''] } },
+      { [`translations.${desired}.summary`]: { $exists: true, $nin: [null, ''] } },
+      { [`translations.${desired}.content`]: { $exists: true, $nin: [null, ''] } },
+    ],
+  };
+}
+
+function applyCachedTranslationToStory(story, desiredLang) {
+  const desired = normalizeLang(desiredLang);
+  if (!desired || !story) return story;
+
+  const base = normalizeLang(story.originalLang) || normalizeLang(story.language) || detectLangFromContent(story.content) || 'en';
+  if (base === desired) {
+    return { ...story, language: desired };
+  }
+
+  const status = story?.translationStatus?.[desired] || null;
+  const bucket = story?.translations?.[desired];
+  const ok = status === 'ready' && hasFullTranslation(bucket);
+  if (!ok) return story;
+
+  return {
+    ...story,
+    title: bucket.title,
+    summary: bucket.summary,
+    content: bucket.content,
+    language: desired,
+  };
+}
+
 // GET: /api/public/stories?category=&lang=&limit=20&page=1
 router.get('/stories', async (req, res) => {
   try {
@@ -28,17 +83,36 @@ router.get('/stories', async (req, res) => {
 
     const q = { status: 'published' };
     if (category) q.category = String(category);
-    if (lang) q.language = String(lang);
+
+    const desired = normalizeLang(lang);
+    if (desired === 'gu') {
+      // Legacy behavior: Gujarati feed shows Gujarati originals immediately.
+      q.language = 'gu';
+    } else if (desired === 'hi' || desired === 'en') {
+      // Hindi/English feeds:
+      // - include originals authored in that language, OR
+      // - include stories with fully-ready cached translations for that language.
+      const originalMatch = buildOriginalLangMatch(desired);
+      const readyMatch = buildReadyTranslationMatch(desired);
+      q.$or = [originalMatch, readyMatch].filter(Boolean);
+    } else if (lang) {
+      // Backward compatible: if a non-standard lang was provided, keep old behavior.
+      q.language = String(lang);
+    }
 
     const lim = Math.min(parseInt(limit, 10) || 20, 50);
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const skip = (pageNum - 1) * lim;
 
-    const stories = await Article.find(q)
+    let stories = await Article.find(q)
       .sort({ publishedAt: -1, createdAt: -1 })
       .skip(skip)
       .limit(lim)
       .lean();
+
+    if (desired === 'hi' || desired === 'en') {
+      stories = (stories || []).map((s) => applyCachedTranslationToStory(s, desired));
+    }
 
     return res.json({ success: true, data: stories });
   } catch (err) {

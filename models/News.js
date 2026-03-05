@@ -42,10 +42,17 @@ const WORKFLOW_CHAIN_STAGES = [
 const TRANSLATION_PROVIDER_VALUES = ['google', 'openai', 'manual'];
 
 function normalizeTranslationProvider(v) {
-  if (v === null || v === undefined) return undefined;
+  if (v === null || v === undefined) return 'google';
   const s = String(v).trim().toLowerCase();
-  if (!s) return undefined;
-  return s;
+  if (!s) return 'google';
+  return TRANSLATION_PROVIDER_VALUES.includes(s) ? s : 'google';
+}
+
+function normalizeTranslationStatus(v) {
+  if (v === null || v === undefined) return 'pending';
+  const s = String(v).trim().toLowerCase();
+  if (s === 'pending' || s === 'ready' || s === 'failed') return s;
+  return 'pending';
 }
 
 const newsSchema = new mongoose.Schema({
@@ -140,9 +147,9 @@ const newsSchema = new mongoose.Schema({
   // Background translation status (publish should never block on translation).
   // NOTE: Stored on the CMS/admin News doc; public Article copy is synced separately.
   translationStatus: {
-    en: { type: String, enum: ['pending', 'ready', 'failed', null], default: null },
-    hi: { type: String, enum: ['pending', 'ready', 'failed', null], default: null },
-    gu: { type: String, enum: ['pending', 'ready', 'failed', null], default: null },
+    en: { type: String, enum: ['pending', 'ready', 'failed'], default: 'pending', set: normalizeTranslationStatus },
+    hi: { type: String, enum: ['pending', 'ready', 'failed'], default: 'pending', set: normalizeTranslationStatus },
+    gu: { type: String, enum: ['pending', 'ready', 'failed'], default: 'pending', set: normalizeTranslationStatus },
   },
   translationError: {
     en: { type: String, default: null },
@@ -391,9 +398,20 @@ newsSchema.pre('validate', function preValidate(next) {
         for (const lang of ['en', 'hi', 'gu']) {
           const b = translations[lang];
           if (!b || typeof b !== 'object') continue;
-          if (b.provider === null) b.provider = 'google';
+          if (b.provider === null || b.provider === undefined || String(b.provider).trim() === '') b.provider = 'google';
           if (hasFull(b) && !b.generatedAt) b.generatedAt = new Date();
         }
+      }
+    } catch (_) {}
+
+    // Legacy repair: translationStatus may be null/invalid.
+    try {
+      if (!this.translationStatus || typeof this.translationStatus !== 'object' || Array.isArray(this.translationStatus)) {
+        this.translationStatus = {};
+      }
+      for (const lang of ['en', 'hi', 'gu']) {
+        const v = this.translationStatus[lang];
+        this.translationStatus[lang] = normalizeTranslationStatus(v);
       }
     } catch (_) {}
 

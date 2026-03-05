@@ -175,8 +175,8 @@ function buildPublishTranslationState({ baseLang, title, summary, content, exist
       continue;
     }
 
-    // If translation is disabled/misconfigured, do not enqueue/persist pending.
-    // Preserve any full cached bucket; otherwise leave status null.
+    // If translation is disabled/misconfigured, still persist a non-null status.
+    // Preserve any full cached bucket; otherwise keep pending (publish must never block).
     if (!translationEnabled) {
       if (_hasFullBucket(existingBucket)) {
         translations[lang] = _sanitizeBucket(existingBucket, { fallbackProvider: 'google', now: at });
@@ -191,10 +191,10 @@ function buildPublishTranslationState({ baseLang, title, summary, content, exist
             : { title: '', summary: '', content: '', provider: 'google', generatedAt: null },
           { fallbackProvider: 'google', now: at }
         );
-        translationStatus[lang] = null;
+        translationStatus[lang] = 'pending';
         translationError[lang] = null;
         translationNextRetryAt[lang] = null;
-        translationUpdatedAt[lang] = existingUpdatedAt && !Number.isNaN(existingUpdatedAt.getTime()) ? existingUpdatedAt : null;
+        translationUpdatedAt[lang] = existingUpdatedAt && !Number.isNaN(existingUpdatedAt.getTime()) ? existingUpdatedAt : at;
       }
       continue;
     }
