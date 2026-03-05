@@ -101,6 +101,57 @@ test('GET /api/public/regional/:state?lang=en returns ready-only translations an
   }
 });
 
+test('GET /api/public/regional/:state supports district-only fallback when state tag is missing', async () => {
+  const prevFind = News.find;
+  const prevCount = News.countDocuments;
+
+  const capture = { query: null, selectArg: null, sortArg: null, skip: null, limit: null };
+
+  try {
+    const dataset = [];
+
+    News.find = (q) => {
+      capture.query = q;
+      return makeChainableQuery(dataset, capture);
+    };
+    News.countDocuments = async () => dataset.length;
+
+    const res = await request(app).get('/api/public/regional/Gujarat%20?lang=gu&district=Ahmedabad%20&page=1&limit=20');
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.data.stateSlug, 'gujarat');
+
+    assert.ok(capture.query);
+    const andClauses = Array.isArray(capture.query.$and) ? capture.query.$and : [];
+    assert.ok(andClauses.length >= 1);
+
+    const locationClause = andClauses[0];
+    assert.ok(locationClause);
+    assert.ok(Array.isArray(locationClause.$or));
+    assert.equal(locationClause.$or.length, 2);
+
+    const withState = locationClause.$or[0];
+    const fallback = locationClause.$or[1];
+
+    assert.ok(Array.isArray(withState.$and));
+    assert.ok(Array.isArray(fallback.$and));
+
+    const withStateJson = JSON.stringify(withState);
+    const fallbackJson = JSON.stringify(fallback);
+
+    assert.ok(withStateJson.includes('location.stateSlug'));
+    assert.ok(withStateJson.includes('location.district'));
+
+    assert.ok(fallbackJson.includes('location.district'));
+    assert.ok(!fallbackJson.includes('location.stateSlug'));
+    assert.ok(!fallbackJson.includes('location.state'));
+  } finally {
+    News.find = prevFind;
+    News.countDocuments = prevCount;
+  }
+});
+
 test('GET /api/public/regional/:state rejects invalid state (400)', async () => {
   const res = await request(app).get('/api/public/regional/not-a-real-state?lang=gu');
   assert.equal(res.status, 400);

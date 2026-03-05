@@ -7,7 +7,7 @@ const Article = News;
 const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const PushHistory = require('../models/PushHistory');
-const { canonicalizeSlug, getSlugCandidates, slugifyUnicode } = require('../lib/slug');
+const { canonicalizeSlug, getSlugCandidates, safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 const { tagStatesFromText, isValidStateSlug } = require('../src/utils/locationTagger');
 const {
@@ -748,7 +748,7 @@ function _resolveImageUrlFromNewsDoc(doc) {
 // GET /api/public/regional/:state?lang=en|hi|gu
 router.get('/public/regional/:state', async (req, res, next) => {
   try {
-    const rawState = String(req.params.state || '').trim();
+    const rawState = String(safeDecodeURIComponent(req.params.state || '') || '').trim();
     if (!rawState) {
       return res.status(400).json({ ok: false, success: false, status: 400, message: 'state is required' });
     }
@@ -763,6 +763,11 @@ router.get('/public/regional/:state', async (req, res, next) => {
 
     const desired = normalizeLanguage(req.query.lang || req.query.language) || 'gu';
 
+    const rawDistrict = String(safeDecodeURIComponent(req.query.district || '') || '').trim();
+    const rawCity = String(safeDecodeURIComponent(req.query.city || '') || '').trim();
+    const districtSlug = rawDistrict ? String(slugifyUnicode(rawDistrict, { maxLength: 80 }) || '').trim().toLowerCase() : '';
+    const citySlug = rawCity ? String(slugifyUnicode(rawCity, { maxLength: 80 }) || '').trim().toLowerCase() : '';
+
     const page = Math.max(_parseIntOrDefault(req.query.page, 1), 1);
     const limit = _clampInt(_parseIntOrDefault(req.query.limit, 20), 1, 100);
     const skip = (page - 1) * limit;
@@ -770,19 +775,54 @@ router.get('/public/regional/:state', async (req, res, next) => {
     const stateRx = new RegExp(`^${_escapeRegex(rawState)}$`, 'i');
     const stateSlugRx = new RegExp(`^${_escapeRegex(stateSlug)}$`, 'i');
 
+    const districtRx = rawDistrict ? new RegExp(`^\\s*${_escapeRegex(rawDistrict)}\\s*$`, 'i') : null;
+    const districtSlugRx = districtSlug ? new RegExp(`^\\s*${_escapeRegex(districtSlug)}\\s*$`, 'i') : null;
+    const cityRx = rawCity ? new RegExp(`^\\s*${_escapeRegex(rawCity)}\\s*$`, 'i') : null;
+    const citySlugRx = citySlug ? new RegExp(`^\\s*${_escapeRegex(citySlug)}\\s*$`, 'i') : null;
+
+    const stateClause = {
+      $or: [
+        { 'location.stateSlug': stateSlug },
+        { 'location.state': stateRx },
+        // Backward compatibility: some docs may store slug-like strings in location.state.
+        { 'location.state': stateSlugRx },
+      ],
+    };
+
+    const districtClause = rawDistrict ? {
+      $or: [
+        ...(districtSlug ? [{ 'location.districtSlug': districtSlug }] : []),
+        { 'location.district': districtRx },
+        ...(districtSlugRx ? [{ 'location.district': districtSlugRx }] : []),
+      ],
+    } : null;
+
+    const cityClause = rawCity ? {
+      $or: [
+        ...(citySlug ? [{ 'location.citySlug': citySlug }] : []),
+        { 'location.city': cityRx },
+        ...(citySlugRx ? [{ 'location.city': citySlugRx }] : []),
+      ],
+    } : null;
+
+    // Matching rules:
+    // - Prefer (state AND district/city)
+    // - Fallback to (district/city) alone for legacy docs missing state tags
+    const locationClause = (districtClause || cityClause)
+      ? {
+        $or: [
+          { $and: [stateClause, districtClause, cityClause].filter(Boolean) },
+          { $and: [districtClause, cityClause].filter(Boolean) },
+        ],
+      }
+      : stateClause;
+
     const filter = {
       status: 'published',
       // Regional feed includes both regional + breaking (consistent with existing category handling).
       category: { $in: ['regional', 'breaking'] },
       $and: [
-        {
-          $or: [
-            { 'location.stateSlug': stateSlug },
-            { 'location.state': stateRx },
-            // Backward compatibility: some docs may store slug-like strings in location.state.
-            { 'location.state': stateSlugRx },
-          ],
-        },
+        locationClause,
       ],
     };
 
