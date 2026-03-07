@@ -7,6 +7,9 @@ const CHANNELS = new Set(['breaking', 'live']);
 const MODES = new Set(['auto', 'force_on', 'force_off', 'off']);
 
 const DEFAULT_TICKER_SPEED_SECONDS = 18;
+const DEFAULT_BREAKING_MAX_ITEMS = 10;
+const DEFAULT_LIVE_MAX_ITEMS = 20;
+const DEFAULT_PAUSE_ON_HOVER = true;
 
 const DEFAULT_BROADCAST = {
   breaking: { enabled: false, mode: 'auto', tickerSpeedSeconds: DEFAULT_TICKER_SPEED_SECONDS },
@@ -38,13 +41,16 @@ function defaultSettingsDocShape() {
       mode: DEFAULT_BROADCAST.breaking.mode,
       tickerSpeedSeconds: DEFAULT_BROADCAST.breaking.tickerSpeedSeconds,
       speedSec: DEFAULT_BROADCAST.breaking.tickerSpeedSeconds,
+      maxItems: DEFAULT_BREAKING_MAX_ITEMS,
     },
     live: {
       enabled: DEFAULT_BROADCAST.live.enabled,
       mode: DEFAULT_BROADCAST.live.mode,
       tickerSpeedSeconds: DEFAULT_BROADCAST.live.tickerSpeedSeconds,
       speedSec: DEFAULT_BROADCAST.live.tickerSpeedSeconds,
+      maxItems: DEFAULT_LIVE_MAX_ITEMS,
     },
+    pauseOnHover: DEFAULT_PAUSE_ON_HOVER,
     // Keep legacy fields initialized for older callers
     breakingEnabled: false,
     liveEnabled: false,
@@ -93,6 +99,14 @@ function normalizeSpeedSec(v) {
   const rounded = Math.round(n);
   // Tickers settings UI supports up to 120s.
   if (rounded < 2 || rounded > 120) return null;
+  return rounded;
+}
+
+function normalizeMaxItems(v) {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return null;
+  const rounded = Math.round(n);
+  if (rounded < 1 || rounded > 30) return null;
   return rounded;
 }
 
@@ -188,6 +202,12 @@ async function getOrCreateSettings() {
     }
     // Keep speedSec mirrored for older callers.
     doc.breaking.speedSec = normalizeSpeedSec(doc.breaking.speedSec) ?? doc.breaking.tickerSpeedSeconds;
+
+    // Backfill maxItems
+    if (typeof doc.breaking.maxItems !== 'number' || !Number.isFinite(doc.breaking.maxItems)) {
+      doc.breaking.maxItems = DEFAULT_BREAKING_MAX_ITEMS;
+    }
+    doc.breaking.maxItems = normalizeMaxItems(doc.breaking.maxItems) ?? DEFAULT_BREAKING_MAX_ITEMS;
   }
   if (doc.live && typeof doc.live === 'object') {
     if (typeof doc.live.tickerSpeedSeconds !== 'number' || !Number.isFinite(doc.live.tickerSpeedSeconds)) {
@@ -195,6 +215,16 @@ async function getOrCreateSettings() {
       doc.live.tickerSpeedSeconds = clampTickerSpeedSeconds(legacy) ?? DEFAULT_TICKER_SPEED_SECONDS;
     }
     doc.live.speedSec = normalizeSpeedSec(doc.live.speedSec) ?? doc.live.tickerSpeedSeconds;
+
+    if (typeof doc.live.maxItems !== 'number' || !Number.isFinite(doc.live.maxItems)) {
+      doc.live.maxItems = DEFAULT_LIVE_MAX_ITEMS;
+    }
+    doc.live.maxItems = normalizeMaxItems(doc.live.maxItems) ?? DEFAULT_LIVE_MAX_ITEMS;
+  }
+
+  // Backfill pauseOnHover
+  if (typeof doc.pauseOnHover !== 'boolean') {
+    doc.pauseOnHover = DEFAULT_PAUSE_ON_HOVER;
   }
 
   // Normalize to schema-valid values to avoid enum validation errors on future saves.
@@ -359,6 +389,16 @@ function applySettingsPatch(doc, payload) {
       doc[channel].tickerSpeedSeconds = s;
       doc[channel].speedSec = s;
     }
+
+    if (Object.prototype.hasOwnProperty.call(next, 'maxItems')) {
+      const m = normalizeMaxItems(next.maxItems);
+      if (m === null) return { ok: false, status: 400, message: `Invalid ${channel}.maxItems. Expected integer 1..30` };
+      doc[channel].maxItems = m;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(normalized, 'pauseOnHover')) {
+    doc.pauseOnHover = Boolean(normalized.pauseOnHover);
   }
 
   return { ok: true, status: 200 };
@@ -402,6 +442,7 @@ function adminSettingsResponse(doc) {
       tickerSpeedSeconds: breakingSpeed,
       durationSeconds: breakingSpeed,
       speedSec: breakingSpeed,
+      maxItems: normalizeMaxItems(breaking.maxItems) ?? DEFAULT_BREAKING_MAX_ITEMS,
     },
     live: {
       enabled: Boolean(live.enabled),
@@ -411,7 +452,9 @@ function adminSettingsResponse(doc) {
       tickerSpeedSeconds: liveSpeed,
       durationSeconds: liveSpeed,
       speedSec: liveSpeed,
+      maxItems: normalizeMaxItems(live.maxItems) ?? DEFAULT_LIVE_MAX_ITEMS,
     },
+    pauseOnHover: typeof d.pauseOnHover === 'boolean' ? d.pauseOnHover : DEFAULT_PAUSE_ON_HOVER,
     updatedAt: d.updatedAt || null,
   };
 }

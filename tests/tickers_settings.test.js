@@ -133,6 +133,7 @@ test('Public tickers settings returns default when no published', async () => {
   assert.strictEqual(res.body.data.tickers.live.refreshSec, 30);
   assert.strictEqual(res.body.data.tickers.live.maxItems, 20);
   assert.strictEqual(res.body.data.tickers.breaking.showWhenEmpty, true);
+  assert.strictEqual(res.body.data.tickers.pauseOnHover, true);
 
   mongoose.connection.readyState = prev;
 });

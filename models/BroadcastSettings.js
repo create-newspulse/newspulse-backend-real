@@ -10,13 +10,19 @@ const BroadcastSettingsSchema = new mongoose.Schema(
       tickerSpeedSeconds: { type: Number, default: 8, min: 4, max: 60 },
       // Back-compat mirror used by older endpoints
       speedSec: { type: Number, default: 8, min: 2, max: 120 },
+      // Max items to display in ticker
+      maxItems: { type: Number, default: 10, min: 1, max: 30 },
     },
     live: {
       enabled: { type: Boolean, default: false },
       mode: { type: String, enum: ['auto', 'force_on', 'force_off'], default: 'auto' },
       tickerSpeedSeconds: { type: Number, default: 8, min: 4, max: 60 },
       speedSec: { type: Number, default: 8, min: 2, max: 120 },
+      maxItems: { type: Number, default: 20, min: 1, max: 30 },
     },
+
+    // UI behavior: pause ticker animation on hover
+    pauseOnHover: { type: Boolean, default: true },
 
     // Legacy fields used by older routes/UIs (kept for backward compatibility)
     breakingEnabled: { type: Boolean, default: false },

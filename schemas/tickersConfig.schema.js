@@ -4,6 +4,7 @@ const ShowOnSchema = z.enum(['home', 'category', 'article']);
 
 const TickersConfigSchema = z.object({
   tickers: z.object({
+    pauseOnHover: z.boolean().default(true),
     live: z.object({
       enabled: z.boolean(),
       speedSec: z.number().min(5).max(120),
@@ -25,6 +26,7 @@ const TickersConfigSchema = z.object({
 
 const DEFAULT_TICKERS_CONFIG = {
   tickers: {
+    pauseOnHover: true,
     live: {
       enabled: true,
       speedSec: 24,

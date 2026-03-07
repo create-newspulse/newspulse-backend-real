@@ -289,6 +289,11 @@ router.get('/config', async (_req, res) => {
 
     return res.status(200).json({
       version,
+      breakingMaxItems: settings?.breaking?.maxItems,
+      liveMaxItems: settings?.live?.maxItems,
+      breakingSpeedSec: settings?.breaking?.durationSec,
+      liveSpeedSec: settings?.live?.durationSec,
+      pauseOnHover: settings?.pauseOnHover,
       breaking: {
         enabled: Boolean(breakingEnabled),
         mode: settings.breaking.mode,

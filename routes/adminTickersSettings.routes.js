@@ -43,6 +43,7 @@ function tickersConfigFromBroadcastSettings(doc) {
   const def = DEFAULT_TICKERS_CONFIG;
   const breakingDoc = doc && doc.breaking ? doc.breaking : {};
   const liveDoc = doc && doc.live ? doc.live : {};
+  const pauseOnHover = typeof doc?.pauseOnHover === 'boolean' ? doc.pauseOnHover : def.tickers.pauseOnHover;
 
   let breakingMode = typeof breakingDoc.mode === 'string' ? breakingDoc.mode : undefined;
   if (!breakingMode) {
@@ -57,6 +58,7 @@ function tickersConfigFromBroadcastSettings(doc) {
 
   return {
     tickers: {
+      pauseOnHover,
       live: {
         enabled: typeof liveDoc.enabled === 'boolean' ? liveDoc.enabled : def.tickers.live.enabled,
         speedSec: typeof liveDoc.speedSec === 'number' ? liveDoc.speedSec : def.tickers.live.speedSec,
@@ -89,10 +91,15 @@ function tickersConfigFromBroadcastSettings(doc) {
 async function saveBroadcastSettingsFromTickersConfig(config) {
   const live = config && config.tickers ? config.tickers.live : null;
   const breaking = config && config.tickers ? config.tickers.breaking : null;
+  const pauseOnHover = config && config.tickers ? config.tickers.pauseOnHover : undefined;
 
   const update = {
     updatedAt: new Date(),
   };
+
+  if (typeof pauseOnHover === 'boolean') {
+    update.pauseOnHover = pauseOnHover;
+  }
 
   if (breaking) {
     const breakingModeRaw = String(breaking.mode || '').trim().toLowerCase();

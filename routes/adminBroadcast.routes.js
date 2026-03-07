@@ -102,17 +102,28 @@ function toAdminConfigContract(settings, itemsByChannel) {
   const breakingDuration = resolveDurationSec(settings?.breaking);
   const liveDuration = resolveDurationSec(settings?.live);
 
+  const breakingMaxItems = typeof settings?.breaking?.maxItems === 'number' ? settings.breaking.maxItems : undefined;
+  const liveMaxItems = typeof settings?.live?.maxItems === 'number' ? settings.live.maxItems : undefined;
+  const pauseOnHover = typeof settings?.pauseOnHover === 'boolean' ? settings.pauseOnHover : undefined;
+
   return {
+    breakingMaxItems,
+    liveMaxItems,
+    breakingSpeedSec: breakingDuration,
+    liveSpeedSec: liveDuration,
+    pauseOnHover,
     breaking: {
       // Admin config should reflect the stored flag (not computed/effective enabled).
       enabled: Boolean(settings?.breaking?.enabled),
       mode: settings?.breaking?.mode || 'auto',
       durationSec: breakingDuration,
+      maxItems: breakingMaxItems,
     },
     live: {
       enabled: Boolean(settings?.live?.enabled),
       mode: settings?.live?.mode || 'auto',
       durationSec: liveDuration,
+      maxItems: liveMaxItems,
     },
   };
 }
@@ -139,6 +150,23 @@ function _buildConfigPatchPayload(type, body) {
       payload[ch].mode = next.mode;
     }
 
+    if (Object.prototype.hasOwnProperty.call(next, 'maxItems')) {
+      payload[ch].maxItems = next.maxItems;
+    }
+
+    // Flat compatibility keys when updating both channels at once.
+    if (!channel) {
+      const maxKey = ch === 'breaking' ? 'breakingMaxItems' : 'liveMaxItems';
+      if (Object.prototype.hasOwnProperty.call(b, maxKey)) {
+        payload[ch].maxItems = b[maxKey];
+      }
+
+      const speedKey = ch === 'breaking' ? 'breakingSpeedSec' : 'liveSpeedSec';
+      if (Object.prototype.hasOwnProperty.call(b, speedKey)) {
+        payload[ch].speedSec = b[speedKey];
+      }
+    }
+
     // Prefer durationSec (requested contract), but accept legacy names too.
     if (Object.prototype.hasOwnProperty.call(next, 'durationSec')) {
       payload[ch].durationSeconds = next.durationSec;
@@ -157,18 +185,26 @@ function _buildConfigPatchPayload(type, body) {
     }
   }
 
+  if (Object.prototype.hasOwnProperty.call(b, 'pauseOnHover')) {
+    payload.pauseOnHover = b.pauseOnHover;
+  }
+
   return payload;
 }
 
 function _summarizePatchKeys(body) {
   const out = [];
   const b = body && typeof body === 'object' ? body : {};
+  if (Object.prototype.hasOwnProperty.call(b, 'pauseOnHover')) out.push('pauseOnHover');
   for (const ch of ['breaking', 'live']) {
     const next = ch === 'live' ? ((b && b.live) || (b && b.liveUpdates)) : b[ch];
     if (!next || typeof next !== 'object') continue;
-    for (const k of ['enabled', 'mode', 'durationSec', 'durationSeconds', 'tickerSpeedSeconds', 'scrollDurationSeconds', 'scrollDurationSec', 'speedSec', 'speed']) {
+    for (const k of ['enabled', 'mode', 'durationSec', 'durationSeconds', 'tickerSpeedSeconds', 'scrollDurationSeconds', 'scrollDurationSec', 'speedSec', 'speed', 'maxItems']) {
       if (Object.prototype.hasOwnProperty.call(next, k)) out.push(`${ch}.${k}`);
     }
+  }
+  for (const k of ['breakingMaxItems', 'liveMaxItems', 'breakingSpeedSec', 'liveSpeedSec']) {
+    if (Object.prototype.hasOwnProperty.call(b, k)) out.push(k);
   }
   return out;
 }
@@ -415,8 +451,13 @@ router.patch('/config', requireAdminAuth, async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const payload = _buildConfigPatchPayload(null, body);
   const touched = _summarizePatchKeys(body);
-  if ((!payload.breaking || Object.keys(payload.breaking).length === 0) && (!payload.live || Object.keys(payload.live).length === 0)) {
-    return fail(res, 400, 'BAD_REQUEST', 'No supported fields to update (enabled, mode, durationSec/scrollDurationSeconds)');
+  const hasChannelUpdates =
+    (payload.breaking && Object.keys(payload.breaking).length > 0) ||
+    (payload.live && Object.keys(payload.live).length > 0);
+  const hasRootUpdates = Object.prototype.hasOwnProperty.call(payload, 'pauseOnHover');
+
+  if (!hasChannelUpdates && !hasRootUpdates) {
+    return fail(res, 400, 'BAD_REQUEST', 'No supported fields to update (enabled, mode, durationSec/scrollDurationSeconds, maxItems, pauseOnHover)');
   }
 
   // Minimal debug log (no secrets)
