@@ -72,6 +72,40 @@ function applyCachedTranslationToStory(story, desiredLang) {
   };
 }
 
+function _normalizeImageUrlCandidate(v) {
+  if (v === null || v === undefined) return null;
+
+  if (typeof v === 'string') {
+    const s = v.trim();
+    return s ? s : null;
+  }
+
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const url = v.url ?? v.src ?? null;
+    if (typeof url === 'string') {
+      const s = url.trim();
+      return s ? s : null;
+    }
+  }
+
+  return null;
+}
+
+function withNormalizedImageUrl(story) {
+  if (!story || typeof story !== 'object') return story;
+
+  const imageUrl =
+    _normalizeImageUrlCandidate(story.imageUrl) ||
+    _normalizeImageUrlCandidate(story.coverImageUrl) ||
+    _normalizeImageUrlCandidate(story.coverImage) ||
+    _normalizeImageUrlCandidate(story.image) ||
+    _normalizeImageUrlCandidate(story.thumbnail) ||
+    _normalizeImageUrlCandidate(Array.isArray(story.images) ? story.images[0] : null) ||
+    null;
+
+  return { ...story, imageUrl };
+}
+
 // GET: /api/public/stories?category=&lang=&limit=20&page=1
 router.get('/stories', async (req, res) => {
   try {
@@ -114,6 +148,8 @@ router.get('/stories', async (req, res) => {
       stories = (stories || []).map((s) => applyCachedTranslationToStory(s, desired));
     }
 
+    stories = (stories || []).map(withNormalizedImageUrl);
+
     return res.json({ success: true, data: stories });
   } catch (err) {
     return res.status(500).json({ success: false, message: err?.message || String(err) });
@@ -146,14 +182,16 @@ router.get('/stories/:slug', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Story not found' });
     }
 
+    const storyWithImageUrl = withNormalizedImageUrl(story);
+
     const langQueryRaw = (req.query.lang || req.query.language || '').toString().trim();
     if (!langQueryRaw) {
-      return res.json({ success: true, data: story });
+      return res.json({ success: true, data: storyWithImageUrl });
     }
 
     const desired = normalizeLang(langQueryRaw);
     if (!desired) {
-      return res.json({ success: true, data: story });
+      return res.json({ success: true, data: storyWithImageUrl });
     }
 
     const source = normalizeLang(story?.originalLang) || detectLangFromContent(story?.content) || normalizeLang(story?.language) || 'en';
@@ -179,7 +217,7 @@ router.get('/stories/:slug', async (req, res) => {
 
       return res.json({
         success: true,
-        data: localized && localized.out ? localized.out : story,
+        data: localized && localized.out ? withNormalizedImageUrl(localized.out) : storyWithImageUrl,
         resolvedLang: source,
         translationPending: false,
       });
@@ -203,7 +241,7 @@ router.get('/stories/:slug', async (req, res) => {
 
       return res.json({
         success: true,
-        data: localized && localized.out ? localized.out : story,
+        data: localized && localized.out ? withNormalizedImageUrl(localized.out) : storyWithImageUrl,
         resolvedLang: localized && localized.resolvedLang ? localized.resolvedLang : source,
         translationPending: false,
       });
@@ -219,7 +257,7 @@ router.get('/stories/:slug', async (req, res) => {
       if (status === 'pending' || (status === 'failed' && retryAt && now < retryAt)) {
         return res.json({
           success: true,
-          data: story,
+          data: storyWithImageUrl,
           resolvedLang: source,
           translationPending: true,
         });
@@ -261,7 +299,7 @@ router.get('/stories/:slug', async (req, res) => {
       if (!lockOwner) {
         return res.json({
           success: true,
-          data: story,
+          data: storyWithImageUrl,
           resolvedLang: source,
           translationPending: true,
         });
@@ -305,7 +343,7 @@ router.get('/stories/:slug', async (req, res) => {
 
     return res.json({
       success: true,
-      data: localized && localized.out ? localized.out : story,
+      data: localized && localized.out ? withNormalizedImageUrl(localized.out) : storyWithImageUrl,
       resolvedLang: localized && localized.resolvedLang ? localized.resolvedLang : (story?.originalLang || story?.language || 'en'),
       translationPending: !!(localized && localized.translationPending),
     });
