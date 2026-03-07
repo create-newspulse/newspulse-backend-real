@@ -160,6 +160,7 @@ let adminMetaRoutes = null;
 try { adminMetaRoutes = require('./routes/adminMeta.routes'); } catch (_) { console.warn('[init] optional routes/adminMeta.routes not found; skipping'); }
 const publicAdsRouter = require('./routes/publicAds.routes');
 const adminAdsRouter = require('./routes/adminAds.routes');
+const adminAdsInquiriesRouter = require('./routes/adminAdsInquiries.routes');
 const publicAdSettingsRouter = require('./routes/publicAdSettings.routes');
 const adminAdSettingsRouter = require('./routes/adminAdSettings.routes');
 const publicRoutes = require('./routes/public.routes');
@@ -1441,6 +1442,10 @@ try {
   // ignore
 }
 app.use('/api/admin', adminAdsRouter);
+
+// Ads inquiry admin APIs (JWT required)
+app.use('/admin-api/ads', adminAdsInquiriesRouter);
+app.use('/admin-api/api/ads', adminAdsInquiriesRouter);
 
 // Admin public settings (tickers)
 app.use('/api/admin', adminTickersSettingsRouter);
