@@ -408,8 +408,17 @@ const PUBLIC_SELECT = [
   'originalLang',
   'translationKey',
   'translationGroupId',
+  // Image fields (legacy + new)
+  'imageUrl',
   'imageURL',
   'coverImageUrl',
+  'coverImage',
+  // Optional/legacy fields that may exist in older docs
+  'image',
+  'thumbnail',
+  'images',
+  'imageAlt',
+  'imageCaption',
   'publishedAt',
   'date',
   'createdAt',
@@ -422,9 +431,84 @@ const PUBLIC_DETAIL_SELECT = `${PUBLIC_SELECT} originalLang translations transla
 // Feed needs translationStatus to filter and translations to localize.
 const PUBLIC_FEED_SELECT = `${PUBLIC_SELECT} originalLang translations translationStatus`;
 
+function _normalizeOptionalString(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  return s ? s : null;
+}
+
+function _extractImageUrlFromAny(v) {
+  if (!v) return null;
+  if (typeof v === 'string') return _normalizeOptionalString(v);
+  if (typeof v === 'object' && !Array.isArray(v)) {
+    // Common shapes: { url }, { src }, { secure_url }
+    return _normalizeOptionalString(v.url || v.src || v.secure_url || null);
+  }
+  return null;
+}
+
+function _extractFirstImgSrcFromHtml(html) {
+  if (typeof html !== 'string' || !html.trim()) return null;
+
+  const m = html.match(/<img\b[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+  const raw = (m && (m[1] || m[2] || m[3])) ? String(m[1] || m[2] || m[3]) : '';
+  const url = _normalizeOptionalString(raw);
+  if (!url) return null;
+  if (url.length > 2048) return null;
+
+  const lower = url.toLowerCase();
+  if (lower.startsWith('javascript:')) return null;
+  if (lower.startsWith('data:') && !lower.startsWith('data:image/')) return null;
+
+  return url;
+}
+
 function withCoverImageUrl(obj) {
   const out = { ...(obj || {}) };
-  out.coverImageUrl = out.coverImageUrl || out.imageURL || null;
+
+  // Normalize imageUrl with the requested priority, plus legacy fields.
+  // Priority: imageUrl || coverImage || image || thumbnail || images[0] || null
+  const candidates = [];
+  candidates.push(_extractImageUrlFromAny(out.imageUrl));
+  candidates.push(_extractImageUrlFromAny(out.coverImageUrl));
+  candidates.push(_extractImageUrlFromAny(out.coverImage));
+  candidates.push(_extractImageUrlFromAny(out.imageURL));
+  candidates.push(_extractImageUrlFromAny(out.image));
+  candidates.push(_extractImageUrlFromAny(out.thumbnail));
+
+  if (Array.isArray(out.images) && out.images.length) {
+    candidates.push(_extractImageUrlFromAny(out.images[0]));
+  }
+
+  let imageUrl = candidates.find(Boolean) || null;
+
+  // Optional fallback: extract from body HTML when no explicit image exists.
+  if (!imageUrl) {
+    imageUrl = _extractFirstImgSrcFromHtml(out.content) || null;
+  }
+
+  out.imageUrl = imageUrl;
+
+  // Keep backward-compatible coverImageUrl populated.
+  const coverFromObj = (out.coverImage && typeof out.coverImage === 'object') ? _normalizeOptionalString(out.coverImage.url) : null;
+  out.coverImageUrl = _normalizeOptionalString(out.coverImageUrl) || _normalizeOptionalString(out.imageURL) || coverFromObj || out.imageUrl || null;
+
+  // Normalize optional alt/caption fields (pass-through if present).
+  const alt =
+    _normalizeOptionalString(out.imageAlt) ||
+    (out.coverImage && typeof out.coverImage === 'object' ? _normalizeOptionalString(out.coverImage.alt) : null) ||
+    (out.image && typeof out.image === 'object' ? _normalizeOptionalString(out.image.alt) : null) ||
+    null;
+
+  const caption =
+    _normalizeOptionalString(out.imageCaption) ||
+    (out.coverImage && typeof out.coverImage === 'object' ? _normalizeOptionalString(out.coverImage.caption) : null) ||
+    (out.image && typeof out.image === 'object' ? _normalizeOptionalString(out.image.caption) : null) ||
+    null;
+
+  out.imageAlt = alt;
+  out.imageCaption = caption;
+
   out.lang = out.lang || out.language || 'gu';
   out.language = out.language || out.lang || 'gu';
   return out;
