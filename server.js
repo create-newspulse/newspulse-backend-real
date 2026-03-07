@@ -178,6 +178,7 @@ const adminTickersSettingsRouter = require('./routes/adminTickersSettings.routes
 const publicBroadcastRouter = require('./routes/publicBroadcast.routes');
 const publicApiBroadcastRouter = require('./routes/publicApiBroadcast.routes');
 const publicTickerRouter = require('./routes/publicTicker.routes');
+const publicWeatherRouter = require('./routes/publicWeather.routes');
 const debugRouter = require('./routes/_debug.routes');
 let adminWorkflowApiRouter = null;
 let adminPushHistoryApiRouter = null;
@@ -1246,6 +1247,7 @@ app.use('/api/site-settings', siteSettingsRoutes);
 // Mount early to avoid being shadowed by other /api routers.
 app.use('/api/public/trending-topics', publicTrendingTopicsRouter);
 app.use('/api/public/news', publicNewsRouter);
+app.use('/api/public/weather', publicWeatherRouter);
 // Admin panel proxy basePath support for public news
 app.use('/admin-api/public/news', publicNewsRouter);
 app.use('/admin-api/api/public/news', publicNewsRouter);
