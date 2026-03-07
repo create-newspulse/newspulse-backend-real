@@ -60,7 +60,6 @@ router.get('/inquiries', async (req, res) => {
     ]);
 
     return res.status(200).json({
-      ok: true,
       items: (items || []).map(_toDto),
       page,
       limit,
@@ -77,7 +76,7 @@ router.get('/inquiries/unread-count', async (_req, res) => {
     if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database unavailable' });
 
     const count = await AdInquiry.countDocuments({ status: 'new' });
-    return res.status(200).json({ ok: true, count: typeof count === 'number' ? count : 0 });
+    return res.status(200).json({ count: typeof count === 'number' ? count : 0 });
   } catch (e) {
     return res.status(500).json({ ok: false, message: e?.message || String(e) });
   }
@@ -101,7 +100,7 @@ router.patch('/inquiries/:id/read', async (req, res) => {
 
     if (!updated) return res.status(404).json({ ok: false, message: 'Not found' });
 
-    return res.status(200).json({ ok: true, inquiry: _toDto(updated) });
+    return res.status(200).json({ success: true });
   } catch (e) {
     return res.status(500).json({ ok: false, message: e?.message || String(e) });
   }

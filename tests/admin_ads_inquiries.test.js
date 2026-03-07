@@ -70,7 +70,6 @@ test('GET /admin-api/ads/inquiries lists inquiries with JWT and supports status 
       .set('Authorization', `Bearer ${token}`);
 
     assert.equal(res.statusCode, 200);
-    assert.equal(res.body.ok, true);
     assert.ok(Array.isArray(res.body.items));
     assert.equal(res.body.items.length, 1);
     assert.equal(res.body.items[0].id, '507f1f77bcf86cd799439099');
@@ -98,7 +97,7 @@ test('GET /admin-api/ads/inquiries/unread-count returns count of new inquiries',
       .set('Authorization', `Bearer ${token}`);
 
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, { ok: true, count: 7 });
+    assert.deepEqual(res.body, { count: 7 });
   } finally {
     AdInquiry.countDocuments = prevCount;
   }
@@ -140,9 +139,7 @@ test('PATCH /admin-api/ads/inquiries/:id/read marks inquiry as read', async () =
       .send();
 
     assert.equal(res.statusCode, 200);
-    assert.equal(res.body.ok, true);
-    assert.equal(res.body.inquiry.id, id);
-    assert.equal(res.body.inquiry.status, 'read');
+    assert.deepEqual(res.body, { success: true });
 
     assert.deepEqual(updateArgs, { $set: { status: 'read' } });
     assert.deepEqual(optsArgs, { new: true });

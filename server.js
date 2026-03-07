@@ -161,6 +161,8 @@ try { adminMetaRoutes = require('./routes/adminMeta.routes'); } catch (_) { cons
 const publicAdsRouter = require('./routes/publicAds.routes');
 const adminAdsRouter = require('./routes/adminAds.routes');
 const adminAdsInquiriesRouter = require('./routes/adminAdsInquiries.routes');
+const publicAdsInquiryRouter = require('./src/routes/public.ads.routes');
+const adminAdsInquiriesCompatRouter = require('./src/routes/admin.ads.routes');
 const publicAdSettingsRouter = require('./routes/publicAdSettings.routes');
 const adminAdSettingsRouter = require('./routes/adminAdSettings.routes');
 const publicRoutes = require('./routes/public.routes');
@@ -1350,6 +1352,8 @@ if (publicFeatureTogglesRouter) {
 
 // Public sponsor ads
 app.use('/api/public', publicAdsRouter);
+// Public inquiry endpoint expected by the admin panel/frontends
+app.use('/api/public/ads', publicAdsInquiryRouter);
 
 // Public site settings (tickers)
 app.use('/api/public', publicTickersSettingsRouter);
@@ -1444,8 +1448,8 @@ try {
 app.use('/api/admin', adminAdsRouter);
 
 // Ads inquiry admin APIs (JWT required)
-app.use('/admin-api/ads', adminAdsInquiriesRouter);
-app.use('/admin-api/api/ads', adminAdsInquiriesRouter);
+app.use('/admin-api/ads', adminAdsInquiriesCompatRouter);
+app.use('/admin-api/api/ads', adminAdsInquiriesCompatRouter);
 
 // Admin public settings (tickers)
 app.use('/api/admin', adminTickersSettingsRouter);

@@ -49,6 +49,8 @@ const { optionalAdminAuth } = require('../middleware/optionalAdminAuth');
 // Ads + Ad Settings (shared root-level routers)
 const publicAdsRouter = require('../routes/publicAds.routes');
 const adminAdsRouter = require('../routes/adminAds.routes');
+const adminAdsInquiriesRouter = require('../routes/adminAdsInquiries.routes');
+const publicAdsInquiryRouter = require('../src/routes/public.ads.routes');
 const publicAdSettingsRouter = require('../routes/publicAdSettings.routes');
 const adminAdSettingsRouter = require('../routes/adminAdSettings.routes');
 const publicRoutes = require('../routes/public.routes');
@@ -283,6 +285,8 @@ app.use('/api/community-reporter', communityReporterRoutes);
 
 // Public sponsor ads + global ad slot settings
 app.use('/api/public', publicAdsRouter);
+// Public ads inquiry endpoint
+app.use('/api/public/ads', publicAdsInquiryRouter);
 
 // Public stories
 app.use('/api/public', publicRoutes);
@@ -308,6 +312,10 @@ app.use('/admin-api/api/admin', adminAdSettingsRouter);
 app.use('/api/admin', adminAdsRouter);
 app.use('/admin-api/admin', adminAdsRouter);
 app.use('/admin-api/api/admin', adminAdsRouter);
+
+// Admin ads inquiry endpoints (JWT required)
+app.use('/admin-api/ads', adminAdsInquiriesRouter);
+app.use('/admin-api/api/ads', adminAdsInquiriesRouter);
 // Admin routes mounted at both legacy root and new /api/admin paths where required.
 app.use('/admin', adminRoutes); // legacy POST /admin/login
 // Also mount admin router under /api for endpoints like /api/stats, /api/dashboard-stats
