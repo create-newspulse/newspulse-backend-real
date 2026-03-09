@@ -195,14 +195,12 @@ async function listAdminAdInquiries(req, res) {
       AdInquiry.countDocuments(filter),
     ]);
 
-    const totalNum = typeof total === 'number' ? total : 0;
-    const pages = Math.max(1, Math.ceil(totalNum / limit));
-
     return res.status(200).json({
+      success: true,
       items: (items || []).map(_toDto),
       page,
-      pages,
-      total: totalNum,
+      limit,
+      total: typeof total === 'number' ? total : 0,
     });
   } catch (e) {
     return res.status(500).json({ success: false, message: e?.message || String(e) });
@@ -214,7 +212,7 @@ async function getAdminUnreadCount(req, res) {
     if (!isDbReady()) return res.status(503).json({ success: false, message: 'Database unavailable' });
 
     const count = await AdInquiry.countDocuments({ status: 'new' });
-    return res.status(200).json({ unread: typeof count === 'number' ? count : 0 });
+    return res.status(200).json({ success: true, unread: typeof count === 'number' ? count : 0 });
   } catch (e) {
     return res.status(500).json({ success: false, message: e?.message || String(e) });
   }
