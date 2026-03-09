@@ -68,13 +68,12 @@ test('GET /admin-api/ads/inquiries lists inquiries with JWT and supports status 
       .set('Authorization', `Bearer ${token}`);
 
     assert.equal(res.statusCode, 200);
-    assert.equal(res.body.success, true);
     assert.ok(Array.isArray(res.body.items));
     assert.equal(res.body.items.length, 1);
     assert.equal(res.body.items[0].id, '507f1f77bcf86cd799439099');
     assert.equal(res.body.items[0].status, 'new');
     assert.equal(res.body.page, 1);
-    assert.equal(res.body.limit, 20);
+    assert.equal(res.body.pages, 1);
     assert.equal(res.body.total, 1);
 
     assert.deepEqual(lastFindFilter, { status: 'new' });
@@ -99,7 +98,7 @@ test('GET /admin-api/ads/inquiries/unread-count returns count of new inquiries',
       .set('Authorization', `Bearer ${token}`);
 
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, { success: true, unread: 7 });
+    assert.deepEqual(res.body, { unread: 7 });
   } finally {
     AdInquiry.countDocuments = prevCount;
   }

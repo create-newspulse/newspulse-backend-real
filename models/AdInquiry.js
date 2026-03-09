@@ -26,6 +26,7 @@ const adInquirySchema = new mongoose.Schema(
 
 adInquirySchema.index({ status: 1, createdAt: -1 });
 adInquirySchema.index({ createdAt: -1 });
+adInquirySchema.index({ email: 1 });
 
 module.exports = mongoose.models.AdInquiry || mongoose.model('AdInquiry', adInquirySchema);
 module.exports.STATUS_VALUES = STATUS_VALUES;
