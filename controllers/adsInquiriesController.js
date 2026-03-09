@@ -26,7 +26,7 @@ const mongoose = require('mongoose');
 const AdInquiry = require('../models/AdInquiry');
 const adsMailer = require('../utils/mailer');
 
-const STATUS_VALUES = ['new', 'read', 'closed', 'spam'];
+const STATUS_VALUES = ['new', 'read', 'deleted'];
 
 function isDbReady() {
   const env = String(process.env.NODE_ENV || '').toLowerCase();
@@ -57,15 +57,29 @@ function _clampInt(n, min, max) {
 function _toDto(doc) {
   if (!doc) return null;
 
+  const meta = doc.meta && typeof doc.meta === 'object' ? doc.meta : {};
+
   return {
     id: String(doc._id),
     name: doc.name,
     email: doc.email,
     message: doc.message,
     status: doc.status,
+    readAt: doc.readAt || null,
+    deletedAt: doc.deletedAt || null,
+    meta: {
+      ip: meta.ip ?? null,
+      userAgent: meta.userAgent ?? null,
+      referer: meta.referer ?? null,
+      site: meta.site ?? null,
+    },
     createdAt: doc.createdAt || null,
     updatedAt: doc.updatedAt || null,
   };
+}
+
+function _escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 async function submitPublicAdInquiry(req, res) {
@@ -92,11 +106,26 @@ async function submitPublicAdInquiry(req, res) {
       return res.status(400).json({ success: false, message: 'Missing required field: message' });
     }
 
+    const ip = req.ip ? String(req.ip) : null;
+    const userAgent = req.headers && req.headers['user-agent'] ? String(req.headers['user-agent']) : null;
+    const referer = (req.headers && (req.headers['referer'] || req.headers['referrer']))
+      ? String(req.headers['referer'] || req.headers['referrer'])
+      : null;
+    const site = (req.headers && req.headers.origin) ? String(req.headers.origin) : null;
+
     const inquiry = await AdInquiry.create({
       name,
       email,
       message,
       status: 'new',
+      readAt: null,
+      deletedAt: null,
+      meta: {
+        ip,
+        userAgent,
+        referer,
+        site,
+      },
     });
 
     const id = inquiry && inquiry._id ? String(inquiry._id) : null;
@@ -111,11 +140,10 @@ async function submitPublicAdInquiry(req, res) {
         createdAt: inquiry?.createdAt || new Date(),
         inquiryId: id,
         meta: {
-          ip: req.ip ? String(req.ip) : null,
-          userAgent: req.headers && req.headers['user-agent'] ? String(req.headers['user-agent']) : null,
-          referrer: (req.headers && (req.headers['referer'] || req.headers['referrer']))
-            ? String(req.headers['referer'] || req.headers['referrer'])
-            : null,
+          ip,
+          userAgent,
+          referer,
+          site,
         },
       });
       emailSent = true;
@@ -124,7 +152,8 @@ async function submitPublicAdInquiry(req, res) {
       console.warn(`[ads] email failed id=${id} error=${e?.message || String(e)}`);
     }
 
-    return res.status(201).json({ success: true, id, emailSent });
+    // Keep response minimal/stable for the public website.
+    return res.status(201).json({ success: true, id });
   } catch (e) {
     return res.status(500).json({ success: false, message: e?.message || String(e) });
   }
@@ -132,17 +161,29 @@ async function submitPublicAdInquiry(req, res) {
 
 async function listAdminAdInquiries(req, res) {
   try {
-    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database unavailable' });
+    if (!isDbReady()) return res.status(503).json({ success: false, message: 'Database unavailable' });
 
-    const statusRaw = String(req.query.status || '').trim().toLowerCase();
-    const status = STATUS_VALUES.includes(statusRaw) ? statusRaw : null;
+    const statusRaw = String(req.query.status || 'new').trim().toLowerCase();
+    const status = statusRaw === 'all' ? 'all' : (STATUS_VALUES.includes(statusRaw) ? statusRaw : 'new');
 
     const page = Math.max(_parseInt(req.query.page, 1), 1);
     const limit = _clampInt(_parseInt(req.query.limit, 20), 1, 100);
     const skip = (page - 1) * limit;
 
+    const searchRaw = String(req.query.search || '').trim();
+
     const filter = {};
-    if (status) filter.status = status;
+    if (status !== 'all') filter.status = status;
+
+    if (searchRaw) {
+      const q = _escapeRegex(searchRaw);
+      const rx = new RegExp(q, 'i');
+      filter.$or = [
+        { name: rx },
+        { email: rx },
+        { message: rx },
+      ];
+    }
 
     const [items, total] = await Promise.all([
       AdInquiry.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
@@ -150,40 +191,41 @@ async function listAdminAdInquiries(req, res) {
     ]);
 
     return res.status(200).json({
+      success: true,
       items: (items || []).map(_toDto),
       page,
       limit,
       total: typeof total === 'number' ? total : 0,
     });
   } catch (e) {
-    return res.status(500).json({ ok: false, message: e?.message || String(e) });
+    return res.status(500).json({ success: false, message: e?.message || String(e) });
   }
 }
 
 async function getAdminUnreadCount(req, res) {
   try {
-    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database unavailable' });
+    if (!isDbReady()) return res.status(503).json({ success: false, message: 'Database unavailable' });
 
     const count = await AdInquiry.countDocuments({ status: 'new' });
-    return res.status(200).json({ unread: typeof count === 'number' ? count : 0 });
+    return res.status(200).json({ success: true, unread: typeof count === 'number' ? count : 0 });
   } catch (e) {
-    return res.status(500).json({ ok: false, message: e?.message || String(e) });
+    return res.status(500).json({ success: false, message: e?.message || String(e) });
   }
 }
 
 async function patchAdminInquiryStatus(req, res) {
   try {
-    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database unavailable' });
+    if (!isDbReady()) return res.status(503).json({ success: false, message: 'Database unavailable' });
 
     const id = String(req.params.id || '').trim();
     if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({ ok: false, message: 'Invalid id' });
+      return res.status(400).json({ success: false, message: 'Invalid id' });
     }
 
     const body = req.body && typeof req.body === 'object' ? req.body : {};
     const statusRaw = String(body.status || '').trim().toLowerCase();
     if (!STATUS_VALUES.includes(statusRaw)) {
-      return res.status(400).json({ ok: false, message: 'Invalid status' });
+      return res.status(400).json({ success: false, message: 'Invalid status' });
     }
 
     const updated = await AdInquiry.findByIdAndUpdate(
@@ -192,34 +234,34 @@ async function patchAdminInquiryStatus(req, res) {
       { new: true, runValidators: true }
     ).lean();
 
-    if (!updated) return res.status(404).json({ ok: false, message: 'Not found' });
+    if (!updated) return res.status(404).json({ success: false, message: 'Not found' });
 
     return res.status(200).json(_toDto(updated));
   } catch (e) {
-    return res.status(500).json({ ok: false, message: e?.message || String(e) });
+    return res.status(500).json({ success: false, message: e?.message || String(e) });
   }
 }
 
 async function markAdminInquiryRead(req, res) {
   try {
-    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database unavailable' });
+    if (!isDbReady()) return res.status(503).json({ success: false, message: 'Database unavailable' });
 
     const id = String(req.params.id || '').trim();
     if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({ ok: false, message: 'Invalid id' });
+      return res.status(400).json({ success: false, message: 'Invalid id' });
     }
 
     const updated = await AdInquiry.findByIdAndUpdate(
       id,
-      { $set: { status: 'read' } },
+      { $set: { status: 'read', readAt: new Date() } },
       { new: true, runValidators: true }
     ).lean();
 
-    if (!updated) return res.status(404).json({ ok: false, message: 'Not found' });
+    if (!updated) return res.status(404).json({ success: false, message: 'Not found' });
 
     return res.status(200).json({ success: true });
   } catch (e) {
-    return res.status(500).json({ ok: false, message: e?.message || String(e) });
+    return res.status(500).json({ success: false, message: e?.message || String(e) });
   }
 }
 
@@ -229,19 +271,63 @@ async function patchAdminInquiryStatusById(req, res) {
 
 async function deleteAdminInquiry(req, res) {
   try {
-    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database unavailable' });
+    if (!isDbReady()) return res.status(503).json({ success: false, message: 'Database unavailable' });
 
     const id = String(req.params.id || '').trim();
     if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({ ok: false, message: 'Invalid id' });
+      return res.status(400).json({ success: false, message: 'Invalid id' });
     }
 
-    const deleted = await AdInquiry.findByIdAndDelete(id).lean();
-    if (!deleted) return res.status(404).json({ ok: false, message: 'Not found' });
+    const updated = await AdInquiry.findByIdAndUpdate(
+      id,
+      { $set: { status: 'deleted', deletedAt: new Date() } },
+      { new: true, runValidators: true }
+    ).lean();
+    if (!updated) return res.status(404).json({ success: false, message: 'Not found' });
 
     return res.status(200).json({ success: true });
   } catch (e) {
-    return res.status(500).json({ ok: false, message: e?.message || String(e) });
+    return res.status(500).json({ success: false, message: e?.message || String(e) });
+  }
+}
+
+async function restoreAdminInquiry(req, res) {
+  try {
+    if (!isDbReady()) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
+    const id = String(req.params.id || '').trim();
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid id' });
+    }
+
+    const updated = await AdInquiry.findByIdAndUpdate(
+      id,
+      { $set: { status: 'new', deletedAt: null } },
+      { new: true, runValidators: true }
+    ).lean();
+
+    if (!updated) return res.status(404).json({ success: false, message: 'Not found' });
+    return res.status(200).json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e?.message || String(e) });
+  }
+}
+
+async function hardDeleteAdminInquiry(req, res) {
+  try {
+    if (!isDbReady()) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
+    const id = String(req.params.id || '').trim();
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid id' });
+    }
+
+    const deleted = await AdInquiry.findByIdAndDelete(id).lean();
+    if (!deleted) return res.status(404).json({ success: false, message: 'Not found' });
+
+    return res.status(200).json({ success: true });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e?.message || String(e) });
   }
 }
 
@@ -252,5 +338,7 @@ module.exports = {
   markAdminInquiryRead,
   patchAdminInquiryStatusById,
   deleteAdminInquiry,
+  restoreAdminInquiry,
+  hardDeleteAdminInquiry,
   STATUS_VALUES,
 };

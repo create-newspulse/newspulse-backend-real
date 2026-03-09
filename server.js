@@ -1451,6 +1451,9 @@ app.use('/api/admin', adminAdsRouter);
 app.use('/admin-api/ads', adminAdsInquiriesCompatRouter);
 app.use('/admin-api/api/ads', adminAdsInquiriesCompatRouter);
 
+// Admin ads inquiry APIs (for admin panel rewrites /admin-api -> /api/admin)
+app.use('/api/admin/ads', adminAdsInquiriesCompatRouter);
+
 // Admin public settings (tickers)
 app.use('/api/admin', adminTickersSettingsRouter);
 // Legacy admin panel path support

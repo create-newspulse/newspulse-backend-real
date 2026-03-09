@@ -1,1 +1,1 @@
-module.exports = require('./adsInquiries').adminAdsInquiriesRouter;
+module.exports = require('./adminAdsInquiries');

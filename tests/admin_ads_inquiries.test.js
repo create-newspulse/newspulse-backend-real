@@ -28,7 +28,7 @@ function makeToken() {
 }
 
 test('GET /admin-api/ads/inquiries returns 401 when unauthenticated', async () => {
-  const res = await request(app).get('/admin-api/ads/inquiries');
+  const res = await request(app).get('/api/admin/ads/inquiries');
   assert.equal(res.statusCode, 401);
   assert.equal(res.body.ok, false);
 });
@@ -64,10 +64,11 @@ test('GET /admin-api/ads/inquiries lists inquiries with JWT and supports status 
     const token = makeToken();
 
     const res = await request(app)
-      .get('/admin-api/ads/inquiries?status=new&page=1&limit=20')
+      .get('/api/admin/ads/inquiries?status=new&page=1&limit=20')
       .set('Authorization', `Bearer ${token}`);
 
     assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
     assert.ok(Array.isArray(res.body.items));
     assert.equal(res.body.items.length, 1);
     assert.equal(res.body.items[0].id, '507f1f77bcf86cd799439099');
@@ -94,11 +95,11 @@ test('GET /admin-api/ads/inquiries/unread-count returns count of new inquiries',
   try {
     const token = makeToken();
     const res = await request(app)
-      .get('/admin-api/ads/inquiries/unread-count')
+      .get('/api/admin/ads/inquiries/unread-count')
       .set('Authorization', `Bearer ${token}`);
 
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, { unread: 7 });
+    assert.deepEqual(res.body, { success: true, unread: 7 });
   } finally {
     AdInquiry.countDocuments = prevCount;
   }
@@ -133,14 +134,15 @@ test('PATCH /admin-api/ads/inquiries/:id/mark-read marks inquiry as read', async
   try {
     const token = makeToken();
     const res = await request(app)
-      .patch(`/admin-api/ads/inquiries/${id}/mark-read`)
+      .patch(`/api/admin/ads/inquiries/${id}/mark-read`)
       .set('Authorization', `Bearer ${token}`)
       .send();
 
     assert.equal(res.statusCode, 200);
     assert.deepEqual(res.body, { success: true });
 
-    assert.deepEqual(updateArgs, { $set: { status: 'read' } });
+    assert.equal(updateArgs.$set.status, 'read');
+    assert.ok(updateArgs.$set.readAt);
     assert.deepEqual(optsArgs, { new: true, runValidators: true });
   } finally {
     AdInquiry.findByIdAndUpdate = prevUpdate;

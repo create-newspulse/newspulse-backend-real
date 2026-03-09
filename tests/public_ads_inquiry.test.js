@@ -38,14 +38,15 @@ test('POST /api/public/ads/inquiry stores inquiry and triggers email (best-effor
       .send({ name: 'Alice', email: 'alice@example.com', message: 'Hello there' });
 
     assert.equal(res.statusCode, 201);
-    assert.deepEqual(res.body, { success: true, id: fixedId, emailSent: true });
+    assert.deepEqual(res.body, { success: true, id: fixedId });
 
     assert.ok(createArgs);
     assert.equal(createArgs.name, 'Alice');
     assert.equal(createArgs.email, 'alice@example.com');
     assert.equal(createArgs.message, 'Hello there');
     assert.equal(createArgs.status, 'new');
-    assert.ok(!('meta' in createArgs));
+    assert.ok(createArgs.meta);
+    assert.equal(createArgs.meta.userAgent, 'unit-test-agent');
 
     assert.ok(mailArgs);
     assert.equal(mailArgs.name, 'Alice');
