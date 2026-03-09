@@ -45,8 +45,6 @@ test('GET /admin-api/ads/inquiries lists inquiries with JWT and supports status 
       message: 'Need pricing',
       status: 'new',
       createdAt: new Date('2025-01-02T00:00:00.000Z'),
-      ip: '127.0.0.1',
-      userAgent: 'ua',
     },
   ];
 
@@ -74,6 +72,9 @@ test('GET /admin-api/ads/inquiries lists inquiries with JWT and supports status 
     assert.equal(res.body.items.length, 1);
     assert.equal(res.body.items[0].id, '507f1f77bcf86cd799439099');
     assert.equal(res.body.items[0].status, 'new');
+    assert.equal(res.body.page, 1);
+    assert.equal(res.body.limit, 20);
+    assert.equal(res.body.total, 1);
 
     assert.deepEqual(lastFindFilter, { status: 'new' });
     assert.deepEqual(lastCountFilter, { status: 'new' });
@@ -97,13 +98,13 @@ test('GET /admin-api/ads/inquiries/unread-count returns count of new inquiries',
       .set('Authorization', `Bearer ${token}`);
 
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, { count: 7 });
+    assert.deepEqual(res.body, { unread: 7 });
   } finally {
     AdInquiry.countDocuments = prevCount;
   }
 });
 
-test('PATCH /admin-api/ads/inquiries/:id/read marks inquiry as read', async () => {
+test('PATCH /admin-api/ads/inquiries/:id/mark-read marks inquiry as read', async () => {
   const prevUpdate = AdInquiry.findByIdAndUpdate;
 
   const id = '507f1f77bcf86cd799439055';
@@ -124,8 +125,6 @@ test('PATCH /admin-api/ads/inquiries/:id/read marks inquiry as read', async () =
           message: 'Need pricing',
           status: 'read',
           createdAt: new Date('2025-01-02T00:00:00.000Z'),
-          ip: null,
-          userAgent: null,
         };
       },
     };
@@ -134,7 +133,7 @@ test('PATCH /admin-api/ads/inquiries/:id/read marks inquiry as read', async () =
   try {
     const token = makeToken();
     const res = await request(app)
-      .patch(`/admin-api/ads/inquiries/${id}/read`)
+      .patch(`/admin-api/ads/inquiries/${id}/mark-read`)
       .set('Authorization', `Bearer ${token}`)
       .send();
 
@@ -142,7 +141,7 @@ test('PATCH /admin-api/ads/inquiries/:id/read marks inquiry as read', async () =
     assert.deepEqual(res.body, { success: true });
 
     assert.deepEqual(updateArgs, { $set: { status: 'read' } });
-    assert.deepEqual(optsArgs, { new: true });
+    assert.deepEqual(optsArgs, { new: true, runValidators: true });
   } finally {
     AdInquiry.findByIdAndUpdate = prevUpdate;
   }

@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const STATUS_VALUES = ['new', 'read'];
+const STATUS_VALUES = ['new', 'read', 'closed', 'spam'];
 
 const adInquirySchema = new mongoose.Schema(
   {
@@ -8,11 +8,9 @@ const adInquirySchema = new mongoose.Schema(
     email: { type: String, required: true, trim: true, lowercase: true },
     message: { type: String, required: true, trim: true },
     status: { type: String, enum: STATUS_VALUES, default: 'new', index: true },
-    ip: { type: String, default: null },
-    userAgent: { type: String, default: null },
   },
   {
-    timestamps: { createdAt: true, updatedAt: false },
+    timestamps: true,
   }
 );
 

@@ -161,8 +161,8 @@ try { adminMetaRoutes = require('./routes/adminMeta.routes'); } catch (_) { cons
 const publicAdsRouter = require('./routes/publicAds.routes');
 const adminAdsRouter = require('./routes/adminAds.routes');
 const adminAdsInquiriesRouter = require('./routes/adminAdsInquiries.routes');
-const publicAdsInquiryRouter = require('./src/routes/public.ads.routes');
-const adminAdsInquiriesCompatRouter = require('./src/routes/admin.ads.routes');
+const publicAdsInquiryRouter = require('./routes/publicAds');
+const adminAdsInquiriesCompatRouter = require('./routes/adminAds');
 const publicAdSettingsRouter = require('./routes/publicAdSettings.routes');
 const adminAdSettingsRouter = require('./routes/adminAdSettings.routes');
 const publicRoutes = require('./routes/public.routes');
@@ -2260,6 +2260,16 @@ app.use((req, res) => {
 // Start server only when invoked directly (not when imported by tests)
 const PORT = parseInt(process.env.PORT || '5000', 10) || 5000;
 if (require.main === module) {
+  // Non-blocking startup check for Ads SMTP (best-effort)
+  try {
+    const { createAdsTransport } = require('./utils/mailer');
+    createAdsTransport();
+  } catch (e) {
+    try {
+      console.warn('[ads-smtp] not ready', e?.message || String(e));
+    } catch (_) {}
+  }
+
   // On Windows, Node may bind IPv6-only by default when no host is provided.
   // That breaks callers/proxies that target 127.0.0.1. Prefer dual-stack there.
   const listenArg = process.platform === 'win32'

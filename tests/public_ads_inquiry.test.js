@@ -9,11 +9,11 @@ process.env.ADS_INQUIRY_FROM = 'no-reply@newspulse.ai';
 const app = require('../server');
 
 const AdInquiry = require('../models/AdInquiry');
-const mailer = require('../lib/mailer');
+const adsMailer = require('../utils/mailer');
 
 test('POST /api/public/ads/inquiry stores inquiry and triggers email (best-effort)', async () => {
   const prevCreate = AdInquiry.create;
-  const prevSendMail = mailer.sendMail;
+  const prevSend = adsMailer.sendAdsInquiryMail;
 
   const fixedId = '507f1f77bcf86cd799439011';
   const fixedCreatedAt = new Date('2025-01-01T00:00:00.000Z');
@@ -26,7 +26,7 @@ test('POST /api/public/ads/inquiry stores inquiry and triggers email (best-effor
     return { _id: fixedId, createdAt: fixedCreatedAt };
   };
 
-  mailer.sendMail = async (opts) => {
+  adsMailer.sendAdsInquiryMail = async (opts) => {
     mailArgs = opts;
     return { messageId: 'test-message-id' };
   };
@@ -37,31 +37,24 @@ test('POST /api/public/ads/inquiry stores inquiry and triggers email (best-effor
       .set('User-Agent', 'unit-test-agent')
       .send({ name: 'Alice', email: 'alice@example.com', message: 'Hello there' });
 
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, { success: true, id: fixedId });
+    assert.equal(res.statusCode, 201);
+    assert.deepEqual(res.body, { success: true, id: fixedId, emailSent: true });
 
     assert.ok(createArgs);
     assert.equal(createArgs.name, 'Alice');
     assert.equal(createArgs.email, 'alice@example.com');
     assert.equal(createArgs.message, 'Hello there');
     assert.equal(createArgs.status, 'new');
-    assert.equal(createArgs.userAgent, 'unit-test-agent');
+    assert.ok(!('meta' in createArgs));
 
     assert.ok(mailArgs);
-    assert.equal(mailArgs.to, 'ads-team@example.com');
-    assert.equal(mailArgs.from, 'no-reply@newspulse.ai');
-    assert.equal(mailArgs.replyTo, 'alice@example.com');
-    assert.equal(typeof mailArgs.subject, 'string');
-    assert.ok(mailArgs.subject.includes('New Ad Inquiry'));
-    assert.equal(typeof mailArgs.text, 'string');
-    assert.ok(mailArgs.text.includes('Name: Alice'));
-    assert.ok(mailArgs.text.includes('Email: alice@example.com'));
-    assert.ok(mailArgs.text.includes('Message:'));
-    assert.ok(mailArgs.text.includes('Hello there'));
-    assert.ok(mailArgs.text.includes(`InquiryId: ${fixedId}`));
+    assert.equal(mailArgs.name, 'Alice');
+    assert.equal(mailArgs.email, 'alice@example.com');
+    assert.equal(mailArgs.message, 'Hello there');
+    assert.equal(String(mailArgs.inquiryId), fixedId);
   } finally {
     AdInquiry.create = prevCreate;
-    mailer.sendMail = prevSendMail;
+    adsMailer.sendAdsInquiryMail = prevSend;
   }
 });
 
