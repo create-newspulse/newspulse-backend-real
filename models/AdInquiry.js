@@ -13,6 +13,8 @@ const adInquirySchema = new mongoose.Schema(
     meta: {
       ip: { type: String, default: null },
       userAgent: { type: String, default: null },
+      // Store as "referrer" (double-r) in DB; accept/keep "referer" for backward compatibility.
+      referrer: { type: String, default: null },
       referer: { type: String, default: null },
       site: { type: String, default: null },
     },

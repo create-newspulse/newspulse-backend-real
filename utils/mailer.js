@@ -82,7 +82,7 @@ async function sendAdsInquiryMail({ name, email, message, createdAt, inquiryId, 
   const subject = `New Ad Inquiry - ${String(name || '').trim() || 'Unknown'}`;
   const ip = meta && meta.ip ? String(meta.ip) : '';
   const userAgent = meta && meta.userAgent ? String(meta.userAgent) : '';
-  const referer = meta && (meta.referer || meta.referrer) ? String(meta.referer || meta.referrer) : '';
+  const referrer = meta && typeof meta === 'object' ? String(meta.referrer || meta.referer || '') : '';
   const siteFromMeta = meta && meta.site ? String(meta.site) : '';
   const siteFinal = siteFromMeta || site;
 
@@ -93,7 +93,7 @@ async function sendAdsInquiryMail({ name, email, message, createdAt, inquiryId, 
     `Site: ${siteFinal}`,
     ...(ip ? [`IP: ${ip}`] : []),
     ...(userAgent ? [`User-Agent: ${userAgent}`] : []),
-    ...(referer ? [`Referer: ${referer}`] : []),
+      ...(referrer ? [`Referer: ${referrer}`] : []),
     ...(inquiryId ? [`InquiryId: ${String(inquiryId)}`] : []),
     '',
     'Message:',

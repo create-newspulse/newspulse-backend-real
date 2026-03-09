@@ -148,3 +148,46 @@ test('PATCH /admin-api/ads/inquiries/:id/mark-read marks inquiry as read', async
     AdInquiry.findByIdAndUpdate = prevUpdate;
   }
 });
+
+test('DELETE /admin-api/ads/inquiries/:id soft-deletes inquiry', async () => {
+  const prevUpdate = AdInquiry.findByIdAndUpdate;
+
+  const id = '507f1f77bcf86cd799439056';
+  let updateArgs = null;
+  let optsArgs = null;
+
+  AdInquiry.findByIdAndUpdate = (passedId, update, opts) => {
+    updateArgs = update;
+    optsArgs = opts;
+    assert.equal(passedId, id);
+
+    return {
+      async lean() {
+        return {
+          _id: id,
+          name: 'Buyer',
+          email: 'buyer@example.com',
+          message: 'Need pricing',
+          status: 'deleted',
+          createdAt: new Date('2025-01-02T00:00:00.000Z'),
+        };
+      },
+    };
+  };
+
+  try {
+    const token = makeToken();
+    const res = await request(app)
+      .delete(`/api/admin/ads/inquiries/${id}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body, { success: true });
+
+    assert.equal(updateArgs.$set.status, 'deleted');
+    assert.ok(updateArgs.$set.deletedAt);
+    assert.deepEqual(optsArgs, { new: true, runValidators: true });
+  } finally {
+    AdInquiry.findByIdAndUpdate = prevUpdate;
+  }
+});

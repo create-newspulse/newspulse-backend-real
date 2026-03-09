@@ -58,6 +58,7 @@ function _toDto(doc) {
   if (!doc) return null;
 
   const meta = doc.meta && typeof doc.meta === 'object' ? doc.meta : {};
+  const referrer = meta.referrer ?? meta.referer ?? null;
 
   return {
     id: String(doc._id),
@@ -70,7 +71,9 @@ function _toDto(doc) {
     meta: {
       ip: meta.ip ?? null,
       userAgent: meta.userAgent ?? null,
-      referer: meta.referer ?? null,
+      // Provide both keys to avoid breaking existing callers.
+      referrer,
+      referer: meta.referer ?? referrer,
       site: meta.site ?? null,
     },
     createdAt: doc.createdAt || null,
@@ -108,8 +111,8 @@ async function submitPublicAdInquiry(req, res) {
 
     const ip = req.ip ? String(req.ip) : null;
     const userAgent = req.headers && req.headers['user-agent'] ? String(req.headers['user-agent']) : null;
-    const referer = (req.headers && (req.headers['referer'] || req.headers['referrer']))
-      ? String(req.headers['referer'] || req.headers['referrer'])
+    const referrer = (req.headers && (req.headers['referrer'] || req.headers['referer']))
+      ? String(req.headers['referrer'] || req.headers['referer'])
       : null;
     const site = (req.headers && req.headers.origin) ? String(req.headers.origin) : null;
 
@@ -123,7 +126,8 @@ async function submitPublicAdInquiry(req, res) {
       meta: {
         ip,
         userAgent,
-        referer,
+        referrer,
+        referer: referrer,
         site,
       },
     });
@@ -142,7 +146,8 @@ async function submitPublicAdInquiry(req, res) {
         meta: {
           ip,
           userAgent,
-          referer,
+          referrer,
+          referer: referrer,
           site,
         },
       });
