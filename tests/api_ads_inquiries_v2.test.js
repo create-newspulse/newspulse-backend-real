@@ -9,6 +9,7 @@ const jwt = require('jsonwebtoken');
 
 const app = require('../server');
 const AdInquiry = require('../models/AdInquiry');
+const AuditLog = require('../models/AuditLog');
 
 function makeFindResult(items) {
   return {
@@ -48,6 +49,11 @@ test('GET /api/ads/inquiries returns {success, items, total} with admin JWT', as
       placement: 'homepage',
       status: 'new',
       isRead: false,
+      hasReply: true,
+      replyCount: 2,
+      lastRepliedAt: new Date('2025-01-04T00:00:00.000Z'),
+      lastRepliedBy: 'admin@newspulse.ai',
+      lastReplySubject: 'Pricing follow-up',
       createdAt: new Date('2025-01-02T00:00:00.000Z'),
       updatedAt: new Date('2025-01-02T00:00:00.000Z'),
     },
@@ -70,6 +76,10 @@ test('GET /api/ads/inquiries returns {success, items, total} with admin JWT', as
     assert.ok(Array.isArray(res.body.items));
     assert.equal(res.body.items.length, 1);
     assert.equal(res.body.items[0]._id, '507f1f77bcf86cd799439099');
+    assert.equal(res.body.items[0].hasReply, true);
+    assert.equal(res.body.items[0].replyCount, 2);
+    assert.equal(res.body.items[0].lastRepliedBy, 'admin@newspulse.ai');
+    assert.equal(res.body.items[0].lastReplySubject, 'Pricing follow-up');
     assert.equal(res.body.total, 1);
     assert.equal(res.body.page, 1);
     assert.equal(res.body.pages, 1);
@@ -118,6 +128,18 @@ test('GET /api/ads/inquiries/:id returns full stable detail payload with no UI a
     message: 'Need pricing',
     status: 'read',
     isRead: true,
+    hasReply: true,
+    replyCount: 1,
+    lastRepliedAt: new Date('2025-01-04T00:00:00.000Z'),
+    lastRepliedBy: 'admin@newspulse.ai',
+    lastReplySubject: 'Pricing',
+    replyHistory: [
+      {
+        subject: 'Pricing',
+        repliedAt: new Date('2025-01-04T00:00:00.000Z'),
+        repliedBy: 'admin@newspulse.ai',
+      },
+    ],
     createdAt: new Date('2025-01-02T00:00:00.000Z'),
     updatedAt: new Date('2025-01-03T00:00:00.000Z'),
   };
@@ -147,6 +169,12 @@ test('GET /api/ads/inquiries/:id returns full stable detail payload with no UI a
     assert.equal(res.body.item.message, 'Need pricing');
     assert.equal(res.body.item.status, 'read');
     assert.equal(res.body.item.isRead, true);
+    assert.equal(res.body.item.hasReply, true);
+    assert.equal(res.body.item.replyCount, 1);
+    assert.equal(res.body.item.lastRepliedBy, 'admin@newspulse.ai');
+    assert.equal(res.body.item.lastReplySubject, 'Pricing');
+    assert.equal(Array.isArray(res.body.item.replyHistory), true);
+    assert.equal(res.body.item.replyHistory.length, 1);
     assert.ok(res.body.item.createdAt);
     assert.ok(res.body.item.updatedAt);
     assert.equal('mailtoLabel' in res.body.item, false);
@@ -252,7 +280,18 @@ test('DELETE /api/ads/inquiries/:id/permanent requires auth and hard-deletes', a
   assert.equal(unauth.statusCode, 401);
 
   const prevDelete = AdInquiry.findByIdAndDelete;
-  AdInquiry.findByIdAndDelete = (_id) => ({ async lean() { return { _id: id }; } });
+  const prevAuditCreate = AuditLog.create;
+  let auditDoc = null;
+
+  AdInquiry.findByIdAndDelete = (_id) => ({
+    async lean() {
+      return { _id: id, advertiserName: 'Buyer', email: 'buyer@example.com', status: 'deleted' };
+    },
+  });
+  AuditLog.create = async (doc) => {
+    auditDoc = doc;
+    return doc;
+  };
 
   try {
     const token = makeToken();
@@ -262,8 +301,17 @@ test('DELETE /api/ads/inquiries/:id/permanent requires auth and hard-deletes', a
 
     assert.equal(res.statusCode, 200);
     assert.deepEqual(res.body, { success: true, message: 'Inquiry deleted permanently', deletedCount: 1 });
+    assert.ok(auditDoc);
+    assert.equal(auditDoc.action, 'permanent_delete');
+    assert.equal(auditDoc.key, `ads_inquiry:${id}`);
+    assert.equal(auditDoc.actor.email, 'admin@newspulse.ai');
+    assert.equal(auditDoc.meta.inquiryId, id);
+    assert.equal(auditDoc.meta.advertiserName, 'Buyer');
+    assert.equal(auditDoc.meta.advertiserEmail, 'buyer@example.com');
+    assert.equal(auditDoc.meta.deletedBy, 'admin@newspulse.ai');
   } finally {
     AdInquiry.findByIdAndDelete = prevDelete;
+    AuditLog.create = prevAuditCreate;
   }
 });
 

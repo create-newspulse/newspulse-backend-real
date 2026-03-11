@@ -24,6 +24,7 @@ curl -X PATCH http://localhost:5051/admin-api/ads/inquiries/<ID> \
 const mongoose = require('mongoose');
 
 const AdInquiry = require('../models/AdInquiry');
+const AuditLog = require('../models/AuditLog');
 const adsMailer = require('../utils/mailer');
 
 const STATUS_VALUES = ['new', 'read', 'deleted'];
@@ -158,6 +159,12 @@ function _getInternalAdsEmails() {
   return internal;
 }
 
+function _getReqIp(req) {
+  const forwarded = String(req?.headers?.['x-forwarded-for'] || '');
+  const forwardedIp = forwarded.split(',')[0].trim();
+  return forwardedIp || req?.ip || req?.socket?.remoteAddress || null;
+}
+
 function _parseInt(v, fallback) {
   const n = parseInt(String(v ?? ''), 10);
   return Number.isFinite(n) ? n : fallback;
@@ -187,6 +194,7 @@ function _toDto(doc) {
     placement: doc.placement ?? null,
     status: doc.status,
     isRead: typeof doc.isRead === 'boolean' ? doc.isRead : (doc.status === 'read'),
+    ..._toReplyMetadata(doc),
     readAt: doc.readAt || null,
     deletedAt: doc.deletedAt || null,
     meta: {
@@ -202,7 +210,34 @@ function _toDto(doc) {
   };
 }
 
-function _toInquiryItemV2(doc) {
+function _toReplyMetadata(doc, options = {}) {
+  const includeReplyHistory = !!options.includeReplyHistory;
+  const rawHistory = Array.isArray(doc?.replyHistory) ? doc.replyHistory : [];
+  const replyCount = Number.isFinite(doc?.replyCount) ? doc.replyCount : rawHistory.length;
+  const hasReply = typeof doc?.hasReply === 'boolean'
+    ? doc.hasReply
+    : !!(replyCount > 0 || doc?.lastRepliedAt || doc?.lastReplySubject);
+
+  const metadata = {
+    hasReply,
+    replyCount,
+    lastRepliedAt: doc?.lastRepliedAt || null,
+    lastRepliedBy: doc?.lastRepliedBy ?? null,
+    lastReplySubject: doc?.lastReplySubject ?? null,
+  };
+
+  if (includeReplyHistory) {
+    metadata.replyHistory = rawHistory.map((entry) => ({
+      subject: entry?.subject ?? null,
+      repliedAt: entry?.repliedAt || null,
+      repliedBy: entry?.repliedBy ?? null,
+    }));
+  }
+
+  return metadata;
+}
+
+function _toInquiryItemV2(doc, options = {}) {
   if (!doc) return null;
 
   return {
@@ -214,6 +249,7 @@ function _toInquiryItemV2(doc) {
     message: doc.message ?? null,
     status: doc.status,
     isRead: typeof doc.isRead === 'boolean' ? doc.isRead : (doc.status === 'read'),
+    ..._toReplyMetadata(doc, options),
     createdAt: doc.createdAt || null,
     updatedAt: doc.updatedAt || null,
   };
@@ -250,6 +286,69 @@ function _parseBulkIds(body) {
   }
 
   return { ok: true, ids: Array.from(unique) };
+}
+
+function _buildAdsPermanentDeleteAuditDoc(req, inquiry, deletedAt) {
+  if (!inquiry || !inquiry._id) return null;
+
+  const actor = req?.admin && typeof req.admin === 'object'
+    ? req.admin
+    : (req?.user && typeof req.user === 'object' ? req.user : {});
+
+  const actorId = actor?.id ? String(actor.id) : null;
+  const actorEmail = actor?.email ? String(actor.email) : null;
+  const actorRole = actor?.role ? String(actor.role) : null;
+  const inquiryId = String(inquiry._id);
+  const advertiserName = inquiry?.advertiserName || inquiry?.name || null;
+  const advertiserEmail = inquiry?.email ? String(inquiry.email) : null;
+  const deletedAtIso = deletedAt instanceof Date ? deletedAt.toISOString() : new Date().toISOString();
+
+  return {
+    action: 'permanent_delete',
+    key: `ads_inquiry:${inquiryId}`,
+    before: {
+      inquiryId,
+      advertiserName,
+      advertiserEmail,
+      status: inquiry?.status || null,
+    },
+    after: null,
+    actor: {
+      id: actorId,
+      email: actorEmail,
+      role: actorRole,
+    },
+    ip: _getReqIp(req),
+    userAgent: String(req?.headers?.['user-agent'] || '').slice(0, 500) || null,
+    meta: {
+      entity: 'ads_inquiry',
+      inquiryId,
+      advertiserName,
+      advertiserEmail,
+      deletedBy: actorEmail || actorId,
+      deletedAt: deletedAtIso,
+      action: 'permanent_delete',
+    },
+  };
+}
+
+async function _createAdsPermanentDeleteAuditLogs(req, inquiries, deletedAt) {
+  const docs = (Array.isArray(inquiries) ? inquiries : [inquiries])
+    .map((inquiry) => _buildAdsPermanentDeleteAuditDoc(req, inquiry, deletedAt))
+    .filter(Boolean);
+
+  if (docs.length === 0) return;
+
+  try {
+    if (docs.length === 1) {
+      await AuditLog.create(docs[0]);
+      return;
+    }
+
+    await AuditLog.insertMany(docs, { ordered: false });
+  } catch (e) {
+    console.warn('[ads][audit] permanent delete log failed', { message: e?.message || String(e), count: docs.length });
+  }
 }
 
 async function submitPublicAdInquiry(req, res) {
@@ -436,7 +535,7 @@ async function getAdminAdInquiryByIdV2(req, res) {
     const doc = await AdInquiry.findById(id).lean();
     if (!doc) return res.status(404).json({ success: false, message: 'Not found' });
 
-    return res.status(200).json({ success: true, item: _toInquiryItemV2(doc) });
+    return res.status(200).json({ success: true, item: _toInquiryItemV2(doc, { includeReplyHistory: true }) });
   } catch (e) {
     console.error('[ads] getAdminAdInquiryByIdV2 failed', { message: e?.message || String(e) });
     return res.status(500).json({ success: false, message: e?.message || String(e) });
@@ -595,15 +694,51 @@ async function replyToAdInquiryV2(req, res) {
       admin: { id: admin.id, email: adminEmail, role: admin.role },
     });
 
+    const repliedAt = new Date();
+    const repliedBy = adminEmail || (admin.id ? String(admin.id) : null);
+    const updated = await AdInquiry.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          hasReply: true,
+          lastRepliedAt: repliedAt,
+          lastRepliedBy: repliedBy,
+          lastReplySubject: subject,
+        },
+        $inc: { replyCount: 1 },
+        $push: {
+          replyHistory: {
+            subject,
+            repliedAt,
+            repliedBy,
+          },
+        },
+      },
+      { new: true, runValidators: true }
+    ).lean();
+
+    if (!updated) {
+      console.error('[ads][reply] tracking update failed', {
+        inquiryId: id,
+        adminEmail: adminEmail || null,
+        at: repliedAt.toISOString(),
+      });
+      return res.status(500).json({ success: false, message: 'Reply sent but failed to persist reply metadata' });
+    }
+
     console.log('[ads][reply] sent', {
       inquiryId: id,
       to: toEmailRaw,
       adminEmail: adminEmail || null,
-      at: new Date().toISOString(),
+      at: repliedAt.toISOString(),
       status: 'sent',
     });
 
-    return res.status(200).json({ success: true, message: 'Reply sent successfully' });
+    return res.status(200).json({
+      success: true,
+      message: 'Reply sent successfully',
+      reply: _toReplyMetadata(updated, { includeReplyHistory: true }),
+    });
   } catch (e) {
     const errMessage = e?.message || String(e);
     console.error('[ads][reply] failed', { message: errMessage });
@@ -704,6 +839,9 @@ async function permanentDeleteAdminInquiryV2(req, res) {
 
     const deleted = await AdInquiry.findByIdAndDelete(id).lean();
     if (!deleted) return res.status(404).json({ success: false, message: 'Not found' });
+
+  const deletedAt = new Date();
+  await _createAdsPermanentDeleteAuditLogs(req, deleted, deletedAt);
 
     console.log(`[ads] inquiry permanently deleted id=${id}`);
     return res.status(200).json({ success: true, message: 'Inquiry deleted permanently', deletedCount: 1 });
@@ -876,7 +1014,8 @@ async function bulkPermanentDeleteV2(req, res) {
       db: dbMeta,
     });
 
-    const matchedCount = await AdInquiry.countDocuments(filter);
+    const matchedDocs = await AdInquiry.find(filter).lean();
+    const matchedCount = Array.isArray(matchedDocs) ? matchedDocs.length : 0;
     const result = await AdInquiry.deleteMany(filter);
     const deletedCount = typeof result?.deletedCount === 'number' ? result.deletedCount : 0;
 
@@ -899,6 +1038,9 @@ async function bulkPermanentDeleteV2(req, res) {
         message,
       });
     }
+
+    const deletedAt = new Date();
+    await _createAdsPermanentDeleteAuditLogs(req, matchedDocs.slice(0, deletedCount), deletedAt);
 
     return res.status(200).json({ success: true, message: 'Inquiries deleted permanently', deletedCount, processed: deletedCount });
   } catch (e) {

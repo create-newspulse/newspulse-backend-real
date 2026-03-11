@@ -32,6 +32,7 @@ test('POST /api/ads/inquiries/:id/reply sends email and returns success', async 
   const id = '507f1f77bcf86cd799439011';
 
   const prevFindById = AdInquiry.findById;
+  const prevFindByIdAndUpdate = AdInquiry.findByIdAndUpdate;
   const prevSend = adsMailer.sendAdsReplyMail;
 
   AdInquiry.findById = (passedId) => {
@@ -44,9 +45,32 @@ test('POST /api/ads/inquiries/:id/reply sends email and returns success', async 
   };
 
   let mailArgs = null;
+  let updateArgs = null;
   adsMailer.sendAdsReplyMail = async (opts) => {
     mailArgs = opts;
     return { messageId: 'test-reply-message-id' };
+  };
+  AdInquiry.findByIdAndUpdate = (_id, update) => {
+    updateArgs = update;
+    return {
+      async lean() {
+        return {
+          _id: id,
+          hasReply: true,
+          replyCount: 1,
+          lastRepliedAt: new Date('2025-01-02T00:00:00.000Z'),
+          lastRepliedBy: 'admin@newspulse.ai',
+          lastReplySubject: 'Pricing',
+          replyHistory: [
+            {
+              subject: 'Pricing',
+              repliedAt: new Date('2025-01-02T00:00:00.000Z'),
+              repliedBy: 'admin@newspulse.ai',
+            },
+          ],
+        };
+      },
+    };
   };
 
   try {
@@ -56,7 +80,14 @@ test('POST /api/ads/inquiries/:id/reply sends email and returns success', async 
       .send({ subject: 'Pricing', message: 'Thanks for reaching out.' });
 
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, { success: true, message: 'Reply sent successfully' });
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.message, 'Reply sent successfully');
+    assert.equal(res.body.reply.hasReply, true);
+    assert.equal(res.body.reply.replyCount, 1);
+    assert.equal(res.body.reply.lastRepliedBy, 'admin@newspulse.ai');
+    assert.equal(res.body.reply.lastReplySubject, 'Pricing');
+    assert.equal(Array.isArray(res.body.reply.replyHistory), true);
+    assert.equal(res.body.reply.replyHistory.length, 1);
 
     assert.ok(mailArgs);
     assert.equal(mailArgs.to, 'buyer@example.com');
@@ -64,8 +95,15 @@ test('POST /api/ads/inquiries/:id/reply sends email and returns success', async 
     assert.equal(mailArgs.message, 'Thanks for reaching out.');
     assert.equal(String(mailArgs.inquiryId), id);
     assert.equal(mailArgs.admin.email, 'admin@newspulse.ai');
+    assert.ok(updateArgs);
+    assert.equal(updateArgs.$set.hasReply, true);
+    assert.equal(updateArgs.$set.lastRepliedBy, 'admin@newspulse.ai');
+    assert.equal(updateArgs.$set.lastReplySubject, 'Pricing');
+    assert.equal(updateArgs.$inc.replyCount, 1);
+    assert.equal(updateArgs.$push.replyHistory.subject, 'Pricing');
   } finally {
     AdInquiry.findById = prevFindById;
+    AdInquiry.findByIdAndUpdate = prevFindByIdAndUpdate;
     adsMailer.sendAdsReplyMail = prevSend;
   }
 });
@@ -75,6 +113,7 @@ test('POST /admin-api/ads/inquiries/:id/reply is mounted (alias path)', async ()
   const id = '507f1f77bcf86cd799439016';
 
   const prevFindById = AdInquiry.findById;
+  const prevFindByIdAndUpdate = AdInquiry.findByIdAndUpdate;
   const prevSend = adsMailer.sendAdsReplyMail;
 
   AdInquiry.findById = (_id) => ({
@@ -84,6 +123,25 @@ test('POST /admin-api/ads/inquiries/:id/reply is mounted (alias path)', async ()
   });
 
   adsMailer.sendAdsReplyMail = async () => ({ messageId: 'alias-ok' });
+  AdInquiry.findByIdAndUpdate = (_id) => ({
+    async lean() {
+      return {
+        _id: id,
+        hasReply: true,
+        replyCount: 1,
+        lastRepliedAt: new Date('2025-01-02T00:00:00.000Z'),
+        lastRepliedBy: 'admin@newspulse.ai',
+        lastReplySubject: 'Hello',
+        replyHistory: [
+          {
+            subject: 'Hello',
+            repliedAt: new Date('2025-01-02T00:00:00.000Z'),
+            repliedBy: 'admin@newspulse.ai',
+          },
+        ],
+      };
+    },
+  });
 
   try {
     const res = await request(app)
@@ -92,9 +150,11 @@ test('POST /admin-api/ads/inquiries/:id/reply is mounted (alias path)', async ()
       .send({ subject: 'Hello', message: 'Test' });
 
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, { success: true, message: 'Reply sent successfully' });
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.reply.hasReply, true);
   } finally {
     AdInquiry.findById = prevFindById;
+    AdInquiry.findByIdAndUpdate = prevFindByIdAndUpdate;
     adsMailer.sendAdsReplyMail = prevSend;
   }
 });
@@ -104,6 +164,7 @@ test('POST /api/ads/inquiries/:id/reply returns 503 when SMTP is not configured'
   const id = '507f1f77bcf86cd799439017';
 
   const prevFindById = AdInquiry.findById;
+  const prevFindByIdAndUpdate = AdInquiry.findByIdAndUpdate;
   const prevSend = adsMailer.sendAdsReplyMail;
 
   AdInquiry.findById = (_id) => ({
@@ -111,6 +172,12 @@ test('POST /api/ads/inquiries/:id/reply returns 503 when SMTP is not configured'
       return { _id: id, email: 'buyer@example.com' };
     },
   });
+
+  let updateCalled = false;
+  AdInquiry.findByIdAndUpdate = async () => {
+    updateCalled = true;
+    return { lean: async () => null };
+  };
 
   adsMailer.sendAdsReplyMail = async () => {
     throw new Error('Ads SMTP not configured');
@@ -125,8 +192,10 @@ test('POST /api/ads/inquiries/:id/reply returns 503 when SMTP is not configured'
     assert.equal(res.statusCode, 503);
     assert.equal(res.body.success, false);
     assert.equal(res.body.code, 'ADS_SMTP_NOT_CONFIGURED');
+    assert.equal(updateCalled, false);
   } finally {
     AdInquiry.findById = prevFindById;
+    AdInquiry.findByIdAndUpdate = prevFindByIdAndUpdate;
     adsMailer.sendAdsReplyMail = prevSend;
   }
 });

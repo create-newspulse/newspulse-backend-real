@@ -9,6 +9,7 @@ const jwt = require('jsonwebtoken');
 
 const app = require('../server');
 const AdInquiry = require('../models/AdInquiry');
+const AuditLog = require('../models/AuditLog');
 
 function makeToken() {
   return jwt.sign(
@@ -140,19 +141,24 @@ test('PATCH /api/ads/inquiries/bulk/restore uses bulkWrite and returns processed
 test('DELETE /api/ads/inquiries/bulk/permanent deletes many and returns deletedCount', async () => {
   const token = makeToken();
 
-  const prevCountDocuments = AdInquiry.countDocuments;
+  const prevFind = AdInquiry.find;
   const prevDeleteMany = AdInquiry.deleteMany;
+  const prevAuditInsertMany = AuditLog.insertMany;
 
-  let seenCountFilter = null;
   let seenDeleteFilter = null;
-  AdInquiry.countDocuments = async (filter) => {
-    seenCountFilter = filter;
-    return 2;
-  };
+  let auditDocs = null;
+  AdInquiry.find = () => makeFindLeanResult([
+    { _id: '507f1f77bcf86cd799439056', advertiserName: 'Buyer 1', email: 'buyer1@example.com', status: 'deleted' },
+    { _id: '507f1f77bcf86cd799439057', advertiserName: 'Buyer 2', email: 'buyer2@example.com', status: 'deleted' },
+  ]);
 
   AdInquiry.deleteMany = async (filter) => {
     seenDeleteFilter = filter;
     return { deletedCount: 2 };
+  };
+  AuditLog.insertMany = async (docs) => {
+    auditDocs = docs;
+    return docs;
   };
 
   try {
@@ -166,20 +172,28 @@ test('DELETE /api/ads/inquiries/bulk/permanent deletes many and returns deletedC
     assert.equal(res.body.message, 'Inquiries deleted permanently');
     assert.equal(res.body.processed, 2);
     assert.equal(res.body.deletedCount, 2);
-    assert.equal(seenCountFilter.status, 'deleted');
     assert.equal(seenDeleteFilter.status, 'deleted');
+    assert.ok(Array.isArray(auditDocs));
+    assert.equal(auditDocs.length, 2);
+    assert.equal(auditDocs[0].action, 'permanent_delete');
+    assert.equal(auditDocs[0].actor.email, 'admin@newspulse.ai');
+    assert.equal(auditDocs[0].meta.inquiryId, '507f1f77bcf86cd799439056');
+    assert.equal(auditDocs[1].meta.inquiryId, '507f1f77bcf86cd799439057');
   } finally {
-    AdInquiry.countDocuments = prevCountDocuments;
+    AdInquiry.find = prevFind;
     AdInquiry.deleteMany = prevDeleteMany;
+    AuditLog.insertMany = prevAuditInsertMany;
   }
 });
 
 test('DELETE /api/ads/inquiries/bulk/permanent returns 200 with processed=0 when nothing matches', async () => {
   const token = makeToken();
 
+  const prevFind = AdInquiry.find;
   const prevCountDocuments = AdInquiry.countDocuments;
   const prevDeleteMany = AdInquiry.deleteMany;
 
+  AdInquiry.find = () => makeFindLeanResult([]);
   AdInquiry.countDocuments = async () => 0;
   AdInquiry.deleteMany = async () => ({ deletedCount: 0 });
 
@@ -195,6 +209,7 @@ test('DELETE /api/ads/inquiries/bulk/permanent returns 200 with processed=0 when
     assert.equal(res.body.deletedCount, 0);
     assert.ok(String(res.body.message || '').length > 0);
   } finally {
+    AdInquiry.find = prevFind;
     AdInquiry.countDocuments = prevCountDocuments;
     AdInquiry.deleteMany = prevDeleteMany;
   }

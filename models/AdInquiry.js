@@ -21,6 +21,21 @@ const adInquirySchema = new mongoose.Schema(
     // When moved to trash, store the prior status so restore can return it.
     previousStatus: { type: String, enum: STATUS_VALUES },
     isRead: { type: Boolean, default: false, index: true },
+    hasReply: { type: Boolean, default: false, index: true },
+    replyCount: { type: Number, default: 0 },
+    lastRepliedAt: { type: Date, default: null },
+    lastRepliedBy: { type: String, default: null, trim: true },
+    lastReplySubject: { type: String, default: null, trim: true },
+    replyHistory: {
+      type: [
+        {
+          subject: { type: String, default: null, trim: true },
+          repliedAt: { type: Date, default: null },
+          repliedBy: { type: String, default: null, trim: true },
+        },
+      ],
+      default: [],
+    },
     readAt: { type: Date, default: null },
     deletedAt: { type: Date, default: null },
     meta: {
