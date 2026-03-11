@@ -10,12 +10,19 @@ const _isProdEarly = _nodeEnvEarly === 'production' || _isRenderEarly;
 // - Local dev: allow .env to override any stale shell environment vars.
 // - Production (Render): NEVER override Render-provided env vars from the repo's .env.
 //   A committed .env would otherwise clobber the real Render config.
+const _preDotenvPort = process.env.PORT;
 require('dotenv').config({
   path: path.join(__dirname, '.env'),
   // In tests, individual test files set env vars (esp. NODE_ENV) explicitly.
   // Avoid a committed/local .env accidentally overriding those values.
   override: !_isProdEarly && _nodeEnvEarly !== 'test',
 });
+
+// Allow developers/operators to intentionally override the port via the shell
+// even when local-dev dotenv override is enabled.
+if (typeof _preDotenvPort === 'string' && _preDotenvPort.trim()) {
+  process.env.PORT = _preDotenvPort;
+}
 
 // Backward-compat: older setups used MONGO_URI.
 // Prefer MONGODB_URI, but if only MONGO_URI exists, alias it.
@@ -75,12 +82,14 @@ function _logStartupDbStatus(label) {
     const hasMongoUri = !!String(process.env.MONGODB_URI || '').trim();
     const readyState = typeof mongoose?.connection?.readyState === 'number' ? mongoose.connection.readyState : -1;
     const dbName = (readyState === 1 && mongoose?.connection?.name) ? String(mongoose.connection.name) : null;
+    const configuredDbName = String(process.env.MONGODB_DBNAME || '').trim() || null;
 
     // eslint-disable-next-line no-console
     console.log('[startup][db-status]', {
       label,
       hasMongoUri,
       readyState,
+      ...(configuredDbName ? { configuredDbName } : {}),
       ...(dbName ? { dbName } : {}),
     });
   } catch (_) {}
@@ -163,6 +172,7 @@ const adminAdsRouter = require('./routes/adminAds.routes');
 const adminAdsInquiriesRouter = require('./routes/adminAdsInquiries.routes');
 const publicAdsInquiryRouter = require('./routes/publicAds');
 const adminAdsInquiriesCompatRouter = require('./routes/adminAds');
+const adsRoutes = require('./routes/ads.routes');
 const publicAdSettingsRouter = require('./routes/publicAdSettings.routes');
 const adminAdSettingsRouter = require('./routes/adminAdSettings.routes');
 const publicRoutes = require('./routes/public.routes');
@@ -245,6 +255,8 @@ for (const p of ['/admin-api/system/health', '/admin-api/api/system/health']) {
     });
   });
 }
+
+
 
 
 
@@ -687,11 +699,12 @@ app.get('/api/health', (_req, res) => {
 // These are defined directly on the app instance and must appear
 // before any 404/error handlers so they are always reachable.
 app.get('/health', (req, res) => {
-  const readyState = typeof mongoose?.connection?.readyState === 'number' ? mongoose.connection.readyState : -1;
-  const dbConnected = readyState === 1;
-  // Keep response minimal/stable for load balancers and uptime checks.
-  // (Spec requires: GET /health -> { ok: true })
-  return res.status(200).json({ ok: true, dbConnected, readyState });
+  // Keep response minimal/stable for uptime checks.
+  return res.status(200).json({
+    success: true,
+    service: 'newspulse-backend',
+    status: 'ok',
+  });
 });
 
 app.get('/stats', (req, res) => {
@@ -733,6 +746,7 @@ app.get('/dashboard-stats', async (req, res) => {
 // Mongo
 // Single source of truth: use MONGODB_URI exactly as provided.
 const MONGO_URI = process.env.MONGODB_URI;
+const MONGO_DB_NAME = String(process.env.MONGODB_DBNAME || '').trim() || null;
 const _isImported = require.main !== module;
 
 function _mongoDbNameFromUri(uri) {
@@ -751,6 +765,10 @@ function _mongoDbNameFromUri(uri) {
   return dbName.split('/')[0] || null;
 }
 
+function _resolvedMongoDbName() {
+  return MONGO_DB_NAME || _mongoDbNameFromUri(MONGO_URI) || null;
+}
+
 // Dev-only debug endpoint to confirm environment and DB selection.
 // Returns { env, dbName } and is intentionally NOT available in production.
 app.get(['/admin-api/system/env', '/admin-api/api/system/env'], (_req, res) => {
@@ -758,7 +776,7 @@ app.get(['/admin-api/system/env', '/admin-api/api/system/env'], (_req, res) => {
   if (String(env).toLowerCase() === 'production') return res.status(404).json({ message: 'Not found' });
 
   const connectedName = (mongoose.connection && mongoose.connection.name) ? String(mongoose.connection.name) : '';
-  const dbFromUri = _mongoDbNameFromUri(process.env.MONGODB_URI);
+  const dbFromUri = _resolvedMongoDbName();
   const dbName = (connectedName || dbFromUri || null);
   return res.status(200).json({ env, dbName });
 });
@@ -776,7 +794,11 @@ mongoose.connection.on('disconnected', () => {
 });
 mongoose.connection.on('connected', () => {
   console.log('Mongo connected');
-  console.log('[mongo] connected', { readyState: mongoose.connection.readyState, db: mongoose.connection.name || undefined });
+  console.log('[mongo] connected', {
+    readyState: mongoose.connection.readyState,
+    db: mongoose.connection.name || undefined,
+    configuredDbName: _resolvedMongoDbName() || undefined,
+  });
 });
 
 if (process.env.NODE_ENV === 'test' || _isImported) {
@@ -793,7 +815,7 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
   const _mongoRetryMaxMs = 30000;
 
   async function _afterMongoConnected() {
-    const dbFromUri = _mongoDbNameFromUri(MONGO_URI);
+    const dbFromUri = _resolvedMongoDbName();
     const db = dbFromUri || mongoose.connection.name || undefined;
     console.log('[startup] MongoDB connected', { db });
     // Ensure TTL index for Broadcast Center is present.
@@ -855,7 +877,7 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
     if (_mongoConnectInFlight) return;
     _mongoConnectInFlight = true;
     try {
-      await mongoose.connect(MONGO_URI);
+      await mongoose.connect(MONGO_URI, MONGO_DB_NAME ? { dbName: MONGO_DB_NAME } : undefined);
       _mongoRetryMs = 2000;
       await _afterMongoConnected();
     } catch (err) {
@@ -965,7 +987,9 @@ if (!_isImported && String(process.env.NODE_ENV || '').toLowerCase() !== 'test')
 }
 
 // Home
-app.get('/', (req, res) => { res.send('🟢 News Pulse Admin Backend is Live'); });
+app.get('/', (_req, res) => {
+  return res.status(200).send('News Pulse backend is running');
+});
 
 // API Routes
 app.use('/api/news', newsRoutes);
@@ -1354,6 +1378,33 @@ if (publicFeatureTogglesRouter) {
 app.use('/api/public', publicAdsRouter);
 // Public inquiry endpoint expected by the admin panel/frontends
 app.use('/api/public/ads', publicAdsInquiryRouter);
+
+const ADS_INQUIRY_MUTATION_ENDPOINTS = [
+  'PATCH /api/ads/inquiries/:id/read',
+  'PATCH /api/ads/inquiries/:id/trash',
+  'PATCH /api/ads/inquiries/:id/restore',
+  'DELETE /api/ads/inquiries/:id/permanent',
+  'PATCH /api/ads/inquiries/bulk/read',
+  'PATCH /api/ads/inquiries/bulk/trash',
+  'PATCH /api/ads/inquiries/bulk/restore',
+  'DELETE /api/ads/inquiries/bulk/permanent',
+];
+
+// Admin Panel production endpoints (exact paths):
+// - POST /api/ads/inquiries
+// - GET  /api/ads/inquiries
+// - GET  /api/ads/inquiries/unread-count
+// - PATCH /api/ads/inquiries/:id/read
+// - PATCH /api/ads/inquiries/:id/trash
+// - PATCH /api/ads/inquiries/:id/restore
+// - DELETE /api/ads/inquiries/:id/permanent
+app.use('/api/ads', adsRoutes);
+if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() !== 'test') {
+  console.log('[routes] mounted /api/ads (ads inquiries)');
+  console.log('[routes][ads-inquiries] active=true');
+  console.log('[routes][ads-inquiries][mounted-path]', '/api/ads');
+  console.log('[routes][ads-inquiries][mutation-endpoints]', ADS_INQUIRY_MUTATION_ENDPOINTS);
+}
 
 // Public site settings (tickers)
 app.use('/api/public', publicTickersSettingsRouter);
@@ -2280,7 +2331,14 @@ if (require.main === module) {
     : PORT;
 
   const server = app.listen(listenArg, () => {
+    const backendUrl = `http://127.0.0.1:${PORT}`;
+    const healthUrl = `${backendUrl}/health`;
+    const apiBaseUrl = `${backendUrl}/api`;
+
     console.log(`✅ Server running on port ${PORT}`);
+    console.log('[startup] backend', { port: PORT });
+    console.log('[startup][urls]', { backendUrl, healthUrl, apiBaseUrl });
+    console.log('[startup][ads-routes]', { mountPath: '/api/ads', mutationEndpoints: ADS_INQUIRY_MUTATION_ENDPOINTS });
     _logStartupDbStatus('listening');
     try {
       const reporterRoutes = [];

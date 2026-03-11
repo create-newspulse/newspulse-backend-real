@@ -54,6 +54,7 @@ const publicAdsInquiryRouter = require('../src/routes/public.ads.routes');
 const publicAdSettingsRouter = require('../routes/publicAdSettings.routes');
 const adminAdSettingsRouter = require('../routes/adminAdSettings.routes');
 const publicRoutes = require('../routes/public.routes');
+const adsRoutes = require('../routes/ads.routes');
 // Broadcast Center (shared root-level router)
 const broadcastRoutes = require('../routes/broadcast.routes');
 // Public Broadcast Center (shared root-level router)
@@ -156,9 +157,9 @@ app.get('/system/ai-training-info', (req, res) => {
 // Ensure these are defined before 404/error handlers.
 app.get('/health', (req, res) => {
   return res.status(200).json({
-    status: 'ok',
+    success: true,
     service: 'newspulse-backend',
-    timestamp: new Date().toISOString(),
+    status: 'ok',
   });
 });
 
@@ -231,7 +232,7 @@ if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
 
 // Simple homepage route
 app.get('/', (req, res) => {
-  res.send('🟢 News Pulse Admin Backend is Live');
+  res.status(200).send('News Pulse backend is running');
 });
 
 // Compatibility alias for frontends requesting `/articles`
@@ -287,6 +288,10 @@ app.use('/api/community-reporter', communityReporterRoutes);
 app.use('/api/public', publicAdsRouter);
 // Public ads inquiry endpoint
 app.use('/api/public/ads', publicAdsInquiryRouter);
+
+// Admin Panel production endpoints (exact paths) under /api/ads/*
+// Includes: POST /api/ads/inquiries/:id/reply
+app.use('/api/ads', adsRoutes);
 
 // Public stories
 app.use('/api/public', publicRoutes);

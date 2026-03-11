@@ -19,7 +19,9 @@ npm install
 npm run dev
 ```
 Local dev requires `MONGODB_URI` and a running MongoDB instance (local or Atlas).
-Server will attempt to listen on `PORT` (default 10000) and auto-fallback up to 4 higher ports if occupied.
+Server listens on `PORT` (from `.env` in local dev).
+
+If your frontend dev proxy targets `http://localhost:5000`, make sure your backend `PORT` matches it in local dev. If you hit an `EADDRINUSE` error, free the conflicting process or update the proxy target to the actual backend port.
 
 ## MongoDB
 

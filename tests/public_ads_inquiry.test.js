@@ -68,3 +68,49 @@ test('POST /api/public/ads/inquiry rejects invalid email', async () => {
   assert.equal(res.body.success, false);
   assert.equal(res.body.message, 'Invalid email');
 });
+
+test('POST /api/public/ads/inquiry prefers advertiserEmail when email matches internal inbox', async () => {
+  const prevCreate = AdInquiry.create;
+  const prevSend = adsMailer.sendAdsInquiryMail;
+
+  // Simulate a miswired frontend sending internal inbox in `email`.
+  process.env.ADS_INQUIRY_TO = 'newspulse.ads@gmail.com';
+
+  const fixedId = '507f1f77bcf86cd799439012';
+  const fixedCreatedAt = new Date('2025-01-03T00:00:00.000Z');
+
+  let createArgs = null;
+  let mailArgs = null;
+
+  AdInquiry.create = async (doc) => {
+    createArgs = doc;
+    return { _id: fixedId, createdAt: fixedCreatedAt };
+  };
+
+  adsMailer.sendAdsInquiryMail = async (opts) => {
+    mailArgs = opts;
+    return { messageId: 'test-message-id-2' };
+  };
+
+  try {
+    const res = await request(app)
+      .post('/api/public/ads/inquiry')
+      .send({
+        name: 'Bob',
+        email: 'newspulse.ads@gmail.com',
+        advertiserEmail: 'bob@example.com',
+        message: 'Need pricing',
+      });
+
+    assert.equal(res.statusCode, 201);
+    assert.deepEqual(res.body, { success: true, id: fixedId });
+
+    assert.ok(createArgs);
+    assert.equal(createArgs.email, 'bob@example.com');
+    assert.ok(mailArgs);
+    assert.equal(mailArgs.email, 'bob@example.com');
+  } finally {
+    AdInquiry.create = prevCreate;
+    adsMailer.sendAdsInquiryMail = prevSend;
+  }
+});

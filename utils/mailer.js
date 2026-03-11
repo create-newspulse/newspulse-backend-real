@@ -65,7 +65,19 @@ function createAdsTransport() {
   return transport;
 }
 
-async function sendAdsInquiryMail({ name, email, message, createdAt, inquiryId, meta }) {
+async function sendAdsInquiryMail({
+  name,
+  advertiserName,
+  companyName,
+  email,
+  phone,
+  message,
+  budget,
+  placement,
+  createdAt,
+  inquiryId,
+  meta,
+}) {
   const to = _env('ADS_INQUIRY_TO');
   if (!to) {
     console.error('[ads][mailer][config-error] Missing ADS_INQUIRY_TO');
@@ -79,7 +91,8 @@ async function sendAdsInquiryMail({ name, email, message, createdAt, inquiryId, 
   const tsIso = Number.isFinite(ts.getTime()) ? ts.toISOString() : new Date().toISOString();
   const site = getPublicBaseUrl() || _env('PUBLIC_BASE_URL') || _env('SITE_URL') || _env('PUBLIC_SITE_URL') || '';
 
-  const subject = `New Ad Inquiry - ${String(name || '').trim() || 'Unknown'}`;
+  const displayName = String(advertiserName || name || '').trim() || 'Unknown';
+  const subject = `New Ad Inquiry - ${displayName}`;
   const ip = meta && meta.ip ? String(meta.ip) : '';
   const userAgent = meta && meta.userAgent ? String(meta.userAgent) : '';
   const referrer = meta && typeof meta === 'object' ? String(meta.referrer || meta.referer || '') : '';
@@ -87,8 +100,12 @@ async function sendAdsInquiryMail({ name, email, message, createdAt, inquiryId, 
   const siteFinal = siteFromMeta || site;
 
   const text = [
-    `Name: ${String(name || '').trim()}`,
+    `Advertiser Name: ${displayName}`,
+    ...(companyName ? [`Company: ${String(companyName).trim()}`] : []),
     `Email: ${String(email || '').trim()}`,
+    ...(phone ? [`Phone: ${String(phone).trim()}`] : []),
+    ...(budget ? [`Budget: ${String(budget).trim()}`] : []),
+    ...(placement ? [`Placement: ${String(placement).trim()}`] : []),
     `Timestamp: ${tsIso}`,
     `Site: ${siteFinal}`,
     ...(ip ? [`IP: ${ip}`] : []),
@@ -130,7 +147,80 @@ async function sendAdsInquiryMail({ name, email, message, createdAt, inquiryId, 
   }
 }
 
+async function sendAdsReplyMail({
+  to,
+  subject,
+  message,
+  inquiryId,
+  admin,
+}) {
+  const toFinal = String(to || '').trim();
+  const subjectFinal = String(subject || '').trim();
+  const messageFinal = String(message || '').trim();
+
+  if (!toFinal) throw new Error('Missing recipient');
+  if (!subjectFinal) throw new Error('Missing subject');
+  if (!messageFinal) throw new Error('Missing message');
+
+  const { user } = _getAdsSmtpConfig();
+  const from = _env('ADS_REPLY_FROM') || _env('ADS_INQUIRY_FROM') || user;
+
+  // Prefer admin email as reply-to if present; otherwise use internal inbox.
+  const inbox = _splitFirstEmail(_env('ADS_INQUIRY_TO'));
+  const replyTo = _splitFirstEmail(admin && admin.email ? String(admin.email) : '') || inbox || undefined;
+
+  const text = [
+    messageFinal,
+    '',
+    '---',
+    `InquiryId: ${String(inquiryId || '').trim()}`,
+    `SentBy: ${admin && admin.email ? String(admin.email).trim() : 'admin'}`,
+    `SentAt: ${new Date().toISOString()}`,
+  ].join('\n');
+
+  const transport = createAdsTransport();
+  const start = Date.now();
+
+  try {
+    const info = await transport.sendMail({
+      to: toFinal,
+      from,
+      replyTo,
+      subject: subjectFinal,
+      text,
+    });
+
+    console.log('[ads][mailer][reply-sent]', {
+      to: toFinal,
+      subject: subjectFinal,
+      inquiryId: inquiryId ? String(inquiryId) : undefined,
+      adminEmail: admin && admin.email ? String(admin.email) : undefined,
+      messageId: info?.messageId,
+      elapsedMs: Date.now() - start,
+    });
+
+    return info;
+  } catch (err) {
+    console.error('[ads][mailer][reply-failed]', {
+      to: toFinal,
+      subject: subjectFinal,
+      inquiryId: inquiryId ? String(inquiryId) : undefined,
+      adminEmail: admin && admin.email ? String(admin.email) : undefined,
+      message: err?.message || String(err),
+    });
+    throw err;
+  }
+}
+
+function _splitFirstEmail(v) {
+  const s = String(v || '').trim();
+  if (!s) return '';
+  const first = s.split(/[,;\s]+/g).map((x) => String(x || '').trim()).filter(Boolean)[0] || '';
+  return first;
+}
+
 module.exports = {
   createAdsTransport,
   sendAdsInquiryMail,
+  sendAdsReplyMail,
 };
