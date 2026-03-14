@@ -16,6 +16,8 @@ test('GET /api/public/ad-settings returns defaults when DB not connected', async
   assert.deepEqual(res.body.slotEnabled, {
     HOME_728x90: true,
     HOME_RIGHT_300x250: true,
+    HOME_RIGHT_RAIL: true,
+    ARTICLE_INLINE: false,
   });
 });
 

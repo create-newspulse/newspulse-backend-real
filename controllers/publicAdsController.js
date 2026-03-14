@@ -10,13 +10,16 @@ function isDbReady() {
 const DEFAULT_SLOT_ENABLED = {
   HOME_728x90: true,
   HOME_RIGHT_300x250: true,
+  HOME_RIGHT_RAIL: true,
+  ARTICLE_INLINE: false,
 };
 
 function normalizeSlotEnabled(raw) {
   const out = { ...DEFAULT_SLOT_ENABLED };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
-  if (typeof raw.HOME_728x90 === 'boolean') out.HOME_728x90 = raw.HOME_728x90;
-  if (typeof raw.HOME_RIGHT_300x250 === 'boolean') out.HOME_RIGHT_300x250 = raw.HOME_RIGHT_300x250;
+  for (const key of Object.keys(DEFAULT_SLOT_ENABLED)) {
+    if (typeof raw[key] === 'boolean') out[key] = raw[key];
+  }
   return out;
 }
 
@@ -28,7 +31,39 @@ async function getSlotEnabled() {
     { $setOnInsert: { _id: 'global' } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   ).lean();
-  return normalizeSlotEnabled(doc && typeof doc === 'object' ? doc.slotEnabled : null);
+
+  const normalized = normalizeSlotEnabled(doc && typeof doc === 'object' ? doc.slotEnabled : null);
+
+  // Best-effort backfill for older docs missing newer slot keys.
+  try {
+    const raw = doc && typeof doc === 'object' ? (doc.slotEnabled || null) : null;
+    let needsBackfill = false;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      needsBackfill = true;
+    } else {
+      for (const key of Object.keys(DEFAULT_SLOT_ENABLED)) {
+        if (typeof raw[key] !== 'boolean') {
+          needsBackfill = true;
+          break;
+        }
+      }
+    }
+    if (needsBackfill) {
+      await AdSettings.updateOne(
+        { _id: 'global' },
+        { $set: { slotEnabled: normalized } },
+      );
+    }
+  } catch (_) {
+    // ignore
+  }
+
+  return normalized;
+}
+
+function _isDevLogEnabled() {
+  const env = String(process.env.NODE_ENV || '').toLowerCase();
+  return env === '' || env === 'development' || env === 'dev';
 }
 
 function toPublicAdDto(doc) {
@@ -52,6 +87,8 @@ async function getActiveAd(req, res) {
   const slot = normalizeSlot(req.query && req.query.slot);
   res.set('Cache-Control', 'no-store');
 
+  const devLog = _isDevLogEnabled();
+
   if (!slot) {
     return res.status(400).json({ ok: false, message: 'Invalid or missing slot' });
   }
@@ -63,22 +100,92 @@ async function getActiveAd(req, res) {
 
   // Respect global ad slot disable switches
   const slotEnabled = await getSlotEnabled();
+  if (devLog) {
+    const enabledVal = Object.prototype.hasOwnProperty.call(slotEnabled, slot) ? slotEnabled[slot] : undefined;
+    // eslint-disable-next-line no-console
+    console.log('[public-ads]', {
+      slot,
+      slotEnabled: enabledVal,
+    });
+  }
   if (Object.prototype.hasOwnProperty.call(slotEnabled, slot) && slotEnabled[slot] === false) {
     return res.status(200).json({ ok: true, ad: null });
   }
 
   const now = new Date();
 
-  const ad = await Ad.findOne({
+  // Schedule rules:
+  // - Missing startAt/endAt => allowed
+  // - startAt exists and now < startAt => not allowed
+  // - endAt exists and now > endAt => not allowed
+  // - If startAt === endAt (instant), treat as valid only within that same minute:
+  //   allow if now is in [startAt, startAt + 1 minute)
+  const filter = {
     slot,
     isActive: true,
     $and: [
       { $or: [{ startAt: null }, { startAt: { $exists: false } }, { startAt: { $lte: now } }] },
-      { $or: [{ endAt: null }, { endAt: { $exists: false } }, { endAt: { $gte: now } }] },
+      {
+        $or: [
+          { endAt: null },
+          { endAt: { $exists: false } },
+          { endAt: { $gte: now } },
+          {
+            // startAt=endAt special case: valid for that same minute window
+            $expr: {
+              $and: [
+                { $ne: ['$startAt', null] },
+                { $ne: ['$endAt', null] },
+                { $eq: ['$startAt', '$endAt'] },
+                { $lte: ['$startAt', now] },
+                {
+                  $gt: [
+                    { $dateAdd: { startDate: '$endAt', unit: 'minute', amount: 1 } },
+                    now,
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      },
     ],
-  })
+  };
+
+  let countBefore = null;
+  let countAfter = null;
+  if (devLog) {
+    try {
+      countBefore = await Ad.countDocuments({ slot, isActive: true });
+    } catch (_) {
+      countBefore = null;
+    }
+    try {
+      countAfter = await Ad.countDocuments(filter);
+    } catch (_) {
+      countAfter = null;
+    }
+  }
+
+  const ad = await Ad.findOne(filter)
     .sort({ priority: -1, updatedAt: -1 })
     .lean();
+
+  if (devLog) {
+    // eslint-disable-next-line no-console
+    console.log('[public-ads][select]', {
+      slot,
+      countBefore: countBefore === null ? '?' : countBefore,
+      countAfter: countAfter === null ? '?' : countAfter,
+      selected: ad
+        ? {
+          id: String(ad._id),
+          title: ad.title || '',
+          priority: typeof ad.priority === 'number' ? ad.priority : 0,
+        }
+        : null,
+    });
+  }
 
   return res.status(200).json({ ok: true, ad: toPublicAdDto(ad) });
 }

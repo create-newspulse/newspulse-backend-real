@@ -92,11 +92,19 @@ function buildAdPayload(body) {
 
 // GET /api/admin/ads?slot=HOME_728x90
 async function listAds(req, res) {
-  const slot = req.query && req.query.slot ? normalizeSlot(req.query.slot) : null;
+  const slotRaw = req.query && req.query.slot ? String(req.query.slot) : '';
+  const slot = slotRaw ? normalizeSlot(slotRaw) : null;
   const activeOnly = String(req.query && req.query.activeOnly || '').trim();
 
   if (!isDbReady()) {
     return res.status(503).json({ ok: false, message: 'Database unavailable' });
+  }
+
+  if (slotRaw && !slot) {
+    return res.status(400).json({
+      ok: false,
+      message: `Invalid slot. Expected one of: ${AD_SLOTS.join(', ')}`,
+    });
   }
 
   const filter = {};

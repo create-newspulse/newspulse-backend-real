@@ -6,6 +6,8 @@ const AdSettingsSchema = new mongoose.Schema(
     slotEnabled: {
       HOME_728x90: { type: Boolean, default: true },
       HOME_RIGHT_300x250: { type: Boolean, default: true },
+      HOME_RIGHT_RAIL: { type: Boolean, default: true },
+      ARTICLE_INLINE: { type: Boolean, default: false },
     },
   },
   { timestamps: true, collection: 'ad_settings' },

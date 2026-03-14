@@ -5,6 +5,8 @@ const AdSettings = require('../models/AdSettings');
 const DEFAULT_SLOT_ENABLED = {
   HOME_728x90: true,
   HOME_RIGHT_300x250: true,
+  HOME_RIGHT_RAIL: true,
+  ARTICLE_INLINE: false,
 };
 
 function isDbReady() {
@@ -14,8 +16,9 @@ function isDbReady() {
 function normalizeSlotEnabled(raw) {
   const out = { ...DEFAULT_SLOT_ENABLED };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
-  if (typeof raw.HOME_728x90 === 'boolean') out.HOME_728x90 = raw.HOME_728x90;
-  if (typeof raw.HOME_RIGHT_300x250 === 'boolean') out.HOME_RIGHT_300x250 = raw.HOME_RIGHT_300x250;
+  for (const key of Object.keys(DEFAULT_SLOT_ENABLED)) {
+    if (typeof raw[key] === 'boolean') out[key] = raw[key];
+  }
   return out;
 }
 
@@ -23,8 +26,9 @@ function validateSlotEnabled(slotEnabled) {
   if (!slotEnabled || typeof slotEnabled !== 'object' || Array.isArray(slotEnabled)) {
     return { ok: false, message: 'slotEnabled must be an object' };
   }
-  if (typeof slotEnabled.HOME_728x90 !== 'boolean') return { ok: false, message: 'slotEnabled.HOME_728x90 must be boolean' };
-  if (typeof slotEnabled.HOME_RIGHT_300x250 !== 'boolean') return { ok: false, message: 'slotEnabled.HOME_RIGHT_300x250 must be boolean' };
+  for (const key of Object.keys(DEFAULT_SLOT_ENABLED)) {
+    if (typeof slotEnabled[key] !== 'boolean') return { ok: false, message: `slotEnabled.${key} must be boolean` };
+  }
   return { ok: true };
 }
 
@@ -40,12 +44,50 @@ async function getOrCreateSlotEnabled() {
     { upsert: true, new: true, setDefaultsOnInsert: true },
   ).lean();
 
-  return normalizeSlotEnabled(doc && typeof doc === 'object' ? doc.slotEnabled : null);
+  const normalized = normalizeSlotEnabled(doc && typeof doc === 'object' ? doc.slotEnabled : null);
+
+  // Self-heal: existing docs created before new slots were added won't get schema defaults.
+  // Backfill missing keys once so future reads/writes are consistent.
+  try {
+    const raw = doc && typeof doc === 'object' ? (doc.slotEnabled || null) : null;
+    let needsBackfill = false;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      needsBackfill = true;
+    } else {
+      for (const key of Object.keys(DEFAULT_SLOT_ENABLED)) {
+        if (typeof raw[key] !== 'boolean') {
+          needsBackfill = true;
+          break;
+        }
+      }
+    }
+
+    if (needsBackfill) {
+      await AdSettings.updateOne(
+        { _id: 'global' },
+        { $set: { slotEnabled: normalized } },
+      );
+    }
+  } catch (_) {
+    // Best-effort backfill; ignore errors.
+  }
+
+  return normalized;
 }
 
 function validateSlotEnabledPayload(slotEnabled) {
-  const v = validateSlotEnabled(slotEnabled);
-  if (!v.ok) return { ok: false, code: 'INVALID_BODY', message: v.message };
+  if (!slotEnabled || typeof slotEnabled !== 'object' || Array.isArray(slotEnabled)) {
+    return { ok: false, code: 'INVALID_BODY', message: 'slotEnabled must be an object' };
+  }
+
+  // Backward-compatible: allow missing keys (we backfill defaults), but if a key
+  // is provided it must be a boolean.
+  for (const key of Object.keys(DEFAULT_SLOT_ENABLED)) {
+    if (Object.prototype.hasOwnProperty.call(slotEnabled, key) && typeof slotEnabled[key] !== 'boolean') {
+      return { ok: false, code: 'INVALID_BODY', message: `slotEnabled.${key} must be boolean` };
+    }
+  }
+
   return { ok: true };
 }
 
@@ -73,14 +115,13 @@ async function updateAdminAdSettings(req, res) {
     }
 
     const v = validateSlotEnabledPayload(slotEnabled);
-    if (!v.ok) {
-      return res.status(400).json({ ok: false, code: v.code, message: v.message });
-    }
+    if (!v.ok) return res.status(400).json({ ok: false, code: v.code, message: v.message });
 
-    const incoming = {
-      HOME_728x90: slotEnabled.HOME_728x90,
-      HOME_RIGHT_300x250: slotEnabled.HOME_RIGHT_300x250,
-    };
+    const incoming = normalizeSlotEnabled(slotEnabled);
+
+    // After normalization, all keys must be boolean.
+    const strict = validateSlotEnabled(incoming);
+    if (!strict.ok) return res.status(400).json({ ok: false, code: 'INVALID_BODY', message: strict.message });
 
     const doc = await AdSettings.findByIdAndUpdate(
       'global',

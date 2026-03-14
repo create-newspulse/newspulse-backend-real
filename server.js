@@ -1502,6 +1502,13 @@ app.use('/api/admin', adminAdsRouter);
 app.use('/admin-api/ads', adminAdsInquiriesCompatRouter);
 app.use('/admin-api/api/ads', adminAdsInquiriesCompatRouter);
 
+// Sponsor ads CRUD aliases (some admin builds call these without /admin prefix)
+// - GET/POST /admin-api/ads
+// - PUT/PATCH/DELETE /admin-api/ads/:id
+// NOTE: This coexists with inquiries at /admin-api/ads/inquiries*.
+app.use('/admin-api', adminAdsRouter);
+app.use('/admin-api/api', adminAdsRouter);
+
 // Admin ads inquiry APIs (for admin panel rewrites /admin-api -> /api/admin)
 app.use('/api/admin/ads', adminAdsInquiriesCompatRouter);
 

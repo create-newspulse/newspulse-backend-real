@@ -7,6 +7,8 @@ const AdSettings = require('../models/AdSettings');
 const DEFAULT_SLOT_ENABLED = {
   HOME_728x90: true,
   HOME_RIGHT_300x250: true,
+  HOME_RIGHT_RAIL: true,
+  ARTICLE_INLINE: false,
 };
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
@@ -19,8 +21,9 @@ function isDbReady() {
 function normalizeSlotEnabled(raw) {
   const out = { ...DEFAULT_SLOT_ENABLED };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
-  if (typeof raw.HOME_728x90 === 'boolean') out.HOME_728x90 = raw.HOME_728x90;
-  if (typeof raw.HOME_RIGHT_300x250 === 'boolean') out.HOME_RIGHT_300x250 = raw.HOME_RIGHT_300x250;
+  for (const key of Object.keys(DEFAULT_SLOT_ENABLED)) {
+    if (typeof raw[key] === 'boolean') out[key] = raw[key];
+  }
   return out;
 }
 
@@ -28,8 +31,9 @@ function validateSlotEnabled(slotEnabled) {
   if (!slotEnabled || typeof slotEnabled !== 'object' || Array.isArray(slotEnabled)) {
     return { ok: false, message: 'slotEnabled must be an object' };
   }
-  if (typeof slotEnabled.HOME_728x90 !== 'boolean') return { ok: false, message: 'slotEnabled.HOME_728x90 must be boolean' };
-  if (typeof slotEnabled.HOME_RIGHT_300x250 !== 'boolean') return { ok: false, message: 'slotEnabled.HOME_RIGHT_300x250 must be boolean' };
+  for (const key of Object.keys(DEFAULT_SLOT_ENABLED)) {
+    if (typeof slotEnabled[key] !== 'boolean') return { ok: false, message: `slotEnabled.${key} must be boolean` };
+  }
   return { ok: true };
 }
 
