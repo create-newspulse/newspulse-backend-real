@@ -517,6 +517,23 @@ app.use('/api/public/ads/slot', (req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  // Ensure we don't accidentally advertise credentialed CORS on public endpoints.
+  try { res.removeHeader('Access-Control-Allow-Credentials'); } catch (_) {}
+  return next();
+});
+
+// Same CORS override for the querystring variant: GET /api/public/ads?slot=...
+app.use('/api/public/ads', (req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'OPTIONS') return next();
+
+  const origin = req.get('Origin');
+  if (!origin) return next();
+  if (!_PUBLIC_ADS_CORS_ORIGINS.has(String(origin))) return next();
+
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  try { res.removeHeader('Access-Control-Allow-Credentials'); } catch (_) {}
   return next();
 });
 

@@ -17,8 +17,8 @@ test('GET /api/public/ad-settings returns defaults when DB not connected', async
     HOME_728x90: true,
     HOME_RIGHT_300x250: true,
     HOME_RIGHT_RAIL: true,
-    ARTICLE_INLINE: false,
-    ARTICLE_END: false,
+    ARTICLE_INLINE: true,
+    ARTICLE_END: true,
   });
 });
 

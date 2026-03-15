@@ -3,14 +3,9 @@ const path = require('path');
 const mongoose = require('mongoose');
 
 const AdSettings = require('../models/AdSettings');
+const { buildSlotEnabledDefaults, AD_SLOTS } = require('../src/constants/adSlots');
 
-const DEFAULT_SLOT_ENABLED = {
-  HOME_728x90: true,
-  HOME_RIGHT_300x250: true,
-  HOME_RIGHT_RAIL: true,
-  ARTICLE_INLINE: false,
-  ARTICLE_END: false,
-};
+const DEFAULT_SLOT_ENABLED = buildSlotEnabledDefaults(true);
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const FILE_PATH = path.join(DATA_DIR, 'ad-settings.json');
@@ -20,9 +15,12 @@ function isDbReady() {
 }
 
 function normalizeSlotEnabled(raw) {
+  if (raw && typeof raw === 'object' && typeof raw.get === 'function' && typeof raw.entries === 'function') {
+    raw = Object.fromEntries(Array.from(raw.entries()));
+  }
   const out = { ...DEFAULT_SLOT_ENABLED };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
-  for (const key of Object.keys(DEFAULT_SLOT_ENABLED)) {
+  for (const key of AD_SLOTS) {
     if (typeof raw[key] === 'boolean') out[key] = raw[key];
   }
   return out;
@@ -32,7 +30,7 @@ function validateSlotEnabled(slotEnabled) {
   if (!slotEnabled || typeof slotEnabled !== 'object' || Array.isArray(slotEnabled)) {
     return { ok: false, message: 'slotEnabled must be an object' };
   }
-  for (const key of Object.keys(DEFAULT_SLOT_ENABLED)) {
+  for (const key of AD_SLOTS) {
     if (typeof slotEnabled[key] !== 'boolean') return { ok: false, message: `slotEnabled.${key} must be boolean` };
   }
   return { ok: true };

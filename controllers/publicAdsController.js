@@ -1,24 +1,24 @@
 const mongoose = require('mongoose');
 const Ad = require('../models/Ad');
 const AdSettings = require('../models/AdSettings');
-const { normalizeSlot, isValidObjectId } = require('../lib/ads');
+const { normalizeSlot, isValidObjectId, parseDateMaybe } = require('../lib/ads');
+const { buildSlotEnabledDefaults, AD_SLOTS } = require('../src/constants/adSlots');
 
 function isDbReady() {
   return mongoose.connection.readyState === 1;
 }
 
 const DEFAULT_SLOT_ENABLED = {
-  HOME_728x90: true,
-  HOME_RIGHT_300x250: true,
-  HOME_RIGHT_RAIL: true,
-  ARTICLE_INLINE: false,
-  ARTICLE_END: false,
+  ...buildSlotEnabledDefaults(true),
 };
 
 function normalizeSlotEnabled(raw) {
+  if (raw && typeof raw === 'object' && typeof raw.get === 'function' && typeof raw.entries === 'function') {
+    raw = Object.fromEntries(Array.from(raw.entries()));
+  }
   const out = { ...DEFAULT_SLOT_ENABLED };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
-  for (const key of Object.keys(DEFAULT_SLOT_ENABLED)) {
+  for (const key of AD_SLOTS) {
     if (typeof raw[key] === 'boolean') out[key] = raw[key];
   }
   return out;
@@ -42,7 +42,7 @@ async function getSlotEnabled() {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
       needsBackfill = true;
     } else {
-      for (const key of Object.keys(DEFAULT_SLOT_ENABLED)) {
+      for (const key of AD_SLOTS) {
         if (typeof raw[key] !== 'boolean') {
           needsBackfill = true;
           break;
@@ -69,6 +69,8 @@ function _isDevLogEnabled() {
 
 function toPublicAdDto(doc) {
   if (!doc) return null;
+  const startParsed = parseDateMaybe(doc.startAt);
+  const endParsed = parseDateMaybe(doc.endAt);
   return {
     id: String(doc._id),
     slot: doc.slot,
@@ -76,27 +78,62 @@ function toPublicAdDto(doc) {
     imageUrl: doc.imageUrl,
     isClickable: doc.isClickable !== false,
     targetUrl: doc.targetUrl,
-    startAt: doc.startAt || null,
-    endAt: doc.endAt || null,
+    startAt: startParsed.ok ? (startParsed.date || null) : null,
+    endAt: endParsed.ok ? (endParsed.date || null) : null,
     priority: typeof doc.priority === 'number' ? doc.priority : 0,
     updatedAt: doc.updatedAt || null,
   };
 }
 
+function _isSameInstantMinuteWindow(startAt, endAt, now) {
+  if (!(startAt instanceof Date) || Number.isNaN(startAt.getTime())) return false;
+  if (!(endAt instanceof Date) || Number.isNaN(endAt.getTime())) return false;
+  if (startAt.getTime() !== endAt.getTime()) return false;
+  const startMs = startAt.getTime();
+  const nowMs = now.getTime();
+  return nowMs >= startMs && nowMs < (startMs + 60_000);
+}
+
+function _isInSchedule(ad, now) {
+  const startParsed = parseDateMaybe(ad.startAt);
+  const endParsed = parseDateMaybe(ad.endAt);
+
+  if (!startParsed.ok || !endParsed.ok) {
+    return { ok: true, inSchedule: false, reason: 'invalid_schedule' };
+  }
+
+  const startAt = startParsed.date;
+  const endAt = endParsed.date;
+
+  if (startAt && endAt && _isSameInstantMinuteWindow(startAt, endAt, now)) {
+    return { ok: true, inSchedule: true, reason: 'instant_minute' };
+  }
+
+  if (startAt && now.getTime() < startAt.getTime()) {
+    return { ok: true, inSchedule: false, reason: 'not_started' };
+  }
+
+  if (endAt && now.getTime() > endAt.getTime()) {
+    return { ok: true, inSchedule: false, reason: 'ended' };
+  }
+
+  return { ok: true, inSchedule: true, reason: 'in_window' };
+}
+
 // GET /api/public/ads?slot=HOME_728x90
 async function getActiveAd(req, res) {
   const slot = normalizeSlot(req.query && req.query.slot);
-  res.set('Cache-Control', 'no-store');
+  res.set('Cache-Control', 'public, max-age=60');
 
   const devLog = _isDevLogEnabled();
 
   if (!slot) {
-    return res.status(400).json({ ok: false, message: 'Invalid or missing slot' });
+    return res.status(400).json({ enabled: false, ad: null, reason: 'invalid_slot' });
   }
 
   // In test/local-no-db mode, keep a stable shape (avoid buffering timeouts)
   if (!isDbReady()) {
-    return res.status(200).json({ ok: true, ad: null });
+    return res.status(200).json({ enabled: true, ad: null, reason: 'db_unavailable' });
   }
 
   // Respect global ad slot disable switches
@@ -110,74 +147,32 @@ async function getActiveAd(req, res) {
     });
   }
   if (Object.prototype.hasOwnProperty.call(slotEnabled, slot) && slotEnabled[slot] === false) {
-    return res.status(200).json({ ok: true, ad: null });
+    return res.status(200).json({ enabled: false, ad: null, reason: 'disabled' });
   }
 
   const now = new Date();
 
-  // Schedule rules:
-  // - Missing startAt/endAt => allowed
-  // - startAt exists and now < startAt => not allowed
-  // - endAt exists and now > endAt => not allowed
-  // - If startAt === endAt (instant), treat as valid only within that same minute:
-  //   allow if now is in [startAt, startAt + 1 minute)
-  const filter = {
-    slot,
-    isActive: true,
-    $and: [
-      { $or: [{ startAt: null }, { startAt: { $exists: false } }, { startAt: { $lte: now } }] },
-      {
-        $or: [
-          { endAt: null },
-          { endAt: { $exists: false } },
-          { endAt: { $gte: now } },
-          {
-            // startAt=endAt special case: valid for that same minute window
-            $expr: {
-              $and: [
-                { $ne: ['$startAt', null] },
-                { $ne: ['$endAt', null] },
-                { $eq: ['$startAt', '$endAt'] },
-                { $lte: ['$startAt', now] },
-                {
-                  $gt: [
-                    { $dateAdd: { startDate: '$endAt', unit: 'minute', amount: 1 } },
-                    now,
-                  ],
-                },
-              ],
-            },
-          },
-        ],
-      },
-    ],
-  };
+  // Important: legacy data may store startAt/endAt as strings (e.g. "DD-MM-YYYY HH:mm").
+  // Comparing those in Mongo will not behave correctly. Fetch then filter in JS using parseDateMaybe.
+  const candidates = await Ad.find({ slot, isActive: true })
+    .sort({ priority: -1, updatedAt: -1 })
+    .limit(100)
+    .lean();
 
-  let countBefore = null;
-  let countAfter = null;
-  if (devLog) {
-    try {
-      countBefore = await Ad.countDocuments({ slot, isActive: true });
-    } catch (_) {
-      countBefore = null;
-    }
-    try {
-      countAfter = await Ad.countDocuments(filter);
-    } catch (_) {
-      countAfter = null;
-    }
+  const inSchedule = [];
+  for (const a of candidates) {
+    const sched = _isInSchedule(a, now);
+    if (sched.ok && sched.inSchedule) inSchedule.push(a);
   }
 
-  const ad = await Ad.findOne(filter)
-    .sort({ priority: -1, updatedAt: -1 })
-    .lean();
+  const ad = inSchedule.length > 0 ? inSchedule[0] : null;
 
   if (devLog) {
     // eslint-disable-next-line no-console
     console.log('[public-ads][select]', {
       slot,
-      countBefore: countBefore === null ? '?' : countBefore,
-      countAfter: countAfter === null ? '?' : countAfter,
+      candidates: candidates.length,
+      inSchedule: inSchedule.length,
       selected: ad
         ? {
           id: String(ad._id),
@@ -188,7 +183,30 @@ async function getActiveAd(req, res) {
     });
   }
 
-  return res.status(200).json({ ok: true, ad: toPublicAdDto(ad) });
+  if (!ad) {
+    if (candidates.length > 0) {
+      return res.status(200).json({ enabled: true, ad: null, reason: 'not_in_schedule' });
+    }
+    return res.status(200).json({ enabled: true, ad: null, reason: 'no_active_ad' });
+  }
+
+  // Best-effort: if legacy string dates were parsed successfully, normalize stored types.
+  try {
+    const startParsed = parseDateMaybe(ad.startAt);
+    const endParsed = parseDateMaybe(ad.endAt);
+    const needsStart = startParsed.ok && startParsed.date instanceof Date && !(ad.startAt instanceof Date);
+    const needsEnd = endParsed.ok && endParsed.date instanceof Date && !(ad.endAt instanceof Date);
+    if (needsStart || needsEnd) {
+      const $set = {};
+      if (needsStart) $set.startAt = startParsed.date;
+      if (needsEnd) $set.endAt = endParsed.date;
+      await Ad.updateOne({ _id: ad._id }, { $set });
+    }
+  } catch (_) {
+    // ignore
+  }
+
+  return res.status(200).json({ enabled: true, ad: toPublicAdDto(ad) });
 }
 
 async function postImpression(req, res) {

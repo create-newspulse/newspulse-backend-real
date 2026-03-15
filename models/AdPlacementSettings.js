@@ -1,14 +1,14 @@
 const mongoose = require('mongoose');
 
+const { buildSlotEnabledDefaults } = require('../src/constants/adSlots');
+
 const AdPlacementSettingsSchema = new mongoose.Schema(
   {
     _id: { type: String, default: 'global' },
     slotEnabled: {
-      HOME_728x90: { type: Boolean, default: true },
-      HOME_RIGHT_300x250: { type: Boolean, default: true },
-      HOME_RIGHT_RAIL: { type: Boolean, default: true },
-      ARTICLE_INLINE: { type: Boolean, default: false },
-      ARTICLE_END: { type: Boolean, default: false },
+      type: Map,
+      of: Boolean,
+      default: () => buildSlotEnabledDefaults(true),
     },
   },
   { timestamps: true, collection: 'ad_placement_settings' },
