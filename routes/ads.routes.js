@@ -3,6 +3,14 @@ const mongoose = require('mongoose');
 
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const {
+  listAds,
+  createAd,
+  updateAd,
+  toggleAd,
+  deleteAd,
+  uploadAdImage,
+} = require('../controllers/admin/adsController');
+const {
   submitPublicAdInquiry,
   listAdminAdInquiriesV2,
   getAdminAdInquiryByIdV2,
@@ -76,5 +84,25 @@ router.delete('/inquiries/:id', requireAdminAuth, (_req, res) => {
     message: 'Deprecated. Use PATCH /api/ads/inquiries/:id/trash (soft delete) or DELETE /api/ads/inquiries/:id/permanent (hard delete).',
   });
 });
+
+// Sponsor ads admin endpoints (JWT/cookie auth)
+// NOTE: Keep these AFTER /inquiries routes to avoid route conflicts.
+// GET /api/ads?slot=HOME_728x90
+router.get('/', requireAdminAuth, listAds);
+
+// POST /api/ads
+router.post('/', requireAdminAuth, createAd);
+
+// POST /api/ads/upload-image (multipart, field name "file")
+router.post('/upload-image', requireAdminAuth, uploadAdImage);
+
+// PUT /api/ads/:id
+router.put('/:id([0-9a-fA-F]{24})', requireAdminAuth, updateAd);
+
+// PATCH /api/ads/:id/toggle
+router.patch('/:id([0-9a-fA-F]{24})/toggle', requireAdminAuth, toggleAd);
+
+// DELETE /api/ads/:id
+router.delete('/:id([0-9a-fA-F]{24})', requireAdminAuth, deleteAd);
 
 module.exports = router;

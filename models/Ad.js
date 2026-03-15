@@ -27,6 +27,11 @@ const AdSchema = new mongoose.Schema(
         message: 'imageUrl must start with https:// or http://',
       },
     },
+    originalImageUrl: {
+      type: String,
+      default: null,
+      trim: true,
+    },
     isClickable: {
       type: Boolean,
       default: true,

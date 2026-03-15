@@ -9,6 +9,7 @@ const DEFAULT_SLOT_ENABLED = {
   HOME_RIGHT_300x250: true,
   HOME_RIGHT_RAIL: true,
   ARTICLE_INLINE: false,
+  ARTICLE_END: false,
 };
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
