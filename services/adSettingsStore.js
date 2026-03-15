@@ -23,6 +23,13 @@ function normalizeSlotEnabled(raw) {
   for (const key of AD_SLOTS) {
     if (typeof raw[key] === 'boolean') out[key] = raw[key];
   }
+
+  // Alias: HOME_RIGHT_RAIL should behave exactly like HOME_RIGHT_300x250.
+  if (typeof raw.HOME_RIGHT_300x250 !== 'boolean' && typeof raw.HOME_RIGHT_RAIL === 'boolean') {
+    out.HOME_RIGHT_300x250 = raw.HOME_RIGHT_RAIL;
+  }
+  out.HOME_RIGHT_RAIL = out.HOME_RIGHT_300x250;
+
   return out;
 }
 

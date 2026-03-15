@@ -21,6 +21,14 @@ function normalizeSlotEnabled(raw) {
   for (const key of AD_SLOTS) {
     if (typeof raw[key] === 'boolean') out[key] = raw[key];
   }
+
+  // Alias: HOME_RIGHT_RAIL should behave exactly like HOME_RIGHT_300x250.
+  // If only legacy key exists, treat it as canonical.
+  if (typeof raw.HOME_RIGHT_300x250 !== 'boolean' && typeof raw.HOME_RIGHT_RAIL === 'boolean') {
+    out.HOME_RIGHT_300x250 = raw.HOME_RIGHT_RAIL;
+  }
+  out.HOME_RIGHT_RAIL = out.HOME_RIGHT_300x250;
+
   return out;
 }
 
@@ -73,7 +81,7 @@ function toPublicAdDto(doc) {
   const endParsed = parseDateMaybe(doc.endAt);
   return {
     id: String(doc._id),
-    slot: doc.slot,
+    slot: normalizeSlot(doc.slot) || doc.slot,
     title: doc.title || '',
     imageUrl: doc.imageUrl,
     isClickable: doc.isClickable !== false,
@@ -131,6 +139,10 @@ async function getActiveAd(req, res) {
     return res.status(400).json({ enabled: false, ad: null, reason: 'invalid_slot' });
   }
 
+  const querySlots = slot === 'HOME_RIGHT_300x250'
+    ? ['HOME_RIGHT_300x250', 'HOME_RIGHT_RAIL']
+    : [slot];
+
   // In test/local-no-db mode, keep a stable shape (avoid buffering timeouts)
   if (!isDbReady()) {
     return res.status(200).json({ enabled: true, ad: null, reason: 'db_unavailable' });
@@ -154,7 +166,7 @@ async function getActiveAd(req, res) {
 
   // Important: legacy data may store startAt/endAt as strings (e.g. "DD-MM-YYYY HH:mm").
   // Comparing those in Mongo will not behave correctly. Fetch then filter in JS using parseDateMaybe.
-  const candidates = await Ad.find({ slot, isActive: true })
+  const candidates = await Ad.find({ slot: { $in: querySlots }, isActive: true })
     .sort({ priority: -1, updatedAt: -1 })
     .limit(100)
     .lean();

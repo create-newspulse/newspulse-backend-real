@@ -194,7 +194,15 @@ async function listAds(req, res) {
   }
 
   const filter = {};
-  if (slot) filter.slot = slot;
+  if (slot) {
+    // Alias support: legacy HOME_RIGHT_RAIL is treated as HOME_RIGHT_300x250.
+    // Include both so old DB records remain visible.
+    if (slot === 'HOME_RIGHT_300x250') {
+      filter.slot = { $in: ['HOME_RIGHT_300x250', 'HOME_RIGHT_RAIL'] };
+    } else {
+      filter.slot = slot;
+    }
+  }
   if (activeOnly === '1' || activeOnly.toLowerCase() === 'true') filter.isActive = true;
 
   const docs = await Ad.find(filter).sort({ updatedAt: -1 }).lean();

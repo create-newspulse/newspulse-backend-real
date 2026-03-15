@@ -24,3 +24,15 @@ test('GET /api/public/ads?slot=article inline accepts normalized slot label', as
   assert.equal(res.body.enabled, true);
   assert.equal(res.body.ad, null);
 });
+
+test('GET /api/public/ads?slot=HOME_RIGHT_RAIL aliases to HOME_RIGHT_300x250', async () => {
+  const resLegacy = await request(app).get('/api/public/ads?slot=HOME_RIGHT_RAIL');
+  const resCanonical = await request(app).get('/api/public/ads?slot=HOME_RIGHT_300x250');
+
+  assert.equal(resLegacy.status, 200);
+  assert.equal(resCanonical.status, 200);
+
+  // In NODE_ENV=test the DB is typically not connected for this suite,
+  // so both should return the same stable fallback.
+  assert.deepEqual(resLegacy.body, resCanonical.body);
+});
