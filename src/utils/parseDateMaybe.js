@@ -28,15 +28,15 @@ function _parseLegacyDmyHm(s) {
   return d;
 }
 
-function _isIsoLikeString(s) {
-  // Accept common ISO 8601 forms only.
-  // Examples:
-  // - 2026-03-16
-  // - 2026-03-16T10:14:00Z
-  // - 2026-03-16T10:14:00.000Z
-  // - 2026-03-16T10:14:00+05:30
-  // Also allow a single space instead of 'T' for compatibility.
-  return /^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/.test(String(s || '').trim());
+function _looksLikeIso8601(s) {
+  // Accept:
+  // - YYYY-MM-DD
+  // - YYYY-MM-DDTHH:mm
+  // - YYYY-MM-DDTHH:mm:ss
+  // - optional .sss
+  // - optional timezone Z / ±HH:mm
+  // Also allow a space instead of 'T'.
+  return /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/.test(String(s || ''));
 }
 
 function parseDateMaybe(value) {
@@ -55,8 +55,8 @@ function parseDateMaybe(value) {
   const s = String(value).trim();
   if (!s) return { ok: true, date: null, reason: 'empty_string' };
 
-  // First try strict ISO parsing (supports timezone offsets)
-  if (_isIsoLikeString(s)) {
+  // Only parse ISO-8601 strings via Date() to avoid locale-dependent parsing.
+  if (_looksLikeIso8601(s)) {
     const iso = new Date(s);
     if (_isValidDate(iso)) return { ok: true, date: iso, reason: 'iso' };
   }
