@@ -22,6 +22,12 @@ function normalizeSlotEnabled(raw) {
     if (typeof raw[key] === 'boolean') out[key] = raw[key];
   }
 
+  // Safety default for newly-added slots: if the DB record predates the slot key,
+  // treat it as disabled until explicitly enabled.
+  if (typeof raw.FOOTER_BANNER_728x90 !== 'boolean') {
+    out.FOOTER_BANNER_728x90 = false;
+  }
+
   // Alias: HOME_RIGHT_RAIL should behave exactly like HOME_RIGHT_300x250.
   // If only legacy key exists, treat it as canonical.
   if (typeof raw.HOME_RIGHT_300x250 !== 'boolean' && typeof raw.HOME_RIGHT_RAIL === 'boolean') {
@@ -35,11 +41,12 @@ function normalizeSlotEnabled(raw) {
 async function getSlotEnabled() {
   // If DB is offline, default to enabled so public pages don't break.
   if (!isDbReady()) return { ...DEFAULT_SLOT_ENABLED };
-  const doc = await AdSettings.findByIdAndUpdate(
+  const q = AdSettings.findByIdAndUpdate(
     'global',
     { $setOnInsert: { _id: 'global' } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
-  ).lean();
+  );
+  const doc = q && typeof q.lean === 'function' ? await q.lean() : await q;
 
   const normalized = normalizeSlotEnabled(doc && typeof doc === 'object' ? doc.slotEnabled : null);
 
@@ -131,12 +138,15 @@ function _isInSchedule(ad, now) {
 // GET /api/public/ads?slot=HOME_728x90
 async function getActiveAd(req, res) {
   const slot = normalizeSlot(req.query && req.query.slot);
-  res.set('Cache-Control', 'public, max-age=60');
+  // Ads should never be cached (admin updates must reflect immediately).
+  res.set('Cache-Control', 'no-store, max-age=0');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
 
   const devLog = _isDevLogEnabled();
 
   if (!slot) {
-    return res.status(400).json({ enabled: false, ad: null, reason: 'invalid_slot' });
+    return res.status(400).json({ ok: false, enabled: false, ad: null, reason: 'invalid_slot' });
   }
 
   const querySlots = slot === 'HOME_RIGHT_300x250'
@@ -145,7 +155,7 @@ async function getActiveAd(req, res) {
 
   // In test/local-no-db mode, keep a stable shape (avoid buffering timeouts)
   if (!isDbReady()) {
-    return res.status(200).json({ enabled: true, ad: null, reason: 'db_unavailable' });
+    return res.status(200).json({ ok: true, enabled: true, ad: null, reason: 'db_unavailable' });
   }
 
   // Respect global ad slot disable switches
@@ -159,7 +169,7 @@ async function getActiveAd(req, res) {
     });
   }
   if (Object.prototype.hasOwnProperty.call(slotEnabled, slot) && slotEnabled[slot] === false) {
-    return res.status(200).json({ enabled: false, ad: null, reason: 'disabled' });
+    return res.status(200).json({ ok: true, enabled: false, ad: null, reason: 'disabled' });
   }
 
   const now = new Date();
@@ -197,9 +207,9 @@ async function getActiveAd(req, res) {
 
   if (!ad) {
     if (candidates.length > 0) {
-      return res.status(200).json({ enabled: true, ad: null, reason: 'not_in_schedule' });
+      return res.status(200).json({ ok: true, enabled: true, ad: null, reason: 'not_in_schedule' });
     }
-    return res.status(200).json({ enabled: true, ad: null, reason: 'no_active_ad' });
+    return res.status(200).json({ ok: true, enabled: true, ad: null, reason: 'no_active_ad' });
   }
 
   // Best-effort: if legacy string dates were parsed successfully, normalize stored types.
@@ -218,7 +228,7 @@ async function getActiveAd(req, res) {
     // ignore
   }
 
-  return res.status(200).json({ enabled: true, ad: toPublicAdDto(ad) });
+  return res.status(200).json({ ok: true, enabled: true, ad: toPublicAdDto(ad) });
 }
 
 async function postImpression(req, res) {

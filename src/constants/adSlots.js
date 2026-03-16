@@ -4,6 +4,7 @@ const AD_SLOTS = Object.freeze([
   'HOME_RIGHT_RAIL',
   'ARTICLE_INLINE',
   'ARTICLE_END',
+  'FOOTER_BANNER_728x90',
 ]);
 
 function buildSlotEnabledDefaults(defaultEnabled = true, overrides = null) {

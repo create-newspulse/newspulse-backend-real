@@ -24,6 +24,12 @@ function normalizeSlotEnabled(raw) {
     if (typeof raw[key] === 'boolean') out[key] = raw[key];
   }
 
+  // Safety default for newly-added slots: if the persisted record predates the slot key,
+  // treat it as disabled until explicitly enabled.
+  if (typeof raw.FOOTER_BANNER_728x90 !== 'boolean') {
+    out.FOOTER_BANNER_728x90 = false;
+  }
+
   // Alias: HOME_RIGHT_RAIL should behave exactly like HOME_RIGHT_300x250.
   if (typeof raw.HOME_RIGHT_300x250 !== 'boolean' && typeof raw.HOME_RIGHT_RAIL === 'boolean') {
     out.HOME_RIGHT_300x250 = raw.HOME_RIGHT_RAIL;

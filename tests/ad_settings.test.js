@@ -19,6 +19,7 @@ test('GET /api/public/ad-settings returns defaults when DB not connected', async
     HOME_RIGHT_RAIL: true,
     ARTICLE_INLINE: true,
     ARTICLE_END: true,
+    FOOTER_BANNER_728x90: true,
   });
 });
 
