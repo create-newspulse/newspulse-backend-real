@@ -100,15 +100,6 @@ function toPublicAdDto(doc) {
   };
 }
 
-function _isSameInstantMinuteWindow(startAt, endAt, now) {
-  if (!(startAt instanceof Date) || Number.isNaN(startAt.getTime())) return false;
-  if (!(endAt instanceof Date) || Number.isNaN(endAt.getTime())) return false;
-  if (startAt.getTime() !== endAt.getTime()) return false;
-  const startMs = startAt.getTime();
-  const nowMs = now.getTime();
-  return nowMs >= startMs && nowMs < (startMs + 60_000);
-}
-
 function _isInSchedule(ad, now) {
   const startParsed = parseDateMaybe(ad.startAt);
   const endParsed = parseDateMaybe(ad.endAt);
@@ -119,10 +110,6 @@ function _isInSchedule(ad, now) {
 
   const startAt = startParsed.date;
   const endAt = endParsed.date;
-
-  if (startAt && endAt && _isSameInstantMinuteWindow(startAt, endAt, now)) {
-    return { ok: true, inSchedule: true, reason: 'instant_minute' };
-  }
 
   if (startAt && now.getTime() < startAt.getTime()) {
     return { ok: true, inSchedule: false, reason: 'not_started' };

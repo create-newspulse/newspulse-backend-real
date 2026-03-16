@@ -19,3 +19,11 @@ test('parseDateMaybe rejects unparseable strings', () => {
   assert.equal(out.ok, false);
   assert.equal(out.date, null);
 });
+
+test('parseDateMaybe parses ISO strings as Date', () => {
+  const out = parseDateMaybe('2026-03-16T10:14:00.000Z');
+  assert.equal(out.ok, true);
+  assert.ok(out.date instanceof Date);
+  assert.equal(Number.isNaN(out.date.getTime()), false);
+  assert.equal(out.date.toISOString(), '2026-03-16T10:14:00.000Z');
+});

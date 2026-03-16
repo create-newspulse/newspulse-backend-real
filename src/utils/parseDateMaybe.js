@@ -28,6 +28,17 @@ function _parseLegacyDmyHm(s) {
   return d;
 }
 
+function _isIsoLikeString(s) {
+  // Accept common ISO 8601 forms only.
+  // Examples:
+  // - 2026-03-16
+  // - 2026-03-16T10:14:00Z
+  // - 2026-03-16T10:14:00.000Z
+  // - 2026-03-16T10:14:00+05:30
+  // Also allow a single space instead of 'T' for compatibility.
+  return /^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/.test(String(s || '').trim());
+}
+
 function parseDateMaybe(value) {
   if (value === undefined || value === null || value === '') {
     return { ok: true, date: null, reason: 'empty' };
@@ -44,9 +55,11 @@ function parseDateMaybe(value) {
   const s = String(value).trim();
   if (!s) return { ok: true, date: null, reason: 'empty_string' };
 
-  // First try ISO-ish parsing (supports timezone offsets)
-  const iso = new Date(s);
-  if (_isValidDate(iso)) return { ok: true, date: iso, reason: 'iso' };
+  // First try strict ISO parsing (supports timezone offsets)
+  if (_isIsoLikeString(s)) {
+    const iso = new Date(s);
+    if (_isValidDate(iso)) return { ok: true, date: iso, reason: 'iso' };
+  }
 
   const legacy = _parseLegacyDmyHm(s);
   if (_isValidDate(legacy)) return { ok: true, date: legacy, reason: 'legacy_dmy_hm' };
