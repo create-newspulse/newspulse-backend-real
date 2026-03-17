@@ -47,7 +47,7 @@ test('GET /api/public/ads?slot=FOOTER_BANNER_728x90&lang=en returns 200', async 
 });
 
 test('GET /api/public/ads returns 200 (not 400) for new valid slots', async () => {
-  const slots = ['HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250'];
+  const slots = ['HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250', 'BREAKING_SPONSOR', 'LIVE_UPDATE_SPONSOR'];
   for (const slot of slots) {
     const res = await request(app).get(`/api/public/ads?slot=${encodeURIComponent(slot)}&lang=en`);
     assert.equal(res.status, 200);

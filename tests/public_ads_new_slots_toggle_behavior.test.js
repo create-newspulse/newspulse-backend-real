@@ -53,10 +53,11 @@ test('Public ads: toggle OFF => ok:false enabled:false ad:null for new slots', a
     FOOTER_BANNER_728x90: true,
     HOME_RIGHT_300x600: false,
     HOME_BILLBOARD_970x250: false,
+    BREAKING_SPONSOR: false,
   });
   stubAdsFind(t, []);
 
-  for (const slot of ['HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250']) {
+  for (const slot of ['HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250', 'BREAKING_SPONSOR']) {
     const res = await request(app).get(`/api/public/ads?slot=${encodeURIComponent(slot)}&lang=en`);
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, { ok: false, enabled: false, ad: null });
@@ -74,10 +75,11 @@ test('Public ads: toggle ON + no ad => ok:false enabled:true ad:null for new slo
     FOOTER_BANNER_728x90: true,
     HOME_RIGHT_300x600: true,
     HOME_BILLBOARD_970x250: true,
+    BREAKING_SPONSOR: true,
   });
   stubAdsFind(t, []);
 
-  for (const slot of ['HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250']) {
+  for (const slot of ['HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250', 'BREAKING_SPONSOR']) {
     const res = await request(app).get(`/api/public/ads?slot=${encodeURIComponent(slot)}&lang=en`);
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, { ok: false, enabled: true, ad: null });
@@ -95,6 +97,7 @@ test('Public ads: toggle ON + ad exists => ok:true enabled:true ad:{...} for new
     FOOTER_BANNER_728x90: true,
     HOME_RIGHT_300x600: true,
     HOME_BILLBOARD_970x250: true,
+    BREAKING_SPONSOR: true,
   });
 
   // Return one active ad for whichever slot the controller queries.
@@ -143,5 +146,28 @@ test('Public ads: toggle ON + ad exists => ok:true enabled:true ad:{...} for new
     assert.equal(res.body.enabled, true);
     assert.ok(res.body.ad && typeof res.body.ad === 'object');
     assert.equal(res.body.ad.slot, 'HOME_BILLBOARD_970x250');
+  }
+
+  {
+    stubAdsFind(t, [{
+      _id: '507f1f77bcf86cd799439013',
+      slot: 'BREAKING_SPONSOR',
+      title: 'Breaking Sponsor',
+      imageUrl: 'https://example.com/breaking-sponsor.jpg',
+      isClickable: true,
+      targetUrl: 'https://example.com',
+      isActive: true,
+      startAt: null,
+      endAt: null,
+      priority: 10,
+      updatedAt: new Date('2026-03-16T00:00:00.000Z'),
+    }]);
+
+    const res = await request(app).get('/api/public/ads?slot=BREAKING_SPONSOR&lang=en');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.enabled, true);
+    assert.ok(res.body.ad && typeof res.body.ad === 'object');
+    assert.equal(res.body.ad.slot, 'BREAKING_SPONSOR');
   }
 });

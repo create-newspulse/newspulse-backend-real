@@ -8,7 +8,12 @@ const AdPlacementSettingsSchema = new mongoose.Schema(
     slotEnabled: {
       type: Map,
       of: Boolean,
-      default: () => buildSlotEnabledDefaults(true),
+      default: () => buildSlotEnabledDefaults(true, {
+        HOME_RIGHT_300x600: false,
+        HOME_BILLBOARD_970x250: false,
+        BREAKING_SPONSOR: false,
+        LIVE_UPDATE_SPONSOR: false,
+      }),
     },
   },
   { timestamps: true, collection: 'ad_placement_settings' },

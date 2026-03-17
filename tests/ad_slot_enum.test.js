@@ -11,6 +11,8 @@ test('Ad model allows known ad slots', () => {
     'FOOTER_BANNER_728x90',
     'HOME_RIGHT_300x600',
     'HOME_BILLBOARD_970x250',
+    'BREAKING_SPONSOR',
+    'LIVE_UPDATE_SPONSOR',
   ];
 
   for (const slot of slots) {

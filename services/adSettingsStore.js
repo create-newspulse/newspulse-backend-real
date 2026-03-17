@@ -8,6 +8,8 @@ const { buildSlotEnabledDefaults, AD_SLOTS } = require('../src/constants/adSlots
 const DEFAULT_SLOT_ENABLED = buildSlotEnabledDefaults(true, {
   HOME_RIGHT_300x600: false,
   HOME_BILLBOARD_970x250: false,
+  BREAKING_SPONSOR: false,
+  LIVE_UPDATE_SPONSOR: false,
 });
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
@@ -37,6 +39,12 @@ function normalizeSlotEnabled(raw) {
   }
   if (typeof raw.HOME_BILLBOARD_970x250 !== 'boolean') {
     out.HOME_BILLBOARD_970x250 = false;
+  }
+  if (typeof raw.BREAKING_SPONSOR !== 'boolean') {
+    out.BREAKING_SPONSOR = false;
+  }
+  if (typeof raw.LIVE_UPDATE_SPONSOR !== 'boolean') {
+    out.LIVE_UPDATE_SPONSOR = false;
   }
 
   // Alias: HOME_RIGHT_RAIL should behave exactly like HOME_RIGHT_300x250.
