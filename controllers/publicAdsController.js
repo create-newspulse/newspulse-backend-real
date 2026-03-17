@@ -4,12 +4,17 @@ const AdSettings = require('../models/AdSettings');
 const { normalizeSlot, isValidObjectId, parseDateMaybe } = require('../lib/ads');
 const { buildSlotEnabledDefaults, AD_SLOTS } = require('../src/constants/adSlots');
 
+const DEBUG_PUBLIC_AD_SLOTS = new Set(['HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250']);
+
 function isDbReady() {
   return mongoose.connection.readyState === 1;
 }
 
 const DEFAULT_SLOT_ENABLED = {
-  ...buildSlotEnabledDefaults(true),
+  ...buildSlotEnabledDefaults(true, {
+    HOME_RIGHT_300x600: false,
+    HOME_BILLBOARD_970x250: false,
+  }),
 };
 
 function normalizeSlotEnabled(raw) {
@@ -26,6 +31,12 @@ function normalizeSlotEnabled(raw) {
   // treat it as disabled until explicitly enabled.
   if (typeof raw.FOOTER_BANNER_728x90 !== 'boolean') {
     out.FOOTER_BANNER_728x90 = false;
+  }
+  if (typeof raw.HOME_RIGHT_300x600 !== 'boolean') {
+    out.HOME_RIGHT_300x600 = false;
+  }
+  if (typeof raw.HOME_BILLBOARD_970x250 !== 'boolean') {
+    out.HOME_BILLBOARD_970x250 = false;
   }
 
   // Alias: HOME_RIGHT_RAIL should behave exactly like HOME_RIGHT_300x250.
@@ -131,9 +142,19 @@ async function getActiveAd(req, res) {
   res.set('Expires', '0');
 
   const devLog = _isDevLogEnabled();
+  const shouldDebugSlot = DEBUG_PUBLIC_AD_SLOTS.has(slot);
+
+  if (devLog && shouldDebugSlot) {
+    // eslint-disable-next-line no-console
+    console.log('[public-ads][debug][incoming]', {
+      slot,
+      rawSlot: req.query && req.query.slot,
+    });
+  }
 
   if (!slot) {
-    return res.status(400).json({ ok: false, enabled: false, ad: null, reason: 'invalid_slot' });
+    // Never 400 for public callers; keep console noise down.
+    return res.status(200).json({ ok: false, enabled: false, ad: null });
   }
 
   const querySlots = slot === 'HOME_RIGHT_300x250'
@@ -142,11 +163,19 @@ async function getActiveAd(req, res) {
 
   // In test/local-no-db mode, keep a stable shape (avoid buffering timeouts)
   if (!isDbReady()) {
-    return res.status(200).json({ ok: true, enabled: true, ad: null, reason: 'db_unavailable' });
+    return res.status(200).json({ ok: false, enabled: true, ad: null });
   }
 
   // Respect global ad slot disable switches
   const slotEnabled = await getSlotEnabled();
+  if (devLog && shouldDebugSlot) {
+    // eslint-disable-next-line no-console
+    console.log('[public-ads][debug][slot-enabled]', {
+      slot,
+      slotKeys: Object.keys(slotEnabled || {}),
+      enabledValue: slotEnabled ? slotEnabled[slot] : undefined,
+    });
+  }
   if (devLog) {
     const enabledVal = Object.prototype.hasOwnProperty.call(slotEnabled, slot) ? slotEnabled[slot] : undefined;
     // eslint-disable-next-line no-console
@@ -156,7 +185,7 @@ async function getActiveAd(req, res) {
     });
   }
   if (Object.prototype.hasOwnProperty.call(slotEnabled, slot) && slotEnabled[slot] === false) {
-    return res.status(200).json({ ok: true, enabled: false, ad: null, reason: 'disabled' });
+    return res.status(200).json({ ok: false, enabled: false, ad: null });
   }
 
   const now = new Date();
@@ -176,6 +205,16 @@ async function getActiveAd(req, res) {
 
   const ad = inSchedule.length > 0 ? inSchedule[0] : null;
 
+  if (devLog && shouldDebugSlot) {
+    // eslint-disable-next-line no-console
+    console.log('[public-ads][debug][selected]', {
+      slot,
+      activeAdFound: !!ad,
+      candidates: candidates.length,
+      inSchedule: inSchedule.length,
+    });
+  }
+
   if (devLog) {
     // eslint-disable-next-line no-console
     console.log('[public-ads][select]', {
@@ -193,10 +232,7 @@ async function getActiveAd(req, res) {
   }
 
   if (!ad) {
-    if (candidates.length > 0) {
-      return res.status(200).json({ ok: true, enabled: true, ad: null, reason: 'not_in_schedule' });
-    }
-    return res.status(200).json({ ok: true, enabled: true, ad: null, reason: 'no_active_ad' });
+    return res.status(200).json({ ok: false, enabled: true, ad: null });
   }
 
   // Best-effort: if legacy string dates were parsed successfully, normalize stored types.

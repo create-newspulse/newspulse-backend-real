@@ -6,11 +6,11 @@ const app = require('../server');
 
 test('GET /api/public/ads without slot returns {enabled:false, ad:null}', async () => {
   const res = await request(app).get('/api/public/ads');
-  assert.equal(res.status, 400);
+  assert.equal(res.status, 200);
   assert.equal(res.headers['cache-control'], 'no-store, max-age=0');
   assert.equal(res.headers.pragma, 'no-cache');
   assert.equal(res.headers.expires, '0');
-  assert.deepEqual(res.body, { ok: false, enabled: false, ad: null, reason: 'invalid_slot' });
+  assert.deepEqual(res.body, { ok: false, enabled: false, ad: null });
 });
 
 test('GET /api/public/ads?slot=ARTICLE_INLINE returns stable shape when DB is not connected', async () => {
@@ -19,10 +19,9 @@ test('GET /api/public/ads?slot=ARTICLE_INLINE returns stable shape when DB is no
   assert.equal(res.headers['cache-control'], 'no-store, max-age=0');
   assert.equal(res.headers.pragma, 'no-cache');
   assert.equal(res.headers.expires, '0');
-  assert.equal(res.body.ok, true);
+  assert.equal(res.body.ok, false);
   assert.equal(res.body.enabled, true);
   assert.equal(res.body.ad, null);
-  assert.equal(res.body.reason, 'db_unavailable');
 });
 
 test('GET /api/public/ads?slot=FOOTER_BANNER_728x90 returns stable shape when DB is not connected', async () => {
@@ -31,10 +30,9 @@ test('GET /api/public/ads?slot=FOOTER_BANNER_728x90 returns stable shape when DB
   assert.equal(res.headers['cache-control'], 'no-store, max-age=0');
   assert.equal(res.headers.pragma, 'no-cache');
   assert.equal(res.headers.expires, '0');
-  assert.equal(res.body.ok, true);
+  assert.equal(res.body.ok, false);
   assert.equal(res.body.enabled, true);
   assert.equal(res.body.ad, null);
-  assert.equal(res.body.reason, 'db_unavailable');
 });
 
 test('GET /api/public/ads?slot=FOOTER_BANNER_728x90&lang=en returns 200', async () => {
@@ -43,9 +41,23 @@ test('GET /api/public/ads?slot=FOOTER_BANNER_728x90&lang=en returns 200', async 
   assert.equal(res.headers['cache-control'], 'no-store, max-age=0');
   assert.equal(res.headers.pragma, 'no-cache');
   assert.equal(res.headers.expires, '0');
-  assert.equal(res.body.ok, true);
+  assert.equal(res.body.ok, false);
   assert.equal(res.body.enabled, true);
   assert.equal(res.body.ad, null);
+});
+
+test('GET /api/public/ads returns 200 (not 400) for new valid slots', async () => {
+  const slots = ['HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250'];
+  for (const slot of slots) {
+    const res = await request(app).get(`/api/public/ads?slot=${encodeURIComponent(slot)}&lang=en`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers['cache-control'], 'no-store, max-age=0');
+    assert.equal(res.headers.pragma, 'no-cache');
+    assert.equal(res.headers.expires, '0');
+    assert.equal(res.body.ok, false);
+    assert.equal(typeof res.body.enabled, 'boolean');
+    assert.ok(Object.prototype.hasOwnProperty.call(res.body, 'ad'));
+  }
 });
 
 test('GET /api/public/ads?slot=article inline accepts normalized slot label', async () => {
@@ -56,6 +68,15 @@ test('GET /api/public/ads?slot=article inline accepts normalized slot label', as
   assert.equal(res.headers.expires, '0');
   assert.equal(res.body.enabled, true);
   assert.equal(res.body.ad, null);
+});
+
+test('GET /api/public/ads?slot=UNKNOWN does not 400 (stable shape)', async () => {
+  const res = await request(app).get('/api/public/ads?slot=__NOT_A_REAL_SLOT__&lang=en');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['cache-control'], 'no-store, max-age=0');
+  assert.equal(res.headers.pragma, 'no-cache');
+  assert.equal(res.headers.expires, '0');
+  assert.deepEqual(res.body, { ok: false, enabled: false, ad: null });
 });
 
 test('GET /api/public/ads?slot=HOME_RIGHT_RAIL aliases to HOME_RIGHT_300x250', async () => {

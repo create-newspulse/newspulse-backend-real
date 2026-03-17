@@ -3,7 +3,10 @@ const mongoose = require('mongoose');
 const AdSettings = require('../models/AdSettings');
 const { buildSlotEnabledDefaults, AD_SLOTS } = require('../src/constants/adSlots');
 
-const DEFAULT_SLOT_ENABLED = buildSlotEnabledDefaults(true);
+const DEFAULT_SLOT_ENABLED = buildSlotEnabledDefaults(true, {
+  HOME_RIGHT_300x600: false,
+  HOME_BILLBOARD_970x250: false,
+});
 
 function isDbReady() {
   return mongoose.connection.readyState === 1;
@@ -23,6 +26,12 @@ function normalizeSlotEnabled(raw) {
   // treat it as disabled until explicitly enabled.
   if (typeof raw.FOOTER_BANNER_728x90 !== 'boolean') {
     out.FOOTER_BANNER_728x90 = false;
+  }
+  if (typeof raw.HOME_RIGHT_300x600 !== 'boolean') {
+    out.HOME_RIGHT_300x600 = false;
+  }
+  if (typeof raw.HOME_BILLBOARD_970x250 !== 'boolean') {
+    out.HOME_BILLBOARD_970x250 = false;
   }
 
   // Alias: HOME_RIGHT_RAIL should behave exactly like HOME_RIGHT_300x250.
@@ -130,7 +139,13 @@ async function updateAdminAdSettings(req, res) {
     const v = validateSlotEnabledPayload(slotEnabled);
     if (!v.ok) return res.status(400).json({ ok: false, code: v.code, message: v.message });
 
-    const incoming = normalizeSlotEnabled(slotEnabled);
+    // Merge partial payloads into the currently persisted map so toggling one
+    // placement does not silently reset unrelated placements.
+    const current = await getOrCreateSlotEnabled();
+    const incoming = normalizeSlotEnabled({
+      ...current,
+      ...slotEnabled,
+    });
 
     // After normalization, all keys must be boolean.
     const strict = validateSlotEnabled(incoming);

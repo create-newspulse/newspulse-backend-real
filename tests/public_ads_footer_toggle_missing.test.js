@@ -57,7 +57,7 @@ test('Public ads: missing FOOTER_BANNER_728x90 toggle key => enabled:false (200)
   assert.equal(res.headers['cache-control'], 'no-store, max-age=0');
   assert.equal(res.headers.pragma, 'no-cache');
   assert.equal(res.headers.expires, '0');
-  assert.equal(res.body.ok, true);
+  assert.equal(res.body.ok, false);
 
   assert.deepEqual(res.body && typeof res.body === 'object' ? { enabled: res.body.enabled, ad: res.body.ad } : res.body, {
     enabled: false,
@@ -108,7 +108,7 @@ test('Public ads: explicit FOOTER_BANNER_728x90 toggle true + no active ad => en
   assert.equal(res.headers['cache-control'], 'no-store, max-age=0');
   assert.equal(res.headers.pragma, 'no-cache');
   assert.equal(res.headers.expires, '0');
-  assert.equal(res.body.ok, true);
+  assert.equal(res.body.ok, false);
 
   assert.deepEqual({ enabled: res.body.enabled, ad: res.body.ad }, { enabled: true, ad: null });
 });

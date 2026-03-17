@@ -5,7 +5,10 @@ const mongoose = require('mongoose');
 const AdSettings = require('../models/AdSettings');
 const { buildSlotEnabledDefaults, AD_SLOTS } = require('../src/constants/adSlots');
 
-const DEFAULT_SLOT_ENABLED = buildSlotEnabledDefaults(true);
+const DEFAULT_SLOT_ENABLED = buildSlotEnabledDefaults(true, {
+  HOME_RIGHT_300x600: false,
+  HOME_BILLBOARD_970x250: false,
+});
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const FILE_PATH = path.join(DATA_DIR, 'ad-settings.json');
@@ -28,6 +31,12 @@ function normalizeSlotEnabled(raw) {
   // treat it as disabled until explicitly enabled.
   if (typeof raw.FOOTER_BANNER_728x90 !== 'boolean') {
     out.FOOTER_BANNER_728x90 = false;
+  }
+  if (typeof raw.HOME_RIGHT_300x600 !== 'boolean') {
+    out.HOME_RIGHT_300x600 = false;
+  }
+  if (typeof raw.HOME_BILLBOARD_970x250 !== 'boolean') {
+    out.HOME_BILLBOARD_970x250 = false;
   }
 
   // Alias: HOME_RIGHT_RAIL should behave exactly like HOME_RIGHT_300x250.

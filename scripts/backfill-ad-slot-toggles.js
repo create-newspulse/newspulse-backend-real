@@ -22,7 +22,10 @@ async function main() {
 
   await mongoose.connect(MONGO_URI);
 
-  const defaults = buildSlotEnabledDefaults(true);
+  const defaults = buildSlotEnabledDefaults(true, {
+    HOME_RIGHT_300x600: false,
+    HOME_BILLBOARD_970x250: false,
+  });
 
   const doc = await AdSettings.findByIdAndUpdate(
     'global',
@@ -40,6 +43,13 @@ async function main() {
       if (Object.prototype.hasOwnProperty.call(slotEnabled, k) && typeof v === 'boolean') {
         slotEnabled[k] = v;
       }
+    }
+
+    // Safety defaults for newly-added slots: if the persisted record predates the key,
+    // treat it as disabled until explicitly enabled.
+    for (const key of ['FOOTER_BANNER_728x90', 'HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250']) {
+      const rawVal = typeof raw.get === 'function' ? raw.get(key) : raw[key];
+      if (typeof rawVal !== 'boolean') slotEnabled[key] = false;
     }
 
     // Keep legacy alias in sync
