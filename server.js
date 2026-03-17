@@ -152,6 +152,7 @@ try { publicHomeTopBarsRouter = require('./routes/publicHomeTopBars.routes'); } 
 const broadcastRoutes = require('./routes/broadcast.routes');
 const adminBroadcastRouter = require('./routes/adminBroadcast.routes');
 const adminTickerRouter = require('./routes/adminTicker.routes');
+const adminTickerAdsRouter = require('./routes/adminTickerAds.routes');
 const adminGlossaryRouter = require('./routes/adminGlossary.routes');
 
 const authRoutes = require('./routes/auth.routes');
@@ -189,6 +190,7 @@ const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes
 const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
 const adminTickersSettingsRouter = require('./routes/adminTickersSettings.routes');
 const publicBroadcastRouter = require('./routes/publicBroadcast.routes');
+const publicTickerAdsRouter = require('./routes/publicTickerAds.routes');
 const publicApiBroadcastRouter = require('./routes/publicApiBroadcast.routes');
 const publicTickerRouter = require('./routes/publicTicker.routes');
 const publicWeatherRouter = require('./routes/publicWeather.routes');
@@ -1187,6 +1189,9 @@ app.use('/api/auth', authRoutes);
 // Audit (founder-only)
 app.use('/api/audit', auditRoutes);
 // Broadcast Center (mount early so it cannot be shadowed by other /api routers)
+app.use('/api/broadcast/ticker-ads', adminTickerAdsRouter);
+app.use('/admin-api/broadcast/ticker-ads', adminTickerAdsRouter);
+app.use('/admin-api/api/broadcast/ticker-ads', adminTickerAdsRouter);
 
 // Compatibility shim:
 // Some admin deployments proxy /admin-api/* -> /api/* on the backend.
@@ -1425,6 +1430,7 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
 
 // Public site settings (tickers)
 app.use('/api/public', publicTickersSettingsRouter);
+app.use('/api/public/ticker-ads', publicTickerAdsRouter);
 // Public Broadcast Center tickers (Breaking + Live Updates)
 app.use('/api/public/broadcast', publicBroadcastRouter);
 // Public ticker items (Breaking + Live Updates) with IST daily cycle
@@ -1434,6 +1440,8 @@ app.use('/public-api/broadcast', publicApiBroadcastRouter);
 // Safe debug/version endpoint (no secrets)
 app.use('/_debug', debugRouter);
 // Admin panel proxy basePath support (some frontends call /admin-api/* even for public reads)
+app.use('/admin-api/public/ticker-ads', publicTickerAdsRouter);
+app.use('/admin-api/api/public/ticker-ads', publicTickerAdsRouter);
 app.use('/admin-api/public/broadcast', publicBroadcastRouter);
 app.use('/admin-api/api/public/broadcast', publicBroadcastRouter);
 // Admin panel proxy basePath support
