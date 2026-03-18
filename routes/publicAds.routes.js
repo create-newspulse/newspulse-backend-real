@@ -1,6 +1,8 @@
 const express = require('express');
 const mongoose = require('mongoose');
 
+const noCache = require('../middleware/noCache');
+
 const {
   getActiveAd,
   postImpression,
@@ -8,6 +10,8 @@ const {
 } = require('../controllers/publicAdsController');
 
 const router = express.Router();
+
+router.use(noCache);
 
 function isDbReady() {
   const env = String(process.env.NODE_ENV || '').toLowerCase();

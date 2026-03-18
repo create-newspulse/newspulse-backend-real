@@ -6,10 +6,23 @@ const { isGoogleTranslateConfigured } = require('./translationEnabled');
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 
 function normalizeLang(v) {
-  const s0 = String(v || '').trim().toLowerCase();
-  if (!s0) return null;
-  const s = s0.split(/[-_]/)[0];
-  return SUPPORTED_LANGS.includes(s) ? s : null;
+  const raw = String(v ?? '').trim();
+  if (!raw) return null;
+
+  // Native script hints
+  if (/[\u0A80-\u0AFF]/.test(raw)) return 'gu';
+  if (/[\u0900-\u097F]/.test(raw)) return 'hi';
+
+  const lower = raw.toLowerCase();
+  const primary = lower.split(/[-_]/)[0];
+  if (SUPPORTED_LANGS.includes(primary)) return primary;
+
+  const lettersOnly = lower.replace(/[^a-z]/g, '');
+  if (lettersOnly === 'english' || lettersOnly === 'eng') return 'en';
+  if (lettersOnly === 'hindi' || lettersOnly === 'hin') return 'hi';
+  if (lettersOnly === 'gujarati' || lettersOnly === 'gujrati' || lettersOnly === 'guj') return 'gu';
+
+  return null;
 }
 
 function _isNonEmptyString(v) {

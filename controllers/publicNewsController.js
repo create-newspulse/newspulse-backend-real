@@ -46,9 +46,28 @@ function parseTruthy(v) {
   return s === 'true' || s === '1' || s === 'yes' || s === 'y';
 }
 
+function isAutoTranslateOnReadEnabled() {
+  const s = String(process.env.ENABLE_AUTO_TRANSLATE_ON_READ ?? '').trim().toLowerCase();
+  return s === 'true' || s === '1' || s === 'yes' || s === 'y';
+}
+
 function normalizeLanguage(v) {
-  const s = String(v ?? '').trim().toLowerCase();
-  if (s === 'en' || s === 'hi' || s === 'gu') return s;
+  const raw = String(v ?? '').trim();
+  if (!raw) return null;
+
+  // Native script hints
+  if (/[\u0A80-\u0AFF]/.test(raw)) return 'gu';
+  if (/[\u0900-\u097F]/.test(raw)) return 'hi';
+
+  const lower = raw.toLowerCase();
+  const primary = lower.split(/[-_]/)[0];
+  if (primary === 'en' || primary === 'hi' || primary === 'gu') return primary;
+
+  const lettersOnly = lower.replace(/[^a-z]/g, '');
+  if (lettersOnly === 'english' || lettersOnly === 'eng') return 'en';
+  if (lettersOnly === 'hindi' || lettersOnly === 'hin') return 'hi';
+  if (lettersOnly === 'gujarati' || lettersOnly === 'gujrati' || lettersOnly === 'guj') return 'gu';
+
   return null;
 }
 
@@ -577,6 +596,83 @@ function _applyCachedTranslationInPlace(doc, desired) {
   return true;
 }
 
+function _setBaseLocalizationInPlace(doc, baseLang, requestedLang) {
+  const base = normalizeLang(baseLang) || _resolveBaseLang(doc);
+  doc.requestedLang = requestedLang || null;
+  doc.resolvedLang = base;
+  doc.isTranslated = false;
+  doc.lang = base;
+  doc.language = base;
+  doc.summary = doc.description || '';
+  return base;
+}
+
+function _applyBestAvailableCachedLocalizationInPlace(doc, requestedLang) {
+  const requested = normalizeLang(requestedLang);
+  const base = _resolveBaseLang(doc);
+
+  const ordered = [requested, 'en', 'hi', 'gu', base].filter(Boolean);
+  const seen = new Set();
+  for (const lang of ordered) {
+    if (!lang || seen.has(lang)) continue;
+    seen.add(lang);
+
+    if (lang === base) {
+      return { resolvedLang: _setBaseLocalizationInPlace(doc, base, requested), translated: false };
+    }
+
+    const ok = _applyCachedTranslationInPlace(doc, lang);
+    if (ok) {
+      // Preserve requestedLang even if we fell back to another cached language.
+      doc.requestedLang = requested || null;
+      doc.resolvedLang = lang;
+      return { resolvedLang: lang, translated: true };
+    }
+  }
+
+  return { resolvedLang: _setBaseLocalizationInPlace(doc, base, requested), translated: false };
+}
+
+async function tryAcquireNewsTranslationLock({ id, lang, now = new Date() }) {
+  const desired = normalizeLang(lang);
+  if (!desired || !id) return false;
+
+  const nowDt = now instanceof Date ? now : new Date(now);
+
+  try {
+    const lockRes = await News.updateOne(
+      {
+        _id: id,
+        $and: [
+          { [`translationStatus.${desired}`]: { $ne: 'pending' } },
+          {
+            $or: [
+              { [`translationStatus.${desired}`]: { $ne: 'failed' } },
+              { [`translationNextRetryAt.${desired}`]: { $exists: false } },
+              { [`translationNextRetryAt.${desired}`]: null },
+              { [`translationNextRetryAt.${desired}`]: { $lte: nowDt } },
+            ],
+          },
+        ],
+      },
+      {
+        $set: {
+          [`translationStatus.${desired}`]: 'pending',
+          [`translationError.${desired}`]: null,
+          [`translationNextRetryAt.${desired}`]: null,
+        },
+      }
+    );
+
+    const modified = typeof lockRes?.modifiedCount === 'number'
+      ? lockRes.modifiedCount
+      : (typeof lockRes?.nModified === 'number' ? lockRes.nModified : 0);
+    return modified === 1;
+  } catch (_) {
+    return false;
+  }
+}
+
 // GET /api/public/news?category=&type=video&founderOnly=true&limit=30&page=1
 async function listPublicNews(req, res) {
   try {
@@ -789,52 +885,63 @@ async function getPublicNewsBySlugOrId(req, res) {
     }
 
     let out = withCoverImageUrl(doc);
+    const rawForTranslation = { ...out };
 
-    const target = normalizeLang(requestedLang);
-    if (!target) {
+    const desired = normalizeLang(requestedLang);
+    if (!desired) {
+      const base = _resolveBaseLang(out);
+      _setBaseLocalizationInPlace(out, base, null);
       try { delete out.translations; } catch (_) {}
       try { delete out.translationStatus; } catch (_) {}
-      attachLocalizationFields(out, null);
-      out.resolvedLang = _resolveBaseLang(out);
-      out.isTranslated = false;
+      attachLocalizationFields(out, out.resolvedLang);
       return res.status(200).json(out);
     }
 
-    const source = _resolveBaseLang(out);
-    if (target === source) {
-      try { delete out.translations; } catch (_) {}
-      try { delete out.translationStatus; } catch (_) {}
-      attachLocalizationFields(out, target);
-      out.requestedLang = target;
-      out.resolvedLang = source;
-      out.isTranslated = false;
-      out.summary = out.description || '';
-      return res.status(200).json(out);
-    }
+    // 1) Prefer cached translation for requested language.
+    // 2) Fall back to other cached languages in order: requested → en → hi → gu → base.
+    // 3) Optionally auto-translate requested language on read (dev-only), if enabled.
+    const baseLang = _resolveBaseLang(out);
+    const cachedRes = _applyBestAvailableCachedLocalizationInPlace(out, desired);
 
-    // If translation is disabled/misconfigured, return originals (cannot satisfy strict language).
-    if (!isGoogleTranslateConfigured()) {
-      try { delete out.translations; } catch (_) {}
-      try { delete out.translationStatus; } catch (_) {}
-      attachLocalizationFields(out, target);
-      out.requestedLang = target;
-      out.resolvedLang = source;
-      out.isTranslated = false;
-      out.summary = out.description || '';
-      return res.status(200).json(out);
-    }
+    const shouldAuto = isAutoTranslateOnReadEnabled();
+    const needsRequested = desired !== baseLang && cachedRes.resolvedLang !== desired;
 
-    // Serve cached translation if ready; otherwise pending.
-    const applied = _applyCachedTranslationInPlace(out, target);
-    if (!applied) {
-      return res.status(200).json(buildPendingTranslationResponse(out, target));
+    if (shouldAuto && needsRequested && isGoogleTranslateConfigured()) {
+      const now = new Date();
+      const lockOwner = await tryAcquireNewsTranslationLock({ id: out?._id, lang: desired, now });
+      const localized = await ensureOnDemandNewsTranslation({
+        doc: rawForTranslation,
+        requestedLang: desired,
+        logger: console,
+        lockOwner,
+        now,
+      });
+
+      if (localized && localized.dbSet && out && out._id) {
+        try {
+          await News.updateOne({ _id: out._id }, { $set: localized.dbSet }).catch(() => null);
+        } catch (_) {}
+      }
+
+      if (localized && localized.out && localized.resolvedLang === desired && localized.translationPending === false) {
+        out = withCoverImageUrl(localized.out);
+        out.requestedLang = desired;
+        out.resolvedLang = desired;
+        out.isTranslated = true;
+        out.summary = out.description || out.summary || '';
+      } else {
+        // Keep the best cached/base fallback already applied.
+        out.requestedLang = desired;
+      }
+    } else {
+      out.requestedLang = desired;
     }
 
     try { delete out.translations; } catch (_) {}
     try { delete out.translationStatus; } catch (_) {}
     try { delete out.translationError; } catch (_) {}
     try { delete out.translationNextRetryAt; } catch (_) {}
-    attachLocalizationFields(out, target);
+    attachLocalizationFields(out, out.resolvedLang);
     return res.status(200).json(out);
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
@@ -909,50 +1016,59 @@ async function getPublicNewsBySlug(req, res) {
     if (!doc) return res.status(404).json({ message: 'Not found' });
 
     let out = withCoverImageUrl(doc);
+    const rawForTranslation = { ...out };
 
-    const target = normalizeLang(requestedLang);
-    if (!target) {
+    const desired = normalizeLang(requestedLang);
+    if (!desired) {
+      const base = _resolveBaseLang(out);
+      _setBaseLocalizationInPlace(out, base, null);
       try { delete out.translations; } catch (_) {}
       try { delete out.translationStatus; } catch (_) {}
-      attachLocalizationFields(out, null);
-      out.resolvedLang = _resolveBaseLang(out);
-      out.isTranslated = false;
+      attachLocalizationFields(out, out.resolvedLang);
       return res.status(200).json(out);
     }
 
-    const source = _resolveBaseLang(out);
-    if (target === source) {
-      try { delete out.translations; } catch (_) {}
-      try { delete out.translationStatus; } catch (_) {}
-      attachLocalizationFields(out, target);
-      out.requestedLang = target;
-      out.resolvedLang = source;
-      out.isTranslated = false;
-      out.summary = out.description || '';
-      return res.status(200).json(out);
-    }
+    const baseLang = _resolveBaseLang(out);
+    const cachedRes = _applyBestAvailableCachedLocalizationInPlace(out, desired);
 
-    if (!isGoogleTranslateConfigured()) {
-      try { delete out.translations; } catch (_) {}
-      try { delete out.translationStatus; } catch (_) {}
-      attachLocalizationFields(out, target);
-      out.requestedLang = target;
-      out.resolvedLang = source;
-      out.isTranslated = false;
-      out.summary = out.description || '';
-      return res.status(200).json(out);
-    }
+    const shouldAuto = isAutoTranslateOnReadEnabled();
+    const needsRequested = desired !== baseLang && cachedRes.resolvedLang !== desired;
 
-    const applied = _applyCachedTranslationInPlace(out, target);
-    if (!applied) {
-      return res.status(200).json(buildPendingTranslationResponse(out, target));
+    if (shouldAuto && needsRequested && isGoogleTranslateConfigured()) {
+      const now = new Date();
+      const lockOwner = await tryAcquireNewsTranslationLock({ id: out?._id, lang: desired, now });
+      const localized = await ensureOnDemandNewsTranslation({
+        doc: rawForTranslation,
+        requestedLang: desired,
+        logger: console,
+        lockOwner,
+        now,
+      });
+
+      if (localized && localized.dbSet && out && out._id) {
+        try {
+          await News.updateOne({ _id: out._id }, { $set: localized.dbSet }).catch(() => null);
+        } catch (_) {}
+      }
+
+      if (localized && localized.out && localized.resolvedLang === desired && localized.translationPending === false) {
+        out = withCoverImageUrl(localized.out);
+        out.requestedLang = desired;
+        out.resolvedLang = desired;
+        out.isTranslated = true;
+        out.summary = out.description || out.summary || '';
+      } else {
+        out.requestedLang = desired;
+      }
+    } else {
+      out.requestedLang = desired;
     }
 
     try { delete out.translations; } catch (_) {}
     try { delete out.translationStatus; } catch (_) {}
     try { delete out.translationError; } catch (_) {}
     try { delete out.translationNextRetryAt; } catch (_) {}
-    attachLocalizationFields(out, target);
+    attachLocalizationFields(out, out.resolvedLang);
     return res.status(200).json(out);
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });

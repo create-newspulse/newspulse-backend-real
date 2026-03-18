@@ -10,6 +10,11 @@ const { isGoogleTranslateConfigured } = require('../services/translationEnabled'
 
 const router = express.Router();
 
+function isAutoTranslateOnReadEnabled() {
+  const s = String(process.env.ENABLE_AUTO_TRANSLATE_ON_READ ?? '').trim().toLowerCase();
+  return s === 'true' || s === '1' || s === 'yes' || s === 'y';
+}
+
 function isDbConnected() {
   // 1 = connected
   const env = String(process.env.NODE_ENV || '').toLowerCase();
@@ -60,7 +65,7 @@ function applyCachedTranslationToStory(story, desiredLang) {
 
   const status = story?.translationStatus?.[desired] || null;
   const bucket = story?.translations?.[desired];
-  const ok = status === 'ready' && hasFullTranslation(bucket);
+  const ok = (status === 'ready' || status === null) && hasFullTranslation(bucket);
   if (!ok) return story;
 
   return {
@@ -70,6 +75,29 @@ function applyCachedTranslationToStory(story, desiredLang) {
     content: bucket.content,
     language: desired,
   };
+}
+
+function applyBestAvailableCachedTranslationToStory(story, requestedLang) {
+  const requested = normalizeLang(requestedLang);
+  if (!story) return { story, resolvedLang: null, translated: false };
+
+  const base = normalizeLang(story.originalLang) || normalizeLang(story.language) || detectLangFromContent(story.content) || 'en';
+  const ordered = [requested, 'en', 'hi', 'gu', base].filter(Boolean);
+  const seen = new Set();
+
+  for (const l of ordered) {
+    if (!l || seen.has(l)) continue;
+    seen.add(l);
+    if (l === base) {
+      return { story: { ...story, language: base }, resolvedLang: base, translated: false };
+    }
+    const candidate = applyCachedTranslationToStory(story, l);
+    if (candidate && candidate !== story && normalizeLang(candidate.language) === l) {
+      return { story: candidate, resolvedLang: l, translated: true };
+    }
+  }
+
+  return { story: { ...story, language: base }, resolvedLang: base, translated: false };
 }
 
 function _normalizeImageUrlCandidate(v) {
@@ -109,7 +137,14 @@ function withNormalizedImageUrl(story) {
 // GET: /api/public/stories?category=&lang=&limit=20&page=1
 router.get('/stories', async (req, res) => {
   try {
-    const { category, lang, limit = 20, page = 1 } = req.query;
+    res.set('Cache-Control', 'no-store');
+
+    const { category, limit = 20, page = 1 } = req.query;
+
+    // Prefer explicit query lang, otherwise use negotiated language (e.g. header x-lang).
+    // Keep backward-compat behavior for non-standard explicit query values.
+    const explicitLangRaw = (req.query.lang || req.query.language || '').toString().trim();
+    const negotiatedLangRaw = explicitLangRaw || (req.lang || '');
 
     if (!isDbConnected()) {
       return res.json({ success: true, data: [], message: 'Database unavailable' });
@@ -118,7 +153,7 @@ router.get('/stories', async (req, res) => {
     const q = { status: 'published' };
     if (category) q.category = String(category);
 
-    const desired = normalizeLang(lang);
+    const desired = normalizeLang(negotiatedLangRaw);
     if (desired === 'gu') {
       // Legacy behavior: Gujarati feed shows Gujarati originals immediately.
       q.language = 'gu';
@@ -129,9 +164,9 @@ router.get('/stories', async (req, res) => {
       const originalMatch = buildOriginalLangMatch(desired);
       const readyMatch = buildReadyTranslationMatch(desired);
       q.$or = [originalMatch, readyMatch].filter(Boolean);
-    } else if (lang) {
+    } else if (explicitLangRaw) {
       // Backward compatible: if a non-standard lang was provided, keep old behavior.
-      q.language = String(lang);
+      q.language = String(explicitLangRaw);
     }
 
     const lim = Math.min(parseInt(limit, 10) || 20, 50);
@@ -159,6 +194,8 @@ router.get('/stories', async (req, res) => {
 // GET: /api/public/stories/:slug
 router.get('/stories/:slug', async (req, res) => {
   try {
+    res.set('Cache-Control', 'no-store');
+
     if (!isDbConnected()) {
       return res.status(200).json({ success: false, message: 'Database unavailable' });
     }
@@ -184,7 +221,7 @@ router.get('/stories/:slug', async (req, res) => {
 
     const storyWithImageUrl = withNormalizedImageUrl(story);
 
-    const langQueryRaw = (req.query.lang || req.query.language || '').toString().trim();
+    const langQueryRaw = (req.query.lang || req.query.language || req.lang || '').toString().trim();
     if (!langQueryRaw) {
       return res.json({ success: true, data: storyWithImageUrl });
     }
@@ -198,6 +235,17 @@ router.get('/stories/:slug', async (req, res) => {
     const existingBucket = story?.translations?.[desired];
     const hasAll = hasFullTranslation(existingBucket);
     const now = new Date();
+
+    // Fast path: serve any best-available cached translation before considering on-demand translation.
+    const bestCached = applyBestAvailableCachedTranslationToStory(story, desired);
+    if (bestCached && bestCached.translated) {
+      return res.json({
+        success: true,
+        data: withNormalizedImageUrl(bestCached.story),
+        resolvedLang: bestCached.resolvedLang,
+        translationPending: false,
+      });
+    }
 
     // No translation needed (always serve original fields).
     if (desired === source) {
@@ -223,11 +271,15 @@ router.get('/stories/:slug', async (req, res) => {
       });
     }
 
-    // If translation is disabled or misconfigured, only serve cached full translations; never attempt a lock/translate.
-    if (!isGoogleTranslateConfigured() && !hasAll) {
+    const shouldAutoTranslate = isAutoTranslateOnReadEnabled();
+
+    // If auto-translate-on-read is disabled, never attempt a lock/translate.
+    // Serve base/original (or cached translation if it becomes available later).
+    if (!shouldAutoTranslate) {
+      // Still allow originalLang backfill (safe and cheap).
       const localized = await ensureOnDemandArticleTranslation({
         article: story,
-        requestedLang: langQueryRaw,
+        requestedLang: source,
         logger: console,
         lockOwner: false,
         now,
@@ -243,7 +295,17 @@ router.get('/stories/:slug', async (req, res) => {
         success: true,
         data: localized && localized.out ? withNormalizedImageUrl(localized.out) : storyWithImageUrl,
         resolvedLang: localized && localized.resolvedLang ? localized.resolvedLang : source,
-        translationPending: false,
+        translationPending: desired !== source,
+      });
+    }
+
+    // Translation disabled/misconfigured: never attempt a lock/translate.
+    if (!isGoogleTranslateConfigured() && !hasAll) {
+      return res.json({
+        success: true,
+        data: storyWithImageUrl,
+        resolvedLang: source,
+        translationPending: desired !== source,
       });
     }
 

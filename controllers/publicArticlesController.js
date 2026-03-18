@@ -15,6 +15,25 @@ function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function normalizeLanguage(v) {
+  const raw = String(v ?? '').trim();
+  if (!raw) return null;
+
+  if (/[\u0A80-\u0AFF]/.test(raw)) return 'gu';
+  if (/[\u0900-\u097F]/.test(raw)) return 'hi';
+
+  const lower = raw.toLowerCase();
+  const primary = lower.split(/[-_]/)[0];
+  if (primary === 'en' || primary === 'hi' || primary === 'gu') return primary;
+
+  const lettersOnly = lower.replace(/[^a-z]/g, '');
+  if (lettersOnly === 'english' || lettersOnly === 'eng') return 'en';
+  if (lettersOnly === 'hindi' || lettersOnly === 'hin') return 'hi';
+  if (lettersOnly === 'gujarati' || lettersOnly === 'gujrati' || lettersOnly === 'guj') return 'gu';
+
+  return null;
+}
+
 function normalizeSlug(slug) {
   // Keep backward-compat callers, but normalize via candidate logic.
   const c = getSlugCandidates(slug);
@@ -43,6 +62,8 @@ function shouldDeferToAdminArticlesRouter(req) {
 
 async function listArticles(req, res, next) {
   try {
+    res.set('Cache-Control', 'no-store');
+
     if (mongoose.connection.readyState !== 1) {
       return res.status(503).json({ message: 'Database not connected' });
     }
@@ -53,7 +74,7 @@ async function listArticles(req, res, next) {
 
     const statusRaw = String(req.query.status || '').trim().toLowerCase();
     const category = String(req.query.category || '').trim();
-    const lang = String(req.query.lang || req.query.language || '').trim().toLowerCase();
+    const lang = normalizeLanguage(req.query.lang || req.query.language || req.lang);
     const isBreaking = parseBool(req.query.isBreaking);
 
     const state = String(req.query.state || '').trim();
@@ -119,6 +140,8 @@ async function listArticles(req, res, next) {
 
 async function getArticleBySlug(req, res, next) {
   try {
+    res.set('Cache-Control', 'no-store');
+
     if (mongoose.connection.readyState !== 1) {
       return res.status(503).json({ message: 'Database not connected' });
     }
@@ -144,8 +167,7 @@ async function getArticleBySlug(req, res, next) {
       return res.status(404).json({ message: 'Article not found' });
     }
 
-    const requestedLang = String(req.query.lang || req.query.language || '').trim().toLowerCase();
-    const target = (requestedLang === 'en' || requestedLang === 'hi' || requestedLang === 'gu') ? requestedLang : null;
+    const target = normalizeLanguage(req.query.lang || req.query.language || req.lang);
     const canonicalSlug = (target && doc.slugs && doc.slugs[target]) ? doc.slugs[target] : (doc.slug || null);
 
     return res.json({

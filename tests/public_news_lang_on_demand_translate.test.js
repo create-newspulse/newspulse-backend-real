@@ -70,7 +70,7 @@ test('GET /api/public/news/:slugOrId?lang=hi returns cached translations when pr
   }
 });
 
-test('GET /api/public/news/:slugOrId?lang=hi returns pending when translation is missing (no on-demand translate)', async () => {
+test('GET /api/public/news/:slugOrId?lang=hi falls back to base content when translation is missing (no on-demand translate)', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { findOne: News.findOne, updateOne: News.updateOne };
 
@@ -103,9 +103,12 @@ test('GET /api/public/news/:slugOrId?lang=hi returns pending when translation is
 
     const res = await request(app).get('/api/public/news/s2?lang=hi');
     assert.equal(res.statusCode, 200);
-    assert.equal(res.body.status, 'pending');
     assert.equal(res.body.requestedLang, 'hi');
     assert.equal(res.body.resolvedLang, 'en');
+    assert.equal(res.body.isTranslated, false);
+    assert.equal(res.body.title, 'Hello');
+    assert.equal(res.body.description, 'Summary');
+    assert.equal(res.body.content, '<p>Body</p>');
     assert.equal(updateCalls, 0);
   } finally {
     restore(originals);
@@ -113,7 +116,7 @@ test('GET /api/public/news/:slugOrId?lang=hi returns pending when translation is
   }
 });
 
-test('GET /api/public/news/:slugOrId?lang=hi returns pending when translation failed/cooldown', async () => {
+test('GET /api/public/news/:slugOrId?lang=hi falls back to base content when translation is failed/cooldown', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { findOne: News.findOne, updateOne: News.updateOne };
 
@@ -146,10 +149,12 @@ test('GET /api/public/news/:slugOrId?lang=hi returns pending when translation fa
 
     const res = await request(app).get('/api/public/news/s3?lang=hi');
     assert.equal(res.statusCode, 200);
-
-    assert.equal(res.body.status, 'pending');
     assert.equal(res.body.requestedLang, 'hi');
     assert.equal(res.body.resolvedLang, 'en');
+    assert.equal(res.body.isTranslated, false);
+    assert.equal(res.body.title, 'Hello');
+    assert.equal(res.body.description, 'Summary');
+    assert.equal(res.body.content, 'Body');
     assert.equal(updateCalls, 0);
   } finally {
     restore(originals);

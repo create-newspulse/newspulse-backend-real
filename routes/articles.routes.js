@@ -15,6 +15,9 @@ const {
   localizeFromArticleI18n,
 } = require('../services/newsI18n.service');
 
+const { ensureOnDemandNewsTranslation } = require('../services/newsOnDemandTranslation.service');
+const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
+
 const { mapArticleForLang } = require('../services/mapArticleForLang');
 
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
@@ -28,6 +31,92 @@ const {
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
 const router = express.Router();
+
+function isAutoTranslateOnReadEnabled() {
+  const s = String(process.env.ENABLE_AUTO_TRANSLATE_ON_READ ?? '').trim().toLowerCase();
+  return s === 'true' || s === '1' || s === 'yes' || s === 'y';
+}
+
+async function tryAcquireNewsTranslationLock({ id, lang, now = new Date() }) {
+  const desired = normalizeLanguage(lang);
+  if (!desired || !id) return false;
+  const nowDt = now instanceof Date ? now : new Date(now);
+
+  try {
+    const lockRes = await News.updateOne(
+      {
+        _id: id,
+        $and: [
+          { [`translationStatus.${desired}`]: { $ne: 'pending' } },
+          {
+            $or: [
+              { [`translationStatus.${desired}`]: { $ne: 'failed' } },
+              { [`translationNextRetryAt.${desired}`]: { $exists: false } },
+              { [`translationNextRetryAt.${desired}`]: null },
+              { [`translationNextRetryAt.${desired}`]: { $lte: nowDt } },
+            ],
+          },
+        ],
+      },
+      {
+        $set: {
+          [`translationStatus.${desired}`]: 'pending',
+          [`translationError.${desired}`]: null,
+          [`translationNextRetryAt.${desired}`]: null,
+        },
+      }
+    );
+
+    const modified = typeof lockRes?.modifiedCount === 'number'
+      ? lockRes.modifiedCount
+      : (typeof lockRes?.nModified === 'number' ? lockRes.nModified : 0);
+    return modified === 1;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function localizeNewsDocWithOptionalTranslate({ docLike, desiredLang, logger = console }) {
+  const desired = normalizeLanguage(desiredLang);
+  if (!desired) {
+    const base = normalizeLanguage(docLike?.lang) || normalizeLanguage(docLike?.language) || 'en';
+    return { out: docLike, resolvedLang: base, translationPending: false, isTranslated: false };
+  }
+
+  // Cached localization (strict from requested bucket)
+  const cached = localizeFromNewsTranslations(docLike, desired);
+  if (!cached || !cached.translationPending) {
+    const isTranslated = cached && cached.resolvedLang === desired;
+    return { ...cached, isTranslated };
+  }
+
+  // Optional: translate-on-read, guarded by env + provider config.
+  if (!isAutoTranslateOnReadEnabled() || !isGoogleTranslateConfigured()) {
+    return { ...cached, isTranslated: false };
+  }
+
+  const now = new Date();
+  const lockOwner = await tryAcquireNewsTranslationLock({ id: docLike?._id, lang: desired, now });
+  const localized = await ensureOnDemandNewsTranslation({
+    doc: docLike,
+    requestedLang: desired,
+    logger,
+    lockOwner,
+    now,
+  });
+
+  if (localized && localized.dbSet && docLike && docLike._id) {
+    try {
+      await News.updateOne({ _id: docLike._id }, { $set: localized.dbSet }).catch(() => null);
+    } catch (_) {}
+  }
+
+  const out = localized && localized.out ? localized.out : docLike;
+  const resolvedLang = localized && localized.resolvedLang ? localized.resolvedLang : (cached.resolvedLang || desired);
+  const translationPending = !!(localized && localized.translationPending);
+  const isTranslated = resolvedLang === desired && translationPending === false;
+  return { out, resolvedLang, translationPending, isTranslated };
+}
 
 // Helpers
 function parseTags(tags) {
@@ -141,8 +230,21 @@ function slugifyFromTitle(title) {
 }
 
 function normalizeLanguage(v) {
-  const s = String(v ?? '').trim().toLowerCase();
-  if (s === 'en' || s === 'hi' || s === 'gu') return s;
+  const raw = String(v ?? '').trim();
+  if (!raw) return null;
+
+  if (/[\u0A80-\u0AFF]/.test(raw)) return 'gu';
+  if (/[\u0900-\u097F]/.test(raw)) return 'hi';
+
+  const lower = raw.toLowerCase();
+  const primary = lower.split(/[-_]/)[0];
+  if (primary === 'en' || primary === 'hi' || primary === 'gu') return primary;
+
+  const lettersOnly = lower.replace(/[^a-z]/g, '');
+  if (lettersOnly === 'english' || lettersOnly === 'eng') return 'en';
+  if (lettersOnly === 'hindi' || lettersOnly === 'hin') return 'hi';
+  if (lettersOnly === 'gujarati' || lettersOnly === 'gujrati' || lettersOnly === 'guj') return 'gu';
+
   return null;
 }
 
@@ -673,6 +775,8 @@ router.get('/articles', requireAdminAuth, async (req, res, next) => {
 // GET /api/public/articles → public site listing (published only)
 router.get('/public/articles', async (req, res, next) => {
   try {
+    res.set('Cache-Control', 'no-store');
+
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
     const sortParam = (req.query.sort || '-publishedAt').toString();
@@ -681,7 +785,10 @@ router.get('/public/articles', async (req, res, next) => {
       return res.status(400).json({ ok: false, success: false, message: 'Only status=published is allowed' });
     }
 
-    const langQueryRaw = (req.query.lang || req.query.language || '').toString().trim();
+    // Prefer explicit query lang, otherwise use negotiated language (e.g. header x-lang).
+    // Keep backward-compat behavior for non-standard explicit query values.
+    const explicitLangRaw = (req.query.lang || req.query.language || '').toString().trim();
+    const langQueryRaw = (explicitLangRaw || req.lang || '').toString().trim();
     const categoryRaw = (req.query.category || '').toString().trim();
     const qRaw = (req.query.q || '').toString().trim();
 
@@ -692,9 +799,22 @@ router.get('/public/articles', async (req, res, next) => {
       query.$and = (query.$and || []).concat(locationAnd);
     }
 
-    const langNorm = normalizeLanguage(langQueryRaw);
-    if (langNorm) {
-      query.$and = (query.$and || []).concat([{ $or: [{ language: langNorm }, { lang: langNorm }] }]);
+    const desired = normalizeLanguage(langQueryRaw);
+    if (desired === 'gu') {
+      const originalMatch = _buildOriginalLangMatch('gu');
+      if (originalMatch) query.$and = (query.$and || []).concat([originalMatch]);
+    } else if (desired === 'hi' || desired === 'en') {
+      const originalMatch = _buildOriginalLangMatch(desired);
+      const readyMatch = _buildReadyTranslationMatch(desired);
+      query.$and = (query.$and || []).concat([{ $or: [originalMatch, readyMatch].filter(Boolean) }]);
+    } else if (explicitLangRaw) {
+      const langNorm = normalizeLanguage(explicitLangRaw);
+      if (langNorm) {
+        query.$and = (query.$and || []).concat([{ $or: [{ language: langNorm }, { lang: langNorm }] }]);
+      } else {
+        // Backward compatible: preserve old behavior for non-standard explicit lang.
+        query.$and = (query.$and || []).concat([{ $or: [{ language: explicitLangRaw }, { lang: explicitLangRaw }] }]);
+      }
     }
 
     if (categoryRaw) {
@@ -716,7 +836,35 @@ router.get('/public/articles', async (req, res, next) => {
       News.countDocuments(query),
     ]);
 
-    const items = (itemsRaw || []).map(withCoverImageUrl);
+    let items = (itemsRaw || []).map(withCoverImageUrl);
+
+    // If a supported language was requested, localize from cached translation buckets.
+    // Keep response shape stable (same fields), just swap title/description/content.
+    if (desired === 'hi' || desired === 'en') {
+      items = items
+        .map((doc) => {
+          const mapped = mapArticleForLang(doc, desired);
+          if (!mapped) return null;
+          return {
+            ...doc,
+            title: mapped.title,
+            description: mapped.summary,
+            summary: mapped.summary,
+            content: mapped.content,
+            lang: mapped.lang,
+            language: mapped.lang,
+            requestedLang: desired,
+            resolvedLang: mapped.resolvedLang,
+            isTranslated: mapped.isTranslated,
+          };
+        })
+        .filter(Boolean);
+    } else if (desired === 'gu') {
+      items = items.map((doc) => {
+        const summary = typeof doc.description === 'string' ? doc.description : (typeof doc.summary === 'string' ? doc.summary : '');
+        return { ...doc, summary, lang: 'gu', language: 'gu', requestedLang: 'gu', resolvedLang: 'gu', isTranslated: false };
+      });
+    }
     return res.status(200).json({ ok: true, success: true, status: 200, data: { items, page, limit, total } });
   } catch (err) {
     return next(err);
@@ -1108,6 +1256,7 @@ router.get('/news/all', (req, res, next) => {
 // GET /api/articles/slug/:slug → lookup by slug (admin UI compatibility)
 router.get('/articles/slug/:slug', async (req, res, next) => {
   try {
+    res.set('Cache-Control', 'no-store');
     const raw = String(req.params.slug || '');
     let decoded = raw;
     try { decoded = decodeURIComponent(raw); } catch (_) {}
@@ -1131,7 +1280,42 @@ router.get('/articles/slug/:slug', async (req, res, next) => {
     const fallback = doc ? null : await PublicArticle.findOne(query).lean().catch(() => null);
     const out = doc || fallback;
     if (!out) return res.status(200).json({ exists: false });
-    return res.status(200).json(withCoverImageUrl(out));
+
+    const langRaw = (req.query.lang || req.query.language || req.lang || '').toString().trim();
+    const desired = normalizeLanguage(langRaw);
+    if (!desired) return res.status(200).json(withCoverImageUrl(out));
+
+    const out0 = withCoverImageUrl(out);
+
+    if (out0 && out0.translations && typeof out0.translations === 'object') {
+      const localized = await localizeNewsDocWithOptionalTranslate({ docLike: out0, desiredLang: desired, logger: console });
+      return res.status(200).json({
+        ...withCoverImageUrl(localized.out),
+        requestedLang: desired,
+        resolvedLang: localized.resolvedLang,
+        isTranslated: localized.isTranslated,
+        translationPending: localized.translationPending,
+      });
+    }
+
+    if (out0 && out0.i18n && typeof out0.i18n === 'object') {
+      const localized = localizeFromArticleI18n(out0, desired);
+      return res.status(200).json({
+        ...withCoverImageUrl(localized.out),
+        requestedLang: desired,
+        resolvedLang: localized.resolvedLang,
+        isTranslated: localized.resolvedLang === desired,
+        translationPending: !!localized.translationPending,
+      });
+    }
+
+    return res.status(200).json({
+      ...out0,
+      requestedLang: desired,
+      resolvedLang: normalizeLanguage(out0?.lang) || normalizeLanguage(out0?.language) || desired,
+      isTranslated: false,
+      translationPending: false,
+    });
   } catch (err) {
     return next(err);
   }
@@ -1140,6 +1324,7 @@ router.get('/articles/slug/:slug', async (req, res, next) => {
 // GET /api/articles/by-slug/:slug → alias (some admin builds use this path)
 router.get('/articles/by-slug/:slug', async (req, res, next) => {
   try {
+    res.set('Cache-Control', 'no-store');
     const raw = String(req.params.slug || '');
     let decoded = raw;
     try { decoded = decodeURIComponent(raw); } catch (_) {}
@@ -1162,7 +1347,42 @@ router.get('/articles/by-slug/:slug', async (req, res, next) => {
     const fallback = doc ? null : await PublicArticle.findOne(query).lean().catch(() => null);
     const out = doc || fallback;
     if (!out) return res.status(200).json({ exists: false });
-    return res.status(200).json(withCoverImageUrl(out));
+
+    const langRaw = (req.query.lang || req.query.language || req.lang || '').toString().trim();
+    const desired = normalizeLanguage(langRaw);
+    if (!desired) return res.status(200).json(withCoverImageUrl(out));
+
+    const out0 = withCoverImageUrl(out);
+
+    if (out0 && out0.translations && typeof out0.translations === 'object') {
+      const localized = await localizeNewsDocWithOptionalTranslate({ docLike: out0, desiredLang: desired, logger: console });
+      return res.status(200).json({
+        ...withCoverImageUrl(localized.out),
+        requestedLang: desired,
+        resolvedLang: localized.resolvedLang,
+        isTranslated: localized.isTranslated,
+        translationPending: localized.translationPending,
+      });
+    }
+
+    if (out0 && out0.i18n && typeof out0.i18n === 'object') {
+      const localized = localizeFromArticleI18n(out0, desired);
+      return res.status(200).json({
+        ...withCoverImageUrl(localized.out),
+        requestedLang: desired,
+        resolvedLang: localized.resolvedLang,
+        isTranslated: localized.resolvedLang === desired,
+        translationPending: !!localized.translationPending,
+      });
+    }
+
+    return res.status(200).json({
+      ...out0,
+      requestedLang: desired,
+      resolvedLang: normalizeLanguage(out0?.lang) || normalizeLanguage(out0?.language) || desired,
+      isTranslated: false,
+      translationPending: false,
+    });
   } catch (err) {
     return next(err);
   }
@@ -1171,12 +1391,13 @@ router.get('/articles/by-slug/:slug', async (req, res, next) => {
 // GET /api/articles/:id → get single article by id
 router.get('/articles/:id', async (req, res, next) => {
   try {
+    res.set('Cache-Control', 'no-store');
     const rawId = String(req.params.id || '').trim();
     if (!mongoose.Types.ObjectId.isValid(rawId)) {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
     }
 
-    const langQueryRaw = (req.query.lang || req.query.language || '').toString().trim();
+    const langQueryRaw = (req.query.lang || req.query.language || req.lang || '').toString().trim();
     const langNorm = normalizeLanguage(langQueryRaw);
 
     // Primary: CMS/admin articles stored in News collection.
@@ -1194,18 +1415,27 @@ router.get('/articles/:id', async (req, res, next) => {
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
     const out0 = withCoverImageUrl(obj);
 
-    const localized = (() => {
-      if (!langNorm) return { out: out0, resolvedLang: normalizeLanguage(out0?.lang) || normalizeLanguage(out0?.language) || 'en', translationPending: false };
+    const localized = await (async () => {
+      if (!langNorm) {
+        return {
+          out: out0,
+          resolvedLang: normalizeLanguage(out0?.lang) || normalizeLanguage(out0?.language) || 'en',
+          translationPending: false,
+          isTranslated: false,
+        };
+      }
 
       // News docs use `translations`; public Article uses `i18n`.
       if (out0 && out0.translations && typeof out0.translations === 'object') {
-        return localizeFromNewsTranslations(out0, langNorm);
-      }
-      if (out0 && out0.i18n && typeof out0.i18n === 'object') {
-        return localizeFromArticleI18n(out0, langNorm);
+        return localizeNewsDocWithOptionalTranslate({ docLike: out0, desiredLang: langNorm, logger: console });
       }
 
-      return { out: out0, resolvedLang: langNorm, translationPending: false };
+      if (out0 && out0.i18n && typeof out0.i18n === 'object') {
+        const r = localizeFromArticleI18n(out0, langNorm);
+        return { ...r, isTranslated: r && r.resolvedLang === langNorm };
+      }
+
+      return { out: out0, resolvedLang: langNorm, translationPending: false, isTranslated: false };
     })();
 
     const out = localized.out;
@@ -1228,7 +1458,7 @@ router.get('/articles/:id', async (req, res, next) => {
       status: 200,
       article: out,
       data: { article: out },
-      ...(langNorm ? { resolvedLang: localized.resolvedLang, translationPending: localized.translationPending } : {}),
+      ...(langNorm ? { requestedLang: langNorm, resolvedLang: localized.resolvedLang, isTranslated: !!localized.isTranslated, translationPending: !!localized.translationPending } : {}),
     });
   } catch (err) {
     return next(err);

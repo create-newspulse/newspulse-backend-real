@@ -51,7 +51,10 @@ test('GET /api/public/stories/:slug?lang=hi returns cached translations when pre
 
 test('GET /api/public/stories/:slug?lang=hi auto-generates missing fields, saves, and returns translated body', async () => {
   const originals = { findOne: Article.findOne, updateOne: Article.updateOne };
+  const prevAuto = process.env.ENABLE_AUTO_TRANSLATE_ON_READ;
   const prevFetch = global.fetch;
+
+  process.env.ENABLE_AUTO_TRANSLATE_ON_READ = 'true';
 
   const fetchBodies = [];
   global.fetch = async (_url, opts) => {
@@ -124,12 +127,17 @@ test('GET /api/public/stories/:slug?lang=hi auto-generates missing fields, saves
   } finally {
     restore(originals);
     global.fetch = prevFetch;
+    if (prevAuto === undefined) delete process.env.ENABLE_AUTO_TRANSLATE_ON_READ;
+    else process.env.ENABLE_AUTO_TRANSLATE_ON_READ = prevAuto;
   }
 });
 
 test('GET /api/public/stories/:slug detects source language from content when originalLang+language missing', async () => {
   const originals = { findOne: Article.findOne, updateOne: Article.updateOne };
+  const prevAuto = process.env.ENABLE_AUTO_TRANSLATE_ON_READ;
   const prevFetch = global.fetch;
+
+  process.env.ENABLE_AUTO_TRANSLATE_ON_READ = 'true';
 
   const fetchBodies = [];
   global.fetch = async (_url, opts) => {
@@ -173,12 +181,17 @@ test('GET /api/public/stories/:slug detects source language from content when or
   } finally {
     restore(originals);
     global.fetch = prevFetch;
+    if (prevAuto === undefined) delete process.env.ENABLE_AUTO_TRANSLATE_ON_READ;
+    else process.env.ENABLE_AUTO_TRANSLATE_ON_READ = prevAuto;
   }
 });
 
 test('GET /api/public/stories/:slug does not crash when translation fails (falls back)', async () => {
   const originals = { findOne: Article.findOne, updateOne: Article.updateOne };
+  const prevAuto = process.env.ENABLE_AUTO_TRANSLATE_ON_READ;
   const prevFetch = global.fetch;
+
+  process.env.ENABLE_AUTO_TRANSLATE_ON_READ = 'true';
 
   global.fetch = async () => {
     throw new Error('boom');
@@ -215,5 +228,7 @@ test('GET /api/public/stories/:slug does not crash when translation fails (falls
   } finally {
     restore(originals);
     global.fetch = prevFetch;
+    if (prevAuto === undefined) delete process.env.ENABLE_AUTO_TRANSLATE_ON_READ;
+    else process.env.ENABLE_AUTO_TRANSLATE_ON_READ = prevAuto;
   }
 });

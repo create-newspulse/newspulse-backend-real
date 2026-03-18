@@ -141,11 +141,7 @@ async function fetchJson(url) {
 
 function buildOwmUrl(kind, city) {
   const apiKey = String(process.env.OPENWEATHER_API_KEY || '').trim();
-  if (!apiKey) {
-    const err = new Error('Missing OPENWEATHER_API_KEY');
-    err.status = 503;
-    throw err;
-  }
+  if (!apiKey) return null;
 
   const base = 'https://api.openweathermap.org/data/2.5';
   const q = encodeURIComponent(city);
@@ -167,6 +163,8 @@ function buildOwmUrl(kind, city) {
 function weatherHandler(kind) {
   return async (req, res) => {
     try {
+      res.set('Cache-Control', 'no-store');
+
       const ip = getClientIp(req);
       if (isRateLimited(ip)) {
         return res.status(429).json({
@@ -185,6 +183,19 @@ function weatherHandler(kind) {
       }
 
       const url = buildOwmUrl(kind, city);
+      if (!url) {
+        // Local/dev-friendly: don't fail hard when API key isn't configured.
+        const empty = {
+          ...(kind === 'forecast'
+            ? mapForecastToMinimal(null, city)
+            : mapCurrentToMinimal(null, city)
+          ),
+          ok: false,
+          message: 'Weather unavailable',
+          reason: 'missing_api_key',
+        };
+        return res.status(200).json(empty);
+      }
       const raw = await fetchJson(url);
 
       const out = kind === 'forecast'
@@ -202,7 +213,18 @@ function weatherHandler(kind) {
         return res.status(404).json({ message: 'City not found' });
       }
 
-      return res.status(status).json({ message: msg });
+      // Graceful: prefer returning a stable 200 payload for upstream/config errors.
+      const city = normalizeCity(req.query.city) || null;
+      const empty = {
+        ...(kind === 'forecast'
+          ? mapForecastToMinimal(null, city)
+          : mapCurrentToMinimal(null, city)
+        ),
+        ok: false,
+        message: 'Weather unavailable',
+        reason: status === 401 || status === 403 ? 'invalid_api_key' : 'upstream_error',
+      };
+      return res.status(200).json(empty);
     }
   };
 }
