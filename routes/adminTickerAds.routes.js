@@ -6,6 +6,7 @@ const { requireAdminAuth } = require('../middleware/adminAuth');
 const TickerAd = require('../models/TickerAd');
 const {
   sanitizeTickerAdMessage,
+  normalizeOptionalTickerAdMessage,
   normalizeOptionalTickerAdUrl,
   isValidTickerAdHttpUrl,
   normalizeTickerAdLang,
@@ -89,6 +90,13 @@ function mapTickerAd(doc) {
   return {
     id: item._id ? String(item._id) : (item.id ? String(item.id) : undefined),
     message: typeof item.message === 'string' ? item.message : '',
+    messages: item.messages && typeof item.messages === 'object'
+      ? {
+          en: typeof item.messages.en === 'string' ? item.messages.en : null,
+          hi: typeof item.messages.hi === 'string' ? item.messages.hi : null,
+          gu: typeof item.messages.gu === 'string' ? item.messages.gu : null,
+        }
+      : { en: null, hi: null, gu: null },
     url: typeof item.url === 'string' ? item.url : null,
     lang: typeof item.lang === 'string' ? item.lang : null,
     channel: typeof item.channel === 'string' ? item.channel : null,
@@ -110,12 +118,43 @@ function parseBody(body, { partial = false, current = null, actor = null } = {})
   const source = body && typeof body === 'object' ? body : {};
   let touched = 0;
 
+  const effectiveLang = (() => {
+    if (!partial) return normalizeTickerAdLang(source.lang);
+    if (Object.prototype.hasOwnProperty.call(source, 'lang')) return normalizeTickerAdLang(source.lang);
+    return normalizeTickerAdLang(current && current.lang);
+  })();
+
+  if (!effectiveLang) {
+    if (!partial || Object.prototype.hasOwnProperty.call(source, 'lang')) {
+      return { ok: false, message: 'lang must be one of en|hi|gu|all' };
+    }
+  }
+
+  if (!partial || Object.prototype.hasOwnProperty.call(source, 'lang')) {
+    if (Object.prototype.hasOwnProperty.call(source, 'lang')) touched += 1;
+    payload.lang = effectiveLang;
+  }
+
   if (!partial || Object.prototype.hasOwnProperty.call(source, 'message')) {
     if (Object.prototype.hasOwnProperty.call(source, 'message')) touched += 1;
     const message = sanitizeTickerAdMessage(source.message);
-    if (!message) return { ok: false, message: 'message is required' };
-    if (message.length > 140) return { ok: false, message: 'message must be 140 characters or fewer' };
-    payload.message = message;
+    if (!message) {
+      if (effectiveLang !== 'all') return { ok: false, message: 'message is required' };
+      payload.message = '';
+    } else {
+      if (message.length > 140) return { ok: false, message: 'message must be 140 characters or fewer' };
+      payload.message = message;
+    }
+  }
+
+  if (!partial || Object.prototype.hasOwnProperty.call(source, 'messages')) {
+    if (Object.prototype.hasOwnProperty.call(source, 'messages')) touched += 1;
+    const rawMessages = source.messages && typeof source.messages === 'object' ? source.messages : {};
+    payload.messages = {
+      en: normalizeOptionalTickerAdMessage(rawMessages.en),
+      hi: normalizeOptionalTickerAdMessage(rawMessages.hi),
+      gu: normalizeOptionalTickerAdMessage(rawMessages.gu),
+    };
   }
 
   if (!partial || Object.prototype.hasOwnProperty.call(source, 'url')) {
@@ -124,13 +163,6 @@ function parseBody(body, { partial = false, current = null, actor = null } = {})
     if (url && url.length > 300) return { ok: false, message: 'url must be 300 characters or fewer' };
     if (url && !isValidTickerAdHttpUrl(url)) return { ok: false, message: 'url must start with http:// or https://' };
     payload.url = url;
-  }
-
-  if (!partial || Object.prototype.hasOwnProperty.call(source, 'lang')) {
-    if (Object.prototype.hasOwnProperty.call(source, 'lang')) touched += 1;
-    const lang = normalizeTickerAdLang(source.lang);
-    if (!lang) return { ok: false, message: 'lang must be one of en|hi|gu' };
-    payload.lang = lang;
   }
 
   if (!partial || Object.prototype.hasOwnProperty.call(source, 'channel')) {
@@ -200,6 +232,23 @@ function parseBody(body, { partial = false, current = null, actor = null } = {})
   if (effectiveStartAt instanceof Date && effectiveEndAt instanceof Date) {
     if (effectiveEndAt.getTime() <= effectiveStartAt.getTime()) {
       return { ok: false, message: 'endAt must be greater than startAt' };
+    }
+  }
+
+  const finalLang = payload.lang || (current && current.lang);
+  if (finalLang === 'all') {
+    const currentMessages = current && current.messages && typeof current.messages === 'object' ? current.messages : {};
+    const finalMessages = Object.prototype.hasOwnProperty.call(payload, 'messages')
+      ? payload.messages
+      : {
+          en: normalizeOptionalTickerAdMessage(currentMessages.en),
+          hi: normalizeOptionalTickerAdMessage(currentMessages.hi),
+          gu: normalizeOptionalTickerAdMessage(currentMessages.gu),
+        };
+
+    const hasAnyLocalized = Boolean(finalMessages && (finalMessages.en || finalMessages.hi || finalMessages.gu));
+    if (!hasAnyLocalized) {
+      return { ok: false, message: 'messages.en|messages.hi|messages.gu required when lang is all' };
     }
   }
 

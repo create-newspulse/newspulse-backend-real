@@ -5,20 +5,52 @@ const {
   TICKER_AD_CHANNELS,
   TICKER_AD_DAY_PARTS,
   sanitizeTickerAdMessage,
+  normalizeOptionalTickerAdMessage,
   normalizeOptionalTickerAdUrl,
   isValidTickerAdHttpUrl,
+  normalizeTickerAdLang,
+  normalizeTickerAdChannel,
   normalizeTickerAdDayParts,
   clampTickerAdFrequency,
+  parseTickerAdDate,
 } = require('../lib/tickerAds');
 
 const TickerAdSchema = new mongoose.Schema(
   {
     message: {
       type: String,
-      required: true,
+      required: function requiredMessage() {
+        return this && this.lang !== 'all';
+      },
       maxlength: 140,
       trim: true,
       set: sanitizeTickerAdMessage,
+    },
+    messages: {
+      en: {
+        type: String,
+        required: false,
+        default: null,
+        maxlength: 140,
+        trim: true,
+        set: normalizeOptionalTickerAdMessage,
+      },
+      hi: {
+        type: String,
+        required: false,
+        default: null,
+        maxlength: 140,
+        trim: true,
+        set: normalizeOptionalTickerAdMessage,
+      },
+      gu: {
+        type: String,
+        required: false,
+        default: null,
+        maxlength: 140,
+        trim: true,
+        set: normalizeOptionalTickerAdMessage,
+      },
     },
     url: {
       type: String,
@@ -37,12 +69,15 @@ const TickerAdSchema = new mongoose.Schema(
       required: true,
       enum: TICKER_AD_LANGS,
       index: true,
+      set: normalizeTickerAdLang,
+      default: 'en',
     },
     channel: {
       type: String,
       required: true,
       enum: TICKER_AD_CHANNELS,
       index: true,
+      set: normalizeTickerAdChannel,
     },
     isActive: {
       type: Boolean,
@@ -99,8 +134,28 @@ const TickerAdSchema = new mongoose.Schema(
 TickerAdSchema.pre('validate', function ensureTickerAdFields(next) {
   try {
     this.message = sanitizeTickerAdMessage(this.message);
+    this.messages = this.messages && typeof this.messages === 'object' ? this.messages : {};
+    this.messages.en = normalizeOptionalTickerAdMessage(this.messages.en);
+    this.messages.hi = normalizeOptionalTickerAdMessage(this.messages.hi);
+    this.messages.gu = normalizeOptionalTickerAdMessage(this.messages.gu);
     this.url = normalizeOptionalTickerAdUrl(this.url);
+    this.lang = normalizeTickerAdLang(this.lang);
+    this.channel = normalizeTickerAdChannel(this.channel);
     this.frequency = clampTickerAdFrequency(this.frequency, 3);
+
+    const parsedStartAt = parseTickerAdDate(this.startAt, 'startAt');
+    if (!parsedStartAt.ok) {
+      this.invalidate('startAt', parsedStartAt.message);
+    } else {
+      this.startAt = parsedStartAt.value;
+    }
+
+    const parsedEndAt = parseTickerAdDate(this.endAt, 'endAt');
+    if (!parsedEndAt.ok) {
+      this.invalidate('endAt', parsedEndAt.message);
+    } else {
+      this.endAt = parsedEndAt.value;
+    }
 
     const normalizedDayParts = normalizeTickerAdDayParts(this.dayParts);
     if (!normalizedDayParts) {
@@ -109,8 +164,17 @@ TickerAdSchema.pre('validate', function ensureTickerAdFields(next) {
       this.dayParts = normalizedDayParts;
     }
 
-    if (!this.message) {
-      this.invalidate('message', 'message is required');
+    if (this.lang === 'all') {
+      const hasAnyLocalized = Boolean(
+        (this.messages && (this.messages.en || this.messages.hi || this.messages.gu))
+      );
+      if (!hasAnyLocalized) {
+        this.invalidate('messages', 'At least one of messages.en|messages.hi|messages.gu is required when lang is all');
+      }
+    } else {
+      if (!this.message) {
+        this.invalidate('message', 'message is required');
+      }
     }
 
     if (this.startAt instanceof Date && this.endAt instanceof Date) {
