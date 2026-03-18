@@ -98,3 +98,9 @@ Desktop.ini
 # Local runtime state
 ###################################
 data/
+
+# Uploads (runtime/user content)
+uploads/
+
+# Local scratch verification scripts
+tmp-verify-*.js
