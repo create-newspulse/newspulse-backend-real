@@ -14,6 +14,7 @@ const {
   clampTickerAdFrequency,
   parseTickerAdDate,
 } = require('../lib/tickerAds');
+const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.service');
 
 const router = express.Router();
 
@@ -222,6 +223,7 @@ router.post('/', async (req, res) => {
 
   try {
     const created = await TickerAd.create(parsed.value);
+    bumpPublicConfigVersion().catch(() => {});
     return res.status(201).json({ ok: true, success: true, item: mapTickerAd(created) });
   } catch (error) {
     if (error && error.name === 'ValidationError') {
@@ -335,6 +337,7 @@ router.patch('/:id', async (req, res) => {
   try {
     Object.assign(doc, parsed.value);
     await doc.save();
+    bumpPublicConfigVersion().catch(() => {});
     return res.status(200).json({ ok: true, success: true, item: mapTickerAd(doc) });
   } catch (error) {
     if (error && error.name === 'ValidationError') {
@@ -357,6 +360,7 @@ router.delete('/:id', async (req, res) => {
     if (!deleted) {
       return fail(res, 404, 'NOT_FOUND', 'Ticker ad not found');
     }
+    bumpPublicConfigVersion().catch(() => {});
     return res.status(200).json({ ok: true, success: true, id: String(id) });
   } catch (_) {
     return fail(res, 500, 'SERVER_ERROR', 'Failed to delete ticker ad');

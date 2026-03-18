@@ -179,6 +179,7 @@ const adminAdSettingsRouter = require('./routes/adminAdSettings.routes');
 const publicRoutes = require('./routes/public.routes');
 const siteSettingsRoutes = require('./routes/siteSettings.routes');
 const publicSettingsRouter = require('./routes/publicSettings.routes');
+const publicVersionRouter = require('./routes/publicVersion.routes');
 const publicTranslationRouter = require('./routes/publicTranslation.routes');
 const publicUiLabelsRouter = require('./routes/publicUiLabels.routes');
 const adminPublicSettingsRouter = require('./routes/adminPublicSettings.routes');
@@ -1457,6 +1458,11 @@ app.use('/admin-api/api/public', publicTickersSettingsRouter);
 
 // Public stories
 app.use('/api/public', publicRoutes);
+
+// Public config version for client-side refresh checks
+app.use('/api/public', publicVersionRouter);
+app.use('/admin-api/public', publicVersionRouter);
+app.use('/admin-api/api/public', publicVersionRouter);
 
 // Public site settings (published only, no auth)
 app.use('/api/public', publicSettingsRouter);

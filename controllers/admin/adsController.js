@@ -22,6 +22,7 @@ const {
   parseOptionalDate,
   parseOptionalNumber,
 } = require('../../lib/ads');
+const { bumpPublicConfigVersion } = require('../../services/publicConfigVersion.service');
 
 function isDbReady() {
   return mongoose.connection.readyState === 1;
@@ -239,6 +240,8 @@ async function createAd(req, res) {
     stats: { impressions: 0, clicks: 0 },
   });
 
+  bumpPublicConfigVersion().catch(() => {});
+
   return res.status(201).json({ ok: true, ad: toAdminAdDto(created) });
 }
 
@@ -268,6 +271,8 @@ async function updateAd(req, res) {
 
   const updated = await Ad.findByIdAndUpdate(id, { $set: next }, { new: true });
   if (!updated) return res.status(404).json({ ok: false, message: 'Not found' });
+
+  bumpPublicConfigVersion().catch(() => {});
 
   return res.status(200).json({ ok: true, ad: toAdminAdDto(updated) });
 }
@@ -343,6 +348,8 @@ async function toggleAd(req, res) {
   doc.isActive = explicit === null ? !doc.isActive : explicit;
   await doc.save();
 
+  bumpPublicConfigVersion().catch(() => {});
+
   return res.status(200).json({ ok: true, ad: toAdminAdDto(doc) });
 }
 
@@ -354,6 +361,8 @@ async function deleteAd(req, res) {
 
   const deleted = await Ad.findByIdAndDelete(id);
   if (!deleted) return res.status(404).json({ ok: false, message: 'Not found' });
+
+  bumpPublicConfigVersion().catch(() => {});
 
   return res.status(200).json({ ok: true });
 }

@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const AdSettings = require('../models/AdSettings');
 const { buildSlotEnabledDefaults, AD_SLOTS } = require('../src/constants/adSlots');
+const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.service');
 
 const DEFAULT_SLOT_ENABLED = buildSlotEnabledDefaults(true, {
   HOME_RIGHT_300x600: false,
@@ -166,6 +167,7 @@ async function updateAdminAdSettings(req, res) {
     ).lean();
 
     const saved = normalizeSlotEnabled(doc && typeof doc === 'object' ? doc.slotEnabled : incoming);
+    bumpPublicConfigVersion().catch(() => {});
     return res.status(200).json({ ok: true, slotEnabled: saved });
   } catch (e) {
     return res.status(500).json({ ok: false, message: e?.message || 'Failed to update ad settings' });

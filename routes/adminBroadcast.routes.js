@@ -21,6 +21,7 @@ const {
 } = require('../services/broadcastCenter.service');
 
 const { emitBroadcastUpdated } = require('../services/broadcastSse.service');
+const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.service');
 
 const router = express.Router();
 
@@ -440,6 +441,7 @@ router.put('/config', requireAdminAuth, async (req, res) => {
   const itemsBy = await listItemsLast24hByChannel();
 
   emitBroadcastUpdated({ reason: 'admin_config_put' }).catch(() => {});
+  bumpPublicConfigVersion().catch(() => {});
   return res.status(200).json(toAdminConfigContract(settings, itemsBy));
 });
 
@@ -477,6 +479,7 @@ router.patch('/config', requireAdminAuth, async (req, res) => {
   const itemsBy = await listItemsLast24hByChannel();
 
   emitBroadcastUpdated({ reason: 'admin_config_patch_merge' }).catch(() => {});
+  bumpPublicConfigVersion().catch(() => {});
   return res.status(200).json(toAdminConfigContract(settings, itemsBy));
 });
 
@@ -508,6 +511,7 @@ router.patch('/config/:type', requireAdminAuth, async (req, res) => {
   const itemsBy = await listItemsLast24hByChannel();
 
   emitBroadcastUpdated({ reason: 'admin_config_patch' }).catch(() => {});
+  bumpPublicConfigVersion().catch(() => {});
   return res.status(200).json(toAdminConfigContract(settings, itemsBy));
 });
 
@@ -535,6 +539,7 @@ async function _updateBroadcastSettings(req, res) {
   const settings = adminSettingsResponse(doc);
 
   emitBroadcastUpdated({ reason: 'admin_settings_save' }).catch(() => {});
+  bumpPublicConfigVersion().catch(() => {});
   return ok(res, toAdminContract(settings));
 }
 
@@ -757,6 +762,7 @@ router.post('/items', requireAdminAuth, async (req, res) => {
   }
 
   emitBroadcastUpdated({ reason: 'admin_item_create' }).catch(() => {});
+  bumpPublicConfigVersion().catch(() => {});
 
   // Translation queue/worker removed: no background jobs enqueued.
 
@@ -860,6 +866,7 @@ router.patch('/items/:id', requireAdminAuth, async (req, res) => {
   const saved = await doc.save();
 
   emitBroadcastUpdated({ reason: 'admin_item_patch' }).catch(() => {});
+  bumpPublicConfigVersion().catch(() => {});
 
   return ok(res, mapItem(saved));
 });
@@ -876,6 +883,7 @@ router.delete('/items/:id', requireAdminAuth, async (req, res) => {
   }
 
   emitBroadcastUpdated({ reason: 'admin_item_delete' }).catch(() => {});
+  bumpPublicConfigVersion().catch(() => {});
 
   return res.status(200).json({ ok: true, success: true });
 });

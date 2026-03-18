@@ -6,6 +6,7 @@ const { requireAdminAuth } = require('../middleware/adminAuth');
 const SiteSetting = require('../models/SiteSetting');
 const BroadcastSettings = require('../models/BroadcastSettings');
 const { DEFAULT_TICKERS_CONFIG, TickersConfigSchema } = require('../schemas/tickersConfig.schema');
+const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.service');
 
 const router = express.Router();
 
@@ -255,6 +256,7 @@ router.put(ADMIN_PATHS.base, requireAdminAuth, asyncHandler(async (req, res) => 
 
     if (shouldUseBroadcastAlias(req)) {
       const doc = await saveBroadcastSettingsFromTickersConfig(parsed.data);
+      bumpPublicConfigVersion().catch(() => {});
       return res.json({ ok: true, success: true, status: 200, setting: broadcastSettingEnvelope('draft', doc).setting, source: 'broadcast' });
     }
 
@@ -289,6 +291,7 @@ router.put(ADMIN_PATHS.draft, requireAdminAuth, asyncHandler(async (req, res) =>
 
     if (shouldUseBroadcastAlias(req)) {
       const doc = await saveBroadcastSettingsFromTickersConfig(parsed.data);
+      bumpPublicConfigVersion().catch(() => {});
       return res.json({ ok: true, success: true, status: 200, setting: broadcastSettingEnvelope('draft', doc).setting, source: 'broadcast' });
     }
 
@@ -348,6 +351,8 @@ router.post(ADMIN_PATHS.publish, requireAdminAuth, asyncHandler(async (req, res)
       publishedBy: { id: admin.id, email: admin.email },
       createdBy: draft.createdBy || { id: admin.id, email: admin.email },
     });
+
+    bumpPublicConfigVersion().catch(() => {});
 
     // Note: return HTTP 200 for compatibility with existing admin UI expectations.
     return res.json({ ok: true, success: true, status: 200, setting: published });

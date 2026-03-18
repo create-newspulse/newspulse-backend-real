@@ -5,6 +5,7 @@ const { z } = require('zod');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const { requireAuth, requireFounder } = require('../middleware/requireAuth');
 const SystemSetting = require('../models/SystemSetting');
+const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.service');
 
 const router = express.Router();
 
@@ -380,6 +381,8 @@ router.put('/public-settings', requireAdminAuth, async (req, res, next) => {
     if (!result.ok) {
       return res.status(result.status).json({ ok: false, success: false, message: result.message });
     }
+
+    bumpPublicConfigVersion().catch(() => {});
 
     return res.status(200).json({ ok: true, success: true, status: 200, updatedAt: result.updatedAt });
   } catch (e) {

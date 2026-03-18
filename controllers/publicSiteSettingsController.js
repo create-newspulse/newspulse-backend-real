@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const PublicSiteSettings = require('../models/PublicSiteSettings');
+const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.service');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -202,6 +203,8 @@ async function publishSettings(req, res) {
     settings.version = settings.version + 1;
     settings.publishedUpdatedAt = new Date();
     await settings.save();
+
+    bumpPublicConfigVersion().catch(() => {});
 
     return res.status(200).json({
       ok: true,
