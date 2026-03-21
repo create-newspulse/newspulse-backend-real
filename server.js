@@ -126,8 +126,15 @@ const adminCommunityRoutes = require(`${BASE}/routes/adminCommunity`);
 const communityAdminContactsRoutes = require(`${BASE}/routes/communityAdminContacts`);
 // Use root-level communityReporter routes to match tests
 const communityReporterRoutes = require('./routes/communityReporter');
-const { getCommunityReporterQueue, listReporterContacts } = require('./controllers/communityReporterController');
-const { getCommunityReporterAnalytics } = require('./controllers/communityReporterController');
+const {
+  getCommunityReporterQueue,
+  listReporterContacts,
+  getCommunityReporterAnalytics,
+  deleteReporterContact,
+  bulkDeleteReporterContacts,
+  deleteCommunityReporterStory,
+  bulkDeleteCommunityReporterStories,
+} = require('./controllers/communityReporterController');
 // Use root-level admin settings router for base /settings endpoint
 const adminSettingsRoutes = require('./routes/adminSettings.routes');
 // Admin system routes (e.g., AI training info under /system)
@@ -135,6 +142,7 @@ const adminSystemRoutes = require('./routes/adminSystem.routes');
 const communityReporterSettingsRouter = require(`${BASE}/routes/adminSettings/communityReporterSettings`);
 // Dashboard stats router lives in root-level routes, not nested BASE dir
 const dashboardStatsRouter = require('./routes/dashboardStats');
+const adminDashboardRoutes = require('./routes/adminDashboard.routes');
 const adminCommunityReporterQueueRouter = require('./routes/admin/communityReporterQueue');
 const founderFeatureTogglesRouter = require('./routes/admin/founderFeatureToggles');
 const alertsRouter = require('./routes/alerts');
@@ -206,7 +214,7 @@ const CommunitySubmission = require(`${BASE}/models/CommunitySubmission`);
 const News = require(`${BASE}/models/News`);
 // Public /api/public/stories uses the root Article model; reuse it for admin stories.
 const Story = require('./models/Article');
-const { requireAdminAuth, requireAdminJwt } = require('./middleware/adminAuth');
+const { requireAdminAuth, requireAdminJwt, requireFounderOrAdmin } = require('./middleware/adminAuth');
 const { optionalAdminAuth } = require('./middleware/optionalAdminAuth');
 let aiRoutes = null;
 let feedRoutes = null;
@@ -1376,6 +1384,22 @@ app.use('/api/community', communityStoriesRouter);
 // PUBLIC routes – must be before any /api auth-protected mounts
 app.get('/api/community-reporter/queue', getCommunityReporterQueue);
 app.get('/api/community-reporter/contacts', listReporterContacts);
+
+// Admin/founder delete APIs for reporter contact directory + submissions
+// NOTE: These are intentionally NOT part of routes/communityReporter.js because that router is also
+// mounted under /api/public/community-reporter.
+app.delete('/api/community-reporter/contacts/:id', requireFounderOrAdmin, deleteReporterContact);
+app.post('/api/community-reporter/contacts/bulk-delete', requireFounderOrAdmin, bulkDeleteReporterContacts);
+app.delete('/api/community-reporter/stories/:id', requireFounderOrAdmin, deleteCommunityReporterStory);
+app.post('/api/community-reporter/stories/bulk-delete', requireFounderOrAdmin, bulkDeleteCommunityReporterStories);
+
+// Admin Panel (required contract)
+app.delete('/api/admin/community-reporter/contacts/:id', requireFounderOrAdmin, deleteReporterContact);
+app.post('/api/admin/community-reporter/contacts/bulk-delete', requireFounderOrAdmin, bulkDeleteReporterContacts);
+
+// Backward/compat aliases observed in some admin builds (keep until frontend is standardized)
+app.delete('/api/admin/community/reporter-contacts/:id', requireFounderOrAdmin, deleteReporterContact);
+app.post('/api/admin/community/reporter-contacts/delete', requireFounderOrAdmin, bulkDeleteReporterContacts);
 // Admin UI often calls these aliases; expose public read-only directory
 app.get('/api/admin/community/reporter-contacts', listReporterContacts);
 app.get('/admin-api/admin/community/reporter-contacts', listReporterContacts);
@@ -1573,6 +1597,12 @@ app.use('/api', dashboardStatsRouter);
 app.use('/admin-api', dashboardStatsRouter);
 // /api/admin -> explicit admin-prefixed endpoints
 app.use('/api/admin', dashboardStatsRouter);
+
+// Admin dashboard stats (admin-auth protected)
+// Final URL: GET /api/admin/dashboard/stats
+app.use('/api/admin/dashboard', adminDashboardRoutes);
+// Admin panel proxy basePath support
+app.use('/admin-api/admin/dashboard', adminDashboardRoutes);
 app.use('/admin-auth', adminAuthRoutes);
 // Compatibility aliases: some admin builds call /api/admin-auth/* (or via /admin-api proxy)
 app.use('/api/admin-auth', adminAuthRoutes);

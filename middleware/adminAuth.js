@@ -277,4 +277,18 @@ function requireFounderOnly(req, res, next) {
 // Alias for clarity with routing instructions
 const requireFounderAuth = requireFounderOnly;
 
-module.exports = { requireAdminAuth, requireAdminJwt, requireFounderOnly, requireFounderAuth };
+// Admin/founder-only guard.
+// - Uses requireAdminAuth for JWT/cookie parsing
+// - Then restricts role to founder|admin only (excludes staff/editor/legal)
+function requireFounderOrAdmin(req, res, next) {
+  requireAdminAuth(req, res, function onAuthed(err) {
+    if (err) return;
+    const role = String((req.admin && req.admin.role) || '').toLowerCase();
+    if (role !== 'founder' && role !== 'admin') {
+      return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' });
+    }
+    return next();
+  });
+}
+
+module.exports = { requireAdminAuth, requireAdminJwt, requireFounderOnly, requireFounderAuth, requireFounderOrAdmin };

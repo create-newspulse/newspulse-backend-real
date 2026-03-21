@@ -2,9 +2,69 @@ const mongoose = require('mongoose');
 const CommunityReport = require('../models/CommunityReport');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const ReporterContact = require('../models/ReporterContact');
+const { logAudit } = require('../lib/audit');
 let CommunityStory = null;
 try { CommunityStory = require('../models/CommunityStory'); } catch (_) { /* optional model */ }
 const CommunitySubmissionModel = require('../models/CommunitySubmission');
+
+function _isValidObjectId(id) {
+  return !!id && mongoose.isValidObjectId(String(id));
+}
+
+function _actorLabel(req) {
+  const admin = req && req.admin ? req.admin : null;
+  return {
+    id: admin && admin.id ? String(admin.id) : null,
+    email: admin && admin.email ? String(admin.email) : null,
+    role: admin && admin.role ? String(admin.role) : null,
+  };
+}
+
+function _parseBool(value) {
+  const v = String(value ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+function _normalizeEmail(value) {
+  const e = String(value || '').trim().toLowerCase();
+  return e || null;
+}
+
+async function _countLinkedSubmissionsForContact(contact) {
+  // Safe linking: prefer reporterId, but also check normalized email fallbacks.
+  const contactId = contact && contact._id ? contact._id : null;
+  const email = _normalizeEmail(contact && contact.email);
+  const or = [];
+  if (contactId && _isValidObjectId(contactId)) {
+    or.push({ reporterId: contactId });
+  }
+  if (email) {
+    or.push({ reporterEmailNorm: email });
+    or.push({ reporterEmail: email });
+    or.push({ email });
+    or.push({ 'contact.email': email });
+  }
+  if (!or.length) return 0;
+  return CommunitySubmission.countDocuments({ $or: or, isDeleted: { $ne: true } });
+}
+
+async function _deleteLinkedSubmissionsForContact(contact) {
+  const contactId = contact && contact._id ? contact._id : null;
+  const email = _normalizeEmail(contact && contact.email);
+
+  const or = [];
+  if (contactId && _isValidObjectId(contactId)) {
+    or.push({ reporterId: contactId });
+  }
+  if (email) {
+    or.push({ reporterEmailNorm: email });
+    or.push({ reporterEmail: email });
+    or.push({ email });
+    or.push({ 'contact.email': email });
+  }
+  if (!or.length) return { acknowledged: true, deletedCount: 0 };
+  return CommunitySubmission.deleteMany({ $or: or });
+}
 
 // GET /api/community-reporter/queue
 // Returns real queue items from CommunitySubmission with status mapping
@@ -62,6 +122,209 @@ async function getCommunityReporterQueue(req, res) {
   } catch (err) {
     console.error('Error in GET /api/community-reporter/queue:', err?.message || err);
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load community reporter queue' });
+  }
+}
+
+// DELETE /api/community-reporter/contacts/:id
+// Safe-delete default: blocks deletion when linked submissions exist.
+// Optional cascade: ?cascade=true (or body.cascade=true) deletes linked submissions first.
+async function deleteReporterContact(req, res) {
+  const actor = _actorLabel(req);
+  try {
+    const id = String(req.params.id || '').trim();
+    const cascade = _parseBool(req.query && req.query.cascade) || _parseBool(req.body && req.body.cascade);
+
+    if (!_isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid contact id' });
+    }
+
+    const contact = await ReporterContact.findById(id);
+    if (!contact) {
+      return res.status(404).json({ success: false, message: 'Reporter contact not found' });
+    }
+
+    const linkedCount = await _countLinkedSubmissionsForContact(contact);
+    if (linkedCount > 0 && !cascade) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete reporter contact while linked stories exist. Delete stories first.',
+        linkedStories: linkedCount,
+      });
+    }
+
+    let deletedStories = 0;
+    if (linkedCount > 0 && cascade) {
+      const del = await _deleteLinkedSubmissionsForContact(contact);
+      deletedStories = del && typeof del.deletedCount === 'number' ? del.deletedCount : 0;
+    }
+
+    await ReporterContact.deleteOne({ _id: id });
+
+    console.log('[ADMIN_DELETE][reporter-contact] deleted', { actor, id, cascade, deletedStories });
+    await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_DELETE', id, { entity: 'ReporterContact', cascade, deletedStories });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Reporter contact deleted successfully',
+      deletedId: id,
+      ...(cascade ? { deletedStories } : {}),
+    });
+  } catch (e) {
+    console.error('[ADMIN_DELETE][reporter-contact] error', { actor, message: e?.message || e });
+    return res.status(500).json({ success: false, message: 'Failed to delete reporter contact' });
+  }
+}
+
+// POST /api/community-reporter/contacts/bulk-delete
+// Body: { ids: string[], cascade?: boolean }
+async function bulkDeleteReporterContacts(req, res) {
+  const actor = _actorLabel(req);
+  try {
+    const ids = req.body && Array.isArray(req.body.ids) ? req.body.ids : null;
+    const cascade = _parseBool(req.query && req.query.cascade) || _parseBool(req.body && req.body.cascade);
+
+    if (!ids || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'ids array is required' });
+    }
+    if (ids.length > 2000) {
+      return res.status(400).json({ success: false, message: 'Too many ids (max 2000)' });
+    }
+
+    const normalizedIds = ids.map(x => String(x || '').trim()).filter(Boolean);
+    const invalidIds = normalizedIds.filter(x => !_isValidObjectId(x));
+    if (invalidIds.length) {
+      return res.status(400).json({ success: false, message: 'Invalid contact id(s)', invalidIds });
+    }
+
+    const contacts = await ReporterContact.find({ _id: { $in: normalizedIds } }).lean();
+    const foundIds = new Set(contacts.map(c => String(c._id)));
+    const notFoundIds = normalizedIds.filter(x => !foundIds.has(String(x)));
+
+    // Safer bulk semantics: do not partially delete when any linked stories exist
+    const blocked = [];
+    const deletableIds = [];
+    let deletedStories = 0;
+
+    for (const contact of contacts) {
+      const linkedCount = await _countLinkedSubmissionsForContact(contact);
+      if (linkedCount > 0 && !cascade) {
+        blocked.push({ id: String(contact._id), linkedStories: linkedCount, reason: 'linked_stories' });
+      } else {
+        deletableIds.push(String(contact._id));
+      }
+    }
+
+    if (blocked.length && !cascade) {
+      console.log('[ADMIN_DELETE][reporter-contact][bulk] blocked', { actor, requested: normalizedIds.length, blocked: blocked.length });
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete reporter contact while linked stories exist. Delete stories first.',
+        blocked,
+      });
+    }
+
+    if (cascade) {
+      // Cascade is supported but must be explicitly requested; still safe-guarded by admin/founder auth.
+      for (const contact of contacts) {
+        const linkedCount = await _countLinkedSubmissionsForContact(contact);
+        if (linkedCount > 0) {
+          const del = await _deleteLinkedSubmissionsForContact(contact);
+          deletedStories += del && typeof del.deletedCount === 'number' ? del.deletedCount : 0;
+        }
+      }
+    }
+
+    const delRes = await ReporterContact.deleteMany({ _id: { $in: deletableIds } });
+    const deletedCount = delRes && typeof delRes.deletedCount === 'number' ? delRes.deletedCount : deletableIds.length;
+
+    console.log('[ADMIN_DELETE][reporter-contact][bulk] done', { actor, requested: normalizedIds.length, deletedCount, cascade, deletedStories, deletedIds: deletableIds });
+    await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_BULK_DELETE', null, { entity: 'ReporterContact', requested: normalizedIds.length, deletedCount, cascade, deletedStories });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Reporter contacts deleted successfully',
+      deletedCount,
+      // Keep these extra fields for debugging/admin UX; frontend can ignore.
+      deletedIds: deletableIds,
+      notFoundIds,
+      ...(cascade ? { deletedStories } : {}),
+    });
+  } catch (e) {
+    console.error('[ADMIN_DELETE][reporter-contact][bulk] error', { actor, message: e?.message || e });
+    return res.status(500).json({ success: false, message: 'Failed to bulk delete reporter contacts' });
+  }
+}
+
+// DELETE /api/community-reporter/stories/:id
+async function deleteCommunityReporterStory(req, res) {
+  const actor = _actorLabel(req);
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!_isValidObjectId(id)) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid story id' });
+    }
+
+    const doc = await CommunitySubmission.findById(id).lean();
+    if (!doc) {
+      return res.status(404).json({ ok: false, success: false, message: 'Story not found' });
+    }
+
+    // Safety: only allow deletes for community reporter submissions (sourceType community|journalist, or missing for legacy).
+    const st = doc && doc.sourceType ? String(doc.sourceType).toLowerCase() : '';
+    if (st && st !== 'community' && st !== 'journalist') {
+      return res.status(400).json({ ok: false, success: false, message: 'Not a community reporter story' });
+    }
+
+    await CommunitySubmission.deleteOne({ _id: id });
+    console.log('[ADMIN_DELETE][community-story] deleted', { actor, id, reporterId: doc.reporterId ? String(doc.reporterId) : null, email: doc.reporterEmailNorm || doc.reporterEmail || doc.email || null });
+    await logAudit(req, 'COMMUNITY_REPORTER_STORY_DELETE', id, { entity: 'CommunitySubmission' });
+
+    return res.status(200).json({ ok: true, success: true, message: 'Story deleted', deletedId: id });
+  } catch (e) {
+    console.error('[ADMIN_DELETE][community-story] error', { actor, message: e?.message || e });
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to delete story' });
+  }
+}
+
+// POST /api/community-reporter/stories/bulk-delete
+// Body: { ids: string[] }
+async function bulkDeleteCommunityReporterStories(req, res) {
+  const actor = _actorLabel(req);
+  try {
+    const ids = req.body && Array.isArray(req.body.ids) ? req.body.ids : null;
+    if (!ids || ids.length === 0) {
+      return res.status(400).json({ ok: false, success: false, message: 'ids array is required' });
+    }
+    if (ids.length > 5000) {
+      return res.status(400).json({ ok: false, success: false, message: 'Too many ids (max 5000)' });
+    }
+
+    const normalizedIds = ids.map(x => String(x || '').trim()).filter(Boolean);
+    const invalidIds = normalizedIds.filter(x => !_isValidObjectId(x));
+    if (invalidIds.length) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid story id(s)', invalidIds });
+    }
+
+    // Safety filter: restrict to community reporter submissions.
+    const filter = {
+      _id: { $in: normalizedIds },
+      $or: [
+        { sourceType: { $in: ['community', 'journalist'] } },
+        { sourceType: { $exists: false } },
+        { sourceType: null },
+        { sourceType: '' },
+      ],
+    };
+
+    const del = await CommunitySubmission.deleteMany(filter);
+    const deletedCount = del && typeof del.deletedCount === 'number' ? del.deletedCount : 0;
+    console.log('[ADMIN_DELETE][community-story][bulk] deleted', { actor, requested: normalizedIds.length, deletedCount });
+    await logAudit(req, 'COMMUNITY_REPORTER_STORY_BULK_DELETE', null, { entity: 'CommunitySubmission', requested: normalizedIds.length, deletedCount });
+
+    return res.status(200).json({ ok: true, success: true, message: 'Bulk story delete completed', deletedCount });
+  } catch (e) {
+    console.error('[ADMIN_DELETE][community-story][bulk] error', { actor, message: e?.message || e });
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to bulk delete stories' });
   }
 }
 
@@ -343,4 +606,16 @@ async function listMyCommunityReports(req, res) {
   }
 }
 
-module.exports = { submitCommunityReport, listMyCommunityReports, getCommunityReporterQueue, listReporterContacts, listReporters, getCommunityStats, getCommunityReporterAnalytics };
+module.exports = {
+  submitCommunityReport,
+  listMyCommunityReports,
+  getCommunityReporterQueue,
+  listReporterContacts,
+  listReporters,
+  getCommunityStats,
+  getCommunityReporterAnalytics,
+  deleteReporterContact,
+  bulkDeleteReporterContacts,
+  deleteCommunityReporterStory,
+  bulkDeleteCommunityReporterStories,
+};
