@@ -16,6 +16,8 @@ const {
   reassignReporterContactStories,
   bulkDeleteReporterContacts,
   deleteCommunityReporterStory,
+  restoreCommunityReporterStory,
+  permanentDeleteCommunityReporterStory,
   bulkDeleteCommunityReporterStories,
 } = require('../controllers/communityReporterController');
 
@@ -30,8 +32,13 @@ router.post('/contacts/:id/deactivate', requireFounderOrAdmin, deactivateReporte
 router.post('/contacts/:id/archive', requireFounderOrAdmin, deactivateReporterContact);
 router.post('/contacts/:id/reassign-stories', requireFounderOrAdmin, reassignReporterContactStories);
 router.post('/contacts/bulk-delete', requireFounderOrAdmin, bulkDeleteReporterContacts);
-router.delete('/stories/:storyId', requireFounderOrAdmin, deleteCommunityReporterStory);
-router.post('/stories/bulk-delete', requireFounderOrAdmin, bulkDeleteCommunityReporterStories);
+// Community stories: two-stage delete model
+router.delete('/stories/:storyId', requireAdminAuth, deleteCommunityReporterStory); // soft delete
+router.post('/stories/:storyId/restore', requireAdminAuth, restoreCommunityReporterStory);
+router.delete('/stories/:storyId/permanent', requireAdminAuth, permanentDeleteCommunityReporterStory);
+// Compatibility aliases
+router.post('/stories/:storyId/permanent-delete', requireAdminAuth, permanentDeleteCommunityReporterStory);
+router.post('/stories/bulk-delete', requireAdminAuth, bulkDeleteCommunityReporterStories);
 
 // Helper: create or update a draft News article from a submission
 async function upsertDraftFromSubmission(submission) {

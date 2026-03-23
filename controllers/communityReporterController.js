@@ -3,6 +3,9 @@ const CommunityReport = require('../models/CommunityReport');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const ReporterContact = require('../models/ReporterContact');
 const ReporterProfile = require('../models/ReporterProfile');
+const ReporterStoryLink = require('../models/ReporterStoryLink');
+const News = require('../models/News');
+const Article = require('../models/Article');
 const { logAudit } = require('../lib/audit');
 let CommunityStory = null;
 try { CommunityStory = require('../models/CommunityStory'); } catch (_) { /* optional model */ }
@@ -107,6 +110,56 @@ function _jsonError(res, status, { code, message, details }) {
     message,
     details: details || undefined,
   });
+}
+
+function _requireFounderOrAdminRole(req, res) {
+  const role = String(req?.admin?.role || '').trim().toLowerCase();
+  if (role === 'founder' || role === 'admin') return true;
+  _jsonError(res, 403, { code: 'PERMISSION_DENIED', message: 'Permission denied' });
+  return false;
+}
+
+function _isSubmissionInDeletedState(doc) {
+  if (!doc) return false;
+  if (doc.isDeleted === true) return true;
+  if (doc.deletedAt) return true;
+  const s = String(doc.status || '').trim().toLowerCase();
+  return ['deleted', 'trash', 'archived', 'deactivated'].includes(s);
+}
+
+function _isNewsDocPubliclyVisible(newsDoc, now = new Date()) {
+  if (!newsDoc) return false;
+  const nowDt = now instanceof Date ? now : new Date(now);
+  const status = String(newsDoc.status || '').trim().toLowerCase();
+  if (status !== 'published') return false;
+
+  const deletedAt = newsDoc.deletedAt ?? null;
+  if (deletedAt) return false;
+  if (newsDoc.locked === true) return false;
+
+  const embargoUntil = newsDoc.embargoUntil ?? null;
+  if (embargoUntil instanceof Date && embargoUntil.getTime() > nowDt.getTime()) return false;
+
+  const publishAt = newsDoc.publishAt ?? null;
+  if (publishAt instanceof Date && publishAt.getTime() > nowDt.getTime()) return false;
+
+  if (newsDoc.workflow && typeof newsDoc.workflow === 'object') {
+    if (newsDoc.workflow.locked === true) return false;
+    const wEmbargo = newsDoc.workflow.embargoUntil ?? null;
+    if (wEmbargo instanceof Date && wEmbargo.getTime() > nowDt.getTime()) return false;
+  }
+
+  return true;
+}
+
+function _isPublicArticleDocPubliclyVisible(articleDoc, now = new Date()) {
+  if (!articleDoc) return false;
+  const nowDt = now instanceof Date ? now : new Date(now);
+  const status = String(articleDoc.status || '').trim().toLowerCase();
+  if (status !== 'published') return false;
+  const publishedAt = articleDoc.publishedAt ?? null;
+  if (publishedAt instanceof Date && publishedAt.getTime() > nowDt.getTime()) return false;
+  return true;
 }
 
 async function _aggregateSubmissionStatsByContactKey(contactKeys) {
@@ -1002,6 +1055,8 @@ async function deleteCommunityReporterStory(req, res) {
       return res.status(503).json({ success: false, message: 'Database not connected' });
     }
 
+    if (!_requireFounderOrAdminRole(req, res)) return;
+
     const id = String(req.params.storyId || req.params.id || '').trim();
     if (!_isValidObjectId(id)) {
       return res.status(400).json({ success: false, message: 'Invalid story id' });
@@ -1009,7 +1064,7 @@ async function deleteCommunityReporterStory(req, res) {
 
     const doc = await CommunitySubmission.findById(id).lean();
     if (!doc) {
-      return res.status(404).json({ success: false, message: 'Story not found' });
+      return _jsonError(res, 404, { code: 'STORY_NOT_FOUND', message: 'Story not found' });
     }
 
     // Safety: only allow deletes for community reporter submissions (sourceType community|journalist, or missing for legacy).
@@ -1018,14 +1073,161 @@ async function deleteCommunityReporterStory(req, res) {
       return res.status(400).json({ success: false, message: 'Not a community reporter story' });
     }
 
-    await CommunitySubmission.deleteOne({ _id: id });
-    console.log('[ADMIN_DELETE][community-story] deleted', { actor, id, reporterId: doc.reporterId ? String(doc.reporterId) : null, email: doc.reporterEmailNorm || doc.reporterEmail || doc.email || null });
-    await logAudit(req, 'COMMUNITY_REPORTER_STORY_DELETE', id, { entity: 'CommunitySubmission' });
+    if (_isSubmissionInDeletedState(doc)) {
+      return res.status(200).json({ ok: true, success: true, action: 'soft_delete', id, alreadyDeleted: true });
+    }
 
-    return res.status(200).json({ success: true, message: 'Story deleted successfully', deletedId: id });
+    const now = new Date();
+    const prev = doc.previousStatus || (doc.status && String(doc.status).trim().toLowerCase() !== 'deleted' && String(doc.status).trim().toLowerCase() !== 'trash' ? String(doc.status) : null);
+    await CommunitySubmission.updateOne(
+      { _id: id },
+      {
+        $set: {
+          isDeleted: true,
+          deletedAt: now,
+          deletedBy: actor,
+          restoredAt: null,
+          restoredBy: null,
+          status: 'DELETED',
+          ...(prev ? { previousStatus: prev } : {}),
+        },
+      }
+    );
+
+    console.log('[ADMIN_DELETE][community-story] soft-deleted', { actor, id, reporterId: doc.reporterId ? String(doc.reporterId) : null, email: doc.reporterEmailNorm || doc.reporterEmail || doc.email || null });
+    await logAudit(req, 'COMMUNITY_REPORTER_STORY_SOFT_DELETE', id, { entity: 'CommunitySubmission' });
+
+    return res.status(200).json({ ok: true, success: true, action: 'soft_delete', id, deletedAt: now.toISOString() });
   } catch (e) {
     console.error('[ADMIN_DELETE][community-story] error', { actor, message: e?.message || e });
     return res.status(500).json({ success: false, message: 'Failed to delete story' });
+  }
+}
+
+// POST /api/admin/community-reporter/stories/:storyId/restore
+async function restoreCommunityReporterStory(req, res) {
+  const actor = _actorLabel(req);
+  try {
+    if (!_isMongoReady()) return _jsonError(res, 503, { code: 'DB_NOT_READY', message: 'Database not connected' });
+    if (!_requireFounderOrAdminRole(req, res)) return;
+
+    const id = String(req.params.storyId || req.params.id || '').trim();
+    if (!_isValidObjectId(id)) {
+      return _jsonError(res, 400, { code: 'INVALID_STORY_ID', message: 'Invalid story id' });
+    }
+
+    const doc = await CommunitySubmission.findById(id).lean();
+    if (!doc) return _jsonError(res, 404, { code: 'STORY_NOT_FOUND', message: 'Story not found' });
+
+    const st = doc && doc.sourceType ? String(doc.sourceType).toLowerCase() : '';
+    if (st && st !== 'community' && st !== 'journalist') {
+      return _jsonError(res, 400, { code: 'INVALID_STORY_TYPE', message: 'Not a community reporter story' });
+    }
+
+    if (!_isSubmissionInDeletedState(doc)) {
+      return _jsonError(res, 409, { code: 'STORY_NOT_DELETED_YET', message: 'Story must be deleted before it can be restored' });
+    }
+
+    const now = new Date();
+    const prev = doc.previousStatus && String(doc.previousStatus).trim() ? String(doc.previousStatus).trim() : null;
+    const restoreStatus = prev && prev.toLowerCase() !== 'deleted' && prev.toLowerCase() !== 'trash' ? prev : 'NEW';
+
+    await CommunitySubmission.updateOne(
+      { _id: id },
+      {
+        $set: {
+          isDeleted: false,
+          deletedAt: null,
+          deletedBy: null,
+          restoredAt: now,
+          restoredBy: actor,
+          status: restoreStatus,
+        },
+        $unset: { previousStatus: 1 },
+      }
+    );
+
+    await logAudit(req, 'COMMUNITY_REPORTER_STORY_RESTORE', id, { entity: 'CommunitySubmission', restoredStatus: restoreStatus });
+    return res.status(200).json({ ok: true, success: true, action: 'restore', id, restoredAt: now.toISOString(), status: restoreStatus });
+  } catch (e) {
+    console.error('[ADMIN][community-story][restore] error', { actor, message: e?.message || e });
+    return _jsonError(res, 500, { code: 'RESTORE_FAILED', message: 'Failed to restore story' });
+  }
+}
+
+// DELETE /api/admin/community-reporter/stories/:storyId/permanent
+async function permanentDeleteCommunityReporterStory(req, res) {
+  const actor = _actorLabel(req);
+  try {
+    if (!_isMongoReady()) return _jsonError(res, 503, { code: 'DB_NOT_READY', message: 'Database not connected' });
+    if (!_requireFounderOrAdminRole(req, res)) return;
+
+    const id = String(req.params.storyId || req.params.id || '').trim();
+    if (!_isValidObjectId(id)) {
+      return _jsonError(res, 400, { code: 'INVALID_STORY_ID', message: 'Invalid story id' });
+    }
+
+    const doc = await CommunitySubmission.findById(id).lean();
+    if (!doc) return _jsonError(res, 404, { code: 'STORY_NOT_FOUND', message: 'Story not found' });
+
+    const st = doc && doc.sourceType ? String(doc.sourceType).toLowerCase() : '';
+    if (st && st !== 'community' && st !== 'journalist') {
+      return _jsonError(res, 400, { code: 'INVALID_STORY_TYPE', message: 'Not a community reporter story' });
+    }
+
+    if (!_isSubmissionInDeletedState(doc)) {
+      return _jsonError(res, 409, { code: 'STORY_NOT_DELETED_YET', message: 'Story must be deleted before permanent delete' });
+    }
+
+    const now = new Date();
+    const linkedNewsId = doc.linkedArticleId ? String(doc.linkedArticleId) : null;
+    let newsDoc = null;
+    if (linkedNewsId && _isValidObjectId(linkedNewsId)) {
+      newsDoc = await News.findById(linkedNewsId)
+        .select('status deletedAt locked embargoUntil publishAt workflow communityReportId')
+        .lean();
+      if (_isNewsDocPubliclyVisible(newsDoc, now)) {
+        return _jsonError(res, 409, {
+          code: 'STORY_LINKED_TO_ACTIVE_PUBLIC_RECORD',
+          message: 'Cannot permanently delete while linked News is publicly visible',
+          details: { linkedNewsId },
+        });
+      }
+    }
+
+    // Public Article copies are what the frontend serves; block if any active published copy exists.
+    let publicCopy = null;
+    try {
+      if (doc.articleId && _isValidObjectId(String(doc.articleId))) {
+        publicCopy = await Article.findById(String(doc.articleId)).select('status publishedAt sourceNewsId').lean();
+      } else if (linkedNewsId && _isValidObjectId(linkedNewsId)) {
+        publicCopy = await Article.findOne({ sourceNewsId: linkedNewsId, status: 'published' })
+          .select('status publishedAt sourceNewsId')
+          .lean();
+      }
+    } catch (_) {}
+
+    if (_isPublicArticleDocPubliclyVisible(publicCopy, now)) {
+      return _jsonError(res, 409, {
+        code: 'STORY_LINKED_TO_ACTIVE_PUBLIC_RECORD',
+        message: 'Cannot permanently delete while linked public Article copy is published',
+        details: { articleId: publicCopy && publicCopy._id ? String(publicCopy._id) : null, linkedNewsId },
+      });
+    }
+
+    // Cleanup: avoid leaving broken references.
+    if (linkedNewsId && newsDoc && newsDoc.communityReportId && String(newsDoc.communityReportId) === String(doc._id)) {
+      await News.updateOne({ _id: linkedNewsId }, { $set: { communityReportId: null } });
+    }
+
+    await ReporterStoryLink.deleteMany({ submissionId: id });
+    await CommunitySubmission.deleteOne({ _id: id });
+
+    await logAudit(req, 'COMMUNITY_REPORTER_STORY_PERMANENT_DELETE', id, { entity: 'CommunitySubmission', linkedNewsId, publicArticleId: publicCopy && publicCopy._id ? String(publicCopy._id) : null });
+    return res.status(200).json({ ok: true, success: true, action: 'permanent_delete', id });
+  } catch (e) {
+    console.error('[ADMIN][community-story][permanent-delete] error', { actor, message: e?.message || e });
+    return _jsonError(res, 500, { code: 'PERMANENT_DELETE_FAILED', message: 'Failed to permanently delete story' });
   }
 }
 
@@ -1037,6 +1239,8 @@ async function bulkDeleteCommunityReporterStories(req, res) {
     if (!_isMongoReady()) {
       return res.status(503).json({ success: false, message: 'Database not connected' });
     }
+
+    if (!_requireFounderOrAdminRole(req, res)) return;
 
     const ids = req.body && Array.isArray(req.body.ids) ? req.body.ids : null;
     if (!ids || ids.length === 0) {
@@ -1063,12 +1267,49 @@ async function bulkDeleteCommunityReporterStories(req, res) {
       ],
     };
 
-    const del = await CommunitySubmission.deleteMany(filter);
-    const deletedCount = del && typeof del.deletedCount === 'number' ? del.deletedCount : 0;
-    console.log('[ADMIN_DELETE][community-story][bulk] deleted', { actor, requested: normalizedIds.length, deletedCount, deletedIds: normalizedIds });
-    await logAudit(req, 'COMMUNITY_REPORTER_STORY_BULK_DELETE', null, { entity: 'CommunitySubmission', requested: normalizedIds.length, deletedCount, deletedIds: normalizedIds });
+    // Soft-delete in bulk (permanent delete is intentionally NOT supported in bulk).
+    const now = new Date();
+    let modifiedCount = 0;
+    try {
+      // Prefer update pipeline to preserve previousStatus where absent.
+      const resUpd = await CommunitySubmission.updateMany(
+        filter,
+        [
+          {
+            $set: {
+              isDeleted: true,
+              deletedAt: now,
+              deletedBy: actor,
+              restoredAt: null,
+              restoredBy: null,
+              previousStatus: { $ifNull: ['$previousStatus', '$status'] },
+              status: 'DELETED',
+            },
+          },
+        ]
+      );
+      modifiedCount = typeof resUpd?.modifiedCount === 'number' ? resUpd.modifiedCount : (resUpd?.nModified || 0);
+    } catch (e) {
+      const resUpd = await CommunitySubmission.updateMany(
+        filter,
+        {
+          $set: {
+            isDeleted: true,
+            deletedAt: now,
+            deletedBy: actor,
+            restoredAt: null,
+            restoredBy: null,
+            status: 'DELETED',
+          },
+        }
+      );
+      modifiedCount = typeof resUpd?.modifiedCount === 'number' ? resUpd.modifiedCount : (resUpd?.nModified || 0);
+    }
 
-    return res.status(200).json({ success: true, message: 'Stories deleted successfully', deletedCount });
+    console.log('[ADMIN_DELETE][community-story][bulk] soft-deleted', { actor, requested: normalizedIds.length, modifiedCount, ids: normalizedIds });
+    await logAudit(req, 'COMMUNITY_REPORTER_STORY_BULK_SOFT_DELETE', null, { entity: 'CommunitySubmission', requested: normalizedIds.length, modifiedCount, ids: normalizedIds });
+
+    return res.status(200).json({ ok: true, success: true, action: 'bulk_soft_delete', modifiedCount, ids: normalizedIds });
   } catch (e) {
     console.error('[ADMIN_DELETE][community-story][bulk] error', { actor, message: e?.message || e });
     return res.status(500).json({ success: false, message: 'Failed to bulk delete stories' });
@@ -1407,5 +1648,7 @@ module.exports = {
   reassignReporterContactStories,
   bulkDeleteReporterContacts,
   deleteCommunityReporterStory,
+  restoreCommunityReporterStory,
+  permanentDeleteCommunityReporterStory,
   bulkDeleteCommunityReporterStories,
 };

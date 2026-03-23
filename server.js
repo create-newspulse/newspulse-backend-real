@@ -149,6 +149,8 @@ const {
   deleteReporterContact,
   bulkDeleteReporterContacts,
   deleteCommunityReporterStory,
+  restoreCommunityReporterStory,
+  permanentDeleteCommunityReporterStory,
   bulkDeleteCommunityReporterStories,
 } = require('./controllers/communityReporterController');
 // Use root-level admin settings router for base /settings endpoint
@@ -1889,6 +1891,11 @@ function _parseDateSafe(v) {
   return Number.isFinite(d.getTime()) ? d : null;
 }
 
+function _parseBoolLoose(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  return s === '1' || s === 'true' || s === 'yes' || s === 'on';
+}
+
 function _normalizeLangCode(code) {
   const raw = String(code ?? '').trim();
   if (!raw) return '';
@@ -2121,15 +2128,19 @@ async function _adminMyStoriesHandler(req, res) {
     const limit = Math.min(Math.max(_parseIntSafe(q.limit, 50), 1), 200);
     const skip = (page - 1) * limit;
 
-    const filter = { isDeleted: { $ne: true } };
+    const filter = {};
 
     // Status filter (submission workflow status)
     const statusNorm = String(status || '').trim().toLowerCase();
+    const wantsDeleted = _parseBoolLoose(q.deleted || q.includeDeleted || q.showDeleted) || statusNorm === 'deleted' || statusNorm === 'trash';
+    filter.isDeleted = wantsDeleted ? true : { $ne: true };
+
     if (statusNorm && statusNorm !== 'all') {
       const variants = {
         pending: ['pending', 'under_review', 'new', 'PENDING_FOUNDER', 'PENDING', 'NEW', 'UNDER_REVIEW'],
         approved: ['approved', 'APPROVED', 'published', 'PUBLISHED'],
         rejected: ['rejected', 'REJECTED', 'trash', 'TRASH', 'deleted', 'DELETED'],
+        deleted: ['deleted', 'DELETED', 'trash', 'TRASH'],
         withdrawn: ['withdrawn', 'WITHDRAWN'],
       };
       const v = variants[statusNorm] || [statusNorm];
@@ -2318,6 +2329,13 @@ async function _adminMyStoriesHandler(req, res) {
 
         createdAt: d.createdAt || null,
         updatedAt: d.updatedAt || null,
+
+        // Soft delete metadata (for Deleted tab)
+        isDeleted: d.isDeleted === true,
+        deletedAt: d.deletedAt || null,
+        deletedBy: d.deletedBy || null,
+        restoredAt: d.restoredAt || null,
+        restoredBy: d.restoredBy || null,
       };
     });
 
@@ -2335,6 +2353,21 @@ async function _adminMyStoriesHandler(req, res) {
 
 for (const p of ['/api/admin/community/my-stories', '/admin-api/admin/community/my-stories', '/admin-api/api/admin/community/my-stories', '/admin/community/my-stories']) {
   app.get(p, requireAdminAuth, _adminMyStoriesHandler);
+}
+
+// Community Story Desk actions (aliases): soft delete, restore, permanent delete
+for (const p of ['/api/admin/community/my-stories/:storyId', '/admin-api/admin/community/my-stories/:storyId', '/admin-api/api/admin/community/my-stories/:storyId', '/admin/community/my-stories/:storyId']) {
+  app.delete(p, requireAdminAuth, deleteCommunityReporterStory);
+}
+for (const p of ['/api/admin/community/my-stories/:storyId/restore', '/admin-api/admin/community/my-stories/:storyId/restore', '/admin-api/api/admin/community/my-stories/:storyId/restore', '/admin/community/my-stories/:storyId/restore']) {
+  app.post(p, requireAdminAuth, restoreCommunityReporterStory);
+  app.patch(p, requireAdminAuth, restoreCommunityReporterStory);
+}
+for (const p of ['/api/admin/community/my-stories/:storyId/permanent', '/admin-api/admin/community/my-stories/:storyId/permanent', '/admin-api/api/admin/community/my-stories/:storyId/permanent', '/admin/community/my-stories/:storyId/permanent']) {
+  app.delete(p, requireAdminAuth, permanentDeleteCommunityReporterStory);
+}
+for (const p of ['/api/admin/community/my-stories/:storyId/permanent-delete', '/admin-api/admin/community/my-stories/:storyId/permanent-delete', '/admin-api/api/admin/community/my-stories/:storyId/permanent-delete', '/admin/community/my-stories/:storyId/permanent-delete']) {
+  app.post(p, requireAdminAuth, permanentDeleteCommunityReporterStory);
 }
 
 function _adminMeResponse(req, res) {

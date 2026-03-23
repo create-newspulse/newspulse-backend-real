@@ -105,6 +105,14 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   },
   // Withdrawal tracking
   withdrawnAt: { type: Date, required: false },
+
+  // Soft delete (two-stage delete model)
+  isDeleted: { type: Boolean, default: false, index: true },
+  deletedAt: { type: Date, default: null, index: true },
+  deletedBy: { type: mongoose.Schema.Types.Mixed, default: null },
+  previousStatus: { type: String, required: false, trim: true, default: null },
+  restoredAt: { type: Date, default: null },
+  restoredBy: { type: mongoose.Schema.Types.Mixed, default: null },
 }, { timestamps: true });
 
 // NOTE: Do not define a virtual named 'userName' because it conflicts with the real path.
