@@ -54,7 +54,13 @@ test('GET /api/articles/national/state/:stateSlug filters published national by 
     assert.equal(res.body.data.stateSlug, 'gujarat');
     assert.equal(res.body.data.total, 2);
 
-    assert.deepEqual(capture.query, { status: 'published', category: 'national', stateTags: 'gujarat' });
+    assert.ok(capture.query);
+    assert.equal(capture.query.category, 'national');
+    assert.equal(capture.query.stateTags, 'gujarat');
+    // Shared visibility filter uses $and clauses (published + not deleted/locked/embargo + publishAt safety).
+    assert.ok(Array.isArray(capture.query.$and));
+    const qJson = JSON.stringify(capture.query).toLowerCase();
+    assert.ok(qJson.includes('published'));
     assert.deepEqual(capture.sortArg, { publishedAt: -1, createdAt: -1 });
     assert.equal(capture.skip, 0);
     assert.equal(capture.limit, 20);
@@ -175,7 +181,6 @@ test('GET /api/articles/national/state/:stateSlug?lang=en returns ready-only tra
     assert.equal(item.content, 'Original English content');
 
     assert.ok(capture.query);
-    assert.equal(capture.query.status, 'published');
     assert.equal(capture.query.category, 'national');
     assert.equal(capture.query.stateTags, 'gujarat');
     assert.deepEqual(capture.sortArg, { publishedAt: -1, createdAt: -1 });
@@ -184,6 +189,7 @@ test('GET /api/articles/national/state/:stateSlug?lang=en returns ready-only tra
 
     // Ensure the query requires either originals in en OR a fully-ready cached translation.
     const qJson = JSON.stringify(capture.query).toLowerCase();
+    assert.ok(qJson.includes('published'));
     assert.ok(qJson.includes('translationstatus.en'));
     assert.ok(qJson.includes('translations.en.title'));
     assert.ok(qJson.includes('translations.en.summary'));

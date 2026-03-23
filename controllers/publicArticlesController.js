@@ -2,6 +2,11 @@ const Article = require('../models/Article');
 const { CATEGORY_VALUES, LANGUAGE_VALUES } = require('../models/Article');
 const mongoose = require('mongoose');
 const { getSlugCandidates } = require('../lib/slug');
+const { mapArticleForLang } = require('../services/mapArticleForLang');
+const {
+  buildPubliclyVisiblePublicArticleFilter,
+  getAvailableArticleLocales,
+} = require('../services/publicArticleVisibility.service');
 
 function parseBool(v) {
   if (v === undefined || v === null || v === '') return undefined;
@@ -83,13 +88,13 @@ async function listArticles(req, res, next) {
 
     const q = String(req.query.q || '').trim();
 
-    const filter = {};
+    const filter = buildPubliclyVisiblePublicArticleFilter();
 
     // Public feed is published-only.
     if (statusRaw && statusRaw !== 'published') {
       return res.status(400).json({ message: 'Only status=published is allowed' });
     }
-    filter.status = 'published';
+    // already enforced by buildPubliclyVisiblePublicArticleFilter()
 
     if (category) {
       if (!CATEGORY_VALUES.includes(category)) {
@@ -102,7 +107,53 @@ async function listArticles(req, res, next) {
       if (!LANGUAGE_VALUES.includes(lang)) {
         return res.status(400).json({ message: 'Invalid lang (use en, hi, gu)' });
       }
-      filter.language = lang;
+
+      // Strict language rules:
+      // - If requested lang matches the original language => show originals
+      // - Else => show ONLY fully-ready cached translations for that language
+      if (lang === 'gu') {
+        filter.$and = (filter.$and || []).concat([
+          {
+            $or: [
+              { originalLang: { $in: ['gu', 'GU'] } },
+              {
+                $and: [
+                  { $or: [{ originalLang: null }, { originalLang: { $exists: false } }] },
+                  { language: { $in: ['gu', 'GU'] } },
+                ],
+              },
+            ],
+          },
+        ]);
+      } else {
+        const lower = lang;
+        const upper = lang.toUpperCase();
+        filter.$and = (filter.$and || []).concat([
+          {
+            $or: [
+              {
+                $or: [
+                  { originalLang: { $in: [lower, upper] } },
+                  {
+                    $and: [
+                      { $or: [{ originalLang: null }, { originalLang: { $exists: false } }] },
+                      { language: { $in: [lower, upper] } },
+                    ],
+                  },
+                ],
+              },
+              {
+                $and: [
+                  { [`translationStatus.${lower}`]: 'ready' },
+                  { [`translations.${lower}.title`]: { $exists: true, $nin: [null, ''] } },
+                  { [`translations.${lower}.summary`]: { $exists: true, $nin: [null, ''] } },
+                  { [`translations.${lower}.content`]: { $exists: true, $nin: [null, ''] } },
+                ],
+              },
+            ],
+          },
+        ]);
+      }
     }
 
     if (isBreaking !== undefined) filter.isBreaking = isBreaking;
@@ -125,10 +176,30 @@ async function listArticles(req, res, next) {
 
     const sort = { publishedAt: -1, createdAt: -1 };
 
-    const [items, total] = await Promise.all([
+    const [itemsRaw, total] = await Promise.all([
       Article.find(filter).sort(sort).skip(skip).limit(limit).lean(),
       Article.countDocuments(filter),
     ]);
+
+    let items = itemsRaw || [];
+    if (lang) {
+      items = items
+        .map((doc) => {
+          const mapped = mapArticleForLang(doc, lang);
+          if (!mapped) return null;
+          return {
+            ...doc,
+            title: mapped.title,
+            summary: mapped.summary,
+            content: mapped.content,
+            language: mapped.lang,
+            requestedLang: lang,
+            resolvedLang: mapped.resolvedLang,
+            isTranslated: mapped.isTranslated,
+          };
+        })
+        .filter(Boolean);
+    }
 
     const totalPages = Math.max(Math.ceil(total / limit), 1);
 
@@ -168,13 +239,36 @@ async function getArticleBySlug(req, res, next) {
     }
 
     const target = normalizeLanguage(req.query.lang || req.query.language || req.lang);
-    const canonicalSlug = (target && doc.slugs && doc.slugs[target]) ? doc.slugs[target] : (doc.slug || null);
+    if (target) {
+      const mapped = mapArticleForLang(doc, target);
+      if (!mapped) {
+        return res.status(404).json({
+          message: 'Article not available in requested language',
+          requestedLang: target,
+          availableLocales: getAvailableArticleLocales(doc),
+        });
+      }
 
+      const canonicalSlug = (doc.slugs && doc.slugs[target]) ? doc.slugs[target] : (doc.slug || null);
+      return res.json({
+        ...doc,
+        title: mapped.title,
+        summary: mapped.summary,
+        content: mapped.content,
+        language: mapped.lang,
+        requestedLang: target,
+        resolvedLang: mapped.resolvedLang,
+        isTranslated: mapped.isTranslated,
+        canonicalSlug,
+        availableLocales: getAvailableArticleLocales(doc),
+      });
+    }
+
+    const canonicalSlug = (doc.slug || null);
     return res.json({
       ...doc,
       canonicalSlug,
-      localizedTitle: doc.title || '',
-      localizedContent: doc.content || '',
+      availableLocales: getAvailableArticleLocales(doc),
     });
   } catch (e) {
     return next(e);

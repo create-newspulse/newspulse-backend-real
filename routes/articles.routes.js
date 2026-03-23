@@ -20,6 +20,11 @@ const { isGoogleTranslateConfigured } = require('../services/translationEnabled'
 
 const { mapArticleForLang } = require('../services/mapArticleForLang');
 
+const {
+  buildPubliclyVisibleNewsArticleFilter,
+  buildPubliclyVisiblePublicArticleFilter,
+} = require('../services/publicArticleVisibility.service');
+
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
 const {
   buildPendingTranslationState,
@@ -31,6 +36,49 @@ const {
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
 const router = express.Router();
+
+async function markPublicCopiesDraftFromNewsDoc(newsDoc, options = {}) {
+  const logger = options.logger || console;
+  try {
+    if (!newsDoc) return;
+
+    const groupKey = String(newsDoc.translationKey || newsDoc.translationGroupId || '').trim();
+    const slugSet = new Set();
+
+    if (newsDoc.slug) slugSet.add(String(newsDoc.slug).trim());
+    const slugsObj = newsDoc.slugs && typeof newsDoc.slugs === 'object' && !Array.isArray(newsDoc.slugs) ? newsDoc.slugs : null;
+    for (const k of ['en', 'hi', 'gu']) {
+      const v = slugsObj && slugsObj[k] ? String(slugsObj[k]).trim() : '';
+      if (v) slugSet.add(v);
+    }
+
+    const slugList = Array.from(slugSet).filter(Boolean);
+    const or = [];
+
+    if (newsDoc._id) or.push({ sourceNewsId: newsDoc._id });
+    if (slugList.length) {
+      or.push({ slug: { $in: slugList } });
+      or.push({ 'slugs.en': { $in: slugList } });
+      or.push({ 'slugs.hi': { $in: slugList } });
+      or.push({ 'slugs.gu': { $in: slugList } });
+    }
+    if (groupKey) {
+      or.push({ translationKey: groupKey });
+      or.push({ translationGroupId: groupKey });
+    }
+
+    if (!or.length) return;
+    await PublicArticle.updateMany(
+      { $or: or },
+      { $set: { status: 'draft', publishedAt: null } },
+      { runValidators: false }
+    );
+  } catch (e) {
+    try {
+      logger.warn?.('[publicCopies][markDraft] failed', { message: e?.message || String(e) });
+    } catch (_) {}
+  }
+}
 
 function isAutoTranslateOnReadEnabled() {
   const s = String(process.env.ENABLE_AUTO_TRANSLATE_ON_READ ?? '').trim().toLowerCase();
@@ -792,7 +840,7 @@ router.get('/public/articles', async (req, res, next) => {
     const categoryRaw = (req.query.category || '').toString().trim();
     const qRaw = (req.query.q || '').toString().trim();
 
-    const query = { status: 'published' };
+    const query = buildPubliclyVisibleNewsArticleFilter();
 
     const locationAnd = _buildLocationQueryFromRequest(req);
     if (locationAnd.length) {
@@ -1013,11 +1061,11 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
       if (cityClause) andClauses.push(cityClause);
     }
 
-    const filter = {
-      status: 'published',
-      category: 'regional',
-      ...(andClauses.length ? { $and: andClauses } : {}),
-    };
+    const filter = buildPubliclyVisiblePublicArticleFilter();
+    filter.category = 'regional';
+    if (andClauses.length) {
+      filter.$and = (filter.$and || []).concat(andClauses);
+    }
 
     // Query rules:
     // - If requested lang matches the original language => show originals
@@ -1172,7 +1220,9 @@ router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
     const limit = _clampInt(_parseIntOrDefault(req.query.limit, 20), 1, 100);
     const skip = (page - 1) * limit;
 
-    const query = { status: 'published', category: 'national', stateTags: stateSlug };
+    const query = buildPubliclyVisibleNewsArticleFilter();
+    query.category = 'national';
+    query.stateTags = stateSlug;
     if (desired === 'gu') {
       const originalMatch = _buildOriginalLangMatch('gu');
       if (originalMatch) query.$and = (query.$and || []).concat([originalMatch]);
@@ -2373,6 +2423,8 @@ router.post('/articles/:id/archive', requireAdminAuth, async (req, res) => {
     );
     if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
 
+    await markPublicCopiesDraftFromNewsDoc(doc);
+
     try {
       await PushHistory.create({
         articleId: doc._id,
@@ -2438,6 +2490,8 @@ router.delete('/articles/:id', requireAdminAuth, async (req, res) => {
     if (!doc) {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
     }
+
+    await markPublicCopiesDraftFromNewsDoc(doc);
 
     try {
       await PushHistory.create({

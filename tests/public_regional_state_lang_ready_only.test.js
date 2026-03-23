@@ -86,11 +86,14 @@ test('GET /api/public/regional/:state?lang=en returns ready-only translations an
 
     // Query should include ready-only translation match for the requested lang.
     assert.ok(capture.query);
-    assert.equal(capture.query.status, 'published');
     assert.equal(capture.query.category, 'regional');
     assert.deepEqual(capture.sortArg, { publishedAt: -1, createdAt: -1 });
     assert.equal(capture.skip, 0);
     assert.equal(capture.limit, 20);
+
+    // Shared visibility filter is expressed via $and clauses.
+    const qJson = JSON.stringify(capture.query).toLowerCase();
+    assert.ok(qJson.includes('published'));
 
     // Ensure the filter requires translationStatus.en === 'ready'.
     const andClauses = Array.isArray(capture.query.$and) ? capture.query.$and : [];

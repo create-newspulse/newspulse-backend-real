@@ -1,6 +1,8 @@
 const BroadcastItem = require('../models/BroadcastItem');
 const Article = require('../models/Article');
 
+const { mapArticleForLang } = require('../services/mapArticleForLang');
+
 const { formatIstTimeText } = require('../src/utils/istDate');
 
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
@@ -126,16 +128,23 @@ async function getNationalLiveTicker(req, res) {
     const articleFilter = {
       status: 'published',
       category: 'national',
-      language: lang,
       $or: [{ publishedAt: { $gte: cutoff } }, { publishedAt: null, createdAt: { $gte: cutoff } }],
     };
 
+    // Fetch a few extra and filter strictly by requested lang via cached translations.
     const articleDocs = await Article.find(articleFilter)
       .sort({ publishedAt: -1, createdAt: -1 })
-      .limit(remaining)
+      .limit(Math.min(50, remaining * 6))
       .lean();
 
-    const storyItems = (articleDocs || []).map((a) => mapNationalArticle(a, lang));
+    const storyItems = (articleDocs || [])
+      .map((a) => {
+        const mapped = mapArticleForLang(a, lang);
+        if (!mapped) return null;
+        return mapNationalArticle({ ...a, title: mapped.title }, lang);
+      })
+      .filter(Boolean)
+      .slice(0, remaining);
     const out = [...liveItems, ...storyItems].slice(0, limit);
 
     return res.status(200).json(out);

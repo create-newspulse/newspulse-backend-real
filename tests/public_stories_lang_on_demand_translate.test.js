@@ -186,7 +186,7 @@ test('GET /api/public/stories/:slug detects source language from content when or
   }
 });
 
-test('GET /api/public/stories/:slug does not crash when translation fails (falls back)', async () => {
+test('GET /api/public/stories/:slug does not crash when translation fails (strict lang => 404 + pending)', async () => {
   const originals = { findOne: Article.findOne, updateOne: Article.updateOne };
   const prevAuto = process.env.ENABLE_AUTO_TRANSLATE_ON_READ;
   const prevFetch = global.fetch;
@@ -218,12 +218,14 @@ test('GET /api/public/stories/:slug does not crash when translation fails (falls
     Article.findOne = () => ({ lean: async () => story });
 
     const res = await request(app).get('/api/public/stories/test-story-3?lang=hi');
-    assert.equal(res.statusCode, 200);
-    assert.equal(res.body.success, true);
-    assert.equal(res.body.data.title, 'Hello');
-    assert.equal(res.body.data.summary, 'Summary');
-    assert.equal(res.body.data.content, '<p>Body</p>');
+    assert.equal(res.statusCode, 404);
+    assert.equal(res.body.success, false);
+    assert.equal(res.body.code, 'LOCALE_NOT_AVAILABLE');
+    assert.equal(res.body.requestedLang, 'hi');
+    assert.equal(res.body.resolvedLang, 'en');
     assert.equal(res.body.translationPending, true);
+    assert.ok(Array.isArray(res.body.availableLocales));
+    assert.ok(res.body.availableLocales.includes('en'));
     assert.ok(callCount >= 1, 'should attempt lock (and may persist failure state)');
   } finally {
     restore(originals);
