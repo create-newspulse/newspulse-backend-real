@@ -256,6 +256,12 @@ router.post('/stories/submit', async (req, res) => {
       })(),
     });
 
+    // Contributor network linkage (best-effort; never blocks submission)
+    try {
+      const { resolveAndAttachForSubmission } = require('../services/reporterIdentityResolution.service');
+      await resolveAndAttachForSubmission(submission, { req });
+    } catch (_) {}
+
     const referenceId = submission.referenceId || submission.publicId || submission._id.toString();
     const reporterType = reporterContact && reporterContact.reporterType === 'journalist' ? 'journalist' : 'community';
     const reporterNameOut = normalizedName || undefined;

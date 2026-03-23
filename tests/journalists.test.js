@@ -16,6 +16,36 @@ const CommunitySubmission = require('../models/CommunitySubmission');
 let storedContacts = new Map(); // key: email -> contact object
 let submissions = []; // store submission docs
 
+function _normEmail(value) {
+  const e = String(value || '').trim().toLowerCase();
+  return e || null;
+}
+
+function _docEmail(doc) {
+  return _normEmail(doc?.reporterEmailNorm || doc?.reporterEmail || doc?.email || doc?.contact?.email);
+}
+
+function _matchesEmailQuery(doc, q) {
+  if (!q) return true;
+  const target = _docEmail(doc);
+  if (!target) return false;
+
+  if (q.$or && Array.isArray(q.$or)) {
+    for (const clause of q.$or) {
+      if (clause && typeof clause === 'object') {
+        const clauseVal = clause.reporterEmailNorm || clause.reporterEmail || clause.email || clause['contact.email'];
+        if (_normEmail(clauseVal) === target) return true;
+      }
+    }
+    return false;
+  }
+
+  if (q.email) return _normEmail(q.email) === target;
+  if (q.reporterEmailNorm) return _normEmail(q.reporterEmailNorm) === target;
+  if (q.reporterEmail) return _normEmail(q.reporterEmail) === target;
+  return true;
+}
+
 // Patch findOne / findOneAndUpdate / findById / save behavior
 ReporterContact.findOne = async (q) => {
   const email = q.email;
@@ -49,10 +79,26 @@ CommunitySubmission.create = async (payload) => {
   return doc;
 };
 CommunitySubmission.countDocuments = async (q) => {
-  if (q && q.reporterId) {
-    return submissions.filter(s => String(s.reporterId) === String(q.reporterId)).length;
-  }
-  return submissions.length;
+  const statusIn = q && q.status && q.status.$in ? q.status.$in : null;
+  return submissions.filter(s => {
+    if (q && q.reporterId && String(s.reporterId) !== String(q.reporterId)) return false;
+    if (!_matchesEmailQuery(s, q)) return false;
+    if (statusIn && !statusIn.includes(s.status)) return false;
+    return true;
+  }).length;
+};
+
+CommunitySubmission.findOne = (q) => {
+  return {
+    sort: (_sort) => ({
+      lean: async () => {
+        const hits = submissions
+          .filter(s => _matchesEmailQuery(s, q))
+          .sort((a, b) => Number(new Date(b.createdAt)) - Number(new Date(a.createdAt)));
+        return hits[0] || null;
+      },
+    }),
+  };
 };
 CommunitySubmission.updateMany = async (_q, _u) => ({ acknowledged: true });
 
@@ -111,4 +157,23 @@ test('Community submission includes reporterId and verification fields', async (
   assert.ok(res.body.item.reporterId === null || typeof res.body.item.reporterId === 'string');
   assert.ok(['community', 'journalist'].includes(res.body.item.sourceType));
   assert.ok(['unverified', 'journalist_pending', 'journalist_verified'].includes(res.body.item.reporterVerificationLevel));
+});
+
+test('Phase-1 /api/community-reporter/submit upserts contact and returns string id', async () => {
+  const res = await request(app)
+    .post('/api/community-reporter/submit')
+    .send({
+      name: 'Kiran Parmar',
+      email: 'krn85397@gmail.com',
+      location: 'Ahmedabad, Gujarat',
+      headline: 'Hello',
+      story: 'Body',
+      ageGroup: '18-24',
+    })
+    .set('Accept', 'application/json');
+
+  assert.strictEqual(res.statusCode, 201);
+  assert.strictEqual(res.body.success, true);
+  assert.strictEqual(typeof res.body.id, 'string');
+  assert.ok(storedContacts.has('krn85397@gmail.com'));
 });

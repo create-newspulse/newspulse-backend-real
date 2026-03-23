@@ -1,4 +1,5 @@
 const express = require('express');
+const { LANGUAGE_VALUES } = require('../models/Article');
 
 const router = express.Router();
 
@@ -12,6 +13,13 @@ function getSupportedLanguages() {
   ];
 }
 
+function getSupportedLanguageCodes() {
+  // Prefer the canonical enum used by the public Article model.
+  // Fallback to the platform contract if anything is unexpected.
+  if (Array.isArray(LANGUAGE_VALUES) && LANGUAGE_VALUES.length) return [...LANGUAGE_VALUES];
+  return ['en', 'hi', 'gu'];
+}
+
 // Admin UI bootstrap meta
 // Common call-sites:
 // - GET /api/admin/meta
@@ -23,6 +31,7 @@ router.get('/meta', (_req, res) => {
     status: 200,
     meta: {
       languages: getSupportedLanguages(),
+      supportedLanguages: getSupportedLanguageCodes(),
       timestamp: new Date().toISOString(),
     },
   });
@@ -37,6 +46,19 @@ router.get('/meta/languages', (_req, res) => {
     success: true,
     status: 200,
     languages: getSupportedLanguages(),
+    supportedLanguages: getSupportedLanguageCodes(),
+  });
+});
+
+// Minimal config endpoint for admin UI counters.
+// - GET /api/admin/meta/supported-languages
+// - GET /admin-api/meta/supported-languages
+router.get('/meta/supported-languages', (_req, res) => {
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    supportedLanguages: getSupportedLanguageCodes(),
   });
 });
 

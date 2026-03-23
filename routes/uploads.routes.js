@@ -1,7 +1,13 @@
 const express = require('express');
 const multer = require('multer');
 
-const { isCloudinaryConfigured, uploadFromBuffer, uploadFromDataUri, cloudinaryPing } = require('../lib/cloudinary');
+const {
+  isCloudinaryConfigured,
+  getCloudinaryConfigStatus,
+  uploadFromBuffer,
+  uploadFromDataUri,
+  cloudinaryPing,
+} = require('../lib/cloudinary');
 
 const router = express.Router();
 
@@ -41,11 +47,41 @@ function pickCoverFile(req) {
   return null;
 }
 
+// GET /api/uploads/config -> non-secret capability flags for frontend
+router.get('/config', async (_req, res) => {
+  try {
+    const st = getCloudinaryConfigStatus();
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      data: {
+        cloudinary: {
+          configured: !!st.configured,
+          mode: st.mode,
+          folder: String(process.env.CLOUDINARY_FOLDER || 'newspulse/articles').trim() || 'newspulse/articles',
+        },
+      },
+    });
+  } catch (e) {
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      data: {
+        cloudinary: {
+          configured: false,
+          mode: 'missing',
+          folder: String(process.env.CLOUDINARY_FOLDER || 'newspulse/articles').trim() || 'newspulse/articles',
+        },
+      },
+    });
+  }
+});
+
 // GET /api/uploads/ping -> Cloudinary connectivity diagnostics
 router.get('/ping', async (_req, res) => {
   try {
     if (!isCloudinaryConfigured()) {
-      return res.status(500).json({
+      return res.status(503).json({
         ok: false,
         message: 'Cloudinary not configured',
       });
@@ -99,7 +135,7 @@ router.post(
       }
 
       if (!isCloudinaryConfigured()) {
-        return res.status(500).json({
+        return res.status(503).json({
           ok: false,
           message: 'Cloudinary not configured',
         });
@@ -127,18 +163,29 @@ router.post(
       const width = typeof result?.width === 'number' ? result.width : null;
       const height = typeof result?.height === 'number' ? result.height : null;
       const format = result?.format ? String(result.format) : null;
+      const bytes = typeof result?.bytes === 'number' ? result.bytes : null;
 
       return res.status(200).json({
         ok: true,
         success: true,
-        data: { url, publicId, width, height, format },
+        data: {
+          url,
+          secureUrl: url,
+          secure_url: url,
+          publicId,
+          public_id: publicId,
+          width,
+          height,
+          format,
+          bytes,
+        },
       });
     } catch (err) {
       console.error('UploadCover error:', err);
 
       const code = err?.code;
       if (code === 'CLOUDINARY_NOT_CONFIGURED') {
-        return res.status(500).json({
+        return res.status(503).json({
           ok: false,
           message: 'Cloudinary not configured',
         });

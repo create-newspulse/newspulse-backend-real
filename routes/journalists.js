@@ -71,7 +71,17 @@ router.post('/apply', async (req, res) => {
     // Ensure new journalists default to pending (service already sets pending)
     if (contact.verificationLevel !== 'verified' && contact.verificationLevel !== 'pending') {
       contact.verificationLevel = 'pending';
-      await contact.save();
+      if (contact && typeof contact.save === 'function') {
+        await contact.save();
+      } else {
+        try {
+          await ReporterContact.findOneAndUpdate(
+            { email: String(contact.email || email || '').trim().toLowerCase() },
+            { $set: { reporterType: 'journalist', verificationLevel: 'pending' } },
+            { new: true }
+          );
+        } catch (_) {}
+      }
     }
 
     return res.status(200).json({

@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const News = require('../models/News');
 const User = require('../models/User');
 const CommunitySubmission = require('../models/CommunitySubmission');
@@ -17,7 +18,7 @@ async function safeCount(model, filter = {}) {
   try {
     if (!model || !model.countDocuments) return 0;
     // Prevent Mongoose buffering timeouts when DB is not connected.
-    if (model.db && model.db.readyState !== 1) return 0;
+    if (!mongoose?.connection || mongoose.connection.readyState !== 1) return 0;
     return await model.countDocuments(filter);
   } catch (e) {
     console.error('[stats] count failed', { model: model && model.modelName, filter, error: e?.message || e });
@@ -28,7 +29,7 @@ async function safeCount(model, filter = {}) {
 async function safeDistinctCount(model, field, filter = {}) {
   try {
     if (!model || !model.distinct) return 0;
-    if (model.db && model.db.readyState !== 1) return 0;
+    if (!mongoose?.connection || mongoose.connection.readyState !== 1) return 0;
     const values = await model.distinct(field, filter);
     if (!Array.isArray(values)) return 0;
     const normalized = values
@@ -45,13 +46,46 @@ async function safeAggregate(model, pipeline) {
   try {
     if (!model || !model.aggregate) return [];
     // Prevent Mongoose buffering timeouts when DB is not connected.
-    if (model.db && model.db.readyState !== 1) return [];
+    if (!mongoose?.connection || mongoose.connection.readyState !== 1) return [];
     const rows = await model.aggregate(pipeline);
     return Array.isArray(rows) ? rows : [];
   } catch (e) {
     console.error('[stats] aggregate failed', { model: model && model.modelName, error: e?.message || e });
     return [];
   }
+}
+
+function langValueExpression() {
+  return {
+    $let: {
+      vars: {
+        raw: { $ifNull: ['$lang', '$language'] },
+      },
+      in: {
+        $cond: [
+          { $or: [{ $eq: ['$$raw', null] }, { $eq: ['$$raw', ''] }] },
+          null,
+          {
+            $toLower: {
+              $trim: {
+                input: { $toString: '$$raw' },
+              },
+            },
+          },
+        ],
+      },
+    },
+  };
+}
+
+function categoryValueExpression() {
+  return {
+    $cond: [
+      { $or: [{ $eq: ['$category', null] }, { $eq: ['$category', ''] }] },
+      null,
+      { $toLower: { $trim: { input: { $toString: '$category' } } } },
+    ],
+  };
 }
 
 function getVersion() {
@@ -75,22 +109,31 @@ exports.getSystemStats = async (req, res) => {
     // Dashboard-friendly stats payload (real DB counts; no demo data)
     // Required keys: totalNews, categories, languages, activeUsers, aiLogs
 
-    // Prefer Article model if present; else fall back to News.
-    const Article = safeRequire('../models/Article');
-    const articleModel = Article || News;
+    // Admin dashboard should reflect the same source as the CMS/admin list endpoints.
+    // In this codebase that's `News`.
+    const articleModel = News;
 
     // AI logs: use a model if present (KiranOSLog exists in this repo), else 0.
     const KiranOSLog = safeRequire('../models/KiranOSLog');
 
-    const [totalNews, languagesFromArticles, aiLogs] = await Promise.all([
+    const [totalNews, aiLogs, categoryRows, languageRows] = await Promise.all([
       // Count ALL articles (draft + published + scheduled + archived + deleted)
       safeCount(articleModel, {}),
-      safeDistinctCount(articleModel, 'language', {}),
       safeCount(KiranOSLog, {}),
+      safeAggregate(articleModel, [
+        { $project: { categoryValue: categoryValueExpression() } },
+        { $match: { categoryValue: { $ne: null } } },
+        { $group: { _id: '$categoryValue', count: { $sum: 1 } } },
+      ]),
+      safeAggregate(articleModel, [
+        { $project: { langValue: langValueExpression() } },
+        { $match: { langValue: { $ne: null } } },
+        { $group: { _id: '$langValue', count: { $sum: 1 } } },
+      ]),
     ]);
 
-    const categories = Array.isArray(DASHBOARD_CATEGORIES) ? DASHBOARD_CATEGORIES.length : 0;
-    const languages = languagesFromArticles;
+    const categories = Array.isArray(categoryRows) ? categoryRows.length : 0;
+    const languages = Array.isArray(languageRows) ? languageRows.length : 0;
     const activeUsers = 0;
 
     return res.status(200).json({

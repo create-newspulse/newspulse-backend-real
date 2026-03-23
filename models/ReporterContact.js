@@ -39,11 +39,14 @@ const StatsSchema = new mongoose.Schema({
   approvedStories: { type: Number, default: 0 },
   pendingStories: { type: Number, default: 0 },
   lastStoryAt: { type: Date },
+  lastStoryTitle: { type: String, trim: true },
 }, { _id: false });
 
 const ReporterContactSchema = new mongoose.Schema({
   fullName: { type: String, required: true, trim: true },
   email: { type: String, required: true, lowercase: true, trim: true, unique: true },
+  // Back-compat helper for clients that expect an explicit lowercase field
+  emailLower: { type: String, lowercase: true, trim: true, index: true },
 
   phoneCountryCode: { type: String, default: '+91' },
   phoneNumber: { type: String, trim: true },
@@ -105,8 +108,23 @@ const ReporterContactSchema = new mongoose.Schema({
   verifiedAt: { type: Date },
 }, { timestamps: true });
 
+// Keep emailLower in sync for back-compat and stable lookup keys.
+ReporterContactSchema.pre('validate', function(next) {
+  try {
+    if (!this.emailLower && this.email) {
+      this.emailLower = String(this.email).trim().toLowerCase();
+    }
+  } catch (_) {}
+  next();
+});
+
 // Indexes
 ReporterContactSchema.index({ email: 1 }, { unique: true });
+// Unique but safe: ignore docs where emailLower is missing/null.
+ReporterContactSchema.index(
+  { emailLower: 1 },
+  { unique: true, partialFilterExpression: { emailLower: { $type: 'string' } } }
+);
 ReporterContactSchema.index({ phoneFull: 1 });
 ReporterContactSchema.index({ stateName: 1, districtName: 1, talukaName: 1, areaType: 1 });
 ReporterContactSchema.index({ fullName: 'text', cityTownVillage: 'text', districtName: 'text' });

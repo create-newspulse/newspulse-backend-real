@@ -231,6 +231,15 @@ router.post('/submissions', async (req, res) => {
     if (!story || !String(story).trim()) errors.push('story required');
     if (errors.length) return res.status(400).json({ success: false, message: 'Validation failed', errors });
 
+    // Parse location string ("City, State, Country") when frontend sends a single text field.
+    const locationText = (typeof location === 'string') ? String(location).trim() : '';
+    const locationParts = locationText
+      ? locationText.split(',').map(s => s.trim()).filter(Boolean)
+      : [];
+    const locationCityFromText = locationParts[0] || null;
+    const locationStateFromText = locationParts[1] || null;
+    const locationCountryFromText = locationParts[2] || null;
+
     // Upsert reporter contact (community type)
     const { upsertReporterContactFromPayload } = require('../services/reporterContactService');
     let reporterResult = null;
@@ -240,10 +249,14 @@ router.post('/submissions', async (req, res) => {
         name: (fullName || name || '').trim(),
         email: email.trim().toLowerCase(),
         phone: phone,
-        city: (city || location || '').trim(),
-        state: state,
-        country: country,
+        city: (city || locationCityFromText || '').trim(),
+        state: (state || locationStateFromText || '').trim(),
+        country: (country || locationCountryFromText || '').trim(),
         reporterType,
+        stats: {
+          lastStoryAt: new Date(),
+          lastStoryTitle: (headline || '').trim(),
+        },
         languages: Array.isArray(preferredLanguages) ? preferredLanguages : undefined,
         interests: Array.isArray(communityInterests) ? communityInterests : undefined,
         heardAbout,
@@ -261,9 +274,9 @@ router.post('/submissions', async (req, res) => {
       // Continue without reporterContact (fallback legacy behavior)
     }
 
-    const cityNorm = (city || location || '').trim();
-    const stateNorm = (state || '').trim();
-    const countryNorm = (country || '').trim();
+    const cityNorm = (city || locationCityFromText || locationText || '').trim();
+    const stateNorm = (state || locationStateFromText || '').trim();
+    const countryNorm = (country || locationCountryFromText || '').trim();
     // Log reporter email used for saving
     console.log('[COMMUNITY_REPORTER][create] saving submission for reporterEmail:', (email || '').trim().toLowerCase());
     const submission = await CommunitySubmission.create({
@@ -294,6 +307,12 @@ router.post('/submissions', async (req, res) => {
         return 'unverified';
       })(),
     });
+
+    // Contributor network linkage (best-effort; never blocks submission)
+    try {
+      const { resolveAndAttachForSubmission } = require('../services/reporterIdentityResolution.service');
+      await resolveAndAttachForSubmission(submission, { req });
+    } catch (_) {}
     if (process.env.NODE_ENV !== 'test') {
       try {
         await runCommunityAiChecks(submission);
@@ -316,7 +335,7 @@ router.post('/submissions', async (req, res) => {
       riskScore: submission.riskScore,
       flags: submission.flags,
       status: externalStatus(submission.status),
-      reporterId: submission.reporterId || null,
+      reporterId: submission.reporterId ? String(submission.reporterId) : null,
       sourceType: submission.sourceType,
       reporterVerificationLevel: submission.reporterVerificationLevel,
       createdAt: submission.createdAt,
@@ -335,12 +354,12 @@ router.get('/my-stories', async (req, res) => {
     const emailQuery = req.query && req.query.email;
     const email = String(emailQuery || '').trim().toLowerCase();
     if (!email) {
-      return res.status(400).json({ message: 'Email is required' });
+      return res.status(400).json({ success: false, message: 'Email is required' });
     }
 
     // In local/test runs without MongoDB, avoid Mongoose command buffering delays.
     if (!mongoose.connection || mongoose.connection.readyState !== 1) {
-      return res.status(200).json({ ok: true, success: true, stories: [], submissions: [], message: 'Database unavailable' });
+      return res.status(200).json({ success: true, items: [], total: 0, stories: [], submissions: [], message: 'Database unavailable' });
     }
 
     // Primary: Phase-1 schema stores email at the top-level `email`.
@@ -359,21 +378,37 @@ router.get('/my-stories', async (req, res) => {
       .lean();
 
     const items = docs.map(s => {
-      const city = (s.location && s.location.city) || s.city || s.reporterLocation || null;
+      const emailOut = (s.reporterEmailNorm || s.reporterEmail || s.email || (s.contact && s.contact.email) || null);
+      const nameOut = (s.reporterName || s.name || (s.contact && s.contact.name) || null);
+      const rawLocation = s.reporterLocation || null;
+      const locObj = s.location || s.locationDetail || null;
+      const city = (locObj && locObj.city) || s.city || rawLocation || null;
+      const locationText = rawLocation || (typeof city === 'string' ? city : null);
+
       return {
         id: String(s._id),
         headline: s.headline || '',
         story: s.body || '',
         ageGroup: s.ageGroup || null,
         status: s.status || 'NEW',
-        location: s.location || (city ? { city, state: s.state || null, country: s.country || null } : null),
+        name: nameOut,
+        email: emailOut,
+        location: locationText,
+        locationObj: locObj,
         createdAt: s.createdAt || null,
         updatedAt: s.updatedAt || null,
       };
     });
 
-    // Frontend compatibility: some builds expect `stories`, others `submissions`.
-    return res.status(200).json({ ok: true, success: true, stories: items, submissions: items });
+    return res.status(200).json({
+      success: true,
+      items,
+      total: items.length,
+      // Backward compatibility
+      ok: true,
+      stories: items,
+      submissions: items,
+    });
   } catch (error) {
     console.error('CommunityReporter my-stories error:', error);
     return res.status(500).json({ message: 'Internal error in Community Reporter my stories' });
@@ -433,6 +468,38 @@ router.post('/submit', async (req, res) => {
     const locationObj = (location && typeof location === 'object') ? location : null;
     const locationText = (typeof location === 'string') ? location.trim() : undefined;
 
+    // Parse "City, State, Country" if location comes as a string.
+    let parsedCity = null;
+    let parsedState = null;
+    let parsedCountry = null;
+    if (locationText) {
+      const parts = locationText.split(',').map(s => s.trim()).filter(Boolean);
+      parsedCity = parts[0] || null;
+      parsedState = parts[1] || null;
+      parsedCountry = parts[2] || null;
+    }
+
+    // Best-effort: upsert contact directory (do not block submit flow)
+    const { upsertReporterContactFromPayload, upsertReporterContactFromSubmission } = require('../services/reporterContactService');
+    let reporterResult = null;
+    try {
+      reporterResult = await upsertReporterContactFromPayload({
+        name: nameNorm,
+        email: emailNorm,
+        phone: (req.body && (req.body.phone || req.body.whatsapp)) || undefined,
+        city: locationObj?.city || parsedCity || undefined,
+        state: locationObj?.state || parsedState || undefined,
+        country: locationObj?.country || parsedCountry || undefined,
+        reporterType: 'community',
+        stats: {
+          lastStoryAt: new Date(),
+          lastStoryTitle: headlineNorm,
+        },
+      });
+    } catch (err) {
+      console.error('ReporterContact upsert error:', err?.message || err);
+    }
+
     const submission = await CommunitySubmission.create({
       name: nameNorm,
       email: emailNorm,
@@ -443,18 +510,32 @@ router.post('/submit', async (req, res) => {
         city: locationObj.city ?? null,
         state: locationObj.state ?? null,
         country: locationObj.country ?? null,
-      } : (locationText ? { city: locationText || null, state: null, country: null } : { city: null, state: null, country: null }),
+      } : (locationText ? { city: parsedCity || locationText || null, state: parsedState || null, country: parsedCountry || null } : { city: null, state: null, country: null }),
       headline: headlineNorm,
       story: storyNorm,
       ageGroup: ageGroupNorm,
       status: 'NEW',
       sourceType: 'community',
       reporterVerificationLevel: 'unverified',
+      reporterId: reporterResult ? reporterResult.contactId : undefined,
       ipAddress: req.ip ? String(req.ip) : undefined,
       userAgent: req.get('user-agent') ? String(req.get('user-agent')) : undefined,
     });
 
-    return res.status(201).json({ success: true, id: submission._id });
+    // Contributor network linkage (best-effort; never blocks submission)
+    try {
+      const { resolveAndAttachForSubmission } = require('../services/reporterIdentityResolution.service');
+      await resolveAndAttachForSubmission(submission, { req });
+    } catch (_) {}
+
+    // Optional second-pass upsert from saved submission (fills counts/latest more accurately).
+    try {
+      await upsertReporterContactFromSubmission(submission);
+    } catch (err) {
+      console.error('ReporterContact upsert error:', err?.message || err);
+    }
+
+    return res.status(201).json({ success: true, id: submission._id && typeof submission._id.toString === 'function' ? submission._id.toString() : submission._id });
   } catch (error) {
     console.error('CommunityReporterSubmit error:', error);
     // Surface validation errors as 400s to avoid noisy 500s for bad payloads.

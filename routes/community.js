@@ -78,6 +78,12 @@ router.post('/submissions', async (req, res) => {
 
     const saved = await CommunitySubmission.create(submissionData);
 
+    // Contributor network linkage (best-effort; never blocks submission)
+    try {
+      const { resolveAndAttachForSubmission } = require('../services/reporterIdentityResolution.service');
+      await resolveAndAttachForSubmission(saved, { req });
+    } catch (_) {}
+
     // Fire-and-forget reporter contact upsert (non-blocking)
     try {
       const { upsertReporterContactFromPayload } = require('../services/reporterContactService');

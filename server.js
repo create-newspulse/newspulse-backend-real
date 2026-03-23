@@ -55,6 +55,22 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
     // eslint-disable-next-line no-console
     console.warn('[startup] JWT_SECRET is not set; auth endpoints may fail until configured.');
   }
+
+  // Cloudinary is optional; warn once when missing so admins understand why cover uploads fail.
+  try {
+    const { getCloudinaryConfigStatus, initCloudinaryIfConfigured } = require('./lib/cloudinary');
+    const st = getCloudinaryConfigStatus();
+    // Apply Cloudinary config at startup when available (no network calls).
+    if (st.configured) {
+      initCloudinaryIfConfigured();
+    }
+    if (!st.configured) {
+      // eslint-disable-next-line no-console
+      console.warn('[startup] Cloudinary not configured; cover image uploads will be unavailable.', {
+        missing: st.missing,
+      });
+    }
+  } catch (_) {}
 }
 
 function _redactMongoUri(uri) {
@@ -144,6 +160,7 @@ const communityReporterSettingsRouter = require(`${BASE}/routes/adminSettings/co
 const dashboardStatsRouter = require('./routes/dashboardStats');
 const adminDashboardRoutes = require('./routes/adminDashboard.routes');
 const adminCommunityReporterQueueRouter = require('./routes/admin/communityReporterQueue');
+const adminContributorNetworkRouter = require('./routes/adminContributorNetwork.routes');
 const founderFeatureTogglesRouter = require('./routes/admin/founderFeatureToggles');
 const alertsRouter = require('./routes/alerts');
 const securityRouter = require('./routes/security');
@@ -204,6 +221,8 @@ const publicApiBroadcastRouter = require('./routes/publicApiBroadcast.routes');
 const publicTickerRouter = require('./routes/publicTicker.routes');
 const publicWeatherRouter = require('./routes/publicWeather.routes');
 const debugRouter = require('./routes/_debug.routes');
+const articleAnalyticsRouter = require('./routes/articleAnalytics.routes');
+const adminAnalyticsRouter = require('./routes/adminAnalytics.routes');
 let adminWorkflowApiRouter = null;
 let adminPushHistoryApiRouter = null;
 let adminWorkflowLegacyRouter = null;
@@ -600,7 +619,7 @@ app.use((req, res, next) => {
   return next();
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 // Friendly error for invalid JSON bodies (e.g. bad Unicode escapes like "\\u0" without 4 hex digits).
 app.use((err, req, res, next) => {
   try {
@@ -621,6 +640,12 @@ const uploadRoutes = require('./routes/uploads.routes');
 app.use('/api/uploads', uploadRoutes);
 app.use('/admin-api/uploads', uploadRoutes);
 app.use('/admin-api/api/uploads', uploadRoutes);
+
+// Media status routes (admin capability checks)
+const mediaRoutes = require('./routes/media.routes');
+app.use('/api/media', mediaRoutes);
+app.use('/admin-api/media', mediaRoutes);
+app.use('/admin-api/api/media', mediaRoutes);
 
 // Admin panel compat endpoints (fast fallbacks)
 const adminCompatRoutes = require('./src/routes/adminCompat.routes');
@@ -1325,6 +1350,17 @@ app.use('/api/public', publicUiLabelsRouter);
 app.use('/admin-api/public', publicUiLabelsRouter);
 app.use('/admin-api/api/public', publicUiLabelsRouter);
 
+// Public analytics ingestion (NO AUTH)
+app.use('/api/analytics', articleAnalyticsRouter);
+// Admin panel proxy basePath support (some deployments call /admin-api/*)
+app.use('/admin-api/analytics', articleAnalyticsRouter);
+app.use('/admin-api/api/analytics', articleAnalyticsRouter);
+
+// Admin analytics (admin-only)
+app.use('/api/admin/analytics', adminAnalyticsRouter);
+app.use('/admin-api/admin/analytics', adminAnalyticsRouter);
+app.use('/admin-api/api/admin/analytics', adminAnalyticsRouter);
+
 // Articles router mounted at /api and alias at root for /articles
 app.use('/api', articlesRoutes);
 app.use('/', articlesRoutes);
@@ -1383,26 +1419,6 @@ app.use('/api/community', communityRoutes);
 app.use('/api/community', communityStoriesRouter);
 // PUBLIC routes – must be before any /api auth-protected mounts
 app.get('/api/community-reporter/queue', getCommunityReporterQueue);
-app.get('/api/community-reporter/contacts', listReporterContacts);
-
-// Admin/founder delete APIs for reporter contact directory + submissions
-// NOTE: These are intentionally NOT part of routes/communityReporter.js because that router is also
-// mounted under /api/public/community-reporter.
-app.delete('/api/community-reporter/contacts/:id', requireFounderOrAdmin, deleteReporterContact);
-app.post('/api/community-reporter/contacts/bulk-delete', requireFounderOrAdmin, bulkDeleteReporterContacts);
-app.delete('/api/community-reporter/stories/:id', requireFounderOrAdmin, deleteCommunityReporterStory);
-app.post('/api/community-reporter/stories/bulk-delete', requireFounderOrAdmin, bulkDeleteCommunityReporterStories);
-
-// Admin Panel (required contract)
-app.delete('/api/admin/community-reporter/contacts/:id', requireFounderOrAdmin, deleteReporterContact);
-app.post('/api/admin/community-reporter/contacts/bulk-delete', requireFounderOrAdmin, bulkDeleteReporterContacts);
-
-// Backward/compat aliases observed in some admin builds (keep until frontend is standardized)
-app.delete('/api/admin/community/reporter-contacts/:id', requireFounderOrAdmin, deleteReporterContact);
-app.post('/api/admin/community/reporter-contacts/delete', requireFounderOrAdmin, bulkDeleteReporterContacts);
-// Admin UI often calls these aliases; expose public read-only directory
-app.get('/api/admin/community/reporter-contacts', listReporterContacts);
-app.get('/admin-api/admin/community/reporter-contacts', listReporterContacts);
 app.use('/api/community-reporter', communityReporterRoutes);
 // Public alias to match frontend expectation
 app.use('/api/public/community-reporter', communityReporterRoutes);
@@ -1732,6 +1748,9 @@ app.get('/api/admin/community-reporter/queue', requireAdminAuth, async (req, res
 try {
   const adminCommunityReporterRouter = require('./routes/adminCommunityReporter');
   app.use('/api/admin/community-reporter', adminCommunityReporterRouter);
+  // Admin frontend often proxies through /admin-api/*
+  app.use('/admin-api/admin/community-reporter', adminCommunityReporterRouter);
+  app.use('/admin-api/api/admin/community-reporter', adminCommunityReporterRouter);
   app.use('/admin/community-reporter', adminCommunityReporterRouter);
   // Also mount under /admin/community for journalist applications aliases
   app.use('/admin/community', adminCommunityReporterRouter);
@@ -1740,6 +1759,12 @@ try {
 } catch (e) {
   console.warn('[init] optional routes/adminCommunityReporter not found; skipping');
 }
+
+// Contributor Network (admin): canonical contributor profiles/queues/backfill
+app.use('/api/admin/community-reporter/network', adminContributorNetworkRouter);
+app.use('/admin-api/admin/community-reporter/network', adminContributorNetworkRouter);
+app.use('/admin-api/api/admin/community-reporter/network', adminContributorNetworkRouter);
+app.use('/admin/community-reporter/network', adminContributorNetworkRouter);
 if (aiRoutes) app.use('/api/ai', aiRoutes);
 if (feedRoutes) app.use('/api/feed', feedRoutes);
 app.use('/api/admin/community', communityAdminContactsRoutes);
@@ -1829,55 +1854,6 @@ app.get('/community/submissions', requireAdminAuth, (req, res, next) => {
   } catch (e) {
     console.error('[alias][community/submissions] delegate failed', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to load submissions' });
-  }
-});
-app.get('/admin/community/reporter-contacts', requireAdminAuth, async (req, res, next) => {
-  if (res.headersSent) return next();
-  if (communityAdminContactsRoutes) return next();
-  return res.json({ ok: true, items: [], total: 0 });
-});
-app.get('/admin/community/reporter-stories', requireAdminAuth, async (req, res) => {
-  try {
-    const reporterKeyRaw = ((req.query.reporterKey || req.query.email || '')).toString().trim();
-    if (!reporterKeyRaw) return res.status(400).json({ ok: false, message: 'Missing reporterKey or email' });
-    const reporterKey = reporterKeyRaw.toLowerCase();
-    const pageNum = Math.max(parseInt(req.query.page || '1', 10), 1);
-    const limitNum = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
-    const skip = (pageNum - 1) * limitNum;
-    const status = (req.query.status || '').toString().trim();
-
-    const baseFilter = {
-      $or: [
-        { reporterEmail: reporterKey },
-        { 'contact.email': reporterKey },
-        { email: reporterKey },
-      ],
-    };
-    if (status && status !== 'all') {
-      baseFilter.$and = (baseFilter.$and || []).concat([{ status }]);
-    }
-
-    const [docs, total] = await Promise.all([
-      CommunitySubmission.find(baseFilter).sort({ createdAt: -1 }).skip(skip).limit(limitNum).lean(),
-      CommunitySubmission.countDocuments(baseFilter),
-    ]);
-    const items = docs.map(d => ({
-      id: d._id.toString(),
-      title: d.headline || '',
-      summary: null,
-      status: d.status || 'draft',
-      language: d.language || 'en',
-      category: d.category || null,
-      city: (d.location?.city || d.city || d.locationDetail?.city || null),
-      createdAt: d.createdAt ? d.createdAt.toISOString() : null,
-      updatedAt: d.updatedAt ? d.updatedAt.toISOString() : null,
-      aiRisk: typeof d.riskScore === 'number' ? String(d.riskScore) : null,
-      priority: d.priority || null,
-    }));
-    return res.json({ ok: true, items, total, page: pageNum, limit: limitNum });
-  } catch (e) {
-    console.error('[ADMIN][reporter-stories] error', e?.message || e);
-    return res.status(500).json({ ok: false, message: 'Failed to load reporter stories' });
   }
 });
 

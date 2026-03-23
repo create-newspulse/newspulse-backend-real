@@ -55,6 +55,7 @@ router.patch('/submissions/:id/status', requireAdminAuth, async (req, res) => {
     }
     const submission = await CommunitySubmission.findById(id);
     if (!submission) return res.status(404).json({ ok: false, message: 'Not found' });
+    const prevStatus = submission.status;
     if (status === 'APPROVED') {
       submission.status = 'APPROVED';
       submission.rejectReason = undefined;
@@ -63,6 +64,20 @@ router.patch('/submissions/:id/status', requireAdminAuth, async (req, res) => {
       submission.rejectReason = rejectReason || 'Not specified';
     }
     await submission.save();
+
+    // Contributor network stats sync (best-effort)
+    try {
+      const {
+        resolveAndAttachForSubmission,
+        updateReporterProfileStatsForStatusChange,
+      } = require('../services/reporterIdentityResolution.service');
+      const link = await resolveAndAttachForSubmission(submission, { req });
+      const profileId = submission.reporterProfileId || link?.profileId;
+      if (profileId) {
+        await updateReporterProfileStatsForStatusChange({ profileId, fromStatus: prevStatus, toStatus: submission.status });
+      }
+    } catch (_) {}
+
     return res.json({ ok: true, submission: {
       _id: submission._id,
       name: submission.name,

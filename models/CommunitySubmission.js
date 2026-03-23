@@ -63,6 +63,11 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   linkedArticleId: { type: mongoose.Schema.Types.ObjectId, ref: 'News', required: false, default: null, index: true },
   // Reporter identity (optional)
   reporterUserId: { type: String, required: false, trim: true },
+
+  // Contributor network (phase-1): canonical reporter profile link + identity diagnostics
+  reporterProfileId: { type: mongoose.Schema.Types.ObjectId, ref: 'ReporterProfile', required: false, default: null, index: true },
+  identityFlags: { type: [String], required: false, default: [], index: true },
+  identityResolutionMethod: { type: String, required: false, trim: true, default: null },
   // Request context
   ipAddress: { type: String, required: false, trim: true },
   userAgent: { type: String, required: false, trim: true },

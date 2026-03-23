@@ -1,12 +1,32 @@
 const express = require('express');
-const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireAdminAuth, requireFounderOrAdmin } = require('../middleware/adminAuth');
 const ReporterContact = require('../models/ReporterContact');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const { addStrikeForReporter } = require('../services/reporterSafetyService');
 const News = require('../models/News');
 const mongoose = require('mongoose');
+const { upsertReporterContact } = require('../services/reporterContactService');
+
+const {
+  adminListReporterContacts,
+  adminListReporterContactStories,
+  backfillReporterContactsFromSubmissions,
+  deleteReporterContact,
+  bulkDeleteReporterContacts,
+  deleteCommunityReporterStory,
+  bulkDeleteCommunityReporterStories,
+} = require('../controllers/communityReporterController');
 
 const router = express.Router();
+
+// --- Final contract: contacts + stories (ONLY under /api/admin/community-reporter) ---
+router.get('/contacts', requireAdminAuth, adminListReporterContacts);
+router.get('/contacts/:id/stories', requireAdminAuth, adminListReporterContactStories);
+router.post('/contacts/backfill', requireFounderOrAdmin, backfillReporterContactsFromSubmissions);
+router.delete('/contacts/:id', requireFounderOrAdmin, deleteReporterContact);
+router.post('/contacts/bulk-delete', requireFounderOrAdmin, bulkDeleteReporterContacts);
+router.delete('/stories/:storyId', requireFounderOrAdmin, deleteCommunityReporterStory);
+router.post('/stories/bulk-delete', requireFounderOrAdmin, bulkDeleteCommunityReporterStories);
 
 // Helper: create or update a draft News article from a submission
 async function upsertDraftFromSubmission(submission) {
@@ -15,6 +35,54 @@ async function upsertDraftFromSubmission(submission) {
   if (process.env.NODE_ENV === 'test' || mongoose.connection?.readyState !== 1) {
     return null;
   }
+
+  // Ensure reporter exists in directory and link submission.reporterId
+  try {
+    const email = String(
+      submission.reporterEmailNorm ||
+      submission.reporterEmail ||
+      submission.email ||
+      (submission.contact && submission.contact.email) ||
+      ''
+    ).trim().toLowerCase();
+
+    const name = String(
+      submission.reporterName ||
+      submission.name ||
+      (submission.contact && submission.contact.name) ||
+      ''
+    ).trim();
+
+    if (email) {
+      const loc = submission.location || submission.locationDetail || {};
+      const phone = submission.contact && submission.contact.phone ? String(submission.contact.phone).trim() : '';
+      const reporterType = submission.sourceType === 'journalist' ? 'journalist' : 'community';
+
+      const { contactId } = await upsertReporterContact({
+        name: name || undefined,
+        email,
+        phone: phone || undefined,
+        city: loc.city || undefined,
+        state: loc.state || undefined,
+        country: loc.country || undefined,
+        reporterType,
+        stats: {
+          lastStoryAt: submission.createdAt || new Date(),
+          lastStoryTitle: submission.headline || undefined,
+        },
+      });
+
+      if (contactId && !submission.reporterId) {
+        try {
+          submission.reporterId = contactId;
+          await submission.save();
+        } catch (_) {}
+      }
+    }
+  } catch (e) {
+    console.error('[COMMUNITY][DRAFT_UPSERT][contact-upsert] failed', e?.message || e);
+  }
+
   const safe = (v) => (v == null ? '' : String(v));
   const title = safe(submission.headline) || 'Untitled';
   const body = safe(submission.body || submission.story);
@@ -126,7 +194,10 @@ router.get('/submissions', requireAdminAuth, async (req, res) => {
       const regex = new RegExp(String(q).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       filter.$or = (filter.$or || []).concat([
         { headline: regex },
-        { location: regex },
+        { reporterLocation: regex },
+        { 'location.city': regex },
+        { 'locationDetail.city': regex },
+        { city: regex },
       ]);
     }
 
@@ -136,22 +207,31 @@ router.get('/submissions', requireAdminAuth, async (req, res) => {
       CommunitySubmission.countDocuments(filter),
     ]);
 
-    const mapped = items.map(s => ({
-      id: s._id.toString(),
-      headline: s.headline,
-      story: s.body,
-      category: s.category,
-      location: s.location || (s.locationDetail && s.locationDetail.city) || null,
-      status: s.status,
-      sourceType: s.sourceType || 'community', // compatibility default
-      reporterVerificationLevel: s.reporterVerificationLevel || 'community_default',
-      reporterId: s.reporterId || null,
-      reporterName: s.reporterName || s.name || (s.contact && s.contact.name) || null,
-      reporterEmail: s.reporterEmail || s.email || (s.contact && s.contact.email) || null,
-      riskScore: s.riskScore || 0,
-      flags: s.flags || [],
-      createdAt: s.createdAt,
-    }));
+    const mapped = items.map(s => {
+      const reporterName = s.reporterName || s.name || (s.contact && s.contact.name) || null;
+      const reporterEmail = s.reporterEmailNorm || s.reporterEmail || s.email || (s.contact && s.contact.email) || null;
+      const locationObj = s.location || s.locationDetail || null;
+      const locationText = s.reporterLocation || (locationObj && locationObj.city) || s.city || null;
+
+      return {
+        id: s._id.toString(),
+        headline: s.headline,
+        story: s.body,
+        category: s.category,
+        location: locationText,
+        locationObj,
+        status: s.status,
+        sourceType: s.sourceType || 'community', // compatibility default
+        reporterVerificationLevel: s.reporterVerificationLevel || 'community_default',
+        reporterId: s.reporterId || null,
+        reporterName,
+        reporterEmail,
+        reporterPhone: (s.contact && s.contact.phone) || null,
+        riskScore: s.riskScore || 0,
+        flags: s.flags || [],
+        createdAt: s.createdAt,
+      };
+    });
 
     console.log('[ADMIN_COMMUNITY][list] rawStatus=%s, appliedStatusFilter=%j, count=%d', rawStatus, statusFilter, mapped.length);
 
@@ -345,6 +425,8 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Submission not found' });
     }
 
+    const prevStatus = submission.status;
+
     // Support multiple input keys: decision, status, action
     const decisionInput = (req.body && (req.body.decision || req.body.status || req.body.action)) || '';
     const decisionRaw = String(decisionInput).trim().toLowerCase();
@@ -404,6 +486,19 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
         await submission.save();
       }
       console.log('[ADMIN_COMMUNITY][decision][post-save]', { id: submission._id.toString(), status: submission.status, linkedArticleId: submission.linkedArticleId?.toString?.() });
+
+      // Contributor network stats sync (best-effort)
+      try {
+        const {
+          resolveAndAttachForSubmission,
+          updateReporterProfileStatsForStatusChange,
+        } = require('../services/reporterIdentityResolution.service');
+        const link = await resolveAndAttachForSubmission(submission, { req });
+        const profileId = submission.reporterProfileId || link?.profileId;
+        if (profileId) {
+          await updateReporterProfileStatsForStatusChange({ profileId, fromStatus: prevStatus, toStatus: submission.status });
+        }
+      } catch (_) {}
     } catch (saveErr) {
       console.error('[community decision][save-error]', saveErr?.message || saveErr);
       // Fallback for legacy docs failing validation: perform direct update without full validation
@@ -420,6 +515,20 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
         if (submission.linkedArticleId) setObj.linkedArticleId = submission.linkedArticleId;
         const upd = await CommunitySubmission.updateOne({ _id: submission._id }, { $set: setObj });
         console.log('[community decision][fallback-update]', upd);
+
+        // Contributor network stats sync (best-effort)
+        try {
+          const {
+            resolveAndAttachForSubmission,
+            updateReporterProfileStatsForStatusChange,
+          } = require('../services/reporterIdentityResolution.service');
+          const link = await resolveAndAttachForSubmission(submission, { req });
+          const profileId = submission.reporterProfileId || link?.profileId;
+          if (profileId) {
+            await updateReporterProfileStatsForStatusChange({ profileId, fromStatus: prevStatus, toStatus: setObj.status });
+          }
+        } catch (_) {}
+
         const fresh = await CommunitySubmission.findById(submission._id).lean();
         return res.json({ ok: true, success: true, submission: fresh, articleId: submission.linkedArticleId || null });
       } catch (updErr) {
@@ -444,6 +553,7 @@ router.post('/submissions/:id/approve', requireAdminAuth, async (req, res) => {
     }
     const submission = await CommunitySubmission.findById(id);
     if (!submission) return res.status(404).json({ ok: false, message: 'Submission not found' });
+    const prevStatus = submission.status;
     submission.status = 'APPROVED';
     submission.rejectReason = undefined;
     // Ensure a draft article exists/updated for this submission
@@ -459,6 +569,20 @@ router.post('/submissions/:id/approve', requireAdminAuth, async (req, res) => {
     } catch (_) {}
     try {
       await submission.save();
+
+      // Contributor network stats sync (best-effort)
+      try {
+        const {
+          resolveAndAttachForSubmission,
+          updateReporterProfileStatsForStatusChange,
+        } = require('../services/reporterIdentityResolution.service');
+        const link = await resolveAndAttachForSubmission(submission, { req });
+        const profileId = submission.reporterProfileId || link?.profileId;
+        if (profileId) {
+          await updateReporterProfileStatsForStatusChange({ profileId, fromStatus: prevStatus, toStatus: 'APPROVED' });
+        }
+      } catch (_) {}
+
       return res.json({ ok: true, success: true, submission, articleId: submission.linkedArticleId || null });
     } catch (e) {
       // Fallback update without validation
@@ -470,6 +594,20 @@ router.post('/submissions/:id/approve', requireAdminAuth, async (req, res) => {
         if (submission.linkedArticleId) setObj.linkedArticleId = submission.linkedArticleId;
         const upd = await CommunitySubmission.updateOne({ _id: submission._id }, { $set: setObj });
         console.log('[ADMIN_COMMUNITY][approve][fallback-update]', upd);
+
+        // Contributor network stats sync (best-effort)
+        try {
+          const {
+            resolveAndAttachForSubmission,
+            updateReporterProfileStatsForStatusChange,
+          } = require('../services/reporterIdentityResolution.service');
+          const link = await resolveAndAttachForSubmission(submission, { req });
+          const profileId = submission.reporterProfileId || link?.profileId;
+          if (profileId) {
+            await updateReporterProfileStatsForStatusChange({ profileId, fromStatus: prevStatus, toStatus: 'APPROVED' });
+          }
+        } catch (_) {}
+
         const fresh = await CommunitySubmission.findById(submission._id).lean();
         return res.json({ ok: true, success: true, submission: fresh, articleId: submission.linkedArticleId || null });
       } catch (ue) {
@@ -503,6 +641,7 @@ router.post('/submissions/:id/reject', requireAdminAuth, async (req, res) => {
     }
     const submission = await CommunitySubmission.findById(id);
     if (!submission) return res.status(404).json({ ok: false, message: 'Submission not found' });
+    const prevStatus = submission.status;
     submission.status = 'REJECTED';
     submission.rejectReason = rejectReason;
     try {
@@ -512,6 +651,20 @@ router.post('/submissions/:id/reject', requireAdminAuth, async (req, res) => {
     } catch (_) {}
     try {
       await submission.save();
+
+      // Contributor network stats sync (best-effort)
+      try {
+        const {
+          resolveAndAttachForSubmission,
+          updateReporterProfileStatsForStatusChange,
+        } = require('../services/reporterIdentityResolution.service');
+        const link = await resolveAndAttachForSubmission(submission, { req });
+        const profileId = submission.reporterProfileId || link?.profileId;
+        if (profileId) {
+          await updateReporterProfileStatsForStatusChange({ profileId, fromStatus: prevStatus, toStatus: 'REJECTED' });
+        }
+      } catch (_) {}
+
       // Safety: ethics strike on reject when reporterId present
       try {
         const reason = rejectReason || submission.rejectReason || 'rejected';
@@ -529,6 +682,20 @@ router.post('/submissions/:id/reject', requireAdminAuth, async (req, res) => {
         if ('updatedAt' in submission) setObj.updatedAt = new Date();
         const upd = await CommunitySubmission.updateOne({ _id: submission._id }, { $set: setObj });
         console.log('[ADMIN_COMMUNITY][reject][fallback-update]', upd);
+
+        // Contributor network stats sync (best-effort)
+        try {
+          const {
+            resolveAndAttachForSubmission,
+            updateReporterProfileStatsForStatusChange,
+          } = require('../services/reporterIdentityResolution.service');
+          const link = await resolveAndAttachForSubmission(submission, { req });
+          const profileId = submission.reporterProfileId || link?.profileId;
+          if (profileId) {
+            await updateReporterProfileStatsForStatusChange({ profileId, fromStatus: prevStatus, toStatus: 'REJECTED' });
+          }
+        } catch (_) {}
+
         // Strike on fallback path too
         try {
           const reason = rejectReason || 'rejected';
@@ -559,11 +726,26 @@ router.post('/submissions/:id/restore', requireAdminAuth, async (req, res) => {
     }
     const submission = await CommunitySubmission.findById(id);
     if (!submission) return res.status(404).json({ ok: false, message: 'Submission not found' });
+    const prevStatus = submission.status;
     submission.status = 'under_review';
     submission.rejectReason = undefined;
     try {
       if ('updatedAt' in submission) submission.updatedAt = new Date();
       await submission.save();
+
+      // Contributor network stats sync (best-effort)
+      try {
+        const {
+          resolveAndAttachForSubmission,
+          updateReporterProfileStatsForStatusChange,
+        } = require('../services/reporterIdentityResolution.service');
+        const link = await resolveAndAttachForSubmission(submission, { req });
+        const profileId = submission.reporterProfileId || link?.profileId;
+        if (profileId) {
+          await updateReporterProfileStatsForStatusChange({ profileId, fromStatus: prevStatus, toStatus: 'under_review' });
+        }
+      } catch (_) {}
+
       return res.json({ ok: true, success: true, submission });
     } catch (e) {
       // fallback
@@ -572,6 +754,20 @@ router.post('/submissions/:id/restore', requireAdminAuth, async (req, res) => {
         if ('updatedAt' in submission) setObj.updatedAt = new Date();
         const upd = await CommunitySubmission.updateOne({ _id: submission._id }, { $set: setObj });
         console.log('[ADMIN_COMMUNITY][restore][fallback-update]', upd);
+
+        // Contributor network stats sync (best-effort)
+        try {
+          const {
+            resolveAndAttachForSubmission,
+            updateReporterProfileStatsForStatusChange,
+          } = require('../services/reporterIdentityResolution.service');
+          const link = await resolveAndAttachForSubmission(submission, { req });
+          const profileId = submission.reporterProfileId || link?.profileId;
+          if (profileId) {
+            await updateReporterProfileStatsForStatusChange({ profileId, fromStatus: prevStatus, toStatus: setObj.status });
+          }
+        } catch (_) {}
+
         const fresh = await CommunitySubmission.findById(submission._id).lean();
         return res.json({ ok: true, success: true, submission: fresh });
       } catch (ue) {
