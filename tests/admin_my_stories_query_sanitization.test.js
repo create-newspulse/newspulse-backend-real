@@ -82,16 +82,178 @@ test('Admin my-stories: escapes regex metacharacters in search and supports /adm
     const row = res.body.items[0];
     assert.equal(row.reporterName, 'Ravi Reporter');
     assert.equal(row.reporterEmail, 'ravi@example.com');
-    assert.equal(row.category, 'Local');
+    assert.equal(row.category, 'local');
     assert.equal(row.language, 'gu');
     assert.equal(row.city, 'Rajkot');
     assert.equal(row.district, 'Rajkot');
     assert.equal(row.state, 'Gujarat');
-    assert.equal(row.publicationStatus, 'pending');
+    assert.equal(row.publicationStatus, 'not_published');
     // Optional fields are present and must be stable (can be null).
     assert.ok(Object.prototype.hasOwnProperty.call(row, 'publicUrl'));
     assert.ok(Object.prototype.hasOwnProperty.call(row, 'adminNewsApiUrl'));
     assert.ok(Object.prototype.hasOwnProperty.call(row, 'adminArticleApiUrl'));
+  } finally {
+    CommunitySubmission.find = originalFind;
+    CommunitySubmission.countDocuments = originalCount;
+  }
+});
+
+test('Admin my-stories: computes isPublished from linked News/Article and normalizes category', async () => {
+  const token = jwt.sign(
+    { sub: '507f1f77bcf86cd799439011', email: 'admin@newspulse.ai', role: 'admin', tokenVersion: 0, type: 'access' },
+    process.env.JWT_SECRET,
+    { expiresIn: '1h' },
+  );
+
+  const originalFind = CommunitySubmission.find;
+  const originalCount = CommunitySubmission.countDocuments;
+
+  try {
+    CommunitySubmission.find = () => {
+      return {
+        sort() { return this; },
+        skip() { return this; },
+        limit() { return this; },
+        populate() { return this; },
+        lean() {
+          return Promise.resolve([
+            // Approved but NOT published (no linked article)
+            {
+              _id: '000000000000000000000001',
+              headline: 'Draft community story',
+              status: 'APPROVED',
+              reporterName: 'Alice',
+              reporterEmail: 'alice@example.com',
+              category: 'Business',
+              createdAt: '2026-03-22T00:00:00.000Z',
+              updatedAt: '2026-03-22T00:00:00.000Z',
+            },
+            // Published via linked News doc
+            {
+              _id: '000000000000000000000002',
+              headline: 'Gujarati headline \u0A97\u0AC1\u0A9C\u0AB0\u0ABE\u0AA4\u0AC0',
+              status: 'APPROVED',
+              reporterName: 'Bob',
+              reporterEmail: 'bob@example.com',
+              linkedArticleId: {
+                _id: '111111111111111111111111',
+                status: 'published',
+                publishedAt: new Date(Date.now() - 60_000),
+                category: 'International',
+                slug: 'live-news-slug',
+                slugs: { gu: 'gu-live-news-slug' },
+                lang: 'en',
+              },
+              createdAt: '2026-03-22T00:00:00.000Z',
+              updatedAt: '2026-03-22T00:00:00.000Z',
+            },
+          ]);
+        },
+      };
+    };
+
+    CommunitySubmission.countDocuments = () => Promise.resolve(2);
+
+    const res = await request(app)
+      .get('/admin-api/admin/community/my-stories')
+      .set('Authorization', `Bearer ${token}`)
+      .query({ page: 1, limit: 50 });
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.total, 2);
+    assert.equal(res.body.items.length, 2);
+
+    const a = res.body.items[0];
+    assert.equal(a.reporterName, 'Alice');
+    assert.equal(a.category, 'business');
+    assert.equal(a.isPublished, false);
+    assert.equal(a.publicationStatus, 'not_published');
+
+    const b = res.body.items[1];
+    assert.equal(b.reporterName, 'Bob');
+    assert.equal(b.category, 'international');
+    assert.equal(b.isPublished, true);
+    assert.equal(b.publicationStatus, 'published');
+    // Gujarati script should not be mislabeled as EN.
+    assert.equal(b.language, 'gu');
+    assert.equal(b.linkedArticleId, '111111111111111111111111');
+    assert.equal(b.sourceId, '111111111111111111111111');
+  } finally {
+    CommunitySubmission.find = originalFind;
+    CommunitySubmission.countDocuments = originalCount;
+  }
+});
+
+test('Admin my-stories: uses resolved public copy (__publicCopy) for published state and articleId', async () => {
+  const token = jwt.sign(
+    { sub: '507f1f77bcf86cd799439011', email: 'admin@newspulse.ai', role: 'admin', tokenVersion: 0, type: 'access' },
+    process.env.JWT_SECRET,
+    { expiresIn: '1h' },
+  );
+
+  const originalFind = CommunitySubmission.find;
+  const originalCount = CommunitySubmission.countDocuments;
+
+  try {
+    CommunitySubmission.find = () => {
+      return {
+        sort() { return this; },
+        skip() { return this; },
+        limit() { return this; },
+        populate() { return this; },
+        lean() {
+          return Promise.resolve([
+            {
+              _id: '000000000000000000000003',
+              headline: 'ગુજરાતી headline',
+              status: 'APPROVED',
+              reporterName: 'Chirag',
+              reporterEmail: 'chirag@example.com',
+              linkedArticleId: {
+                _id: '111111111111111111111112',
+                // Not publicly visible via News fields
+                status: 'draft',
+                publishedAt: null,
+                slug: 'draft-news-slug',
+              },
+              // Simulate handler-attached resolved public copy (Article)
+              __publicCopy: {
+                _id: '222222222222222222222222',
+                sourceNewsId: '111111111111111111111112',
+                status: 'published',
+                publishedAt: new Date(Date.now() - 60_000),
+                slug: 'public-article-slug',
+                slugs: { gu: 'gu-public-article-slug' },
+              },
+              createdAt: '2026-03-22T00:00:00.000Z',
+              updatedAt: '2026-03-22T00:00:00.000Z',
+            },
+          ]);
+        },
+      };
+    };
+
+    CommunitySubmission.countDocuments = () => Promise.resolve(1);
+
+    const res = await request(app)
+      .get('/admin-api/admin/community/my-stories')
+      .set('Authorization', `Bearer ${token}`)
+      .query({ page: 1, limit: 50 });
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.total, 1);
+    assert.equal(res.body.items.length, 1);
+
+    const row = res.body.items[0];
+    assert.equal(row.isPublished, true);
+    assert.equal(row.publicationStatus, 'published');
+    // Prefer public Article copy id when available.
+    assert.equal(row.articleId, '222222222222222222222222');
+    assert.equal(row.adminArticleApiUrl, '/api/admin/articles/222222222222222222222222');
+    // sourceId should still prefer linked News id.
+    assert.equal(row.sourceId, '111111111111111111111112');
   } finally {
     CommunitySubmission.find = originalFind;
     CommunitySubmission.countDocuments = originalCount;

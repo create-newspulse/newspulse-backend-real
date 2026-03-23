@@ -1931,7 +1931,9 @@ function _linkedNewsDoc(d) {
 function _linkedPublicArticleDoc(d) {
   if (!d) return null;
   const a = d.articleId;
-  return (a && typeof a === 'object') ? a : null;
+  if (a && typeof a === 'object') return a;
+  const fallback = d.__publicCopy;
+  return (fallback && typeof fallback === 'object') ? fallback : null;
 }
 
 function _pickSlugFromDoc(doc, langCode) {
@@ -1999,6 +2001,19 @@ function _submissionCategory(d) {
   return null;
 }
 
+function _normalizeCategory(value) {
+  const s = String(value ?? '').trim();
+  if (!s) return null;
+  // Stable slug-like normalization (no invented categories).
+  return s
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/_+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/[^a-z0-9-]/g, '')
+    .trim() || null;
+}
+
 function _submissionLanguage(d) {
   const linkedNews = _linkedNewsDoc(d);
   const linkedPublicArticle = _linkedPublicArticleDoc(d);
@@ -2044,6 +2059,42 @@ function _submissionPublicationStatus(d) {
   if (['rejected', 'trash', 'deleted'].includes(s)) return 'rejected';
   if (['withdrawn'].includes(s)) return 'withdrawn';
   return 'pending';
+}
+
+function _isNewsDocPubliclyVisible(newsDoc, now = new Date()) {
+  if (!newsDoc) return false;
+  const nowDt = now instanceof Date ? now : new Date(now);
+  const status = String(newsDoc.status || '').trim().toLowerCase();
+  if (status !== 'published') return false;
+
+  const deletedAt = newsDoc.deletedAt ?? null;
+  if (deletedAt) return false;
+
+  if (newsDoc.locked === true) return false;
+  const embargoUntil = newsDoc.embargoUntil ?? null;
+  if (embargoUntil instanceof Date && embargoUntil.getTime() > nowDt.getTime()) return false;
+
+  const publishAt = newsDoc.publishAt ?? null;
+  if (publishAt instanceof Date && publishAt.getTime() > nowDt.getTime()) return false;
+
+  // Some docs store these under workflow.*
+  if (newsDoc.workflow && typeof newsDoc.workflow === 'object') {
+    if (newsDoc.workflow.locked === true) return false;
+    const wEmbargo = newsDoc.workflow.embargoUntil ?? null;
+    if (wEmbargo instanceof Date && wEmbargo.getTime() > nowDt.getTime()) return false;
+  }
+
+  return true;
+}
+
+function _isPublicArticleDocPubliclyVisible(articleDoc, now = new Date()) {
+  if (!articleDoc) return false;
+  const nowDt = now instanceof Date ? now : new Date(now);
+  const status = String(articleDoc.status || '').trim().toLowerCase();
+  if (status !== 'published') return false;
+  const publishedAt = articleDoc.publishedAt ?? null;
+  if (publishedAt instanceof Date && publishedAt.getTime() > nowDt.getTime()) return false;
+  return true;
 }
 
 async function _adminMyStoriesHandler(req, res) {
@@ -2153,20 +2204,66 @@ async function _adminMyStoriesHandler(req, res) {
       CommunitySubmission.countDocuments(filter),
     ]);
 
+    // If a submission links to a CMS News doc (linkedArticleId) but does not have a populated
+    // public Article copy (articleId), resolve the public copy via Article.sourceNewsId.
+    // This keeps Published state accurate for the Community Story Desk.
+    const linkedNewsIds = Array.from(new Set((docs || [])
+      .map((d) => _idToString(d?.linkedArticleId))
+      .filter(Boolean)));
+
+    let publicCopyBySourceNewsId = new Map();
+    const mongoConnected = !!(mongoose && mongoose.connection && mongoose.connection.readyState === 1);
+    if (linkedNewsIds.length && Story && mongoConnected) {
+      try {
+        const publicCopies = await Story.find({
+          sourceNewsId: { $in: linkedNewsIds },
+          status: 'published',
+        })
+          .select('_id sourceNewsId status publishedAt slug slugs category language originalLang')
+          .lean();
+
+        publicCopyBySourceNewsId = new Map(
+          (publicCopies || [])
+            .filter((a) => a && a.sourceNewsId)
+            .map((a) => [String(a.sourceNewsId), a])
+        );
+      } catch (e) {
+        // Non-fatal: we can still compute published state from linked News fields.
+        console.warn('[ADMIN][my-stories] public copy lookup failed', e?.message || e);
+      }
+
+      // Attach for later mapping convenience.
+      for (const d of (docs || [])) {
+        try {
+          const id = _idToString(d?.linkedArticleId);
+          if (!id) continue;
+          if (d.articleId) continue;
+          const pc = publicCopyBySourceNewsId.get(String(id)) || null;
+          if (pc) d.__publicCopy = pc;
+        } catch (_) {}
+      }
+    }
+
     const items = (docs || []).map((d) => {
       const reporterNameOut = _submissionReporterName(d);
       const reporterEmailOut = _submissionReporterEmail(d);
-      const categoryOut = _submissionCategory(d);
+      const categoryOut = _normalizeCategory(_submissionCategory(d));
       const languageOut = _submissionLanguage(d);
       const cityOut = (d.locationDetail?.city || d.location?.city || d.city || null);
       const districtOut = (d.locationDetail?.district || null);
       const stateOut = (d.locationDetail?.state || d.location?.state || d.state || null);
       const linkedNewsId = _idToString(d.linkedArticleId);
-      const publicArticleId = _idToString(d.articleId);
-      const sourceIdOut = linkedNewsId || publicArticleId || null;
-
       const linkedNews = _linkedNewsDoc(d);
       const linkedPublicArticle = _linkedPublicArticleDoc(d);
+
+      const publicArticleId = _idToString(linkedPublicArticle?._id || d.articleId);
+      const sourceIdOut = linkedNewsId || publicArticleId || null;
+
+      const now = new Date();
+      const newsIsPublished = _isNewsDocPubliclyVisible(linkedNews, now);
+      const publicArticleIsPublished = _isPublicArticleDocPubliclyVisible(linkedPublicArticle, now);
+      const isPublishedOut = !!(newsIsPublished || publicArticleIsPublished);
+      const publishedAtOut = (linkedPublicArticle?.publishedAt || linkedNews?.publishedAt || null);
 
       const slugOut = _firstNonEmptyString(
         d.articleSlug,
@@ -2199,7 +2296,11 @@ async function _adminMyStoriesHandler(req, res) {
         reporterProfileId: d.reporterProfileId ? String(d.reporterProfileId) : null,
 
         status: d.status || 'pending',
-        publicationStatus: _submissionPublicationStatus(d),
+        // publicationStatus is the live/public state (separate from review status)
+        publicationStatus: isPublishedOut ? 'published' : 'not_published',
+        isPublished: isPublishedOut,
+        published: isPublishedOut,
+        publishedAt: publishedAtOut,
         language: languageOut,
         category: categoryOut,
 
