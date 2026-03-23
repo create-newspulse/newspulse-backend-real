@@ -2012,13 +2012,27 @@ function _normalizeCategory(value) {
   const s = String(value ?? '').trim();
   if (!s) return null;
   // Stable slug-like normalization (no invented categories).
+  // Keep Unicode letters/digits so non-Latin categories don't collapse to null.
   return s
     .toLowerCase()
     .replace(/\s+/g, '-')
     .replace(/_+/g, '-')
     .replace(/-+/g, '-')
-    .replace(/[^a-z0-9-]/g, '')
+    .replace(/[^\p{L}\p{N}-]/gu, '')
     .trim() || null;
+}
+
+function _slugsByLocaleFromDoc(doc) {
+  if (!doc) return null;
+  const en = _pickSlugFromDoc(doc, 'en') || '';
+  const hi = _pickSlugFromDoc(doc, 'hi') || '';
+  const gu = _pickSlugFromDoc(doc, 'gu') || '';
+  if (!en && !hi && !gu) return null;
+  return {
+    en: en || null,
+    hi: hi || null,
+    gu: gu || null,
+  };
 }
 
 function _submissionLanguage(d) {
@@ -2206,8 +2220,8 @@ async function _adminMyStoriesHandler(req, res) {
       .skip(skip)
       .limit(limit)
       .populate({ path: 'reporterId', select: 'fullName email phoneFull cityTownVillage districtName stateName stateCode' })
-      .populate({ path: 'linkedArticleId', select: 'slug slugs category section topic storyType lang language originalLang geo' })
-      .populate({ path: 'articleId', select: 'slug slugs category language originalLang' })
+      .populate({ path: 'linkedArticleId', select: 'slug slugs category primaryCategory section topic storyType lang language originalLang geo' })
+      .populate({ path: 'articleId', select: 'slug slugs category primaryCategory section topic storyType language originalLang status publishedAt sourceNewsId' })
       .lean();
 
     const [docs, total] = await Promise.all([
@@ -2276,11 +2290,17 @@ async function _adminMyStoriesHandler(req, res) {
       const isPublishedOut = !!(newsIsPublished || publicArticleIsPublished);
       const publishedAtOut = (linkedPublicArticle?.publishedAt || linkedNews?.publishedAt || null);
 
+      // Prefer the public Article slug for publicUrl/actions (it must match the public route).
+      // Fall back to submission-stored slug and finally the CMS News slug.
       const slugOut = _firstNonEmptyString(
+        _pickSlugFromDoc(linkedPublicArticle, languageOut),
         d.articleSlug,
         _pickSlugFromDoc(linkedNews, languageOut),
-        _pickSlugFromDoc(linkedPublicArticle, languageOut),
       ) || null;
+
+      const publicSlugsOut = _slugsByLocaleFromDoc(linkedPublicArticle);
+      const cmsSlugsOut = _slugsByLocaleFromDoc(linkedNews);
+      const slugsOut = publicSlugsOut || cmsSlugsOut || null;
 
       const host = req.get('host');
       const envBase = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
@@ -2290,6 +2310,11 @@ async function _adminMyStoriesHandler(req, res) {
       // Admin URLs are best-effort; stable IDs are always returned.
       const adminNewsApiUrl = linkedNewsId ? `/api/admin/news/${encodeURIComponent(linkedNewsId)}` : null;
       const adminArticleApiUrl = publicArticleId ? `/api/admin/articles/${encodeURIComponent(publicArticleId)}` : null;
+
+      const isDeletedOut = d.isDeleted === true;
+      const canRestoreOut = isDeletedOut;
+      const canSoftDeleteOut = !isDeletedOut;
+      const canArchiveOut = canSoftDeleteOut;
 
       return {
         _id: String(d._id),
@@ -2319,9 +2344,16 @@ async function _adminMyStoriesHandler(req, res) {
         linkedArticleId: linkedNewsId,
         articleId: publicArticleId,
         articleSlug: d.articleSlug || null,
+        slug: slugOut,
+        slugs: slugsOut,
         publicUrl: publicUrlOut,
         adminNewsApiUrl,
         adminArticleApiUrl,
+
+        // Capability flags for admin actions
+        canSoftDelete: canSoftDeleteOut,
+        canArchive: canArchiveOut,
+        canRestore: canRestoreOut,
 
         city: cityOut,
         district: districtOut,
@@ -2331,7 +2363,7 @@ async function _adminMyStoriesHandler(req, res) {
         updatedAt: d.updatedAt || null,
 
         // Soft delete metadata (for Deleted tab)
-        isDeleted: d.isDeleted === true,
+        isDeleted: isDeletedOut,
         deletedAt: d.deletedAt || null,
         deletedBy: d.deletedBy || null,
         restoredAt: d.restoredAt || null,
