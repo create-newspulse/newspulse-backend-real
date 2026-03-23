@@ -2022,6 +2022,42 @@ function _normalizeCategory(value) {
     .trim() || null;
 }
 
+function _inferCategoryFallback(d) {
+  // Only used when all known category sources are empty.
+  // Keep this conservative to avoid mislabeling.
+  const headline = typeof d?.headline === 'string' ? d.headline : '';
+  const body = typeof d?.body === 'string' ? d.body : '';
+  const state = String(d?.locationDetail?.state || d?.location?.state || d?.state || '').trim();
+  const text = `${headline} ${body}`;
+
+  const intlRxGu = /(પશ્ચિમ\s*એશિયા|મિડલ\s*ઈસ્ટ|યુદ્ધ|હુમલો|ઈરાન|ઇરાન|ઇઝરાયેલ|ગાઝા|રશિયા|યુક્રેન|ચીન|તાઇવાન)/i;
+  const intlRxEn = /(middle\s*east|war|attack|iran|israel|gaza|russia|ukraine|china|taiwan)/i;
+  const bizRxGu = /(સોનું|ચાંદી|શેર|સ્ટોક|બજાર|સેન્સેક્સ|નિફ્ટી|રૂપિયો|ડોલર|બિટકોઇન|ક્રિપ્ટો|કમોડિટી|તેલ|પેટ્રોલ|ડીઝલ)/i;
+  const bizRxEn = /(gold|silver|stock|market|sensex|nifty|rupee|dollar|bitcoin|crypto|commodity|oil|petrol|diesel)/i;
+
+  // Regional: explicit state mention (example: Gujarat)
+  if (/ગુજરાત/.test(text) || /gujarat/i.test(text) || /gujarat/i.test(state) || /ગુજરાત/.test(state)) {
+    return 'regional';
+  }
+
+  // International: if the headline itself indicates international news, prefer it.
+  if (intlRxGu.test(headline) || intlRxEn.test(headline)) {
+    return 'international';
+  }
+
+  // Business: markets/commodities keywords (Gujarati + English)
+  if (bizRxGu.test(text) || bizRxEn.test(text)) {
+    return 'business';
+  }
+
+  // International: fall back to full-text match (weaker signal than headline match).
+  if (intlRxGu.test(text) || intlRxEn.test(text)) {
+    return 'international';
+  }
+
+  return null;
+}
+
 function _slugsByLocaleFromDoc(doc) {
   if (!doc) return null;
   const en = _pickSlugFromDoc(doc, 'en') || '';
@@ -2272,7 +2308,7 @@ async function _adminMyStoriesHandler(req, res) {
     const items = (docs || []).map((d) => {
       const reporterNameOut = _submissionReporterName(d);
       const reporterEmailOut = _submissionReporterEmail(d);
-      const categoryOut = _normalizeCategory(_submissionCategory(d));
+      const categoryOut = _normalizeCategory(_submissionCategory(d)) || _inferCategoryFallback(d);
       const languageOut = _submissionLanguage(d);
       const cityOut = (d.locationDetail?.city || d.location?.city || d.city || null);
       const districtOut = (d.locationDetail?.district || null);

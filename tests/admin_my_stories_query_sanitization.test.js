@@ -185,6 +185,86 @@ test('Admin my-stories: computes isPublished from linked News/Article and normal
   }
 });
 
+test('Admin my-stories: infers category from headline when explicit category is missing', async () => {
+    const token = jwt.sign(
+      { sub: '507f1f77bcf86cd799439011', email: 'admin@newspulse.ai', role: 'admin', tokenVersion: 0, type: 'access' },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' },
+    );
+
+    const originalFind = CommunitySubmission.find;
+    const originalCount = CommunitySubmission.countDocuments;
+
+    try {
+      CommunitySubmission.find = () => {
+        return {
+          sort() { return this; },
+          skip() { return this; },
+          limit() { return this; },
+          populate() { return this; },
+          lean() {
+            return Promise.resolve([
+              {
+                _id: '000000000000000000000010',
+                headline: 'Gold and silver prices crash today',
+                body: 'Market update: gold, silver, and rupee movement...',
+                status: 'APPROVED',
+                reporterName: 'Ravi',
+                reporterEmail: 'ravi@example.com',
+                category: null,
+                createdAt: '2026-03-22T00:00:00.000Z',
+                updatedAt: '2026-03-22T00:00:00.000Z',
+              },
+              {
+                _id: '000000000000000000000011',
+                headline: 'Middle East war update: Iran and Israel tensions',
+                body: 'International update with war keywords but also oil price mention...',
+                status: 'APPROVED',
+                reporterName: 'Meera',
+                reporterEmail: 'meera@example.com',
+                category: null,
+                createdAt: '2026-03-22T00:00:00.000Z',
+                updatedAt: '2026-03-22T00:00:00.000Z',
+              },
+              {
+                _id: '000000000000000000000012',
+                headline: 'Gujarat weather update',
+                body: 'Regional story',
+                status: 'APPROVED',
+                reporterName: 'Kishan',
+                reporterEmail: 'kishan@example.com',
+                category: null,
+                locationDetail: { state: 'Gujarat' },
+                createdAt: '2026-03-22T00:00:00.000Z',
+                updatedAt: '2026-03-22T00:00:00.000Z',
+              },
+            ]);
+          },
+        };
+      };
+
+      CommunitySubmission.countDocuments = () => Promise.resolve(3);
+
+      const res = await request(app)
+        .get('/admin-api/admin/community/my-stories')
+        .set('Authorization', `Bearer ${token}`)
+        .query({ page: 1, limit: 50 });
+
+      assert.equal(res.status, 200);
+      assert.equal(res.body.ok, true);
+      assert.equal(res.body.total, 3);
+
+      const [a, b, c] = res.body.items;
+      assert.equal(a.category, 'business');
+      assert.equal(b.category, 'international');
+      assert.equal(c.category, 'regional');
+    } finally {
+      CommunitySubmission.find = originalFind;
+      CommunitySubmission.countDocuments = originalCount;
+    }
+
+});
+
 test('Admin my-stories: uses resolved public copy (__publicCopy) for published state and articleId', async () => {
   const token = jwt.sign(
     { sub: '507f1f77bcf86cd799439011', email: 'admin@newspulse.ai', role: 'admin', tokenVersion: 0, type: 'access' },
