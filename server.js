@@ -1889,6 +1889,69 @@ function _parseDateSafe(v) {
   return Number.isFinite(d.getTime()) ? d : null;
 }
 
+function _normalizeLangCode(code) {
+  const raw = String(code ?? '').trim();
+  if (!raw) return '';
+  const lower = raw.toLowerCase();
+  const base = lower.split(/[-_]/)[0] || lower;
+  // Normalize a few common variants.
+  if (base === 'eng') return 'en';
+  if (base === 'guj') return 'gu';
+  if (base === 'hin') return 'hi';
+  return base;
+}
+
+function _detectLangFromText(text) {
+  const t = String(text || '');
+  if (/[\u0A80-\u0AFF]/.test(t)) return 'gu'; // Gujarati
+  if (/[\u0900-\u097F]/.test(t)) return 'hi'; // Devanagari (Hindi, Marathi, etc.)
+  if (/[\u0980-\u09FF]/.test(t)) return 'bn'; // Bengali
+  if (/[\u0B80-\u0BFF]/.test(t)) return 'ta'; // Tamil
+  if (/[\u0C00-\u0C7F]/.test(t)) return 'te'; // Telugu
+  if (/[\u0C80-\u0CFF]/.test(t)) return 'kn'; // Kannada
+  if (/[\u0D00-\u0D7F]/.test(t)) return 'ml'; // Malayalam
+  return 'en';
+}
+
+function _firstNonEmptyString(...values) {
+  for (const v of values) {
+    if (typeof v !== 'string') continue;
+    const s = v.trim();
+    if (s) return s;
+  }
+  return '';
+}
+
+function _submissionCategory(d) {
+  return _firstNonEmptyString(d?.category, d?.finalSection, d?.finalTag, d?.aiSuggestedCategory) || null;
+}
+
+function _submissionLanguage(d) {
+  const explicit = _normalizeLangCode(_firstNonEmptyString(d?.language, d?.lang, d?.originalLanguage));
+  if (explicit) return explicit;
+  return _detectLangFromText(`${d?.headline || ''} ${d?.body || ''}`);
+}
+
+function _submissionReporterName(d) {
+  const fromDirectory = (d && d.reporterId && typeof d.reporterId === 'object') ? d.reporterId.fullName : null;
+  return _firstNonEmptyString(fromDirectory, d?.contact?.name, d?.userName, d?.reporterName, d?.name) || null;
+}
+
+function _submissionReporterEmail(d) {
+  const fromDirectory = (d && d.reporterId && typeof d.reporterId === 'object') ? d.reporterId.email : null;
+  return _firstNonEmptyString(fromDirectory, d?.contact?.email, d?.reporterEmail, d?.email) || null;
+}
+
+function _submissionPublicationStatus(d) {
+  const s = String(d?.status || '').trim().toLowerCase();
+  const hasLinkedArticle = !!(d?.linkedArticleId || d?.articleId || d?.articleSlug);
+  if (hasLinkedArticle) return 'published';
+  if (['approved', 'published'].includes(s)) return 'approved';
+  if (['rejected', 'trash', 'deleted'].includes(s)) return 'rejected';
+  if (['withdrawn'].includes(s)) return 'withdrawn';
+  return 'pending';
+}
+
 async function _adminMyStoriesHandler(req, res) {
   try {
     const q = req.query || {};
@@ -1963,7 +2026,13 @@ async function _adminMyStoriesHandler(req, res) {
     }
 
     // Optional field filters (ignored safely when empty)
-    if (language) filter.language = String(language).trim();
+    // Language is not guaranteed to be present on all CommunitySubmission docs; treat it as best-effort.
+    if (language) {
+      const langNorm = _normalizeLangCode(language);
+      if (langNorm) {
+        filter.$and = (filter.$and || []).concat([{ $or: [{ language: langNorm }, { lang: langNorm }] }]);
+      }
+    }
     if (category) filter.category = String(category).trim();
     if (city) filter.$and = (filter.$and || []).concat([{ $or: [{ 'location.city': new RegExp(_escapeRegExp(city), 'i') }, { 'locationDetail.city': new RegExp(_escapeRegExp(city), 'i') }, { city: new RegExp(_escapeRegExp(city), 'i') }] }]);
     if (district) filter.$and = (filter.$and || []).concat([{ 'locationDetail.district': new RegExp(_escapeRegExp(district), 'i') }]);
@@ -1976,23 +2045,56 @@ async function _adminMyStoriesHandler(req, res) {
       filter.createdAt = range;
     }
 
+    const query = CommunitySubmission.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate({ path: 'reporterId', select: 'fullName email phoneFull cityTownVillage districtName stateName stateCode' })
+      .lean();
+
     const [docs, total] = await Promise.all([
-      CommunitySubmission.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      query,
       CommunitySubmission.countDocuments(filter),
     ]);
 
-    const items = (docs || []).map((d) => ({
-      _id: String(d._id),
-      id: String(d._id),
-      title: d.headline || '',
-      headline: d.headline || '',
-      status: d.status || 'pending',
-      language: d.language || 'en',
-      category: d.category || null,
-      city: (d.location?.city || d.city || d.locationDetail?.city || null),
-      createdAt: d.createdAt || null,
-      updatedAt: d.updatedAt || null,
-    }));
+    const items = (docs || []).map((d) => {
+      const reporterNameOut = _submissionReporterName(d);
+      const reporterEmailOut = _submissionReporterEmail(d);
+      const categoryOut = _submissionCategory(d);
+      const languageOut = _submissionLanguage(d);
+      const cityOut = (d.locationDetail?.city || d.location?.city || d.city || null);
+      const districtOut = (d.locationDetail?.district || null);
+      const stateOut = (d.locationDetail?.state || d.location?.state || d.state || null);
+      const sourceIdOut = d.linkedArticleId || d.articleId || null;
+
+      return {
+        _id: String(d._id),
+        id: String(d._id),
+        refId: String(d._id),
+        sourceId: sourceIdOut ? String(sourceIdOut) : null,
+        sourceType: d.sourceType || null,
+
+        title: d.headline || '',
+        headline: d.headline || '',
+
+        reporterName: reporterNameOut,
+        reporterEmail: reporterEmailOut,
+        reporterId: d.reporterId ? (typeof d.reporterId === 'object' ? String(d.reporterId._id) : String(d.reporterId)) : null,
+        reporterProfileId: d.reporterProfileId ? String(d.reporterProfileId) : null,
+
+        status: d.status || 'pending',
+        publicationStatus: _submissionPublicationStatus(d),
+        language: languageOut,
+        category: categoryOut,
+
+        city: cityOut,
+        district: districtOut,
+        state: stateOut,
+
+        createdAt: d.createdAt || null,
+        updatedAt: d.updatedAt || null,
+      };
+    });
 
     const pages = Math.max(1, Math.ceil(total / limit));
     return res.json({ ok: true, items, total, page, limit, pages });
