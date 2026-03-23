@@ -47,7 +47,7 @@ test('Admin my-stories: escapes regex metacharacters in search and supports /adm
               reporterEmail: 'ravi@example.com',
               category: null,
               aiSuggestedCategory: 'Local',
-              locationDetail: { city: 'Rajkot', district: 'Rajkot', state: 'Gujarat' },
+              locationDetail: { city: 'Rajkot', district: 'Rajkot', state: 'Gujarat', country: 'India' },
               createdAt: '2026-03-22T08:57:36.061Z',
               updatedAt: '2026-03-22T08:58:52.332Z',
             },
@@ -87,11 +87,15 @@ test('Admin my-stories: escapes regex metacharacters in search and supports /adm
     assert.equal(row.city, 'Rajkot');
     assert.equal(row.district, 'Rajkot');
     assert.equal(row.state, 'Gujarat');
+    assert.equal(row.country, 'India');
     assert.equal(row.publicationStatus, 'not_published');
     // Optional fields are present and must be stable (can be null).
     assert.ok(Object.prototype.hasOwnProperty.call(row, 'publicUrl'));
     assert.ok(Object.prototype.hasOwnProperty.call(row, 'adminNewsApiUrl'));
     assert.ok(Object.prototype.hasOwnProperty.call(row, 'adminArticleApiUrl'));
+    assert.ok(Object.prototype.hasOwnProperty.call(row, 'canSoftDelete'));
+    assert.ok(Object.prototype.hasOwnProperty.call(row, 'canRestore'));
+    assert.ok(Object.prototype.hasOwnProperty.call(row, 'canPermanentDelete'));
   } finally {
     CommunitySubmission.find = originalFind;
     CommunitySubmission.countDocuments = originalCount;

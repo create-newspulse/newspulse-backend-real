@@ -1943,6 +1943,73 @@ function _linkedPublicArticleDoc(d) {
   return (fallback && typeof fallback === 'object') ? fallback : null;
 }
 
+function _cleanLocationString(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  if (s.toLowerCase() === 'undefined' || s.toLowerCase() === 'null') return null;
+  return s;
+}
+
+function _locationFromReporterDirectory(d) {
+  const r = (d && d.reporterId && typeof d.reporterId === 'object') ? d.reporterId : null;
+  if (!r) return null;
+  return {
+    city: _cleanLocationString(r.cityTownVillage),
+    district: _cleanLocationString(r.districtName),
+    state: _cleanLocationString(r.stateName),
+    country: _cleanLocationString(r.country),
+  };
+}
+
+function _locationFromLinkedNews(d) {
+  const n = _linkedNewsDoc(d);
+  if (!n) return null;
+  const loc = (n.location && typeof n.location === 'object') ? n.location : null;
+  const geo = (n.geo && typeof n.geo === 'object') ? n.geo : null;
+  return {
+    city: _cleanLocationString(loc?.city) || _cleanLocationString(geo?.city),
+    district: _cleanLocationString(loc?.district) || _cleanLocationString(geo?.district),
+    state: _cleanLocationString(loc?.state) || _cleanLocationString(geo?.state),
+    country: _cleanLocationString(loc?.country),
+  };
+}
+
+function _locationFromPublicArticle(d) {
+  const a = _linkedPublicArticleDoc(d);
+  if (!a) return null;
+  const geo = (a.geo && typeof a.geo === 'object') ? a.geo : null;
+  return {
+    city: _cleanLocationString(a.city) || _cleanLocationString(geo?.city),
+    district: _cleanLocationString(a.district) || _cleanLocationString(geo?.district),
+    state: _cleanLocationString(a.state) || _cleanLocationString(geo?.state),
+    country: null,
+  };
+}
+
+function _resolveSubmissionLocation(d) {
+  if (!d) return { city: null, district: null, state: null, country: null };
+
+  const submission = {
+    city: _cleanLocationString(d.locationDetail?.city) || _cleanLocationString(d.location?.city) || _cleanLocationString(d.city),
+    district: _cleanLocationString(d.locationDetail?.district),
+    state: _cleanLocationString(d.locationDetail?.state) || _cleanLocationString(d.location?.state) || _cleanLocationString(d.state),
+    country: _cleanLocationString(d.locationDetail?.country) || _cleanLocationString(d.location?.country) || _cleanLocationString(d.country),
+  };
+  if (submission.city || submission.district || submission.state || submission.country) return submission;
+
+  const fromNews = _locationFromLinkedNews(d);
+  if (fromNews && (fromNews.city || fromNews.district || fromNews.state || fromNews.country)) return fromNews;
+
+  const fromPublic = _locationFromPublicArticle(d);
+  if (fromPublic && (fromPublic.city || fromPublic.district || fromPublic.state || fromPublic.country)) return fromPublic;
+
+  const fromReporter = _locationFromReporterDirectory(d);
+  if (fromReporter && (fromReporter.city || fromReporter.district || fromReporter.state || fromReporter.country)) return fromReporter;
+
+  return { city: null, district: null, state: null, country: null };
+}
+
 function _pickSlugFromDoc(doc, langCode) {
   if (!doc) return '';
   const lang = _normalizeLangCode(langCode);
@@ -2255,9 +2322,9 @@ async function _adminMyStoriesHandler(req, res) {
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate({ path: 'reporterId', select: 'fullName email phoneFull cityTownVillage districtName stateName stateCode' })
-      .populate({ path: 'linkedArticleId', select: 'slug slugs category primaryCategory section topic storyType lang language originalLang geo' })
-      .populate({ path: 'articleId', select: 'slug slugs category primaryCategory section topic storyType language originalLang status publishedAt sourceNewsId' })
+      .populate({ path: 'reporterId', select: 'fullName email phoneFull cityTownVillage districtName stateName stateCode country' })
+      .populate({ path: 'linkedArticleId', select: 'slug slugs category primaryCategory section topic storyType lang language originalLang geo location' })
+      .populate({ path: 'articleId', select: 'slug slugs category primaryCategory section topic storyType language originalLang status publishedAt sourceNewsId geo state district city' })
       .lean();
 
     const [docs, total] = await Promise.all([
@@ -2310,9 +2377,12 @@ async function _adminMyStoriesHandler(req, res) {
       const reporterEmailOut = _submissionReporterEmail(d);
       const categoryOut = _normalizeCategory(_submissionCategory(d)) || _inferCategoryFallback(d);
       const languageOut = _submissionLanguage(d);
-      const cityOut = (d.locationDetail?.city || d.location?.city || d.city || null);
-      const districtOut = (d.locationDetail?.district || null);
-      const stateOut = (d.locationDetail?.state || d.location?.state || d.state || null);
+
+      const loc = _resolveSubmissionLocation(d);
+      const cityOut = loc.city;
+      const districtOut = loc.district;
+      const stateOut = loc.state;
+      const countryOut = loc.country;
       const linkedNewsId = _idToString(d.linkedArticleId);
       const linkedNews = _linkedNewsDoc(d);
       const linkedPublicArticle = _linkedPublicArticleDoc(d);
@@ -2351,6 +2421,8 @@ async function _adminMyStoriesHandler(req, res) {
       const canRestoreOut = isDeletedOut;
       const canSoftDeleteOut = !isDeletedOut;
       const canArchiveOut = canSoftDeleteOut;
+      const role = String(req?.admin?.role || '').toLowerCase();
+      const canPermanentDeleteOut = isDeletedOut && (role === 'admin' || role === 'founder');
 
       return {
         _id: String(d._id),
@@ -2390,10 +2462,12 @@ async function _adminMyStoriesHandler(req, res) {
         canSoftDelete: canSoftDeleteOut,
         canArchive: canArchiveOut,
         canRestore: canRestoreOut,
+        canPermanentDelete: canPermanentDeleteOut,
 
         city: cityOut,
         district: districtOut,
         state: stateOut,
+        country: countryOut,
 
         createdAt: d.createdAt || null,
         updatedAt: d.updatedAt || null,
