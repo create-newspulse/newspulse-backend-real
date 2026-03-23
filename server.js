@@ -229,7 +229,7 @@ let adminWorkflowLegacyRouter = null;
 try { adminWorkflowApiRouter = require('./src/routes/admin/workflow.routes'); } catch (_) { console.warn('[init] optional src/routes/admin/workflow.routes not found; skipping'); }
 try { adminPushHistoryApiRouter = require('./src/routes/admin/pushHistory.routes'); } catch (_) { console.warn('[init] optional src/routes/admin/pushHistory.routes not found; skipping'); }
 try { adminWorkflowLegacyRouter = require('./routes/admin/workflow.routes'); } catch (_) { console.warn('[init] optional routes/admin/workflow.routes not found; skipping'); }
-const CommunitySubmission = require(`${BASE}/models/CommunitySubmission`);
+const CommunitySubmission = require('./models/CommunitySubmission');
 const News = require(`${BASE}/models/News`);
 // Public /api/public/stories uses the root Article model; reuse it for admin stories.
 const Story = require('./models/Article');
@@ -1857,39 +1857,131 @@ app.get('/community/submissions', requireAdminAuth, (req, res, next) => {
   }
 });
 
-// Admin: Founder overview – list all community stories with optional status/search filters
-// GET /api/admin/community/my-stories?status=pending&search=foo
-app.get('/api/admin/community/my-stories', requireAdminAuth, async (req, res) => {
-  try {
-    const { status = 'all', search = '' } = req.query || {};
-    const filter = {};
+// Admin: Founder overview – list all community stories with optional filters.
+// The Community Story Desk UI may send many optional query params; unsupported ones
+// must be ignored safely (never 500).
+function _adminMyStoriesDebugEnabled() {
+  const v = String(process.env.COMMUNITY_STORY_DESK_DEBUG || '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
 
-    // Status filter: only apply when not 'all'
+function _qs(v) {
+  const s = String(v ?? '').trim();
+  if (!s) return '';
+  const lower = s.toLowerCase();
+  if (lower === 'undefined' || lower === 'null') return '';
+  return s;
+}
+
+function _escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function _parseIntSafe(v, def) {
+  const n = parseInt(String(v ?? ''), 10);
+  return Number.isFinite(n) ? n : def;
+}
+
+function _parseDateSafe(v) {
+  const s = _qs(v);
+  if (!s) return null;
+  const d = new Date(s);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+async function _adminMyStoriesHandler(req, res) {
+  try {
+    const q = req.query || {};
+    if (_adminMyStoriesDebugEnabled()) {
+      // eslint-disable-next-line no-console
+      console.log('[ADMIN][my-stories] query', q);
+    }
+
+    const status = _qs(q.status || 'all');
+    const search = _qs(q.search || q.q || '');
+    const reporter = _qs(q.reporter || '');
+    const publicationStatus = _qs(q.publicationStatus || '');
+    const language = _qs(q.language || q.lang || '');
+    const category = _qs(q.category || '');
+    const city = _qs(q.city || '');
+    const district = _qs(q.district || '');
+    const state = _qs(q.state || '');
+    const dateFrom = _parseDateSafe(q.dateFrom || q.from);
+    const dateTo = _parseDateSafe(q.dateTo || q.to);
+
+    const page = Math.max(_parseIntSafe(q.page, 1), 1);
+    const limit = Math.min(Math.max(_parseIntSafe(q.limit, 50), 1), 200);
+    const skip = (page - 1) * limit;
+
+    const filter = { isDeleted: { $ne: true } };
+
+    // Status filter (submission workflow status)
     const statusNorm = String(status || '').trim().toLowerCase();
     if (statusNorm && statusNorm !== 'all') {
-      // Accept common status labels used across flows
       const variants = {
-        pending: ['pending', 'under_review', 'new', 'PENDING_FOUNDER', 'PENDING', 'NEW'],
-        approved: ['approved', 'APPROVED'],
-        rejected: ['rejected', 'REJECTED'],
+        pending: ['pending', 'under_review', 'new', 'PENDING_FOUNDER', 'PENDING', 'NEW', 'UNDER_REVIEW'],
+        approved: ['approved', 'APPROVED', 'published', 'PUBLISHED'],
+        rejected: ['rejected', 'REJECTED', 'trash', 'TRASH', 'deleted', 'DELETED'],
         withdrawn: ['withdrawn', 'WITHDRAWN'],
       };
       const v = variants[statusNorm] || [statusNorm];
       filter.status = { $in: v };
     }
 
-    // Search filter: case-insensitive regex on headline
-    const searchNorm = String(search || '').trim();
-    if (searchNorm) {
-      filter.headline = { $regex: searchNorm, $options: 'i' };
+    // PublicationStatus is a UI concept; for now, map to a safe subset if provided.
+    // Unsupported values are ignored.
+    const pubNorm = String(publicationStatus || '').trim().toLowerCase();
+    if (pubNorm === 'published') {
+      filter.status = { $in: ['approved', 'APPROVED', 'published', 'PUBLISHED'] };
+    } else if (pubNorm === 'pending') {
+      filter.status = { $in: ['pending', 'under_review', 'new', 'PENDING_FOUNDER', 'PENDING', 'NEW', 'UNDER_REVIEW'] };
+    } else if (pubNorm === 'rejected') {
+      filter.status = { $in: ['rejected', 'REJECTED'] };
     }
 
-    const docs = await CommunitySubmission
-      .find(filter)
-      .sort({ createdAt: -1 })
-      .lean();
+    // Search: treat as plain text (escape regex metacharacters)
+    const searchNorm = String(search || '').trim();
+    if (searchNorm) {
+      const safe = _escapeRegExp(searchNorm);
+      filter.headline = { $regex: safe, $options: 'i' };
+    }
 
-    const items = docs.map(d => ({
+    // Reporter filter: plain-text match across common reporter fields
+    const reporterNorm = String(reporter || '').trim();
+    if (reporterNorm) {
+      const safe = _escapeRegExp(reporterNorm);
+      const rx = new RegExp(safe, 'i');
+      filter.$or = [
+        { reporterName: rx },
+        { name: rx },
+        { reporterEmailNorm: rx },
+        { reporterEmail: rx },
+        { email: rx },
+        { 'contact.email': rx },
+        { 'contact.phone': rx },
+      ];
+    }
+
+    // Optional field filters (ignored safely when empty)
+    if (language) filter.language = String(language).trim();
+    if (category) filter.category = String(category).trim();
+    if (city) filter.$and = (filter.$and || []).concat([{ $or: [{ 'location.city': new RegExp(_escapeRegExp(city), 'i') }, { 'locationDetail.city': new RegExp(_escapeRegExp(city), 'i') }, { city: new RegExp(_escapeRegExp(city), 'i') }] }]);
+    if (district) filter.$and = (filter.$and || []).concat([{ 'locationDetail.district': new RegExp(_escapeRegExp(district), 'i') }]);
+    if (state) filter.$and = (filter.$and || []).concat([{ $or: [{ 'location.state': new RegExp(_escapeRegExp(state), 'i') }, { 'locationDetail.state': new RegExp(_escapeRegExp(state), 'i') }, { state: new RegExp(_escapeRegExp(state), 'i') }] }]);
+
+    if (dateFrom || dateTo) {
+      const range = {};
+      if (dateFrom) range.$gte = dateFrom;
+      if (dateTo) range.$lte = dateTo;
+      filter.createdAt = range;
+    }
+
+    const [docs, total] = await Promise.all([
+      CommunitySubmission.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      CommunitySubmission.countDocuments(filter),
+    ]);
+
+    const items = (docs || []).map((d) => ({
       _id: String(d._id),
       id: String(d._id),
       title: d.headline || '',
@@ -1902,12 +1994,21 @@ app.get('/api/admin/community/my-stories', requireAdminAuth, async (req, res) =>
       updatedAt: d.updatedAt || null,
     }));
 
-    return res.json({ ok: true, items, total: items.length });
+    const pages = Math.max(1, Math.ceil(total / limit));
+    return res.json({ ok: true, items, total, page, limit, pages });
   } catch (e) {
-    console.error('[ADMIN][my-stories] error', e?.message || e);
+    console.error('[ADMIN][my-stories] error', {
+      message: e?.message || e,
+      stack: e?.stack,
+      query: req?.query || null,
+    });
     return res.status(500).json({ ok: false, message: 'Failed to load community stories' });
   }
-});
+}
+
+for (const p of ['/api/admin/community/my-stories', '/admin-api/admin/community/my-stories', '/admin-api/api/admin/community/my-stories', '/admin/community/my-stories']) {
+  app.get(p, requireAdminAuth, _adminMyStoriesHandler);
+}
 
 function _adminMeResponse(req, res) {
   const a = req.admin || null;
