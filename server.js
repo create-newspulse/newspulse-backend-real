@@ -1922,14 +1922,108 @@ function _firstNonEmptyString(...values) {
   return '';
 }
 
+function _linkedNewsDoc(d) {
+  if (!d) return null;
+  const n = d.linkedArticleId;
+  return (n && typeof n === 'object') ? n : null;
+}
+
+function _linkedPublicArticleDoc(d) {
+  if (!d) return null;
+  const a = d.articleId;
+  return (a && typeof a === 'object') ? a : null;
+}
+
+function _pickSlugFromDoc(doc, langCode) {
+  if (!doc) return '';
+  const lang = _normalizeLangCode(langCode);
+  const slugs = doc.slugs && typeof doc.slugs === 'object' ? doc.slugs : null;
+  const byLang = (lang && slugs && typeof slugs[lang] === 'string') ? slugs[lang] : '';
+  return _firstNonEmptyString(byLang, doc.slug);
+}
+
+function _idToString(v) {
+  if (!v) return null;
+  if (typeof v === 'string') return v;
+  if (typeof v === 'object') {
+    if (v._id) return String(v._id);
+    try {
+      return String(v);
+    } catch (_) {
+      return null;
+    }
+  }
+  return String(v);
+}
+
 function _submissionCategory(d) {
-  return _firstNonEmptyString(d?.category, d?.finalSection, d?.finalTag, d?.aiSuggestedCategory) || null;
+  const linkedNews = _linkedNewsDoc(d);
+  const linkedPublicArticle = _linkedPublicArticleDoc(d);
+
+  // Prefer explicit submission fields.
+  const direct = _firstNonEmptyString(
+    d?.category,
+    d?.primaryCategory,
+    d?.section,
+    d?.topic,
+    d?.storyType,
+    d?.classification?.category,
+    d?.classification?.primaryCategory,
+    d?.finalSection,
+    d?.finalTag,
+    d?.aiSuggestedCategory,
+  );
+  if (direct) return direct;
+
+  // Then derive from linked CMS News / public Article (when available).
+  const fromNews = _firstNonEmptyString(
+    linkedNews?.category,
+    linkedNews?.primaryCategory,
+    linkedNews?.section,
+    linkedNews?.topic,
+    linkedNews?.storyType,
+    linkedNews?.classification?.category,
+  );
+  if (fromNews) return fromNews;
+
+  const fromPublic = _firstNonEmptyString(
+    linkedPublicArticle?.category,
+    linkedPublicArticle?.primaryCategory,
+    linkedPublicArticle?.section,
+    linkedPublicArticle?.topic,
+    linkedPublicArticle?.storyType,
+    linkedPublicArticle?.classification?.category,
+  );
+  if (fromPublic) return fromPublic;
+
+  return null;
 }
 
 function _submissionLanguage(d) {
-  const explicit = _normalizeLangCode(_firstNonEmptyString(d?.language, d?.lang, d?.originalLanguage));
+  const linkedNews = _linkedNewsDoc(d);
+  const linkedPublicArticle = _linkedPublicArticleDoc(d);
+
+  const explicit = _normalizeLangCode(_firstNonEmptyString(
+    d?.language,
+    d?.lang,
+    d?.originalLanguage,
+    d?.originalLang,
+    linkedNews?.lang,
+    linkedNews?.language,
+    linkedNews?.originalLang,
+    linkedPublicArticle?.language,
+    linkedPublicArticle?.originalLang,
+  ));
+
+  const detected = _detectLangFromText(`${d?.headline || ''} ${d?.body || ''}`);
+
+  // If we have explicit='en' but the text clearly indicates a non-English script,
+  // prefer detected to avoid Gujarati/Hindi stories being mislabeled EN.
+  if (explicit && explicit !== 'en') return explicit;
+  if (explicit === 'en' && detected && detected !== 'en') return detected;
   if (explicit) return explicit;
-  return _detectLangFromText(`${d?.headline || ''} ${d?.body || ''}`);
+
+  return detected;
 }
 
 function _submissionReporterName(d) {
@@ -2050,6 +2144,8 @@ async function _adminMyStoriesHandler(req, res) {
       .skip(skip)
       .limit(limit)
       .populate({ path: 'reporterId', select: 'fullName email phoneFull cityTownVillage districtName stateName stateCode' })
+      .populate({ path: 'linkedArticleId', select: 'slug slugs category section topic storyType lang language originalLang geo' })
+      .populate({ path: 'articleId', select: 'slug slugs category language originalLang' })
       .lean();
 
     const [docs, total] = await Promise.all([
@@ -2065,13 +2161,33 @@ async function _adminMyStoriesHandler(req, res) {
       const cityOut = (d.locationDetail?.city || d.location?.city || d.city || null);
       const districtOut = (d.locationDetail?.district || null);
       const stateOut = (d.locationDetail?.state || d.location?.state || d.state || null);
-      const sourceIdOut = d.linkedArticleId || d.articleId || null;
+      const linkedNewsId = _idToString(d.linkedArticleId);
+      const publicArticleId = _idToString(d.articleId);
+      const sourceIdOut = linkedNewsId || publicArticleId || null;
+
+      const linkedNews = _linkedNewsDoc(d);
+      const linkedPublicArticle = _linkedPublicArticleDoc(d);
+
+      const slugOut = _firstNonEmptyString(
+        d.articleSlug,
+        _pickSlugFromDoc(linkedNews, languageOut),
+        _pickSlugFromDoc(linkedPublicArticle, languageOut),
+      ) || null;
+
+      const host = req.get('host');
+      const envBase = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+      const base = envBase || `${req.protocol}://${host}`;
+      const publicUrlOut = slugOut ? `${base}/stories/${encodeURIComponent(slugOut)}` : null;
+
+      // Admin URLs are best-effort; stable IDs are always returned.
+      const adminNewsApiUrl = linkedNewsId ? `/api/admin/news/${encodeURIComponent(linkedNewsId)}` : null;
+      const adminArticleApiUrl = publicArticleId ? `/api/admin/articles/${encodeURIComponent(publicArticleId)}` : null;
 
       return {
         _id: String(d._id),
         id: String(d._id),
         refId: String(d._id),
-        sourceId: sourceIdOut ? String(sourceIdOut) : null,
+        sourceId: sourceIdOut,
         sourceType: d.sourceType || null,
 
         title: d.headline || '',
@@ -2086,6 +2202,14 @@ async function _adminMyStoriesHandler(req, res) {
         publicationStatus: _submissionPublicationStatus(d),
         language: languageOut,
         category: categoryOut,
+
+        // Linked editorial/public story metadata (best-effort)
+        linkedArticleId: linkedNewsId,
+        articleId: publicArticleId,
+        articleSlug: d.articleSlug || null,
+        publicUrl: publicUrlOut,
+        adminNewsApiUrl,
+        adminArticleApiUrl,
 
         city: cityOut,
         district: districtOut,

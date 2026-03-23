@@ -88,6 +88,10 @@ test('Admin my-stories: escapes regex metacharacters in search and supports /adm
     assert.equal(row.district, 'Rajkot');
     assert.equal(row.state, 'Gujarat');
     assert.equal(row.publicationStatus, 'pending');
+    // Optional fields are present and must be stable (can be null).
+    assert.ok(Object.prototype.hasOwnProperty.call(row, 'publicUrl'));
+    assert.ok(Object.prototype.hasOwnProperty.call(row, 'adminNewsApiUrl'));
+    assert.ok(Object.prototype.hasOwnProperty.call(row, 'adminArticleApiUrl'));
   } finally {
     CommunitySubmission.find = originalFind;
     CommunitySubmission.countDocuments = originalCount;
