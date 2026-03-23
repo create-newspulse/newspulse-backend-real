@@ -150,6 +150,7 @@ const {
   bulkDeleteReporterContacts,
   deleteCommunityReporterStory,
   restoreCommunityReporterStory,
+  withdrawCommunityReporterStory,
   permanentDeleteCommunityReporterStory,
   bulkDeleteCommunityReporterStories,
 } = require('./controllers/communityReporterController');
@@ -2224,6 +2225,8 @@ function _isPublicArticleDocPubliclyVisible(articleDoc, now = new Date()) {
 async function _adminMyStoriesHandler(req, res) {
   try {
     const q = req.query || {};
+    const actorRole = String(req?.admin?.role || '').trim().toLowerCase();
+    const actorIsPrivileged = actorRole === 'admin' || actorRole === 'founder';
     if (_adminMyStoriesDebugEnabled()) {
       // eslint-disable-next-line no-console
       console.log('[ADMIN][my-stories] query', q);
@@ -2377,7 +2380,6 @@ async function _adminMyStoriesHandler(req, res) {
       const reporterEmailOut = _submissionReporterEmail(d);
       const categoryOut = _normalizeCategory(_submissionCategory(d)) || _inferCategoryFallback(d);
       const languageOut = _submissionLanguage(d);
-
       const loc = _resolveSubmissionLocation(d);
       const cityOut = loc.city;
       const districtOut = loc.district;
@@ -2417,12 +2419,20 @@ async function _adminMyStoriesHandler(req, res) {
       const adminNewsApiUrl = linkedNewsId ? `/api/admin/news/${encodeURIComponent(linkedNewsId)}` : null;
       const adminArticleApiUrl = publicArticleId ? `/api/admin/articles/${encodeURIComponent(publicArticleId)}` : null;
 
-      const isDeletedOut = d.isDeleted === true;
-      const canRestoreOut = isDeletedOut;
-      const canSoftDeleteOut = !isDeletedOut;
+      // Deleted-state must be stable for the Community Story Desk.
+      // Some legacy rows may have status='DELETED'/'TRASH' without isDeleted being set.
+      const statusNorm = String(d.status || '').trim().toLowerCase();
+      const isDeletedOut = d.isDeleted === true || statusNorm === 'deleted' || statusNorm === 'trash' || statusNorm === 'deactivated' || statusNorm === 'archived';
+      const canRestoreOut = actorIsPrivileged && isDeletedOut;
+      const canSoftDeleteOut = actorIsPrivileged && !isDeletedOut;
       const canArchiveOut = canSoftDeleteOut;
-      const role = String(req?.admin?.role || '').toLowerCase();
-      const canPermanentDeleteOut = isDeletedOut && (role === 'admin' || role === 'founder');
+      // Permanent delete removes ONLY the community submission record (not the live/published article).
+      // Therefore it is safe from a live-site standpoint even when a linked article is published.
+      const canPermanentDeleteOut = actorIsPrivileged && isDeletedOut;
+
+      const linkedNewsStatusOut = linkedNews ? (linkedNews.status || null) : null;
+      const linkedPublicArticleStatusOut = linkedPublicArticle ? (linkedPublicArticle.status || null) : null;
+      const linkedArticleStatusOut = linkedPublicArticleStatusOut || linkedNewsStatusOut || null;
 
       return {
         _id: String(d._id),
@@ -2452,11 +2462,17 @@ async function _adminMyStoriesHandler(req, res) {
         linkedArticleId: linkedNewsId,
         articleId: publicArticleId,
         articleSlug: d.articleSlug || null,
+        linkedArticleStatus: linkedArticleStatusOut,
+        linkedNewsStatus: linkedNewsStatusOut,
+        linkedPublicArticleStatus: linkedPublicArticleStatusOut,
         slug: slugOut,
         slugs: slugsOut,
         publicUrl: publicUrlOut,
         adminNewsApiUrl,
         adminArticleApiUrl,
+
+        // Story Desk actions never affect live site content; Manage News controls live visibility.
+        affectsLiveSite: false,
 
         // Capability flags for admin actions
         canSoftDelete: canSoftDeleteOut,
@@ -2510,6 +2526,13 @@ for (const p of ['/api/admin/community/my-stories/:storyId/permanent', '/admin-a
 }
 for (const p of ['/api/admin/community/my-stories/:storyId/permanent-delete', '/admin-api/admin/community/my-stories/:storyId/permanent-delete', '/admin-api/api/admin/community/my-stories/:storyId/permanent-delete', '/admin/community/my-stories/:storyId/permanent-delete']) {
   app.post(p, requireAdminAuth, permanentDeleteCommunityReporterStory);
+}
+
+// Legacy Community Story Desk aliases (older frontends)
+// - Some builds call /admin-api/community/stories/:id/* instead of /admin-api/admin/community-reporter/stories/:id/*
+for (const p of ['/api/admin/community/stories/:id/withdraw', '/admin-api/community/stories/:id/withdraw', '/admin/community/stories/:id/withdraw']) {
+  app.post(p, requireAdminAuth, withdrawCommunityReporterStory);
+  app.patch(p, requireAdminAuth, withdrawCommunityReporterStory);
 }
 
 function _adminMeResponse(req, res) {

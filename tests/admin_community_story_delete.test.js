@@ -99,6 +99,95 @@ test('Community Story Desk: soft delete marks story as deleted', async () => {
   }
 });
 
+test('Community Story Desk: soft delete alias works for /admin/community-reporter/submissions/:id/soft-delete', async () => {
+  const restoreMongo = forceMongoReady();
+  const restoreUser = stubUserLookups();
+  const restoreAudit = stubAuditCreate();
+  const token = makeToken('admin');
+  const id = '507f1f77bcf86cd799439111';
+
+  const originalFindById = CommunitySubmission.findById;
+  const originalUpdateOne = CommunitySubmission.updateOne;
+
+  const calls = { update: [] };
+
+  try {
+    CommunitySubmission.findById = () => ({
+      lean: () => Promise.resolve({
+        _id: id,
+        sourceType: 'community',
+        status: 'NEW',
+        isDeleted: false,
+        reporterEmail: 'ravi@example.com',
+      }),
+    });
+
+    CommunitySubmission.updateOne = (filter, update) => {
+      calls.update.push({ filter, update });
+      return Promise.resolve({ modifiedCount: 1 });
+    };
+
+    const res = await request(app)
+      .post(`/admin-api/admin/community-reporter/submissions/${id}/soft-delete`)
+      .set('Authorization', `Bearer ${token}`);
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.action, 'soft_delete');
+
+    assert.equal(calls.update.length, 1);
+    assert.equal(calls.update[0].update.$set.status, 'DELETED');
+    assert.equal(calls.update[0].update.$set.isDeleted, true);
+  } finally {
+    CommunitySubmission.findById = originalFindById;
+    CommunitySubmission.updateOne = originalUpdateOne;
+    restoreAudit();
+    restoreUser();
+    restoreMongo();
+  }
+});
+
+test('Community Story Desk: trash alias works for /admin/community-reporter/submissions/:id/trash', async () => {
+  const restoreMongo = forceMongoReady();
+  const restoreUser = stubUserLookups();
+  const restoreAudit = stubAuditCreate();
+  const token = makeToken('admin');
+  const id = '507f1f77bcf86cd799439113';
+
+  const originalFindById = CommunitySubmission.findById;
+  const originalUpdateOne = CommunitySubmission.updateOne;
+
+  try {
+    CommunitySubmission.findById = () => ({
+      lean: () => Promise.resolve({
+        _id: id,
+        sourceType: 'community',
+        status: 'NEW',
+        isDeleted: false,
+        reporterEmail: 'ravi@example.com',
+      }),
+    });
+
+    CommunitySubmission.updateOne = () => Promise.resolve({ modifiedCount: 1 });
+
+    const res = await request(app)
+      .post(`/admin-api/admin/community-reporter/submissions/${id}/trash`)
+      .set('Authorization', `Bearer ${token}`);
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.action, 'soft_delete');
+    assert.equal(res.body.affectsLiveSite, false);
+    assert.equal(res.body.isDeleted, true);
+  } finally {
+    CommunitySubmission.findById = originalFindById;
+    CommunitySubmission.updateOne = originalUpdateOne;
+    restoreAudit();
+    restoreUser();
+    restoreMongo();
+  }
+});
+
 test('Community Story Desk: restore moves deleted story back to previous status', async () => {
   const restoreMongo = forceMongoReady();
   const restoreUser = stubUserLookups();
@@ -141,6 +230,94 @@ test('Community Story Desk: restore moves deleted story back to previous status'
     assert.equal(upd.$set.isDeleted, false);
     assert.equal(upd.$set.status, 'APPROVED');
     assert.ok(upd.$unset && upd.$unset.previousStatus === 1);
+  } finally {
+    CommunitySubmission.findById = originalFindById;
+    CommunitySubmission.updateOne = originalUpdateOne;
+    restoreAudit();
+    restoreUser();
+    restoreMongo();
+  }
+});
+
+test('Community Story Desk: withdraw alias works for /admin-api/community/stories/:id/withdraw', async () => {
+  const restoreMongo = forceMongoReady();
+  const restoreUser = stubUserLookups();
+  const restoreAudit = stubAuditCreate();
+  const token = makeToken('admin');
+  const id = '507f1f77bcf86cd799439112';
+
+  const originalFindById = CommunitySubmission.findById;
+  const originalUpdateOne = CommunitySubmission.updateOne;
+
+  const calls = { update: [] };
+
+  try {
+    CommunitySubmission.findById = () => ({
+      lean: () => Promise.resolve({
+        _id: id,
+        sourceType: 'community',
+        status: 'APPROVED',
+        isDeleted: false,
+      }),
+    });
+
+    CommunitySubmission.updateOne = (filter, update) => {
+      calls.update.push({ filter, update });
+      return Promise.resolve({ modifiedCount: 1 });
+    };
+
+    const res = await request(app)
+      .post(`/admin-api/community/stories/${id}/withdraw`)
+      .set('Authorization', `Bearer ${token}`);
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.action, 'withdraw');
+    assert.equal(res.body.status, 'WITHDRAWN');
+
+    assert.equal(calls.update.length, 1);
+    assert.equal(calls.update[0].update.$set.status, 'WITHDRAWN');
+    assert.ok(calls.update[0].update.$set.withdrawnAt);
+  } finally {
+    CommunitySubmission.findById = originalFindById;
+    CommunitySubmission.updateOne = originalUpdateOne;
+    restoreAudit();
+    restoreUser();
+    restoreMongo();
+  }
+});
+
+test('Community Story Desk: withdraw alias works for /admin/community-reporter/submissions/:id/withdraw', async () => {
+  const restoreMongo = forceMongoReady();
+  const restoreUser = stubUserLookups();
+  const restoreAudit = stubAuditCreate();
+  const token = makeToken('admin');
+  const id = '507f1f77bcf86cd799439114';
+
+  const originalFindById = CommunitySubmission.findById;
+  const originalUpdateOne = CommunitySubmission.updateOne;
+
+  try {
+    CommunitySubmission.findById = () => ({
+      lean: () => Promise.resolve({
+        _id: id,
+        sourceType: 'community',
+        status: 'APPROVED',
+        isDeleted: false,
+      }),
+    });
+
+    CommunitySubmission.updateOne = () => Promise.resolve({ modifiedCount: 1 });
+
+    const res = await request(app)
+      .post(`/admin-api/admin/community-reporter/submissions/${id}/withdraw`)
+      .set('Authorization', `Bearer ${token}`);
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.action, 'withdraw');
+    assert.equal(res.body.affectsLiveSite, false);
+    assert.equal(res.body.isDeleted, false);
   } finally {
     CommunitySubmission.findById = originalFindById;
     CommunitySubmission.updateOne = originalUpdateOne;
@@ -198,7 +375,7 @@ test('Community Story Desk: permanent delete is founder/admin-only', async () =>
   restoreMongo();
 });
 
-test('Community Story Desk: permanent delete blocks when linked public record is active', async () => {
+test('Community Story Desk: permanent delete does not affect linked live article visibility', async () => {
   const restoreMongo = forceMongoReady();
   const restoreUser = stubUserLookups();
   const restoreAudit = stubAuditCreate();
@@ -208,6 +385,11 @@ test('Community Story Desk: permanent delete blocks when linked public record is
 
   const originalFindById = CommunitySubmission.findById;
   const originalNewsFindById = News.findById;
+  const originalNewsUpdateOne = News.updateOne;
+  const originalDeleteOne = CommunitySubmission.deleteOne;
+  const originalReporterStoryLinkDeleteMany = ReporterStoryLink.deleteMany;
+
+  const calls = { newsUpdate: 0, storyDelete: 0, linkDelete: 0 };
 
   try {
     CommunitySubmission.findById = () => ({
@@ -216,19 +398,39 @@ test('Community Story Desk: permanent delete blocks when linked public record is
 
     News.findById = () => ({
       select: () => ({
-        lean: () => Promise.resolve({ status: 'published', deletedAt: null, locked: false, communityReportId: id }),
+        lean: () => Promise.resolve({ communityReportId: id }),
       }),
     });
+
+    News.updateOne = (_filter, update) => {
+      calls.newsUpdate += 1;
+      // Must NOT update status fields.
+      assert.equal(Object.prototype.hasOwnProperty.call(update?.$set || {}, 'status'), false);
+      assert.equal(Object.prototype.hasOwnProperty.call(update?.$set || {}, 'publishedAt'), false);
+      return Promise.resolve({ modifiedCount: 1 });
+    };
+
+    ReporterStoryLink.deleteMany = () => { calls.linkDelete += 1; return Promise.resolve({ deletedCount: 1 }); };
+    CommunitySubmission.deleteOne = () => { calls.storyDelete += 1; return Promise.resolve({ deletedCount: 1 }); };
 
     const res = await request(app)
       .delete(`/admin-api/admin/community/my-stories/${id}/permanent`)
       .set('Authorization', `Bearer ${token}`);
 
-    assert.equal(res.status, 409);
-    assert.equal(res.body.code, 'STORY_LINKED_TO_ACTIVE_PUBLIC_RECORD');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.action, 'permanent_delete');
+    assert.equal(res.body.affectsLiveSite, false);
+
+    assert.equal(calls.newsUpdate, 1);
+    assert.equal(calls.linkDelete, 1);
+    assert.equal(calls.storyDelete, 1);
   } finally {
     CommunitySubmission.findById = originalFindById;
     News.findById = originalNewsFindById;
+    News.updateOne = originalNewsUpdateOne;
+    ReporterStoryLink.deleteMany = originalReporterStoryLinkDeleteMany;
+    CommunitySubmission.deleteOne = originalDeleteOne;
     restoreAudit();
     restoreUser();
     restoreMongo();

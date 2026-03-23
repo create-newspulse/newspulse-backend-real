@@ -17,6 +17,7 @@ const {
   bulkDeleteReporterContacts,
   deleteCommunityReporterStory,
   restoreCommunityReporterStory,
+  withdrawCommunityReporterStory,
   permanentDeleteCommunityReporterStory,
   bulkDeleteCommunityReporterStories,
 } = require('../controllers/communityReporterController');
@@ -35,10 +36,19 @@ router.post('/contacts/bulk-delete', requireFounderOrAdmin, bulkDeleteReporterCo
 // Community stories: two-stage delete model
 router.delete('/stories/:storyId', requireAdminAuth, deleteCommunityReporterStory); // soft delete
 router.post('/stories/:storyId/restore', requireAdminAuth, restoreCommunityReporterStory);
+router.post('/stories/:storyId/withdraw', requireAdminAuth, withdrawCommunityReporterStory);
 router.delete('/stories/:storyId/permanent', requireAdminAuth, permanentDeleteCommunityReporterStory);
 // Compatibility aliases
 router.post('/stories/:storyId/permanent-delete', requireAdminAuth, permanentDeleteCommunityReporterStory);
 router.post('/stories/bulk-delete', requireAdminAuth, bulkDeleteCommunityReporterStories);
+
+// Frontend compatibility: some builds treat CommunitySubmission as "submissions" instead of "stories"
+router.post('/submissions/:id/soft-delete', requireAdminAuth, deleteCommunityReporterStory);
+router.post('/submissions/:id/trash', requireAdminAuth, deleteCommunityReporterStory);
+router.post('/submissions/:id/restore', requireAdminAuth, restoreCommunityReporterStory);
+router.post('/submissions/:id/withdraw', requireAdminAuth, withdrawCommunityReporterStory);
+router.delete('/submissions/:id/permanent', requireAdminAuth, permanentDeleteCommunityReporterStory);
+router.post('/submissions/:id/permanent-delete', requireAdminAuth, permanentDeleteCommunityReporterStory);
 
 // Helper: create or update a draft News article from a submission
 async function upsertDraftFromSubmission(submission) {

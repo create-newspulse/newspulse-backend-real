@@ -1074,7 +1074,7 @@ async function deleteCommunityReporterStory(req, res) {
     }
 
     if (_isSubmissionInDeletedState(doc)) {
-      return res.status(200).json({ ok: true, success: true, action: 'soft_delete', id, alreadyDeleted: true });
+      return res.status(200).json({ ok: true, success: true, action: 'soft_delete', id, alreadyDeleted: true, isDeleted: true, affectsLiveSite: false });
     }
 
     const now = new Date();
@@ -1097,7 +1097,7 @@ async function deleteCommunityReporterStory(req, res) {
     console.log('[ADMIN_DELETE][community-story] soft-deleted', { actor, id, reporterId: doc.reporterId ? String(doc.reporterId) : null, email: doc.reporterEmailNorm || doc.reporterEmail || doc.email || null });
     await logAudit(req, 'COMMUNITY_REPORTER_STORY_SOFT_DELETE', id, { entity: 'CommunitySubmission' });
 
-    return res.status(200).json({ ok: true, success: true, action: 'soft_delete', id, deletedAt: now.toISOString() });
+    return res.status(200).json({ ok: true, success: true, action: 'soft_delete', id, isDeleted: true, deletedAt: now.toISOString(), affectsLiveSite: false });
   } catch (e) {
     console.error('[ADMIN_DELETE][community-story] error', { actor, message: e?.message || e });
     return res.status(500).json({ success: false, message: 'Failed to delete story' });
@@ -1148,10 +1148,63 @@ async function restoreCommunityReporterStory(req, res) {
     );
 
     await logAudit(req, 'COMMUNITY_REPORTER_STORY_RESTORE', id, { entity: 'CommunitySubmission', restoredStatus: restoreStatus });
-    return res.status(200).json({ ok: true, success: true, action: 'restore', id, restoredAt: now.toISOString(), status: restoreStatus });
+    return res.status(200).json({ ok: true, success: true, action: 'restore', id, isDeleted: false, restoredAt: now.toISOString(), status: restoreStatus, affectsLiveSite: false });
   } catch (e) {
     console.error('[ADMIN][community-story][restore] error', { actor, message: e?.message || e });
     return _jsonError(res, 500, { code: 'RESTORE_FAILED', message: 'Failed to restore story' });
+  }
+}
+
+// POST /api/admin/community-reporter/stories/:storyId/withdraw
+// Withdraw is a workflow action (not delete): it removes a story from the active review flow
+// without setting isDeleted=true. Soft delete/restore/permanent-delete remain separate.
+async function withdrawCommunityReporterStory(req, res) {
+  const actor = _actorLabel(req);
+  try {
+    if (!_isMongoReady()) return _jsonError(res, 503, { code: 'DB_NOT_READY', message: 'Database not connected' });
+    if (!_requireFounderOrAdminRole(req, res)) return;
+
+    const id = String(req.params.storyId || req.params.id || '').trim();
+    if (!_isValidObjectId(id)) {
+      return _jsonError(res, 400, { code: 'INVALID_STORY_ID', message: 'Invalid story id' });
+    }
+
+    const doc = await CommunitySubmission.findById(id).lean();
+    if (!doc) return _jsonError(res, 404, { code: 'STORY_NOT_FOUND', message: 'Story not found' });
+
+    const st = doc && doc.sourceType ? String(doc.sourceType).toLowerCase() : '';
+    if (st && st !== 'community' && st !== 'journalist') {
+      return _jsonError(res, 400, { code: 'INVALID_STORY_TYPE', message: 'Not a community reporter story' });
+    }
+
+    if (_isSubmissionInDeletedState(doc)) {
+      return _jsonError(res, 409, { code: 'STORY_DELETED', message: 'Withdraw is not allowed for deleted stories (restore or permanent delete instead)' });
+    }
+
+    const current = String(doc.status || '').trim();
+    if (current && current.toLowerCase() === 'withdrawn') {
+      return res.status(200).json({ ok: true, success: true, action: 'withdraw', id, alreadyWithdrawn: true, isDeleted: false, status: 'WITHDRAWN', withdrawnAt: doc.withdrawnAt ? new Date(doc.withdrawnAt).toISOString() : null, affectsLiveSite: false });
+    }
+
+    const now = new Date();
+    const prev = doc.previousStatus || (current && !['deleted', 'trash', 'withdrawn'].includes(current.toLowerCase()) ? current : null);
+    await CommunitySubmission.updateOne(
+      { _id: id },
+      {
+        $set: {
+          status: 'WITHDRAWN',
+          withdrawnAt: now,
+          decisionBy: actor,
+          ...(prev ? { previousStatus: prev } : {}),
+        },
+      }
+    );
+
+    await logAudit(req, 'COMMUNITY_REPORTER_STORY_WITHDRAW', id, { entity: 'CommunitySubmission', previousStatus: prev || null });
+    return res.status(200).json({ ok: true, success: true, action: 'withdraw', id, isDeleted: false, status: 'WITHDRAWN', withdrawnAt: now.toISOString(), previousStatus: prev || null, affectsLiveSite: false });
+  } catch (e) {
+    console.error('[ADMIN][community-story][withdraw] error', { actor, message: e?.message || e });
+    return _jsonError(res, 500, { code: 'WITHDRAW_FAILED', message: 'Failed to withdraw story' });
   }
 }
 
@@ -1179,40 +1232,23 @@ async function permanentDeleteCommunityReporterStory(req, res) {
       return _jsonError(res, 409, { code: 'STORY_NOT_DELETED_YET', message: 'Story must be deleted before permanent delete' });
     }
 
-    const now = new Date();
+    // Strict separation rule:
+    // Community Story Desk permanent delete MUST delete only the CommunitySubmission record.
+    // It must NOT unpublish/archive/delete any linked News/Article (Manage News controls live site).
     const linkedNewsId = doc.linkedArticleId ? String(doc.linkedArticleId) : null;
+    const linkedArticleId = doc.articleId ? String(doc.articleId) : null;
+
+    // Best-effort cleanup: avoid leaving News.communityReportId pointing at a deleted submission.
+    // This does not affect live visibility (no status changes).
     let newsDoc = null;
     if (linkedNewsId && _isValidObjectId(linkedNewsId)) {
-      newsDoc = await News.findById(linkedNewsId)
-        .select('status deletedAt locked embargoUntil publishAt workflow communityReportId')
-        .lean();
-      if (_isNewsDocPubliclyVisible(newsDoc, now)) {
-        return _jsonError(res, 409, {
-          code: 'STORY_LINKED_TO_ACTIVE_PUBLIC_RECORD',
-          message: 'Cannot permanently delete while linked News is publicly visible',
-          details: { linkedNewsId },
-        });
-      }
-    }
-
-    // Public Article copies are what the frontend serves; block if any active published copy exists.
-    let publicCopy = null;
-    try {
-      if (doc.articleId && _isValidObjectId(String(doc.articleId))) {
-        publicCopy = await Article.findById(String(doc.articleId)).select('status publishedAt sourceNewsId').lean();
-      } else if (linkedNewsId && _isValidObjectId(linkedNewsId)) {
-        publicCopy = await Article.findOne({ sourceNewsId: linkedNewsId, status: 'published' })
-          .select('status publishedAt sourceNewsId')
+      try {
+        newsDoc = await News.findById(linkedNewsId)
+          .select('communityReportId')
           .lean();
+      } catch (_) {
+        newsDoc = null;
       }
-    } catch (_) {}
-
-    if (_isPublicArticleDocPubliclyVisible(publicCopy, now)) {
-      return _jsonError(res, 409, {
-        code: 'STORY_LINKED_TO_ACTIVE_PUBLIC_RECORD',
-        message: 'Cannot permanently delete while linked public Article copy is published',
-        details: { articleId: publicCopy && publicCopy._id ? String(publicCopy._id) : null, linkedNewsId },
-      });
     }
 
     // Cleanup: avoid leaving broken references.
@@ -1223,8 +1259,22 @@ async function permanentDeleteCommunityReporterStory(req, res) {
     await ReporterStoryLink.deleteMany({ submissionId: id });
     await CommunitySubmission.deleteOne({ _id: id });
 
-    await logAudit(req, 'COMMUNITY_REPORTER_STORY_PERMANENT_DELETE', id, { entity: 'CommunitySubmission', linkedNewsId, publicArticleId: publicCopy && publicCopy._id ? String(publicCopy._id) : null });
-    return res.status(200).json({ ok: true, success: true, action: 'permanent_delete', id });
+    await logAudit(req, 'COMMUNITY_REPORTER_STORY_PERMANENT_DELETE', id, {
+      entity: 'CommunitySubmission',
+      linkedNewsId,
+      linkedArticleId,
+      affectsLiveSite: false,
+    });
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      action: 'permanent_delete',
+      id,
+      isDeleted: true,
+      linkedArticleId: linkedNewsId,
+      articleId: linkedArticleId,
+      affectsLiveSite: false,
+    });
   } catch (e) {
     console.error('[ADMIN][community-story][permanent-delete] error', { actor, message: e?.message || e });
     return _jsonError(res, 500, { code: 'PERMANENT_DELETE_FAILED', message: 'Failed to permanently delete story' });
@@ -1649,6 +1699,7 @@ module.exports = {
   bulkDeleteReporterContacts,
   deleteCommunityReporterStory,
   restoreCommunityReporterStory,
+  withdrawCommunityReporterStory,
   permanentDeleteCommunityReporterStory,
   bulkDeleteCommunityReporterStories,
 };

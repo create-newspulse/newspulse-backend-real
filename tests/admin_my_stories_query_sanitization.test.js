@@ -93,9 +93,13 @@ test('Admin my-stories: escapes regex metacharacters in search and supports /adm
     assert.ok(Object.prototype.hasOwnProperty.call(row, 'publicUrl'));
     assert.ok(Object.prototype.hasOwnProperty.call(row, 'adminNewsApiUrl'));
     assert.ok(Object.prototype.hasOwnProperty.call(row, 'adminArticleApiUrl'));
-    assert.ok(Object.prototype.hasOwnProperty.call(row, 'canSoftDelete'));
-    assert.ok(Object.prototype.hasOwnProperty.call(row, 'canRestore'));
-    assert.ok(Object.prototype.hasOwnProperty.call(row, 'canPermanentDelete'));
+
+    assert.equal(row.affectsLiveSite, false);
+
+    assert.equal(row.canSoftDelete, true);
+    assert.equal(row.canArchive, true);
+    assert.equal(row.canRestore, false);
+    assert.equal(row.canPermanentDelete, false);
   } finally {
     CommunitySubmission.find = originalFind;
     CommunitySubmission.countDocuments = originalCount;
@@ -183,6 +187,69 @@ test('Admin my-stories: computes isPublished from linked News/Article and normal
     assert.equal(b.language, 'gu');
     assert.equal(b.linkedArticleId, '111111111111111111111111');
     assert.equal(b.sourceId, '111111111111111111111111');
+  } finally {
+    CommunitySubmission.find = originalFind;
+    CommunitySubmission.countDocuments = originalCount;
+  }
+});
+
+test('Admin my-stories: deleted-state capability flags work for legacy status=DELETED without isDeleted', async () => {
+  const token = jwt.sign(
+    { sub: '507f1f77bcf86cd799439011', email: 'admin@newspulse.ai', role: 'admin', tokenVersion: 0, type: 'access' },
+    process.env.JWT_SECRET,
+    { expiresIn: '1h' },
+  );
+
+  const originalFind = CommunitySubmission.find;
+  const originalCount = CommunitySubmission.countDocuments;
+
+  try {
+    CommunitySubmission.find = () => {
+      return {
+        sort() { return this; },
+        skip() { return this; },
+        limit() { return this; },
+        populate() { return this; },
+        lean() {
+          return Promise.resolve([
+            {
+              _id: '000000000000000000000099',
+              headline: 'Legacy deleted row',
+              status: 'DELETED',
+              // Note: isDeleted intentionally omitted
+              reporterName: 'Alice',
+              reporterEmail: 'alice@example.com',
+              category: 'Business',
+              createdAt: '2026-03-22T00:00:00.000Z',
+              updatedAt: '2026-03-22T00:00:00.000Z',
+            },
+          ]);
+        },
+      };
+    };
+
+    CommunitySubmission.countDocuments = () => Promise.resolve(1);
+
+    const res = await request(app)
+      .get('/admin-api/admin/community/my-stories')
+      .set('Authorization', `Bearer ${token}`);
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.items.length, 1);
+
+    const row = res.body.items[0];
+    assert.equal(row.isDeleted, true);
+    assert.equal(row.canSoftDelete, false);
+    assert.equal(row.canRestore, true);
+    // No linked published record, so permanent delete is allowed for admin.
+    assert.equal(row.canPermanentDelete, true);
+    assert.equal(row.affectsLiveSite, false);
+
+    // Linked status fields are always present (can be null).
+    assert.ok(Object.prototype.hasOwnProperty.call(row, 'linkedArticleStatus'));
+    assert.ok(Object.prototype.hasOwnProperty.call(row, 'linkedNewsStatus'));
+    assert.ok(Object.prototype.hasOwnProperty.call(row, 'linkedPublicArticleStatus'));
   } finally {
     CommunitySubmission.find = originalFind;
     CommunitySubmission.countDocuments = originalCount;
