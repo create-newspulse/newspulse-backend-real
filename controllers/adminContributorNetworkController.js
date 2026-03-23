@@ -5,6 +5,8 @@ const ReporterTask = require('../models/ReporterTask');
 const ReporterActivityLog = require('../models/ReporterActivityLog');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const ReporterMergeQueue = require('../models/ReporterMergeQueue');
+const ReporterStoryLink = require('../models/ReporterStoryLink');
+const ReporterContact = require('../models/ReporterContact');
 
 const { resolveAndAttachForSubmission } = require('../services/reporterIdentityResolution.service');
 
@@ -271,6 +273,83 @@ async function runMergeSuggestions(req, res) {
   }
 }
 
+async function profileDebug(req, res) {
+  try {
+    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database not connected' });
+
+    const profileId = String(req.params.profileId || '').trim();
+    if (!mongoose.isValidObjectId(profileId)) return res.status(400).json({ ok: false, message: 'Invalid profileId' });
+
+    const profile = await ReporterProfile.findById(profileId).lean();
+    if (!profile) return res.status(404).json({ ok: false, message: 'Profile not found' });
+
+    const [submissionCount, linkCount, recentSubs] = await Promise.all([
+      CommunitySubmission.countDocuments({ reporterProfileId: profileId }),
+      ReporterStoryLink.countDocuments({ profileId }),
+      CommunitySubmission.find({ reporterProfileId: profileId })
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .select('headline status createdAt reporterEmail reporterEmailNorm email contact.phone contact.email reporterId location locationDetail identityResolutionMethod')
+        .lean(),
+    ]);
+
+    const methods = new Map();
+    const reporterIds = new Set();
+    let hasAnyPhoneInSubmissions = false;
+    let hasAnyLocationInSubmissions = false;
+    for (const s of recentSubs || []) {
+      const m = String(s.identityResolutionMethod || 'unknown');
+      methods.set(m, (methods.get(m) || 0) + 1);
+      if (s.reporterId) reporterIds.add(String(s.reporterId));
+      if (s?.contact?.phone) hasAnyPhoneInSubmissions = true;
+      const loc = s.locationDetail || s.location || null;
+      if (loc && (loc.city || loc.state || loc.country || loc.district)) hasAnyLocationInSubmissions = true;
+    }
+
+    const reporterContacts = [];
+    if (reporterIds.size) {
+      const ids = Array.from(reporterIds).filter((x) => mongoose.isValidObjectId(x));
+      if (ids.length) {
+        const rows = await ReporterContact.find({ _id: { $in: ids } })
+          .select('fullName email phoneFull country stateName districtName talukaName cityTownVillage reporterType verificationLevel')
+          .lean();
+        for (const r of rows || []) reporterContacts.push(r);
+      }
+    }
+
+    const hasAnyPhoneInDirectory = reporterContacts.some((r) => !!String(r?.phoneFull || '').trim());
+    const hasAnyLocationInDirectory = reporterContacts.some((r) => !!(
+      String(r?.stateName || '').trim() || String(r?.districtName || '').trim() || String(r?.cityTownVillage || '').trim() || String(r?.country || '').trim()
+    ));
+
+    return res.status(200).json({
+      ok: true,
+      profile,
+      storyCounts: {
+        submissionsByProfileId: submissionCount,
+        reporterStoryLinks: linkCount,
+      },
+      identityResolution: {
+        recentSubmissionMethods: Object.fromEntries(Array.from(methods.entries()).sort((a, b) => b[1] - a[1])),
+        recentSubmissionsSampleSize: (recentSubs || []).length,
+      },
+      dataPresence: {
+        hasAnyPhoneInSubmissions,
+        hasAnyLocationInSubmissions,
+        reporterContactIdsSeen: reporterIds.size,
+        reporterContactsFound: reporterContacts.length,
+        hasAnyPhoneInDirectory,
+        hasAnyLocationInDirectory,
+      },
+      recentSubmissions: recentSubs,
+      reporterContacts,
+    });
+  } catch (e) {
+    console.error('[contributor-network][profile-debug] failed', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load profile debug' });
+  }
+}
+
 module.exports = {
   queueUnresolved,
   queueMissingEmail,
@@ -279,6 +358,7 @@ module.exports = {
   listInactiveContributors,
   highContributionUnverified,
   topContributors,
+  profileDebug,
   addNote,
   createTask,
   backfillProfiles,

@@ -9,6 +9,7 @@ const {
   listInactiveContributors,
   highContributionUnverified,
   topContributors,
+  profileDebug,
   addNote,
   createTask,
   backfillProfiles,
@@ -29,6 +30,7 @@ router.get('/insights/high-contribution-unverified', requireAdminAuth, highContr
 router.get('/insights/top-contributors', requireAdminAuth, topContributors);
 
 // CRM primitives
+router.get('/profiles/:profileId/debug', requireAdminAuth, profileDebug);
 router.post('/profiles/:profileId/notes', requireAdminAuth, addNote);
 router.post('/profiles/:profileId/tasks', requireAdminAuth, createTask);
 

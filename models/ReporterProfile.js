@@ -40,6 +40,9 @@ const ReporterProfileSchema = new mongoose.Schema(
     // Highest priority stable identity when available (authenticated submitter)
     userId: { type: String, trim: true, default: null, index: true },
 
+    // Stable link to the reporter directory entry when submission used ReporterContact
+    reporterContactId: { type: mongoose.Schema.Types.ObjectId, ref: 'ReporterContact', default: null, index: true },
+
     primaryEmail: { type: String, trim: true, lowercase: true, default: null, index: true },
     primaryPhone: { type: String, trim: true, default: null, index: true },
 
@@ -62,6 +65,7 @@ const ReporterProfileSchema = new mongoose.Schema(
 );
 
 ReporterProfileSchema.index({ userId: 1 }, { sparse: true });
+ReporterProfileSchema.index({ reporterContactId: 1 }, { sparse: true });
 ReporterProfileSchema.index({ primaryEmail: 1 }, { sparse: true });
 ReporterProfileSchema.index({ primaryPhone: 1 }, { sparse: true });
 

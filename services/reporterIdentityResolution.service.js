@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const CommunitySubmission = require('../models/CommunitySubmission');
 const ReporterProfile = require('../models/ReporterProfile');
+const ReporterContact = require('../models/ReporterContact');
 const ReporterContactMethod = require('../models/ReporterContactMethod');
 const ReporterCoverage = require('../models/ReporterCoverage');
 const ReporterStoryLink = require('../models/ReporterStoryLink');
@@ -132,6 +133,12 @@ async function findProfileByUserId(userId) {
   return ReporterProfile.findOne({ userId, mergedIntoProfileId: null }).lean();
 }
 
+async function findProfileByReporterContactId(reporterContactId) {
+  if (!reporterContactId) return null;
+  if (!mongoose.isValidObjectId(reporterContactId)) return null;
+  return ReporterProfile.findOne({ reporterContactId, mergedIntoProfileId: null }).lean();
+}
+
 async function findProfileByContact(type, normalized) {
   if (!type || !normalized) return null;
   const cm = await ReporterContactMethod.findOne({ type, normalized, status: 'active' }).lean();
@@ -188,6 +195,11 @@ async function ensurePrimaryCoverage(profileId, loc) {
 }
 
 async function resolveOrCreateReporterProfile(input) {
+  const reporterContactIdRaw = input && input.reporterContactId ? String(input.reporterContactId).trim() : null;
+  const reporterContactId = reporterContactIdRaw && mongoose.isValidObjectId(reporterContactIdRaw)
+    ? new mongoose.Types.ObjectId(reporterContactIdRaw)
+    : null;
+
   const userId = input && input.userId ? String(input.userId).trim() : null;
   const email = normalizeEmail(input && input.email);
   const phone = normalizePhone(input && input.phone);
@@ -200,6 +212,11 @@ async function resolveOrCreateReporterProfile(input) {
 
   let profile = null;
   let resolutionMethod = null;
+
+  if (reporterContactId) {
+    profile = await findProfileByReporterContactId(reporterContactId);
+    if (profile) resolutionMethod = 'reporterContactId';
+  }
 
   if (userId) {
     profile = await findProfileByUserId(userId);
@@ -235,6 +252,7 @@ async function resolveOrCreateReporterProfile(input) {
     const created = await ReporterProfile.create({
       displayName,
       userId: userId || null,
+      reporterContactId,
       primaryEmail: email,
       primaryPhone: phone,
       flags,
@@ -255,11 +273,76 @@ async function resolveOrCreateReporterProfile(input) {
       flags,
     };
     if (userId && !profile.userId) $set.userId = userId;
+    if (reporterContactId && !profile.reporterContactId) $set.reporterContactId = reporterContactId;
     if (email && !profile.primaryEmail) $set.primaryEmail = email;
     if (phone && !profile.primaryPhone) $set.primaryPhone = phone;
 
     await ReporterProfile.updateOne({ _id: profile._id }, { $set });
     profile = await ReporterProfile.findById(profile._id).lean();
+  }
+
+  // Best-effort enrichment from the ReporterContact directory when available.
+  // This prevents the contributor profile from looking "empty" (missing phone/location)
+  // when the directory is being used as the canonical contact system.
+  if (reporterContactId) {
+    try {
+      const rc = await ReporterContact.findById(reporterContactId).lean();
+      if (rc) {
+        const patch = {};
+
+        if ((!profile.displayName || profile.displayName === 'Unknown') && rc.fullName) {
+          patch.displayName = String(rc.fullName).trim() || profile.displayName;
+        }
+
+        if (!profile.primaryEmail && rc.email) {
+          patch.primaryEmail = normalizeEmail(rc.email);
+        }
+
+        if (!profile.primaryPhone && rc.phoneFull) {
+          patch.primaryPhone = String(rc.phoneFull).trim() || null;
+        }
+
+        const hasProfileLoc = !!(
+          profile.location && (
+            profile.location.country ||
+            profile.location.stateProvince ||
+            profile.location.districtCounty ||
+            profile.location.city ||
+            profile.location.areaLocality
+          )
+        );
+
+        if (!hasProfileLoc) {
+          const mappedLoc = normalizeLocation({
+            country: rc.country || null,
+            stateProvince: rc.stateName || null,
+            districtCounty: rc.districtName || null,
+            city: rc.cityTownVillage || null,
+            areaLocality: rc.talukaName || null,
+          });
+
+          const hasMapped = !!(
+            mappedLoc && (mappedLoc.country || mappedLoc.stateProvince || mappedLoc.districtCounty || mappedLoc.city || mappedLoc.areaLocality)
+          );
+          if (hasMapped) {
+            patch.location = mappedLoc;
+            patch.coverageScope = deriveCoverageScope(mappedLoc);
+          }
+        }
+
+        if (Object.keys(patch).length) {
+          // Recompute flags using "final" values, so missing-phone/location queues are accurate.
+          const emailFinal = patch.primaryEmail || profile.primaryEmail || email;
+          const phoneFinal = patch.primaryPhone || profile.primaryPhone || phone;
+          const locFinal = patch.location || profile.location || location;
+          const userIdFinal = profile.userId || userId;
+          patch.flags = computeIdentityFlags({ userId: userIdFinal, email: emailFinal, phone: phoneFinal, location: locFinal });
+
+          await ReporterProfile.updateOne({ _id: profile._id }, { $set: patch });
+          profile = await ReporterProfile.findById(profile._id).lean();
+        }
+      }
+    } catch (_) {}
   }
 
   // Upsert contact methods (best-effort)
@@ -374,6 +457,7 @@ function identityInputFromSubmission(submission) {
 
   return {
     userId: submission.reporterUserId || null,
+    reporterContactId: submission.reporterId || null,
     email,
     phone,
     name,
