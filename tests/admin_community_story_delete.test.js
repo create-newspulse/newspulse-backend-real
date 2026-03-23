@@ -99,6 +99,61 @@ test('Community Story Desk: soft delete marks story as deleted', async () => {
   }
 });
 
+test('Community Story Desk: canonical Move to Deleted route works (POST .../:id/delete)', async () => {
+  const restoreMongo = forceMongoReady();
+  const restoreUser = stubUserLookups();
+  const restoreAudit = stubAuditCreate();
+  const token = makeToken('admin');
+  const id = '507f1f77bcf86cd799439211';
+
+  const originalFindById = CommunitySubmission.findById;
+  const originalUpdateOne = CommunitySubmission.updateOne;
+
+  const calls = { update: [] };
+
+  try {
+    CommunitySubmission.findById = () => ({
+      lean: () => Promise.resolve({
+        _id: id,
+        sourceType: 'community',
+        status: 'APPROVED',
+        isDeleted: false,
+        reporterEmail: 'ravi@example.com',
+      }),
+    });
+
+    CommunitySubmission.updateOne = (filter, update) => {
+      calls.update.push({ filter, update });
+      return Promise.resolve({ modifiedCount: 1 });
+    };
+
+    const res = await request(app)
+      .post(`/admin-api/admin/community/my-stories/${id}/delete`)
+      .set('Authorization', `Bearer ${token}`);
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.action, 'soft_delete');
+    assert.equal(res.body.isDeleted, true);
+    assert.equal(res.body.affectsLiveSite, false);
+    assert.equal(res.body.row && res.body.row.isDeleted, true);
+    assert.equal(res.body.row && res.body.row.canRestore, true);
+    assert.equal(res.body.row && res.body.row.canPermanentDelete, true);
+    assert.equal(res.body.row && res.body.row.canSoftDelete, false);
+
+    assert.equal(calls.update.length, 1);
+    const upd = calls.update[0].update;
+    assert.equal(upd.$set.isDeleted, true);
+    assert.equal(upd.$set.status, 'DELETED');
+  } finally {
+    CommunitySubmission.findById = originalFindById;
+    CommunitySubmission.updateOne = originalUpdateOne;
+    restoreAudit();
+    restoreUser();
+    restoreMongo();
+  }
+});
+
 test('Community Story Desk: soft delete alias works for /admin/community-reporter/submissions/:id/soft-delete', async () => {
   const restoreMongo = forceMongoReady();
   const restoreUser = stubUserLookups();

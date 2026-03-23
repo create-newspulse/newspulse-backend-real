@@ -2513,7 +2513,19 @@ for (const p of ['/api/admin/community/my-stories', '/admin-api/admin/community/
   app.get(p, requireAdminAuth, _adminMyStoriesHandler);
 }
 
-// Community Story Desk actions (aliases): soft delete, restore, permanent delete
+// Community Story Desk actions
+// Canonical (recommended) routes:
+// - POST   /admin-api/admin/community/my-stories/:storyId/delete        (Move to Deleted / soft delete)
+// - POST   /admin-api/admin/community/my-stories/:storyId/restore       (Restore)
+// - DELETE /admin-api/admin/community/my-stories/:storyId/permanent     (Delete Permanently)
+// Note: we also keep method/path aliases for older frontends.
+
+for (const p of ['/api/admin/community/my-stories/:storyId/delete', '/admin-api/admin/community/my-stories/:storyId/delete', '/admin-api/api/admin/community/my-stories/:storyId/delete', '/admin/community/my-stories/:storyId/delete']) {
+  app.post(p, requireAdminAuth, deleteCommunityReporterStory);
+  app.patch(p, requireAdminAuth, deleteCommunityReporterStory);
+}
+
+// Aliases: soft delete (some clients used DELETE on the base :storyId route)
 for (const p of ['/api/admin/community/my-stories/:storyId', '/admin-api/admin/community/my-stories/:storyId', '/admin-api/api/admin/community/my-stories/:storyId', '/admin/community/my-stories/:storyId']) {
   app.delete(p, requireAdminAuth, deleteCommunityReporterStory);
 }

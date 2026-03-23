@@ -1052,14 +1052,14 @@ async function deleteCommunityReporterStory(req, res) {
   const actor = _actorLabel(req);
   try {
     if (!_isMongoReady()) {
-      return res.status(503).json({ success: false, message: 'Database not connected' });
+      return _jsonError(res, 503, { code: 'DB_NOT_READY', message: 'Database not connected' });
     }
 
     if (!_requireFounderOrAdminRole(req, res)) return;
 
     const id = String(req.params.storyId || req.params.id || '').trim();
     if (!_isValidObjectId(id)) {
-      return res.status(400).json({ success: false, message: 'Invalid story id' });
+      return _jsonError(res, 400, { code: 'INVALID_STORY_ID', message: 'Invalid story id' });
     }
 
     const doc = await CommunitySubmission.findById(id).lean();
@@ -1070,11 +1070,28 @@ async function deleteCommunityReporterStory(req, res) {
     // Safety: only allow deletes for community reporter submissions (sourceType community|journalist, or missing for legacy).
     const st = doc && doc.sourceType ? String(doc.sourceType).toLowerCase() : '';
     if (st && st !== 'community' && st !== 'journalist') {
-      return res.status(400).json({ success: false, message: 'Not a community reporter story' });
+      return _jsonError(res, 400, { code: 'INVALID_STORY_TYPE', message: 'Not a community reporter story' });
     }
 
     if (_isSubmissionInDeletedState(doc)) {
-      return res.status(200).json({ ok: true, success: true, action: 'soft_delete', id, alreadyDeleted: true, isDeleted: true, affectsLiveSite: false });
+      return res.status(200).json({
+        ok: true,
+        success: true,
+        action: 'soft_delete',
+        message: 'Story is already in Deleted',
+        id,
+        alreadyDeleted: true,
+        isDeleted: true,
+        affectsLiveSite: false,
+        linkedArticleId: doc.linkedArticleId ? String(doc.linkedArticleId) : null,
+        row: {
+          id,
+          isDeleted: true,
+          canSoftDelete: false,
+          canRestore: true,
+          canPermanentDelete: true,
+        },
+      });
     }
 
     const now = new Date();
@@ -1097,10 +1114,27 @@ async function deleteCommunityReporterStory(req, res) {
     console.log('[ADMIN_DELETE][community-story] soft-deleted', { actor, id, reporterId: doc.reporterId ? String(doc.reporterId) : null, email: doc.reporterEmailNorm || doc.reporterEmail || doc.email || null });
     await logAudit(req, 'COMMUNITY_REPORTER_STORY_SOFT_DELETE', id, { entity: 'CommunitySubmission' });
 
-    return res.status(200).json({ ok: true, success: true, action: 'soft_delete', id, isDeleted: true, deletedAt: now.toISOString(), affectsLiveSite: false });
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      action: 'soft_delete',
+      message: 'Story moved to Deleted',
+      id,
+      isDeleted: true,
+      deletedAt: now.toISOString(),
+      affectsLiveSite: false,
+      linkedArticleId: doc.linkedArticleId ? String(doc.linkedArticleId) : null,
+      row: {
+        id,
+        isDeleted: true,
+        canSoftDelete: false,
+        canRestore: true,
+        canPermanentDelete: true,
+      },
+    });
   } catch (e) {
     console.error('[ADMIN_DELETE][community-story] error', { actor, message: e?.message || e });
-    return res.status(500).json({ success: false, message: 'Failed to delete story' });
+    return _jsonError(res, 500, { code: 'SOFT_DELETE_FAILED', message: 'Failed to move story to Deleted' });
   }
 }
 
@@ -1148,7 +1182,25 @@ async function restoreCommunityReporterStory(req, res) {
     );
 
     await logAudit(req, 'COMMUNITY_REPORTER_STORY_RESTORE', id, { entity: 'CommunitySubmission', restoredStatus: restoreStatus });
-    return res.status(200).json({ ok: true, success: true, action: 'restore', id, isDeleted: false, restoredAt: now.toISOString(), status: restoreStatus, affectsLiveSite: false });
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      action: 'restore',
+      message: 'Story restored',
+      id,
+      isDeleted: false,
+      restoredAt: now.toISOString(),
+      status: restoreStatus,
+      affectsLiveSite: false,
+      linkedArticleId: doc.linkedArticleId ? String(doc.linkedArticleId) : null,
+      row: {
+        id,
+        isDeleted: false,
+        canSoftDelete: true,
+        canRestore: false,
+        canPermanentDelete: false,
+      },
+    });
   } catch (e) {
     console.error('[ADMIN][community-story][restore] error', { actor, message: e?.message || e });
     return _jsonError(res, 500, { code: 'RESTORE_FAILED', message: 'Failed to restore story' });
@@ -1269,11 +1321,13 @@ async function permanentDeleteCommunityReporterStory(req, res) {
       ok: true,
       success: true,
       action: 'permanent_delete',
+      message: 'Story permanently deleted',
       id,
       isDeleted: true,
       linkedArticleId: linkedNewsId,
       articleId: linkedArticleId,
       affectsLiveSite: false,
+      row: null,
     });
   } catch (e) {
     console.error('[ADMIN][community-story][permanent-delete] error', { actor, message: e?.message || e });
