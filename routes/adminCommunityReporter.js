@@ -12,6 +12,8 @@ const {
   adminListReporterContactStories,
   backfillReporterContactsFromSubmissions,
   deleteReporterContact,
+  deactivateReporterContact,
+  reassignReporterContactStories,
   bulkDeleteReporterContacts,
   deleteCommunityReporterStory,
   bulkDeleteCommunityReporterStories,
@@ -24,6 +26,9 @@ router.get('/contacts', requireAdminAuth, adminListReporterContacts);
 router.get('/contacts/:id/stories', requireAdminAuth, adminListReporterContactStories);
 router.post('/contacts/backfill', requireFounderOrAdmin, backfillReporterContactsFromSubmissions);
 router.delete('/contacts/:id', requireFounderOrAdmin, deleteReporterContact);
+router.post('/contacts/:id/deactivate', requireFounderOrAdmin, deactivateReporterContact);
+router.post('/contacts/:id/archive', requireFounderOrAdmin, deactivateReporterContact);
+router.post('/contacts/:id/reassign-stories', requireFounderOrAdmin, reassignReporterContactStories);
 router.post('/contacts/bulk-delete', requireFounderOrAdmin, bulkDeleteReporterContacts);
 router.delete('/stories/:storyId', requireFounderOrAdmin, deleteCommunityReporterStory);
 router.post('/stories/bulk-delete', requireFounderOrAdmin, bulkDeleteCommunityReporterStories);

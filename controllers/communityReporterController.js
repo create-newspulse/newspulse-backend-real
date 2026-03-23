@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const CommunityReport = require('../models/CommunityReport');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const ReporterContact = require('../models/ReporterContact');
+const ReporterProfile = require('../models/ReporterProfile');
 const { logAudit } = require('../lib/audit');
 let CommunityStory = null;
 try { CommunityStory = require('../models/CommunityStory'); } catch (_) { /* optional model */ }
@@ -80,6 +81,32 @@ async function _countLinkedSubmissionsForContact(contact) {
   const or = _buildSubmissionMatchForContact(contact);
   if (!or.length) return 0;
   return CommunitySubmission.countDocuments({ $or: or, isDeleted: { $ne: true } });
+}
+
+async function _countLinkedProfilesForContact(contact) {
+  const id = contact && contact._id ? String(contact._id) : null;
+  if (!id || !_isValidObjectId(id)) return 0;
+  try {
+    return await ReporterProfile.countDocuments({ reporterContactId: id, mergedIntoProfileId: null });
+  } catch (_) {
+    return 0;
+  }
+}
+
+function _isProtectedContact(contact) {
+  const verification = String(contact?.verificationLevel || '').trim().toLowerCase();
+  // Treat verified directory entries as protected from hard delete.
+  return verification === 'verified';
+}
+
+function _jsonError(res, status, { code, message, details }) {
+  return res.status(status).json({
+    success: false,
+    ok: false,
+    code,
+    message,
+    details: details || undefined,
+  });
 }
 
 async function _aggregateSubmissionStatsByContactKey(contactKeys) {
@@ -235,41 +262,175 @@ async function deleteReporterContact(req, res) {
   const actor = _actorLabel(req);
   try {
     const id = String(req.params.id || '').trim();
+    const hard = _parseBool(req.query?.hard);
 
     if (!_isMongoReady()) {
       return res.status(503).json({ success: false, message: 'Database not connected' });
     }
 
     if (!_isValidObjectId(id)) {
-      return res.status(400).json({ success: false, message: 'Invalid contact id' });
+      return _jsonError(res, 400, { code: 'INVALID_CONTACT_ID', message: 'Invalid contact id' });
     }
 
     const contact = await ReporterContact.findById(id);
     if (!contact) {
-      return res.status(404).json({ success: false, message: 'Reporter contact not found' });
+      return _jsonError(res, 404, { code: 'CONTACT_NOT_FOUND', message: 'Reporter contact not found' });
+    }
+
+    if (hard && _isProtectedContact(contact)) {
+      return _jsonError(res, 403, {
+        code: 'CONTACT_IS_PROTECTED',
+        message: 'This contact is protected and cannot be hard-deleted. Deactivate/archive instead.',
+        details: { allowedActions: ['deactivate', 'archive'] },
+      });
     }
 
     const linkedCount = await _countLinkedSubmissionsForContact(contact);
     if (linkedCount > 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot delete reporter contact while linked stories exist. Delete stories first.',
+      return _jsonError(res, 409, {
+        code: 'CONTACT_HAS_LINKED_STORIES',
+        message: 'Cannot delete reporter contact while linked stories exist.',
+        details: { linkedStories: linkedCount, allowedActions: ['deactivate', 'archive', 'reassign_stories'] },
       });
     }
 
-    await ReporterContact.deleteOne({ _id: id });
+    const linkedProfiles = await _countLinkedProfilesForContact(contact);
+    if (linkedProfiles > 0) {
+      return _jsonError(res, 409, {
+        code: 'CONTACT_HAS_DEPENDENCIES',
+        message: 'Cannot delete reporter contact while contributor profiles depend on it.',
+        details: { linkedProfiles, allowedActions: ['deactivate', 'archive'] },
+      });
+    }
 
-    console.log('[ADMIN_DELETE][reporter-contact] deleted', { actor, deletedId: id });
-    await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_DELETE', id, { entity: 'ReporterContact' });
+    if (hard) {
+      await ReporterContact.deleteOne({ _id: id });
+    } else {
+      // Soft-delete: keep record to prevent accidental recreation/identity drift.
+      await ReporterContact.updateOne(
+        { _id: id },
+        {
+          $set: {
+            status: 'banned',
+            deletedAt: new Date(),
+            deletedBy: actor,
+          },
+        }
+      );
+    }
+
+    console.log('[ADMIN_DELETE][reporter-contact] deleted', { actor, deletedId: id, hard });
+    await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_DELETE', id, { entity: 'ReporterContact', hard });
 
     return res.status(200).json({
       success: true,
-      message: 'Reporter contact deleted successfully',
+      message: hard ? 'Reporter contact hard-deleted successfully' : 'Reporter contact deactivated (soft-deleted) successfully',
+      mode: hard ? 'hard' : 'soft',
       deletedId: id,
     });
   } catch (e) {
     console.error('[ADMIN_DELETE][reporter-contact] error', { actor, message: e?.message || e });
     return res.status(500).json({ success: false, message: 'Failed to delete reporter contact' });
+  }
+}
+
+// POST /api/admin/community-reporter/contacts/:id/deactivate
+// Safely disables the contact without deleting the record.
+async function deactivateReporterContact(req, res) {
+  const actor = _actorLabel(req);
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!_isMongoReady()) return _jsonError(res, 503, { code: 'DB_NOT_READY', message: 'Database not connected' });
+    if (!_isValidObjectId(id)) return _jsonError(res, 400, { code: 'INVALID_CONTACT_ID', message: 'Invalid contact id' });
+
+    const contact = await ReporterContact.findById(id).lean();
+    if (!contact) return _jsonError(res, 404, { code: 'CONTACT_NOT_FOUND', message: 'Reporter contact not found' });
+
+    const reason = req.body?.reason ? String(req.body.reason).trim() : null;
+    await ReporterContact.updateOne(
+      { _id: id },
+      {
+        $set: {
+          status: 'suspended',
+          suspendedAt: new Date(),
+          suspendedBy: actor,
+          ...(reason ? { suspendedReason: reason } : {}),
+        },
+      }
+    );
+
+    await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_DEACTIVATE', id, { entity: 'ReporterContact', reason });
+    return res.status(200).json({ success: true, id, status: 'suspended' });
+  } catch (e) {
+    console.error('[ADMIN][reporter-contact][deactivate] error', { actor, message: e?.message || e });
+    return res.status(500).json({ success: false, message: 'Failed to deactivate reporter contact' });
+  }
+}
+
+// POST /api/admin/community-reporter/contacts/:id/reassign-stories
+// Moves stories from one ReporterContact to another (safe alternative to delete).
+async function reassignReporterContactStories(req, res) {
+  const actor = _actorLabel(req);
+  try {
+    const fromId = String(req.params.id || '').trim();
+    const toId = String(req.body?.toContactId || '').trim();
+    if (!_isMongoReady()) return _jsonError(res, 503, { code: 'DB_NOT_READY', message: 'Database not connected' });
+    if (!_isValidObjectId(fromId)) return _jsonError(res, 400, { code: 'INVALID_FROM_CONTACT_ID', message: 'Invalid from contact id' });
+    if (!_isValidObjectId(toId)) return _jsonError(res, 400, { code: 'INVALID_TO_CONTACT_ID', message: 'Invalid to contact id' });
+    if (fromId === toId) return _jsonError(res, 400, { code: 'SAME_CONTACT', message: 'from and to contacts must be different' });
+
+    const [from, to] = await Promise.all([
+      ReporterContact.findById(fromId).lean(),
+      ReporterContact.findById(toId).lean(),
+    ]);
+    if (!from) return _jsonError(res, 404, { code: 'CONTACT_NOT_FOUND', message: 'From contact not found' });
+    if (!to) return _jsonError(res, 404, { code: 'CONTACT_NOT_FOUND', message: 'To contact not found' });
+
+    const fromEmail = _normalizeEmail(from.email);
+
+    // Primary: move direct reporterId links.
+    const direct = await CommunitySubmission.updateMany(
+      { reporterId: fromId },
+      { $set: { reporterId: toId } }
+    );
+
+    // Secondary: for older submissions without reporterId, optionally link by email.
+    // Only set reporterId when currently null/missing to reduce risk of stealing stories.
+    let emailLinked = { modifiedCount: 0 };
+    if (fromEmail) {
+      emailLinked = await CommunitySubmission.updateMany(
+        {
+          reporterId: { $in: [null, undefined] },
+          $or: [
+            { reporterEmailNorm: fromEmail },
+            { reporterEmail: fromEmail },
+            { email: fromEmail },
+            { 'contact.email': fromEmail },
+          ],
+          isDeleted: { $ne: true },
+        },
+        { $set: { reporterId: toId } }
+      );
+    }
+
+    await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_REASSIGN_STORIES', fromId, { entity: 'ReporterContact', toContactId: toId });
+    console.log('[ADMIN][reporter-contact][reassign-stories]', { actor, fromId, toId });
+
+    const directModified = typeof direct?.modifiedCount === 'number' ? direct.modifiedCount : (direct?.nModified || 0);
+    const emailModified = typeof emailLinked?.modifiedCount === 'number' ? emailLinked.modifiedCount : (emailLinked?.nModified || 0);
+
+    return res.status(200).json({
+      success: true,
+      fromId,
+      toId,
+      reassigned: {
+        reporterIdMatches: directModified,
+        emailMatches: emailModified,
+      },
+    });
+  } catch (e) {
+    console.error('[ADMIN][reporter-contact][reassign-stories] error', { actor, message: e?.message || e });
+    return res.status(500).json({ success: false, message: 'Failed to reassign stories' });
   }
 }
 
@@ -299,15 +460,63 @@ async function bulkDeleteReporterContacts(req, res) {
 
     console.log('Bulk delete contacts ids:', validIds.length);
 
-    const delRes = await ReporterContact.deleteMany({ _id: { $in: validIds } });
-    const deletedCount = delRes && typeof delRes.deletedCount === 'number' ? delRes.deletedCount : 0;
+    const hard = _parseBool(req.query?.hard);
 
-    await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_BULK_DELETE', null, { entity: 'ReporterContact', receivedCount, validCount: validIds.length, deletedCount });
+    const deletedIds = [];
+    const skipped = [];
+
+    for (const id of validIds) {
+      const contact = await ReporterContact.findById(id);
+      if (!contact) {
+        skipped.push({ id, code: 'CONTACT_NOT_FOUND', message: 'Reporter contact not found' });
+        continue;
+      }
+
+      if (hard && _isProtectedContact(contact)) {
+        skipped.push({ id, code: 'CONTACT_IS_PROTECTED', message: 'Protected contact cannot be hard-deleted' });
+        continue;
+      }
+
+      const linkedCount = await _countLinkedSubmissionsForContact(contact);
+      if (linkedCount > 0) {
+        skipped.push({ id, code: 'CONTACT_HAS_LINKED_STORIES', message: 'Contact has linked stories', details: { linkedStories: linkedCount } });
+        continue;
+      }
+
+      const linkedProfiles = await _countLinkedProfilesForContact(contact);
+      if (linkedProfiles > 0) {
+        skipped.push({ id, code: 'CONTACT_HAS_DEPENDENCIES', message: 'Contact has dependent contributor profiles', details: { linkedProfiles } });
+        continue;
+      }
+
+      if (hard) {
+        await ReporterContact.deleteOne({ _id: id });
+      } else {
+        await ReporterContact.updateOne(
+          { _id: id },
+          { $set: { status: 'banned', deletedAt: new Date(), deletedBy: actor } }
+        );
+      }
+
+      deletedIds.push(id);
+    }
+
+    await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_BULK_DELETE', null, {
+      entity: 'ReporterContact',
+      receivedCount,
+      validCount: validIds.length,
+      deletedCount: deletedIds.length,
+      skippedCount: skipped.length,
+      hard,
+    });
 
     return res.status(200).json({
       success: true,
-      message: 'Reporter contacts deleted successfully',
-      deletedCount,
+      message: hard ? 'Bulk hard delete completed' : 'Bulk deactivate (soft delete) completed',
+      mode: hard ? 'hard' : 'soft',
+      deletedCount: deletedIds.length,
+      deletedIds,
+      skipped,
     });
   } catch (e) {
     console.error('[ADMIN_DELETE][reporter-contact][bulk] error', { actor, message: e?.message || e });
@@ -1194,6 +1403,8 @@ module.exports = {
   getCommunityStats,
   getCommunityReporterAnalytics,
   deleteReporterContact,
+  deactivateReporterContact,
+  reassignReporterContactStories,
   bulkDeleteReporterContacts,
   deleteCommunityReporterStory,
   bulkDeleteCommunityReporterStories,

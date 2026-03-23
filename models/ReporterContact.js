@@ -65,6 +65,13 @@ const ReporterContactSchema = new mongoose.Schema({
 
   status: { type: String, enum: STATUS_ENUM, default: 'active', index: true },
 
+  // Soft-delete / moderation lifecycle (optional)
+  suspendedAt: { type: Date },
+  suspendedReason: { type: String, trim: true },
+  suspendedBy: { type: mongoose.Schema.Types.Mixed, default: null },
+  deletedAt: { type: Date },
+  deletedBy: { type: mongoose.Schema.Types.Mixed, default: null },
+
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
 
   stats: { type: StatsSchema, default: () => ({}) },
