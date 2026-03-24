@@ -107,10 +107,29 @@ async function upsertReporterContactFromSubmission(submission) {
 
   // Compute story stats for this reporter (counts + latest headline).
   const match = _buildSubmissionEmailMatch(emailNorm);
-  const approvedStatuses = ['APPROVED', 'approved'];
-  const pendingStatuses = ['NEW', 'UNDER_REVIEW', 'PENDING_FOUNDER', 'pending', 'under_review'];
+  const approvedStatuses = [
+    'APPROVED', 'approved',
+    // treat published as approved for approvedStories
+    'PUBLISHED', 'published', 'PUBLISH', 'publish',
+  ];
+  const publishedStatuses = ['PUBLISHED', 'published', 'PUBLISH', 'publish'];
+  const pendingStatuses = [
+    'NEW', 'new',
+    'PENDING', 'pending',
+    'UNDER_REVIEW', 'under_review', 'UNDERREVIEW', 'underreview',
+    'PENDING_FOUNDER', 'pending_founder', 'PENDINGFOUNDER', 'pendingfounder',
+    'AI_REVIEWED', 'ai_reviewed',
+  ];
+  const rejectedStatuses = [
+    'REJECTED', 'rejected',
+    'TRASH', 'trash',
+    'DISCARDED', 'discarded',
+    'ARCHIVED', 'archived',
+    'DELETED', 'deleted',
+  ];
+  const withdrawnStatuses = ['WITHDRAWN', 'withdrawn'];
 
-  const [stories, approved, pending, latest] = await Promise.all([
+  const [stories, approved, pending, rejected, withdrawn, published, latest] = await Promise.all([
     CommunitySubmission.countDocuments(match),
     CommunitySubmission.countDocuments({
       ...match,
@@ -119,6 +138,18 @@ async function upsertReporterContactFromSubmission(submission) {
     CommunitySubmission.countDocuments({
       ...match,
       status: { $in: pendingStatuses },
+    }),
+    CommunitySubmission.countDocuments({
+      ...match,
+      status: { $in: rejectedStatuses },
+    }),
+    CommunitySubmission.countDocuments({
+      ...match,
+      status: { $in: withdrawnStatuses },
+    }),
+    CommunitySubmission.countDocuments({
+      ...match,
+      status: { $in: publishedStatuses },
     }),
     CommunitySubmission.findOne(match).sort({ createdAt: -1 }).lean(),
   ]);
@@ -139,6 +170,9 @@ async function upsertReporterContactFromSubmission(submission) {
       totalStories: Number(stories || 0),
       approvedStories: Number(approved || 0),
       pendingStories: Number(pending || 0),
+      rejectedStories: Number(rejected || 0),
+      withdrawnStories: Number(withdrawn || 0),
+      publishedStories: Number(published || 0),
       lastStoryAt,
       lastStoryTitle,
     },
@@ -191,6 +225,9 @@ async function upsertReporterContact(payload) {
     if (typeof stats.totalStories === 'number') $set['stats.totalStories'] = stats.totalStories;
     if (typeof stats.approvedStories === 'number') $set['stats.approvedStories'] = stats.approvedStories;
     if (typeof stats.pendingStories === 'number') $set['stats.pendingStories'] = stats.pendingStories;
+    if (typeof stats.rejectedStories === 'number') $set['stats.rejectedStories'] = stats.rejectedStories;
+    if (typeof stats.withdrawnStories === 'number') $set['stats.withdrawnStories'] = stats.withdrawnStories;
+    if (typeof stats.publishedStories === 'number') $set['stats.publishedStories'] = stats.publishedStories;
     if (stats.lastStoryAt) $set['stats.lastStoryAt'] = stats.lastStoryAt;
     if (typeof stats.lastStoryTitle === 'string' && stats.lastStoryTitle.trim()) {
       $set['stats.lastStoryTitle'] = stats.lastStoryTitle.trim();

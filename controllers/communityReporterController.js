@@ -169,7 +169,10 @@ async function _aggregateSubmissionStatsByContactKey(contactKeys) {
   if (keys.length === 0) return new Map();
 
   const approvedStatuses = ['approved', 'published', 'approve', 'approved_final', 'approved_founder', 'approved_by_founder', 'approved_by_admin', 'app'];
+  const publishedStatuses = ['published', 'publish', 'published_final'];
   const pendingStatuses = ['new', 'pending', 'under_review', 'ai_reviewed', 'pending_founder', 'pending_founder_review', 'underreview', 'review'];
+  const rejectedStatuses = ['rejected', 'reject', 'trash', 'discarded', 'archived'];
+  const withdrawnStatuses = ['withdrawn'];
 
   const pipeline = [
     { $match: { isDeleted: { $ne: true } } },
@@ -226,6 +229,9 @@ async function _aggregateSubmissionStatsByContactKey(contactKeys) {
         totalStories: { $sum: 1 },
         approvedStories: { $sum: { $cond: [{ $in: ['$_statusNorm', approvedStatuses] }, 1, 0] } },
         pendingStories: { $sum: { $cond: [{ $in: ['$_statusNorm', pendingStatuses] }, 1, 0] } },
+        rejectedStories: { $sum: { $cond: [{ $in: ['$_statusNorm', rejectedStatuses] }, 1, 0] } },
+        withdrawnStories: { $sum: { $cond: [{ $in: ['$_statusNorm', withdrawnStatuses] }, 1, 0] } },
+        publishedStories: { $sum: { $cond: [{ $in: ['$_statusNorm', publishedStatuses] }, 1, 0] } },
         lastStoryAt: { $max: '$createdAt' },
       },
     },
@@ -240,6 +246,9 @@ async function _aggregateSubmissionStatsByContactKey(contactKeys) {
       totalStories: Number(row.totalStories || 0),
       approvedStories: Number(row.approvedStories || 0),
       pendingStories: Number(row.pendingStories || 0),
+      rejectedStories: Number(row.rejectedStories || 0),
+      withdrawnStories: Number(row.withdrawnStories || 0),
+      publishedStories: Number(row.publishedStories || 0),
       lastStoryAt: row.lastStoryAt || null,
     });
   }
@@ -641,13 +650,16 @@ async function adminListReporterContacts(req, res) {
 
     const items = contacts.map(c => {
       const keys = _contactKeysForContact(c);
-      const base = { totalStories: 0, approvedStories: 0, pendingStories: 0, lastStoryAt: null };
+      const base = { totalStories: 0, approvedStories: 0, pendingStories: 0, rejectedStories: 0, withdrawnStories: 0, publishedStories: 0, lastStoryAt: null };
       const stats = keys.reduce((acc, k) => {
         if (!k || !statsMap.has(k)) return acc;
         const row = statsMap.get(k);
         acc.totalStories += Number(row.totalStories || 0);
         acc.approvedStories += Number(row.approvedStories || 0);
         acc.pendingStories += Number(row.pendingStories || 0);
+        acc.rejectedStories += Number(row.rejectedStories || 0);
+        acc.withdrawnStories += Number(row.withdrawnStories || 0);
+        acc.publishedStories += Number(row.publishedStories || 0);
         const last = row.lastStoryAt ? new Date(row.lastStoryAt) : null;
         const current = acc.lastStoryAt ? new Date(acc.lastStoryAt) : null;
         if (last && (!current || last > current)) acc.lastStoryAt = row.lastStoryAt;
@@ -672,6 +684,9 @@ async function adminListReporterContacts(req, res) {
         totalStories: Number(stats.totalStories || 0),
         approvedStories: Number(stats.approvedStories || 0),
         pendingStories: Number(stats.pendingStories || 0),
+        rejectedStories: Number(stats.rejectedStories || 0),
+        withdrawnStories: Number(stats.withdrawnStories || 0),
+        publishedStories: Number(stats.publishedStories || 0),
         approvedCount: Number(stats.approvedStories || 0),
         pendingCount: Number(stats.pendingStories || 0),
         lastStoryAt: stats.lastStoryAt || null,
@@ -1542,21 +1557,79 @@ async function getCommunityReporterAnalytics(req, res, next) {
     const limit = Math.min(limitRaw, 200);
     const skip = (page - 1) * limit;
 
+    const approvedStatuses = ['approved', 'approve', 'approved_final', 'approved_founder', 'approved_by_founder', 'approved_by_admin', 'app', 'published', 'publish', 'published_final'];
+    const publishedStatuses = ['published', 'publish', 'published_final'];
+    const pendingStatuses = ['new', 'pending', 'under_review', 'underreview', 'ai_reviewed', 'pending_founder', 'pending_founder_review', 'pendingfounder', 'pendingfounderreview', 'review'];
+    const rejectedStatuses = ['rejected', 'reject', 'trash', 'discarded', 'archived'];
+    const withdrawnStatuses = ['withdrawn'];
+
     const pipeline = [
-      { $match: { sourceType: 'community' } },
+      { $match: { sourceType: 'community', isDeleted: { $ne: true } } },
+      {
+        $addFields: {
+          _emailRaw: { $ifNull: ['$reporterEmailNorm', { $ifNull: ['$reporterEmail', { $ifNull: ['$email', '$contact.email'] }] }] },
+          _nameRaw: { $ifNull: ['$reporterName', { $ifNull: ['$name', '$contact.name'] }] },
+        },
+      },
+      {
+        $addFields: {
+          _emailNorm: {
+            $cond: [
+              { $or: [{ $eq: ['$_emailRaw', null] }, { $eq: ['$_emailRaw', ''] }] },
+              null,
+              { $toLower: { $trim: { input: { $toString: '$_emailRaw' } } } },
+            ],
+          },
+          _statusNorm: {
+            $cond: [
+              { $or: [{ $eq: ['$status', null] }, { $eq: ['$status', ''] }] },
+              '',
+              { $toLower: { $trim: { input: { $toString: '$status' } } } },
+            ],
+          },
+          reporterKey: {
+            $cond: [
+              { $and: [{ $ne: ['$reporterProfileId', null] }, { $ne: ['$reporterProfileId', ''] }] },
+              { $toString: '$reporterProfileId' },
+              {
+                $cond: [
+                  { $and: [{ $ne: ['$reporterId', null] }, { $ne: ['$reporterId', ''] }] },
+                  { $toString: '$reporterId' },
+                  {
+                    $cond: [
+                      { $and: [{ $ne: ['$_emailNorm', null] }, { $ne: ['$_emailNorm', ''] }] },
+                      '$_emailNorm',
+                      {
+                        $cond: [
+                          { $and: [{ $ne: ['$contact.phone', null] }, { $ne: ['$contact.phone', ''] }] },
+                          { $toString: '$contact.phone' },
+                          null,
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      { $match: { reporterKey: { $ne: null } } },
       {
         $group: {
-          _id: '$reporterId',
-          name: { $first: '$reporterName' },
-          email: { $first: '$reporterEmail' },
+          _id: '$reporterKey',
+          name: { $first: '$_nameRaw' },
+          email: { $first: '$_emailNorm' },
           totalStories: { $sum: 1 },
-          approvedStories: {
-            $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] },
-          },
+          approvedStories: { $sum: { $cond: [{ $in: ['$_statusNorm', approvedStatuses] }, 1, 0] } },
+          pendingStories: { $sum: { $cond: [{ $in: ['$_statusNorm', pendingStatuses] }, 1, 0] } },
+          rejectedStories: { $sum: { $cond: [{ $in: ['$_statusNorm', rejectedStatuses] }, 1, 0] } },
+          withdrawnStories: { $sum: { $cond: [{ $in: ['$_statusNorm', withdrawnStatuses] }, 1, 0] } },
+          publishedStories: { $sum: { $cond: [{ $in: ['$_statusNorm', publishedStatuses] }, 1, 0] } },
           lastStoryAt: { $max: '$createdAt' },
         },
       },
-      { $sort: { totalStories: -1 } },
+      { $sort: { totalStories: -1, lastStoryAt: -1 } },
       { $skip: skip },
       { $limit: limit },
     ];

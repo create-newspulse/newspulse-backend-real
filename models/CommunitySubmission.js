@@ -155,4 +155,56 @@ CommunitySubmissionSchema.pre('validate', function(next) {
   next();
 });
 
+// Best-effort normalization/upsert so contributor directory is populated from submissions.
+// Never throws (to avoid breaking Community Story Desk flows).
+CommunitySubmissionSchema.post('save', async function(doc) {
+  try {
+    if (!doc || !doc._id) return;
+    if (String(process.env.NODE_ENV || '').toLowerCase() === 'test') return;
+
+    // 1) Upsert ReporterContact (email-keyed) and backfill submission.reporterId
+    try {
+      const { upsertReporterContactFromSubmission } = require('../services/reporterContactService');
+      const out = await upsertReporterContactFromSubmission(doc.toObject ? doc.toObject() : doc);
+      if (out && out.contactId && !doc.reporterId) {
+        try { doc.reporterId = out.contactId; } catch (_) {}
+        await mongoose.model('CommunitySubmission').updateOne(
+          { _id: doc._id },
+          { $set: { reporterId: out.contactId } }
+        ).catch(() => {});
+      }
+
+      if (process.env.REPORTER_NORMALIZE_LOG === '1') {
+        console.log('[community-submission][contact-upserted]', {
+          submissionId: String(doc._id),
+          reporterId: out && out.contactId ? String(out.contactId) : null,
+        });
+      }
+    } catch (_) {}
+
+    // 2) Resolve + attach ReporterProfile, then recompute stats
+    try {
+      const {
+        resolveAndAttachForSubmission,
+        recomputeReporterProfileStoryStats,
+      } = require('../services/reporterIdentityResolution.service');
+
+      const link = await resolveAndAttachForSubmission(doc);
+      const profileId = (doc.reporterProfileId ? String(doc.reporterProfileId) : null) || link?.profileId || null;
+      if (profileId) {
+        await recomputeReporterProfileStoryStats(profileId, { reason: 'submission-saved' }).catch(() => {});
+      }
+
+      if (process.env.REPORTER_NORMALIZE_LOG === '1') {
+        console.log('[community-submission][reporter-normalized]', {
+          submissionId: String(doc._id),
+          reporterProfileId: profileId,
+          resolutionMethod: link?.resolutionMethod || null,
+          identityFlags: Array.isArray(link?.flags) ? link.flags : undefined,
+        });
+      }
+    } catch (_) {}
+  } catch (_) {}
+});
+
 module.exports = mongoose.models.CommunitySubmission || mongoose.model('CommunitySubmission', CommunitySubmissionSchema);

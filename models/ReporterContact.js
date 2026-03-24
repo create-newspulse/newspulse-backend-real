@@ -38,6 +38,9 @@ const StatsSchema = new mongoose.Schema({
   totalStories: { type: Number, default: 0 },
   approvedStories: { type: Number, default: 0 },
   pendingStories: { type: Number, default: 0 },
+  rejectedStories: { type: Number, default: 0 },
+  withdrawnStories: { type: Number, default: 0 },
+  publishedStories: { type: Number, default: 0 },
   lastStoryAt: { type: Date },
   lastStoryTitle: { type: String, trim: true },
 }, { _id: false });

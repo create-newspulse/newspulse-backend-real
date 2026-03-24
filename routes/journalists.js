@@ -3,6 +3,7 @@ const { upsertReporterContactFromPayload } = require('../services/reporterContac
 const ReporterContact = require('../models/ReporterContact');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const { requireAdminAuth } = require('../middleware/adminAuth');
+const { findReporterContactByIdentifier } = require('../services/reporterLookup.service');
 
 const router = express.Router();
 
@@ -159,7 +160,10 @@ router.post('/admin/community/journalists/:reporterId/verify', requireAdminAuth,
   try {
     const { reporterId } = req.params || {};
     if (!reporterId) return res.status(400).json({ ok: false, message: 'Invalid reporterId' });
-    const contact = await ReporterContact.findById(reporterId);
+    const { contact, kind, identifier } = await findReporterContactByIdentifier(reporterId);
+    if (kind !== 'objectId' && kind !== 'email') {
+      return res.status(400).json({ ok: false, message: 'Invalid reporterId' });
+    }
     if (!contact) return res.status(404).json({ ok: false, message: 'Reporter contact not found' });
     contact.reporterType = 'journalist';
     contact.verificationLevel = 'verified';
@@ -174,7 +178,7 @@ router.post('/admin/community/journalists/:reporterId/verify', requireAdminAuth,
     } catch (bulkErr) {
       console.warn('[JOURNALISTS][bulk-update-warning]', bulkErr?.message || bulkErr);
     }
-    return res.json({ ok: true, status: 'verified', reporterId: contact._id.toString() });
+    return res.json({ ok: true, status: 'verified', reporterId: contact._id.toString(), lookup: { kind, identifier } });
   } catch (e) {
     console.error('[JOURNALISTS][verify-error]', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to verify journalist' });
@@ -186,7 +190,10 @@ router.post('/admin/community/journalists/:reporterId/reject', requireAdminAuth,
   try {
     const { reporterId } = req.params || {};
     if (!reporterId) return res.status(400).json({ ok: false, message: 'Invalid reporterId' });
-    const contact = await ReporterContact.findById(reporterId);
+    const { contact, kind, identifier } = await findReporterContactByIdentifier(reporterId);
+    if (kind !== 'objectId' && kind !== 'email') {
+      return res.status(400).json({ ok: false, message: 'Invalid reporterId' });
+    }
     if (!contact) return res.status(404).json({ ok: false, message: 'Reporter contact not found' });
     contact.reporterType = 'community';
     contact.verificationLevel = 'unverified';
@@ -201,7 +208,7 @@ router.post('/admin/community/journalists/:reporterId/reject', requireAdminAuth,
     } catch (bulkErr) {
       console.warn('[JOURNALISTS][bulk-downgrade-warning]', bulkErr?.message || bulkErr);
     }
-    return res.json({ ok: true, status: 'unverified', reporterId: contact._id.toString() });
+    return res.json({ ok: true, status: 'unverified', reporterId: contact._id.toString(), lookup: { kind, identifier } });
   } catch (e) {
     console.error('[JOURNALISTS][reject-error]', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to reject journalist' });

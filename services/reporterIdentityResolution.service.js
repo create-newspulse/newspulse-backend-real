@@ -45,6 +45,21 @@ function normalizeLocation(input) {
   };
 }
 
+function hasAnyLocation(loc) {
+  if (!loc) return false;
+  return !!(
+    String(loc.country || '').trim() ||
+    String(loc.stateProvince || '').trim() ||
+    String(loc.districtCounty || '').trim() ||
+    String(loc.city || '').trim() ||
+    String(loc.areaLocality || '').trim()
+  );
+}
+
+function escapeRegex(s) {
+  return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function deriveCoverageScope(loc) {
   const c = String(loc?.country || '').trim().toLowerCase();
   const hasState = !!String(loc?.stateProvince || '').trim();
@@ -62,7 +77,7 @@ function computeIdentityFlags({ userId, email, phone, location }) {
   const flags = [];
   if (!email) flags.push('missing_email');
   if (!phone) flags.push('missing_phone');
-  const hasLoc = !!(location && (location.city || location.stateProvince || location.country || location.districtCounty || location.areaLocality));
+  const hasLoc = hasAnyLocation(location);
   if (!hasLoc) flags.push('missing_location');
   if (!userId && !email && !phone) flags.push('identity_unresolved');
   return flags;
@@ -74,58 +89,175 @@ function actorFromReq(req) {
   return { kind: 'admin', adminId: a.id || null, email: a.email || null, role: a.role || null };
 }
 
+function toCanonicalReporterProfile(profile) {
+  if (!profile) return null;
+  const p = profile.toObject ? profile.toObject() : profile;
+  return {
+    id: p._id ? String(p._id) : null,
+    displayName: p.displayName || null,
+    userId: p.userId ? String(p.userId) : null,
+    reporterContactId: p.reporterContactId ? String(p.reporterContactId) : null,
+    primaryEmail: p.primaryEmail || null,
+    primaryPhone: p.primaryPhone || null,
+    coverageScope: p.coverageScope || null,
+    location: p.location || null,
+    flags: Array.isArray(p.flags) ? p.flags : [],
+    stats: {
+      totalStories: Number(p?.stats?.totalStories || 0),
+      approvedStories: Number(p?.stats?.approvedStories || 0),
+      pendingStories: Number(p?.stats?.pendingStories || 0),
+      rejectedStories: Number(p?.stats?.rejectedStories || 0),
+      withdrawnStories: Number(p?.stats?.withdrawnStories || 0),
+      publishedStories: Number(p?.stats?.publishedStories || 0),
+      lastStoryAt: p?.stats?.lastStoryAt || null,
+      lastStoryTitle: p?.stats?.lastStoryTitle || null,
+    },
+    createdAt: p.createdAt || null,
+    updatedAt: p.updatedAt || null,
+  };
+}
+
 function classifySubmissionStatus(status) {
   const s = String(status || '').trim().toLowerCase();
   if (!s) return 'other';
 
+  // Published (separate bucket)
+  if (s === 'published' || s === 'publish' || s === 'published_final') return 'published';
+
   // Approved-like
-  if (s === 'approved' || s === 'published') return 'approved';
+  if (s === 'approved' || s === 'approve' || s === 'approved_final' || s === 'approved_founder' || s === 'approved_by_founder' || s === 'approved_by_admin') {
+    return 'approved';
+  }
 
   // Pending/review-like
   if (s === 'new' || s === 'pending' || s === 'under_review' || s === 'pending_founder' || s === 'pendingfounder') {
     return 'pending';
   }
 
+  // Withdrawn (separate bucket)
+  if (s === 'withdrawn') return 'withdrawn';
+
   // Rejected/removed-like
-  if (s === 'rejected' || s === 'trash' || s === 'deleted' || s === 'discarded' || s === 'withdrawn' || s === 'archived') {
+  if (s === 'rejected' || s === 'reject' || s === 'trash' || s === 'deleted' || s === 'discarded' || s === 'archived') {
     return 'rejected';
   }
 
   return 'other';
 }
 
+async function recomputeReporterProfileStoryStats(profileId, { reason } = {}) {
+  try {
+    if (!profileId) return { ok: false, reason: 'missing-profileId' };
+    if (!isDbReady()) return { ok: false, reason: 'db-not-ready' };
+
+    const pid = String(profileId).trim();
+    if (!mongoose.isValidObjectId(pid)) return { ok: false, reason: 'invalid-profileId' };
+
+    const approvedStatuses = [
+      'approved', 'approve', 'approved_final', 'approved_founder', 'approved_by_founder', 'approved_by_admin', 'app',
+      // treat published as approved for the approved counter
+      'published', 'publish', 'published_final',
+    ];
+    const publishedStatuses = ['published', 'publish', 'published_final'];
+    const pendingStatuses = [
+      'new', 'pending', 'under_review', 'underreview', 'ai_reviewed',
+      'pending_founder', 'pending_founder_review', 'pendingfounder', 'pendingfounderreview',
+    ];
+    const rejectedStatuses = ['rejected', 'reject', 'trash', 'discarded', 'archived'];
+    const withdrawnStatuses = ['withdrawn'];
+
+    const match = {
+      reporterProfileId: new mongoose.Types.ObjectId(pid),
+      isDeleted: { $ne: true },
+    };
+
+    const rows = await CommunitySubmission.aggregate([
+      { $match: match },
+      {
+        $addFields: {
+          _statusNorm: {
+            $cond: [
+              { $or: [{ $eq: ['$status', null] }, { $eq: ['$status', ''] }] },
+              '',
+              { $toLower: { $trim: { input: { $toString: '$status' } } } },
+            ],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalStories: { $sum: 1 },
+          approvedStories: { $sum: { $cond: [{ $in: ['$_statusNorm', approvedStatuses] }, 1, 0] } },
+          pendingStories: { $sum: { $cond: [{ $in: ['$_statusNorm', pendingStatuses] }, 1, 0] } },
+          rejectedStories: { $sum: { $cond: [{ $in: ['$_statusNorm', rejectedStatuses] }, 1, 0] } },
+          withdrawnStories: { $sum: { $cond: [{ $in: ['$_statusNorm', withdrawnStatuses] }, 1, 0] } },
+          publishedStories: { $sum: { $cond: [{ $in: ['$_statusNorm', publishedStatuses] }, 1, 0] } },
+          lastStoryAt: { $max: '$createdAt' },
+        },
+      },
+    ]);
+
+    const agg = Array.isArray(rows) && rows[0] ? rows[0] : null;
+    const totalStories = Number(agg?.totalStories || 0);
+    const approvedStories = Number(agg?.approvedStories || 0);
+    const pendingStories = Number(agg?.pendingStories || 0);
+    const rejectedStories = Number(agg?.rejectedStories || 0);
+    const withdrawnStories = Number(agg?.withdrawnStories || 0);
+    const publishedStories = Number(agg?.publishedStories || 0);
+    const lastStoryAt = agg?.lastStoryAt || null;
+
+    let lastStoryTitle = null;
+    try {
+      const latest = await CommunitySubmission.findOne(match).sort({ createdAt: -1 }).select('headline createdAt').lean();
+      lastStoryTitle = latest?.headline ? String(latest.headline).trim() : null;
+    } catch (_) {}
+
+    await ReporterProfile.updateOne(
+      { _id: pid },
+      {
+        $set: {
+          'stats.totalStories': totalStories,
+          'stats.approvedStories': approvedStories,
+          'stats.pendingStories': pendingStories,
+          'stats.rejectedStories': rejectedStories,
+          'stats.withdrawnStories': withdrawnStories,
+          'stats.publishedStories': publishedStories,
+          'stats.lastStoryAt': lastStoryAt,
+          'stats.lastStoryTitle': lastStoryTitle,
+        },
+      }
+    );
+
+    if (process.env.REPORTER_NORMALIZE_LOG === '1') {
+      console.log('[reporter-profile][stats][recompute]', {
+        profileId: pid,
+        reason: reason || null,
+        totalStories,
+        approvedStories,
+        pendingStories,
+        rejectedStories,
+        withdrawnStories,
+        publishedStories,
+        lastStoryAt,
+      });
+    }
+
+    return {
+      ok: true,
+      profileId: pid,
+      stats: { totalStories, approvedStories, pendingStories, rejectedStories, withdrawnStories, publishedStories, lastStoryAt, lastStoryTitle },
+    };
+  } catch (e) {
+    return { ok: false, reason: e?.message || 'error' };
+  }
+}
+
 async function updateReporterProfileStatsForStatusChange({ profileId, fromStatus, toStatus }) {
   if (!profileId) return { ok: false, reason: 'missing-profileId' };
-  if (!isDbReady()) return { ok: false, reason: 'db-not-ready' };
-
-  const fromClass = classifySubmissionStatus(fromStatus);
-  const toClass = classifySubmissionStatus(toStatus);
-  if (fromClass === toClass) return { ok: true, skipped: true, reason: 'no-change' };
-
-  const inc = {};
-  if (fromClass === 'pending') inc['stats.pendingStories'] = (inc['stats.pendingStories'] || 0) - 1;
-  if (toClass === 'pending') inc['stats.pendingStories'] = (inc['stats.pendingStories'] || 0) + 1;
-  if (fromClass === 'approved') inc['stats.approvedStories'] = (inc['stats.approvedStories'] || 0) - 1;
-  if (toClass === 'approved') inc['stats.approvedStories'] = (inc['stats.approvedStories'] || 0) + 1;
-
-  // Defensive: do not allow negative counters in aggregate; clamp via pipeline update when needed.
-  await ReporterProfile.updateOne(
-    { _id: profileId },
-    {
-      $inc: inc,
-    }
-  );
-
-  // Clamp negatives (best-effort)
-  try {
-    const p = await ReporterProfile.findById(profileId, 'stats.pendingStories stats.approvedStories').lean();
-    if (!p) return { ok: true };
-    const pendingStories = Math.max(0, Number(p?.stats?.pendingStories || 0));
-    const approvedStories = Math.max(0, Number(p?.stats?.approvedStories || 0));
-    await ReporterProfile.updateOne({ _id: profileId }, { $set: { 'stats.pendingStories': pendingStories, 'stats.approvedStories': approvedStories } });
-  } catch (_) {}
-
-  return { ok: true, fromClass, toClass };
+  const out = await recomputeReporterProfileStoryStats(profileId, { reason: 'status-change' });
+  if (!out.ok) return out;
+  return { ok: true, recomputed: true, fromStatus: fromStatus || null, toStatus: toStatus || null, stats: out.stats };
 }
 
 async function findProfileByUserId(userId) {
@@ -204,10 +336,11 @@ async function resolveOrCreateReporterProfile(input) {
   const email = normalizeEmail(input && input.email);
   const phone = normalizePhone(input && input.phone);
   const displayName = String(input && input.name ? input.name : 'Unknown').trim() || 'Unknown';
-  const location = normalizeLocation(input && input.location);
+  const locationInput = normalizeLocation(input && input.location);
+  const hasLocInput = hasAnyLocation(locationInput);
 
   if (!isDbReady()) {
-    return { ok: false, reason: 'db-not-ready', profile: null, resolutionMethod: 'db-not-ready', flags: computeIdentityFlags({ userId, email, phone, location }) };
+    return { ok: false, reason: 'db-not-ready', profile: null, resolutionMethod: 'db-not-ready', flags: computeIdentityFlags({ userId, email, phone, location: locationInput }) };
   }
 
   let profile = null;
@@ -233,6 +366,22 @@ async function resolveOrCreateReporterProfile(input) {
     if (profile) resolutionMethod = 'phone';
   }
 
+  // Conservative fallback match: name + (city/state) when email/phone missing.
+  if (!profile && !email && !phone) {
+    const nameKey = String(displayName || '').trim();
+    const cityKey = String(locationInput?.city || '').trim();
+    const stateKey = String(locationInput?.stateProvince || '').trim();
+    if (nameKey && nameKey.toLowerCase() !== 'unknown' && (cityKey || stateKey)) {
+      profile = await ReporterProfile.findOne({
+        mergedIntoProfileId: null,
+        displayName: new RegExp(`^${escapeRegex(nameKey)}$`, 'i'),
+        ...(cityKey ? { 'location.city': cityKey } : {}),
+        ...(stateKey ? { 'location.stateProvince': stateKey } : {}),
+      }).lean();
+      if (profile) resolutionMethod = 'name+city/state';
+    }
+  }
+
   if (!profile) {
     // last-resort: try matching on ReporterProfile primary fields
     if (email) {
@@ -245,8 +394,8 @@ async function resolveOrCreateReporterProfile(input) {
     }
   }
 
-  const flags = computeIdentityFlags({ userId, email, phone, location });
-  const coverageScope = deriveCoverageScope(location);
+  const coverageScopeInput = deriveCoverageScope(locationInput);
+  const flagsInput = computeIdentityFlags({ userId, email, phone, location: locationInput });
 
   if (!profile) {
     const created = await ReporterProfile.create({
@@ -255,10 +404,10 @@ async function resolveOrCreateReporterProfile(input) {
       reporterContactId,
       primaryEmail: email,
       primaryPhone: phone,
-      flags,
+      flags: flagsInput,
       verificationTier: 'new',
-      coverageScope,
-      location,
+      coverageScope: coverageScopeInput,
+      location: locationInput,
       stats: { totalStories: 0, approvedStories: 0, pendingStories: 0, lastStoryAt: null, lastStoryTitle: null },
     });
 
@@ -268,14 +417,24 @@ async function resolveOrCreateReporterProfile(input) {
     // Keep primary identity fields as filled (never overwrite with null)
     const $set = {
       displayName: profile.displayName && profile.displayName !== 'Unknown' ? profile.displayName : displayName,
-      coverageScope,
-      location,
-      flags,
     };
     if (userId && !profile.userId) $set.userId = userId;
     if (reporterContactId && !profile.reporterContactId) $set.reporterContactId = reporterContactId;
     if (email && !profile.primaryEmail) $set.primaryEmail = email;
     if (phone && !profile.primaryPhone) $set.primaryPhone = phone;
+
+    // Only update location/coverage when we actually received values.
+    if (hasLocInput) {
+      $set.location = locationInput;
+      $set.coverageScope = coverageScopeInput;
+    }
+
+    // Compute flags from the merged state (do not regress location/phone/email flags).
+    const emailFinal = (email || profile.primaryEmail) || null;
+    const phoneFinal = (phone || profile.primaryPhone) || null;
+    const userIdFinal = (userId || profile.userId) || null;
+    const locFinal = hasLocInput ? locationInput : (profile.location || locationInput);
+    $set.flags = computeIdentityFlags({ userId: userIdFinal, email: emailFinal, phone: phoneFinal, location: locFinal });
 
     await ReporterProfile.updateOne({ _id: profile._id }, { $set });
     profile = await ReporterProfile.findById(profile._id).lean();
@@ -406,24 +565,7 @@ async function attachSubmissionToReporterProfile(submission, resolveResult, { re
   // Update profile stats best-effort (only when link inserted)
   if (isNewLink) {
     try {
-      const status = String(submission.status || '').trim().toLowerCase();
-      const isApproved = status === 'approved' || status === 'published';
-      const isPending = status === 'new' || status === 'pending' || status === 'under_review' || status === 'pending_founder';
-
-      await ReporterProfile.updateOne(
-        { _id: profileId },
-        {
-          $inc: {
-            'stats.totalStories': 1,
-            ...(isApproved ? { 'stats.approvedStories': 1 } : {}),
-            ...(isPending ? { 'stats.pendingStories': 1 } : {}),
-          },
-          $set: {
-            'stats.lastStoryAt': submission.createdAt || new Date(),
-            'stats.lastStoryTitle': submission.headline ? String(submission.headline).trim() : null,
-          },
-        }
-      );
+      await recomputeReporterProfileStoryStats(profileId, { reason: 'new-link' });
     } catch (_) {}
   }
 
@@ -444,15 +586,20 @@ async function attachSubmissionToReporterProfile(submission, resolveResult, { re
 
 function identityInputFromSubmission(submission) {
   const email = submission.reporterEmailNorm || submission.reporterEmail || submission.email || submission?.contact?.email || null;
-  const phone = submission?.contact?.phone || submission.phone || null;
-  const name = submission.reporterName || submission.name || submission?.contact?.name || 'Unknown';
+  const phone =
+    submission?.contact?.phone ||
+    submission?.contact?.whatsappNumber ||
+    submission?.phone ||
+    submission?.phoneNumber ||
+    null;
+  const name = submission.reporterName || submission.name || submission?.contact?.name || submission?.userName || 'Unknown';
 
-  const loc = submission.locationDetail || submission.location || null;
+  const loc = submission.locationDetail || submission.location || {};
   const location = {
-    city: loc?.city || null,
-    state: loc?.state || null,
-    country: loc?.country || null,
-    district: loc?.district || null,
+    city: loc?.city || submission.city || null,
+    state: loc?.state || submission.state || null,
+    country: loc?.country || submission.country || null,
+    district: loc?.district || submission?.locationDetail?.district || submission.district || null,
   };
 
   return {
@@ -484,9 +631,11 @@ module.exports = {
   normalizeLocation,
   deriveCoverageScope,
   computeIdentityFlags,
+  toCanonicalReporterProfile,
   resolveOrCreateReporterProfile,
   attachSubmissionToReporterProfile,
   resolveAndAttachForSubmission,
   classifySubmissionStatus,
   updateReporterProfileStatsForStatusChange,
+  recomputeReporterProfileStoryStats,
 };

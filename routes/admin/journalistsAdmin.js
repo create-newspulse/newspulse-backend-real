@@ -2,6 +2,7 @@ const express = require('express');
 const { requireAdminAuth } = require('../../middleware/adminAuth');
 const ReporterContact = require('../../models/ReporterContact');
 const CommunitySubmission = require('../../models/CommunitySubmission');
+const { findReporterContactByIdentifier } = require('../../services/reporterLookup.service');
 
 const router = express.Router();
 
@@ -56,14 +57,17 @@ router.get('/journalists/applications', requireAdminAuth, async (req, res) => {
 router.post('/journalists/:id/approve', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params || {};
-    const contact = await ReporterContact.findById(id);
+    const { contact, kind, identifier } = await findReporterContactByIdentifier(id);
+    if (kind !== 'objectId' && kind !== 'email') {
+      return res.status(400).json({ ok: false, message: 'Invalid journalist id' });
+    }
     if (!contact) return res.status(404).json({ ok: false, message: 'Reporter not found' });
     contact.reporterType = 'journalist';
     contact.verificationLevel = 'verified';
     contact.verifiedAt = new Date();
     contact.verifiedBy = (req.admin && (req.admin.id || req.admin.email)) || null;
     await contact.save();
-    return res.json({ ok: true });
+    return res.json({ ok: true, lookup: { kind, identifier } });
   } catch (e) {
     console.error('[ADMIN][journalists.approve] error', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to approve journalist' });
@@ -74,13 +78,16 @@ router.post('/journalists/:id/approve', requireAdminAuth, async (req, res) => {
 router.post('/journalists/:id/reject', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params || {};
-    const contact = await ReporterContact.findById(id);
+    const { contact, kind, identifier } = await findReporterContactByIdentifier(id);
+    if (kind !== 'objectId' && kind !== 'email') {
+      return res.status(400).json({ ok: false, message: 'Invalid journalist id' });
+    }
     if (!contact) return res.status(404).json({ ok: false, message: 'Reporter not found' });
     contact.verificationLevel = 'revoked';
     contact.reporterType = 'journalist';
     contact.ethicsStrikes = (contact.ethicsStrikes || 0) + 1;
     await contact.save();
-    return res.json({ ok: true });
+    return res.json({ ok: true, lookup: { kind, identifier } });
   } catch (e) {
     console.error('[ADMIN][journalists.reject] error', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to reject journalist' });

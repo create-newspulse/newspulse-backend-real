@@ -11,6 +11,7 @@
     "test-email": "node scripts/test-email.js",
     "test-routes": "node scripts/test-routes.js",
     "migrate:normalize-community": "node scripts/migrate-normalize-community-submissions.js",
+    "repair:community-reporters": "node scripts/repair-community-reporter-identities.js",
     "migrate:broadcast-lang": "node scripts/migrate_broadcast_lang.js"
   },
   "dependencies": {

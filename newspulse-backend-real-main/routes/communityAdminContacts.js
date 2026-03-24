@@ -1,6 +1,12 @@
 const express = require('express');
 // Use middleware from root workspace (one level above nested project)
 const { requireAdminAuth } = require('../../middleware/adminAuth');
+const {
+  safeDecodeURIComponent,
+  normalizeEmail,
+  findReporterContactByIdentifier,
+  deriveReporterStatsFromSubmissionsByEmail,
+} = require('../../services/reporterLookup.service');
 
 const router = express.Router();
 
@@ -33,6 +39,87 @@ router.get('/reporter-stories', requireAdminAuth, async (req, res) => {
   } catch (err) {
     console.error('[nested][reporter-stories] error', err?.message || err);
     return res.status(500).json({ ok: false, message: 'Failed to load reporter stories' });
+  }
+});
+
+// GET /api/admin/community/reporter-directory/lookup?identifier=EMAIL_OR_ID
+// This router is mounted by the top-level server under /api/admin/community.
+router.get('/reporter-directory/lookup', requireAdminAuth, async (req, res) => {
+  const debug = process.env.COMMUNITY_REPORTER_DEBUG_LOOKUP === '1';
+  try {
+    const raw = (req.query && (req.query.identifier || req.query.email || req.query.q)) || '';
+    const decoded = String(safeDecodeURIComponent(raw) || '').trim();
+    if (!decoded) {
+      return res.status(400).json({ ok: false, message: 'identifier (email or id) is required' });
+    }
+
+    const lookup = await findReporterContactByIdentifier(decoded);
+    const contact = lookup.contact ? (typeof lookup.contact.toObject === 'function' ? lookup.contact.toObject() : lookup.contact) : null;
+
+    const emailFromContact = contact && contact.email ? normalizeEmail(contact.email) : null;
+    const emailFromIdentifier = decoded.includes('@') ? normalizeEmail(decoded) : null;
+    const emailForStats = emailFromContact || emailFromIdentifier;
+    const derived = emailForStats ? await deriveReporterStatsFromSubmissionsByEmail(emailForStats) : null;
+
+    const emptyStats = {
+      totalStories: 0,
+      approvedStories: 0,
+      pendingStories: 0,
+      rejectedStories: 0,
+      withdrawnStories: 0,
+      publishedStories: 0,
+      lastStoryAt: null,
+      lastStoryTitle: null,
+    };
+
+    const reporter = {
+      id: contact && contact._id ? String(contact._id) : null,
+      name: (contact && contact.fullName) ? String(contact.fullName) : (derived && derived.name ? String(derived.name) : null),
+      email: emailForStats || (contact && contact.email ? String(contact.email) : null),
+      phone: (contact && (contact.phoneFull || contact.phoneNumber)) ? String(contact.phoneFull || contact.phoneNumber) : null,
+      city: contact && contact.cityTownVillage ? String(contact.cityTownVillage) : null,
+      district: contact && contact.districtName ? String(contact.districtName) : null,
+      state: contact && contact.stateName ? String(contact.stateName) : null,
+      country: contact && contact.country ? String(contact.country) : null,
+      reporterType: contact && contact.reporterType ? String(contact.reporterType) : null,
+      verificationLevel: contact && contact.verificationLevel ? String(contact.verificationLevel) : null,
+      status: contact && contact.status ? String(contact.status) : null,
+    };
+
+    const stats = (derived && derived.stats) ? derived.stats : (contact && contact.stats ? contact.stats : emptyStats);
+
+    if (debug) {
+      console.log('[nested][admin][reporter-directory][lookup]', {
+        identifier: decoded,
+        kind: lookup.kind,
+        contactId: reporter.id,
+        emailForStats,
+        totalStories: Number(stats && stats.totalStories || 0),
+      });
+    }
+
+    return res.status(200).json({
+      ok: true,
+      identifier: decoded,
+      kind: lookup.kind,
+      reporter,
+      stats: {
+        ...emptyStats,
+        ...stats,
+        totalStories: Number(stats && stats.totalStories || 0),
+        approvedStories: Number(stats && stats.approvedStories || 0),
+        pendingStories: Number(stats && stats.pendingStories || 0),
+        rejectedStories: Number(stats && stats.rejectedStories || 0),
+        withdrawnStories: Number(stats && stats.withdrawnStories || 0),
+        publishedStories: Number(stats && stats.publishedStories || 0),
+        lastStoryAt: (stats && stats.lastStoryAt) || null,
+        lastStoryTitle: (stats && stats.lastStoryTitle) || null,
+      },
+      derivedFrom: contact ? 'contact' : (derived ? 'submissions' : 'none'),
+    });
+  } catch (err) {
+    console.error('[nested][admin][reporter-directory][lookup] error', err?.stack || err);
+    return res.status(500).json({ ok: false, message: 'Lookup failed' });
   }
 });
 

@@ -6,6 +6,7 @@ const { addStrikeForReporter } = require('../services/reporterSafetyService');
 const News = require('../models/News');
 const mongoose = require('mongoose');
 const { upsertReporterContact } = require('../services/reporterContactService');
+const { findReporterContactByIdentifier } = require('../services/reporterLookup.service');
 
 const {
   adminListReporterContacts,
@@ -325,7 +326,10 @@ router.get('/journalist-applications', requireAdminAuth, async (req, res) => {
 router.post('/journalist-applications/:id/verify', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params || {};
-    const contact = await ReporterContact.findById(id);
+    const { contact, kind, identifier } = await findReporterContactByIdentifier(id);
+    if (kind !== 'objectId' && kind !== 'email') {
+      return res.status(400).json({ ok: false, message: 'Invalid reporter id' });
+    }
     if (!contact) return res.status(404).json({ ok: false, message: 'Reporter contact not found' });
     contact.reporterType = 'journalist';
     contact.verificationLevel = 'verified';
@@ -335,7 +339,7 @@ router.post('/journalist-applications/:id/verify', requireAdminAuth, async (req,
     if (typeof contact.save === 'function') {
       await contact.save();
     }
-    return res.json({ ok: true, contact });
+    return res.json({ ok: true, contact, lookup: { kind, identifier } });
   } catch (e) {
     console.error('[ADMIN_COMMUNITY_REPORTER][verify] error', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to verify journalist' });
@@ -347,7 +351,10 @@ router.post('/journalist-applications/:id/reject', requireAdminAuth, async (req,
   try {
     const { id } = req.params || {};
     const { reason } = req.body || {};
-    const contact = await ReporterContact.findById(id);
+    const { contact, kind, identifier } = await findReporterContactByIdentifier(id);
+    if (kind !== 'objectId' && kind !== 'email') {
+      return res.status(400).json({ ok: false, message: 'Invalid reporter id' });
+    }
     if (!contact) return res.status(404).json({ ok: false, message: 'Reporter contact not found' });
     contact.reporterType = 'journalist';
     contact.verificationLevel = 'revoked';
@@ -358,7 +365,7 @@ router.post('/journalist-applications/:id/reject', requireAdminAuth, async (req,
     if (typeof contact.save === 'function') {
       await contact.save();
     }
-    return res.json({ ok: true });
+    return res.json({ ok: true, lookup: { kind, identifier } });
   } catch (e) {
     console.error('[ADMIN_COMMUNITY_REPORTER][reject] error', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to reject journalist' });
@@ -370,7 +377,10 @@ router.post('/reporters/:id/status', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params || {};
     const { status, verificationLevel, addStrike, note } = req.body || {};
-    const contact = await ReporterContact.findById(id);
+    const { contact, kind, identifier } = await findReporterContactByIdentifier(id);
+    if (kind !== 'objectId' && kind !== 'email') {
+      return res.status(400).json({ ok: false, message: 'Invalid reporter id' });
+    }
     if (!contact) return res.status(404).json({ ok: false, message: 'Reporter contact not found' });
     const allowedStatus = ['active','watchlist','suspended','banned'];
     if (status) {
@@ -392,7 +402,7 @@ router.post('/reporters/:id/status', requireAdminAuth, async (req, res) => {
     if (typeof contact.save === 'function') {
       await contact.save();
     }
-    return res.json({ ok: true, contact });
+    return res.json({ ok: true, contact, lookup: { kind, identifier } });
   } catch (e) {
     console.error('[ADMIN_COMMUNITY_REPORTER][status] error', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to update reporter status' });
