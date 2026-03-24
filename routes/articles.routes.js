@@ -9,7 +9,7 @@ const { requireAdminAuth } = require('../middleware/adminAuth');
 const PushHistory = require('../models/PushHistory');
 const { canonicalizeSlug, getSlugCandidates, safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
-const { tagStatesFromText, isValidStateSlug } = require('../src/utils/locationTagger');
+const { INDIA_STATES_UTS, tagStatesFromText, isValidStateSlug } = require('../src/utils/locationTagger');
 const {
   localizeFromNewsTranslations,
   localizeFromArticleI18n,
@@ -1005,6 +1005,35 @@ function _sanitizeOptionalQueryParam(v) {
   return s;
 }
 
+function _isTruthyEnv(v) {
+  if (v === undefined || v === null) return false;
+  const s = String(v).trim().toLowerCase();
+  return s === '1' || s === 'true' || s === 'yes' || s === 'y' || s === 'on';
+}
+
+function _sanitizeDistrictCityValue(v) {
+  const s = _sanitizeOptionalQueryParam(v);
+  if (!s) return '';
+  const lower = s.toLowerCase().replace(/\s+/g, ' ').trim();
+
+  // Frontends commonly send district=all or similar sentinel values.
+  // State-level regional feeds must NOT be blocked by these.
+  if (
+    lower === 'all' ||
+    lower === 'any' ||
+    lower === '*' ||
+    lower === 'all districts' ||
+    lower === 'all-districts' ||
+    lower === 'alldistricts' ||
+    lower === 'all cities' ||
+    lower === 'all-cities' ||
+    lower === 'allcities'
+  ) {
+    return '';
+  }
+  return s;
+}
+
 function _stripLocationPrefix(v, prefix) {
   const s = String(v || '').trim();
   if (!s) return '';
@@ -1012,6 +1041,66 @@ function _stripLocationPrefix(v, prefix) {
   if (!p) return s;
   const rx = new RegExp(`^\s*${_escapeRegex(p)}\s*:\s*`, 'i');
   return s.replace(rx, '').trim();
+}
+
+function _getStateAliasSlugs(stateSlug) {
+  const s = String(stateSlug || '').trim().toLowerCase();
+  if (!s) return [];
+
+  const stateObj = Array.isArray(INDIA_STATES_UTS)
+    ? INDIA_STATES_UTS.find((it) => String(it?.slug || '').trim().toLowerCase() === s)
+    : null;
+
+  const aliasValues = [];
+  aliasValues.push(s);
+
+  // Add known short-code variants for legacy data.
+  if (s === 'gujarat') aliasValues.push('gj');
+
+  const aliases = stateObj && Array.isArray(stateObj.aliases) ? stateObj.aliases : [];
+  for (const a of aliases) {
+    const slug = slugifyUnicode(String(a || ''), { maxLength: 80 });
+    if (slug) aliasValues.push(slug);
+  }
+
+  // Ensure uniqueness.
+  const out = [];
+  const seen = new Set();
+  for (const v of aliasValues) {
+    const vv = String(v || '').trim();
+    if (!vv) continue;
+    if (seen.has(vv)) continue;
+    seen.add(vv);
+    out.push(vv);
+  }
+  return out;
+}
+
+function _buildGeoOrTagClauseAny(field, tagPrefix, values, options = {}) {
+  const vals = Array.isArray(values) ? values : [values];
+  const cleaned = vals.map((v) => String(v || '').trim()).filter(Boolean);
+  if (!cleaned.length) return null;
+
+  const patterns = [];
+  for (const v of cleaned) {
+    const p = _buildFlexibleSlugValuePattern(v) || _escapeRegex(v);
+    if (p) patterns.push(p);
+  }
+  const tagAlt = patterns.length ? `(?:${patterns.join('|')})` : null;
+  const tagRx = tagAlt ? new RegExp(`^\\s*${_escapeRegex(tagPrefix)}\\s*:\\s*${tagAlt}\\s*$`, 'i') : null;
+
+  const ors = [];
+  ors.push({ [`geo.${field}`]: { $in: cleaned } });
+  if (tagRx) ors.push({ tags: tagRx });
+
+  // Legacy fallback: older public Article copies sometimes stored raw state/district/city in top-level fields.
+  const legacyField = options.legacyField ? String(options.legacyField) : '';
+  if (legacyField) {
+    const rxParts = cleaned.map((v) => _buildFlexibleSlugValueRegex(v)).filter(Boolean);
+    for (const rx of rxParts) ors.push({ [legacyField]: rx });
+  }
+
+  return { $or: ors };
 }
 
 async function _handlePublicRegionalQuery(req, res, next, options = {}) {
@@ -1038,8 +1127,8 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
 
     const desired = normalizeLanguage(req.query.lang || req.query.language) || 'gu';
 
-    const rawDistrict0 = _sanitizeOptionalQueryParam(safeDecodeURIComponent(req.query.district || ''));
-    const rawCity0 = _sanitizeOptionalQueryParam(safeDecodeURIComponent(req.query.city || ''));
+    const rawDistrict0 = _sanitizeDistrictCityValue(safeDecodeURIComponent(req.query.district || ''));
+    const rawCity0 = _sanitizeDistrictCityValue(safeDecodeURIComponent(req.query.city || ''));
     const rawDistrict = _stripLocationPrefix(rawDistrict0, 'district');
     const rawCity = _stripLocationPrefix(rawCity0, 'city');
     const districtSlug = rawDistrict ? String(slugifyUnicode(rawDistrict, { maxLength: 80 }) || '').trim().toLowerCase() : '';
@@ -1050,14 +1139,15 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
     const skip = (page - 1) * limit;
 
     const andClauses = [];
-    const stateClause = _buildGeoOrTagClause('state', 'state', stateSlug);
+    const stateAliases = _getStateAliasSlugs(stateSlug);
+    const stateClause = _buildGeoOrTagClauseAny('state', 'state', stateAliases, { legacyField: 'state' });
     if (stateClause) andClauses.push(stateClause);
     if (districtSlug) {
-      const districtClause = _buildGeoOrTagClause('district', 'district', districtSlug);
+      const districtClause = _buildGeoOrTagClauseAny('district', 'district', districtSlug, { legacyField: 'district' });
       if (districtClause) andClauses.push(districtClause);
     }
     if (citySlug) {
-      const cityClause = _buildGeoOrTagClause('city', 'city', citySlug);
+      const cityClause = _buildGeoOrTagClauseAny('city', 'city', citySlug, { legacyField: 'city' });
       if (cityClause) andClauses.push(cityClause);
     }
 
@@ -1065,6 +1155,44 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
     filter.category = 'regional';
     if (andClauses.length) {
       filter.$and = (filter.$and || []).concat(andClauses);
+    }
+
+    // Optional debug logging for live diagnosis.
+    // Enable with DEBUG_REGIONAL_FEED=1 (or REGIONAL_FEED_DEBUG=1).
+    const debugRegional = _isTruthyEnv(process.env.DEBUG_REGIONAL_FEED) || _isTruthyEnv(process.env.REGIONAL_FEED_DEBUG);
+    if (debugRegional && stateSlug === 'gujarat') {
+      const safeJson = (obj) => {
+        try {
+          return JSON.stringify(
+            obj,
+            (_k, v) => {
+              if (v instanceof RegExp) return v.toString();
+              return v;
+            },
+            2
+          );
+        } catch (_) {
+          return '[unstringifiable]';
+        }
+      };
+
+      try {
+        console.log('[public.regional][debug] request', {
+          path: req.path,
+          stateInput: stateInput || null,
+          rawState: rawState || null,
+          stateSlug,
+          rawDistrict: rawDistrict || null,
+          districtSlug: districtSlug || null,
+          rawCity: rawCity || null,
+          citySlug: citySlug || null,
+          lang: desired,
+          page,
+          limit,
+          query: req.query,
+        });
+        console.log('[public.regional][debug] filter', safeJson(filter));
+      } catch (_) {}
     }
 
     // Query rules:
@@ -1088,6 +1216,12 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
         .lean(),
       PublicArticle.countDocuments(filter),
     ]);
+
+    if ((_isTruthyEnv(process.env.DEBUG_REGIONAL_FEED) || _isTruthyEnv(process.env.REGIONAL_FEED_DEBUG)) && stateSlug === 'gujarat') {
+      try {
+        console.log('[public.regional][debug] result', { stateSlug, lang: desired, total, returned: (itemsRaw || []).length });
+      } catch (_) {}
+    }
 
     // Dedupe across language-variants of the same story.
     // Prefer originals in the requested lang over translated variants.

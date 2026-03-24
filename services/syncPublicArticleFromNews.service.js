@@ -1,7 +1,72 @@
 const PublicArticle = require('../models/Article');
 const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
+const { INDIA_STATES_UTS, isValidStateSlug } = require('../src/utils/locationTagger');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
+
+const STATE_SLUG_TO_DISPLAY = (() => {
+  const m = new Map();
+  for (const it of Array.isArray(INDIA_STATES_UTS) ? INDIA_STATES_UTS : []) {
+    const slug = String(it?.slug || '').trim().toLowerCase();
+    const display = String(it?.display || '').trim();
+    if (slug && display) m.set(slug, display);
+  }
+  return m;
+})();
+
+const STATE_ALIAS_SLUG_TO_CANON = (() => {
+  const m = new Map();
+  for (const it of Array.isArray(INDIA_STATES_UTS) ? INDIA_STATES_UTS : []) {
+    const canon = String(it?.slug || '').trim().toLowerCase();
+    if (!canon) continue;
+    m.set(canon, canon);
+    const aliases = Array.isArray(it?.aliases) ? it.aliases : [];
+    for (const a of aliases) {
+      const as = slugifyUnicode(String(a || ''), { maxLength: 80 });
+      if (as) m.set(as, canon);
+    }
+  }
+  // Legacy abbreviation.
+  m.set('gj', 'gujarat');
+  return m;
+})();
+
+function canonicalStateSlugFromAny(v) {
+  const raw = String(v ?? '').trim();
+  if (!raw) return null;
+  const slug = slugifyUnicode(raw, { maxLength: 80 });
+  if (!slug) return null;
+  if (isValidStateSlug(slug)) return slug;
+  const mapped = STATE_ALIAS_SLUG_TO_CANON.get(slug);
+  return mapped && isValidStateSlug(mapped) ? mapped : null;
+}
+
+function _mergeLocationTags(tagsArr, loc) {
+  const tags = Array.isArray(tagsArr) ? tagsArr.filter((t) => typeof t === 'string' && t.trim()) : [];
+  const out = [];
+  const seen = new Set();
+
+  const add = (t) => {
+    const s = String(t || '').trim();
+    if (!s) return;
+    const key = s.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(s);
+  };
+
+  for (const t of tags) add(t);
+
+  const stateSlug = loc?.state ? canonicalStateSlugFromAny(loc.state) : null;
+  const districtSlug = loc?.district ? slugifyUnicode(String(loc.district), { maxLength: 80 }) : null;
+  const citySlug = loc?.city ? slugifyUnicode(String(loc.city), { maxLength: 80 }) : null;
+
+  if (stateSlug) add(`state:${stateSlug}`);
+  if (districtSlug) add(`district:${districtSlug}`);
+  if (citySlug) add(`city:${citySlug}`);
+
+  return out;
+}
 
 function normalizeLang(v) {
   const s0 = String(v ?? '').trim().toLowerCase();
@@ -120,6 +185,8 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
   const logger = options.logger || console;
   if (!newsDoc) return null;
 
+  const categoryNorm = String(newsDoc.category || '').trim().toLowerCase();
+
   const slug = normalizeSlug(newsDoc.slug);
   if (!slug) return null;
 
@@ -190,16 +257,37 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     publishedAt: isPublished ? (newsDoc.publishedAt || new Date()) : null,
     isBreaking: String(newsDoc.category || '').toLowerCase() === 'breaking',
     coverImage,
-    tags: Array.isArray(newsDoc.tags) ? newsDoc.tags : [],
+    tags: (() => {
+      const baseTags = Array.isArray(newsDoc.tags) ? newsDoc.tags : [];
+      const loc = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location)
+        ? {
+            state: newsDoc.location.state ?? null,
+            district: newsDoc.location.district ?? null,
+            city: newsDoc.location.city ?? null,
+          }
+        : null;
+
+      // For regional stories, always ensure stable location tags exist.
+      // These tags are additive and should not affect /latest, homepage modules, or category feeds.
+      if (categoryNorm === 'regional' && loc) {
+        return _mergeLocationTags(baseTags, loc);
+      }
+      return baseTags;
+    })(),
 
     geo: (() => {
       const fromDoc = newsDoc.geo && typeof newsDoc.geo === 'object' && !Array.isArray(newsDoc.geo) ? newsDoc.geo : null;
-      const fromTags = _geoFromTags(Array.isArray(newsDoc.tags) ? newsDoc.tags : []);
+      const mergedTags = Array.isArray(newsDoc.tags) ? newsDoc.tags : [];
+      const fromTags = _geoFromTags(mergedTags);
       const fromLocation = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location) ? newsDoc.location : null;
+
+      const pickedState = fromDoc && fromDoc.state !== undefined
+        ? fromDoc.state
+        : ((fromLocation && fromLocation.stateSlug !== undefined) ? fromLocation.stateSlug : fromTags.state);
+      const canonState = categoryNorm === 'regional' ? canonicalStateSlugFromAny(pickedState) : null;
+
       return {
-        state: fromDoc && fromDoc.state !== undefined
-          ? fromDoc.state
-          : ((fromLocation && fromLocation.stateSlug !== undefined) ? fromLocation.stateSlug : fromTags.state),
+        state: canonState || pickedState || null,
         district: fromDoc && fromDoc.district !== undefined
           ? fromDoc.district
           : ((fromLocation && fromLocation.districtSlug !== undefined) ? fromLocation.districtSlug : fromTags.district),
@@ -208,6 +296,29 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
           : ((fromLocation && fromLocation.citySlug !== undefined) ? fromLocation.citySlug : fromTags.city),
       };
     })(),
+
+    // Human-readable location fields (legacy). Only normalize for regional.
+    ...(categoryNorm === 'regional'
+      ? {
+          state: (() => {
+            const loc = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location) ? newsDoc.location : null;
+            const s = loc && loc.state ? String(loc.state).trim() : '';
+            if (s) return s;
+            const canon = canonicalStateSlugFromAny(loc?.stateSlug) || canonicalStateSlugFromAny(newsDoc?.geo?.state);
+            return canon ? (STATE_SLUG_TO_DISPLAY.get(canon) || null) : null;
+          })(),
+          district: (() => {
+            const loc = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location) ? newsDoc.location : null;
+            const s = loc && loc.district ? String(loc.district).trim() : '';
+            return s || null;
+          })(),
+          city: (() => {
+            const loc = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location) ? newsDoc.location : null;
+            const s = loc && loc.city ? String(loc.city).trim() : '';
+            return s || null;
+          })(),
+        }
+      : {}),
 
     // State-wise national tags (copied from News)
     stateTags: Array.isArray(newsDoc.stateTags) ? newsDoc.stateTags : [],

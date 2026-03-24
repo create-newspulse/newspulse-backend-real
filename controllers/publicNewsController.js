@@ -1,10 +1,12 @@
 const mongoose = require('mongoose');
 
 const News = require('../models/News');
+const PublicArticle = require('../models/Article');
 const { safeTranslateText, normalizeLang } = require('../services/translate/safeTranslate');
 const { ensureOnDemandNewsTranslation, hasFullTranslation } = require('../services/newsOnDemandTranslation.service');
 const { translateHtmlStrict, detectLangFromContent } = require('../services/articleTranslation.service');
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
+const { buildPubliclyVisiblePublicArticleFilter } = require('../services/publicArticleVisibility.service');
 const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 
 function isDbReady() {
@@ -450,6 +452,45 @@ const PUBLIC_DETAIL_SELECT = `${PUBLIC_SELECT} originalLang translations transla
 // Feed needs translationStatus to filter and translations to localize.
 const PUBLIC_FEED_SELECT = `${PUBLIC_SELECT} originalLang translations translationStatus`;
 
+const PUBLIC_ARTICLE_DETAIL_SELECT = [
+  'title',
+  'summary',
+  'content',
+  'slug',
+  'slugs',
+  'tags',
+  'category',
+  'language',
+  'originalLang',
+  'translationKey',
+  'translationGroupId',
+  'sourceNewsId',
+  'translations',
+  'translationStatus',
+  'translationError',
+  'translationNextRetryAt',
+  'coverImageUrl',
+  'coverImage',
+  'imageUrl',
+  'imageURL',
+  'publishedAt',
+  'createdAt',
+  'updatedAt',
+  'geo',
+  'state',
+  'district',
+  'city',
+].join(' ');
+
+function _mapPublicArticleToNewsLikeShape(articleDoc) {
+  const out = { ...(articleDoc || {}) };
+  out.description = out.description || out.summary || '';
+  out.summary = out.summary || out.description || '';
+  out.lang = out.lang || out.language || out.originalLang || 'en';
+  out.language = out.language || out.lang || 'en';
+  return out;
+}
+
 function _normalizeOptionalString(v) {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
@@ -839,6 +880,9 @@ async function getPublicNewsBySlugOrId(req, res) {
   try {
     res.set('Cache-Control', 'no-store');
 
+    const debugEnabled = parseTruthy(process.env.DEBUG_PUBLIC_NEWS_DETAIL) || parseTruthy(process.env.PUBLIC_NEWS_DETAIL_DEBUG);
+    const debugOnly = String(process.env.DEBUG_PUBLIC_NEWS_DETAIL_ID || '').trim();
+
     const slugOrIdRaw = normalizeSlugOrId(req.params.slugOrId);
     if (!slugOrIdRaw) {
       return res.status(404).json({ message: 'Not found' });
@@ -850,9 +894,21 @@ async function getPublicNewsBySlugOrId(req, res) {
 
     const base = buildPublicPublishedFilter({});
     let doc = null;
+    let docSource = 'news';
 
     // Prefer requested language doc when available.
     const requestedLang = getRequestedLang(req);
+    const shouldDebug = debugEnabled && (!debugOnly || debugOnly === slugOrIdRaw);
+    const debug = (event, payload) => {
+      if (!shouldDebug) return;
+      try {
+        console.log('[public-news][detail]', event, {
+          slugOrId: slugOrIdRaw,
+          requestedLang: requestedLang || null,
+          ...(payload || {}),
+        });
+      } catch (_) {}
+    };
 
     const lookup = { ...base, $and: [...(base.$and || [])] };
     if (isObjectIdLike(slugOrIdRaw)) {
@@ -870,6 +926,8 @@ async function getPublicNewsBySlugOrId(req, res) {
       });
     }
 
+    debug('lookup_built', { isObjectIdLike: isObjectIdLike(slugOrIdRaw) });
+
     if (requestedLang) {
       const byLangFilter = { ...lookup, $and: [...(lookup.$and || [])] };
       applyLangFilter(byLangFilter, requestedLang);
@@ -881,8 +939,74 @@ async function getPublicNewsBySlugOrId(req, res) {
     }
 
     if (!doc) {
+      // Fallback: regional feeds are backed by PublicArticle (_id differs from News).
+      // Try resolving PublicArticle by id/slug, then hop back to News via sourceNewsId when possible.
+      const paBase = buildPubliclyVisiblePublicArticleFilter({});
+      const paLookup = { ...paBase, $and: [...(paBase.$and || [])] };
+
+      if (isObjectIdLike(slugOrIdRaw)) {
+        paLookup._id = slugOrIdRaw;
+      } else {
+        const slugCandidates = getSlugCandidates(slugOrIdRaw);
+        const slugFilter = slugCandidates.length === 1 ? slugCandidates[0] : { $in: slugCandidates };
+        paLookup.$and.push({
+          $or: [
+            { slug: slugFilter },
+            { 'slugs.en': slugFilter },
+            { 'slugs.hi': slugFilter },
+            { 'slugs.gu': slugFilter },
+          ],
+        });
+      }
+
+      let paDoc = null;
+      if (requestedLang) {
+        const paByLang = { ...paLookup, $and: [...(paLookup.$and || [])] };
+        applyLangFilter(paByLang, requestedLang);
+        paDoc = await PublicArticle.findOne(paByLang).select(PUBLIC_ARTICLE_DETAIL_SELECT).lean();
+      }
+      if (!paDoc) {
+        paDoc = await PublicArticle.findOne(paLookup).select(PUBLIC_ARTICLE_DETAIL_SELECT).lean();
+      }
+
+      if (paDoc) {
+        debug('resolved_public_article', {
+          publicArticleId: String(paDoc?._id || ''),
+          sourceNewsId: paDoc?.sourceNewsId ? String(paDoc.sourceNewsId) : null,
+          publicArticleLang: String(paDoc?.language || paDoc?.lang || ''),
+        });
+
+        if (paDoc.sourceNewsId) {
+          const bySource = { ...base, _id: paDoc.sourceNewsId, $and: [...(base.$and || [])] };
+          const newsBySource = await News.findOne(bySource).select(PUBLIC_DETAIL_SELECT).lean();
+          if (newsBySource) {
+            doc = newsBySource;
+            docSource = 'news';
+          } else {
+            doc = _mapPublicArticleToNewsLikeShape(paDoc);
+            docSource = 'publicArticle';
+          }
+        } else {
+          doc = _mapPublicArticleToNewsLikeShape(paDoc);
+          docSource = 'publicArticle';
+        }
+      }
+    }
+
+    if (!doc) {
+      debug('not_found', {});
       return res.status(404).json({ message: 'Not found' });
     }
+
+    debug('resolved_doc', {
+      docSource,
+      resolvedId: doc?._id ? String(doc._id) : null,
+      status: String(doc?.status || ''),
+      lang: String(doc?.lang || ''),
+      language: String(doc?.language || ''),
+      originalLang: String(doc?.originalLang || ''),
+      publishedAt: doc?.publishedAt || null,
+    });
 
     let out = withCoverImageUrl(doc);
     const rawForTranslation = { ...out };
@@ -906,7 +1030,9 @@ async function getPublicNewsBySlugOrId(req, res) {
     const shouldAuto = isAutoTranslateOnReadEnabled();
     const needsRequested = desired !== baseLang && cachedRes.resolvedLang !== desired;
 
-    if (shouldAuto && needsRequested && isGoogleTranslateConfigured()) {
+    const allowOnDemandTranslate = docSource === 'news';
+
+    if (shouldAuto && needsRequested && allowOnDemandTranslate && isGoogleTranslateConfigured()) {
       const now = new Date();
       const lockOwner = await tryAcquireNewsTranslationLock({ id: out?._id, lang: desired, now });
       const localized = await ensureOnDemandNewsTranslation({

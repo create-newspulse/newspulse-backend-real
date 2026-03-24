@@ -190,6 +190,42 @@ test('GET /api/public/regional sanitizes district/city "undefined" strings (stat
   }
 });
 
+test('GET /api/public/regional ignores district/city "all" sentinel values (state-only query still works)', async () => {
+  const prevFind = Article.find;
+  const prevCount = Article.countDocuments;
+
+  const capture = { query: null, selectArg: null, sortArg: null, skip: null, limit: null };
+
+  try {
+    const dataset = [];
+
+    Article.find = (q) => {
+      capture.query = q;
+      return makeChainableQuery(dataset, capture);
+    };
+    Article.countDocuments = async () => dataset.length;
+
+    const res = await request(app).get('/api/public/regional?state=gujarat&district=all&city=all&lang=gu&page=1&limit=20');
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.data.stateSlug, 'gujarat');
+
+    assert.ok(capture.query);
+    const andClauses = Array.isArray(capture.query.$and) ? capture.query.$and : [];
+    const asJson = JSON.stringify(andClauses).toLowerCase();
+
+    // Should include only the state clause (+ lang clause), not district/city.
+    assert.ok(asJson.includes('geo.state'));
+    assert.ok(!asJson.includes('geo.district'));
+    assert.ok(!asJson.includes('geo.city'));
+    assert.ok(!asJson.includes('district:all'));
+  } finally {
+    Article.find = prevFind;
+    Article.countDocuments = prevCount;
+  }
+});
+
 test('GET /api/public/regional accepts state:/district:/city: prefixed query params', async () => {
   const prevFind = Article.find;
   const prevCount = Article.countDocuments;
