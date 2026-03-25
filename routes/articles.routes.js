@@ -296,6 +296,30 @@ function normalizeLanguage(v) {
   return null;
 }
 
+function _stripHtmlForLangDetect(v) {
+  return String(v ?? '').replace(/<[^>]*>/g, ' ');
+}
+
+function _countUnicodeMatches(s, re) {
+  const m = String(s || '').match(re);
+  return m ? m.length : 0;
+}
+
+function inferLanguageFromDocText({ title, description, content } = {}) {
+  // Very lightweight heuristic to prevent obvious mislabeling (e.g. Gujarati content saved as lang=en).
+  // Use a small threshold to avoid flipping for a single borrowed word.
+  const text = _stripHtmlForLangDetect(`${title || ''} ${description || ''} ${content || ''}`);
+  if (!text.trim()) return null;
+
+  const guCount = _countUnicodeMatches(text, /[\u0A80-\u0AFF]/g);
+  const hiCount = _countUnicodeMatches(text, /[\u0900-\u097F]/g);
+  const MIN = 12;
+
+  if (guCount >= MIN && guCount > hiCount) return 'gu';
+  if (hiCount >= MIN && hiCount > guCount) return 'hi';
+  return null;
+}
+
 function normalizeRetryLang(v) {
   const s = String(v ?? '').trim().toLowerCase();
   if (s === 'en' || s === 'hi') return s;
@@ -503,6 +527,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       body: bodyRaw,
       category,
       language,
+      lang: langRaw,
       tags,
       status,
       scheduledAt,
@@ -589,7 +614,16 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       city: locationBody.city ?? req.body?.city,
     });
 
-    const langNorm = normalizeLanguage(language) || 'en';
+    const languageInput = language !== undefined ? language : langRaw;
+    const langFromPayload = normalizeLanguage(languageInput);
+    const inferredLang = inferLanguageFromDocText({ title, description: normalizedDescription, content: content ?? body ?? '' });
+    const langNorm = (
+      (langFromPayload && langFromPayload !== 'en')
+        ? langFromPayload
+        : (inferredLang && inferredLang !== 'en')
+          ? inferredLang
+          : (langFromPayload || 'en')
+    );
     const slugs = { ...(req.body && req.body.slugs && typeof req.body.slugs === 'object' ? req.body.slugs : {}) };
     slugs[langNorm] = resolvedSlug;
     // Best-effort for other languages if titles exist in `translations` payload.
@@ -1672,6 +1706,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       body: bodyRaw,
       category: categoryRaw,
       language: languageRaw,
+      lang: langRaw,
       tags,
       status,
       scheduledAt,
@@ -1688,7 +1723,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     const content = _normalizeOptionalString(contentRaw);
     const bodyText = _normalizeOptionalString(bodyRaw);
     const category = _normalizeOptionalString(categoryRaw);
-    const language = _normalizeOptionalString(languageRaw);
+    const language = _normalizeOptionalString(languageRaw !== undefined ? languageRaw : langRaw);
     const imageURL = _normalizeOptionalString(imageURLRaw);
     const coverImageUrl = _normalizeOptionalString(coverImageUrlRaw);
 
@@ -1727,7 +1762,20 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       // ignore
     }
 
-    const effectiveLang = normalizeLanguage(language) || normalizeLanguage(before?.lang || before?.language) || 'en';
+    const langFromPayload = normalizeLanguage(language);
+    const inferredLang = inferLanguageFromDocText({
+      title: title !== undefined ? title : before?.title,
+      description: (summaryOrDescription0 !== undefined ? summaryOrDescription0 : before?.description),
+      content: (content !== undefined ? content : (bodyText !== undefined ? bodyText : before?.content)),
+    });
+    const effectiveLang0 = langFromPayload || normalizeLanguage(before?.lang || before?.language) || 'en';
+    const effectiveLang = (
+      (langFromPayload && langFromPayload !== 'en')
+        ? langFromPayload
+        : (inferredLang && inferredLang !== 'en')
+          ? inferredLang
+          : effectiveLang0
+    );
 
     // If description is missing in the update payload AND the existing doc is missing it too,
     // fall back to a stripped excerpt of content/body (<= 180 chars).
@@ -1776,12 +1824,15 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     const tagsArr = tags !== undefined ? parseTags(tags) : null;
     const geo = tagsArr ? _geoFromTags(tagsArr) : null;
 
+    const beforeBaseLang = normalizeLanguage(before?.originalLang || before?.lang || before?.language) || 'en';
+    const shouldFixMislabel = Boolean((!langFromPayload || langFromPayload === 'en') && inferredLang && inferredLang !== 'en' && beforeBaseLang === 'en');
+
     const update = {
       ...(title !== undefined ? { title } : {}),
       ...(summaryOrDescription !== undefined ? { description: String(summaryOrDescription).trim() } : {}),
       ...(content !== undefined || bodyText !== undefined ? { content: content ?? bodyText ?? '' } : {}),
       ...(category !== undefined ? { category } : {}),
-      ...(language !== undefined ? { language, lang: language } : {}),
+      ...((language !== undefined || shouldFixMislabel) ? { language: effectiveLang, lang: effectiveLang, originalLang: effectiveLang } : {}),
       ...(loc.state !== undefined ? { 'location.state': loc.state, 'location.stateSlug': loc.stateSlug ?? null } : {}),
       ...(loc.district !== undefined ? { 'location.district': loc.district, 'location.districtSlug': loc.districtSlug ?? null } : {}),
       ...(loc.city !== undefined ? { 'location.city': loc.city, 'location.citySlug': loc.citySlug ?? null } : {}),
@@ -2147,8 +2198,12 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     doc.publishAt = null;
     doc.scheduledAt = null;
     ensureTranslationGroupIdForDoc(doc);
-    doc.lang = doc.lang || doc.language;
-    doc.language = doc.language || doc.lang;
+    const currentBase = normalizeLanguage(doc.originalLang) || normalizeLanguage(doc.lang) || normalizeLanguage(doc.language) || 'en';
+    const inferredBase = inferLanguageFromDocText({ title: doc.title, description: doc.description, content: doc.content });
+    const resolvedBase = (currentBase !== 'en') ? currentBase : (inferredBase || currentBase);
+    doc.originalLang = resolvedBase;
+    doc.lang = resolvedBase;
+    doc.language = resolvedBase;
 
     // Publish must never block on translation.
     // Mark translations pending for non-base languages and translate asynchronously.

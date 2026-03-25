@@ -90,6 +90,18 @@ function applyLangFilter(filter, lang) {
   const lower = String(lang).trim().toLowerCase();
   const upper = lower.toUpperCase();
   if (lang === 'gu') {
+    // Safety net for historical/mislabeled data: include clearly-Gujarati content even if lang fields are wrong.
+    // Use a small threshold (12 Gujarati-block chars) to avoid flipping for a single borrowed word.
+    const likelyGujaratiRx = new RegExp('(?:.*[\\u0A80-\\u0AFF]){12}');
+    const likelyGujaratiTextClause = {
+      $or: [
+        { title: { $regex: likelyGujaratiRx } },
+        { description: { $regex: likelyGujaratiRx } },
+        { summary: { $regex: likelyGujaratiRx } },
+        { content: { $regex: likelyGujaratiRx } },
+      ],
+    };
+
     filter.$and.push({
       $or: [
         { lang: { $in: [lower, upper] } },
@@ -99,6 +111,13 @@ function applyLangFilter(filter, lang) {
           $and: [
             { $or: [{ lang: null }, { lang: { $exists: false } }] },
             { $or: [{ language: null }, { language: { $exists: false } }] },
+          ],
+        },
+        // If a doc was saved as lang=en/hi but the body is clearly Gujarati, include it in Gujarati feed.
+        {
+          $and: [
+            { $or: [{ lang: { $in: ['en', 'EN', 'hi', 'HI'] } }, { language: { $in: ['en', 'EN', 'hi', 'HI'] } }] },
+            likelyGujaratiTextClause,
           ],
         },
       ],
@@ -611,8 +630,31 @@ function buildPendingTranslationResponse(doc, requestedLang) {
   };
 }
 
+function detectStrongScriptLang(textOrHtml) {
+  const s = String(textOrHtml || '').replace(/<[^>]*>/g, ' ');
+  if (!s.trim()) return null;
+
+  const gu = (s.match(/[\u0A80-\u0AFF]/g) || []).length;
+  const hi = (s.match(/[\u0900-\u097F]/g) || []).length;
+  const MIN = 12;
+
+  if (gu >= MIN && gu > hi) return 'gu';
+  if (hi >= MIN && hi > gu) return 'hi';
+  return null;
+}
+
 function _resolveBaseLang(doc) {
-  return normalizeLang(doc?.originalLang) || normalizeLang(doc?.lang || doc?.language) || detectLangFromContent(doc?.content) || 'en';
+  const original = normalizeLang(doc?.originalLang);
+  if (original) return original;
+
+  const stored = normalizeLang(doc?.lang || doc?.language);
+  if (stored && stored !== 'en') return stored;
+
+  // If stored is missing or 'en', allow strong script-based detection to correct obvious mislabels.
+  const strong = detectStrongScriptLang(doc?.content);
+  if (strong && strong !== 'en') return strong;
+
+  return stored || detectLangFromContent(doc?.content) || 'en';
 }
 
 function _applyCachedTranslationInPlace(doc, desired) {

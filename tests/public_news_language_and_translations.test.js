@@ -164,6 +164,7 @@ test('GET /api/public/news returns only gu by default (no lang param)', async ()
     const dataset = [
       { title: 'gu story', description: 'd', lang: 'gu', status: 'published' },
       { title: 'hi story', description: 'd', lang: 'hi', status: 'published' },
+      { title: 'mislabeled gu', description: 'd', lang: 'en', content: 'ગુજરાતી સમાચાર અહીં લખેલ છે ગુજરાતી સમાચાર અહીં લખેલ છે', status: 'published' },
       { title: 'missing lang', description: 'd', status: 'published' },
     ];
 
@@ -189,6 +190,7 @@ test('GET /api/public/news returns only gu by default (no lang param)', async ()
     for (const item of res.body.items) {
       assert.equal(item.lang, 'gu');
     }
+    assert.ok(res.body.items.some((i) => i.title === 'mislabeled gu'), 'expected clearly-Gujarati content to appear even if stored as lang=en');
     assert.ok(res.body.items.every((i) => i.title !== 'hi story'));
   } finally {
     News.find = prevFind;
