@@ -8,6 +8,9 @@ const {
   deriveReporterStatsFromSubmissionsByEmail,
 } = require('../../services/reporterLookup.service');
 
+// Unified reporter-centric directory (ReporterProfile-based) lives in the root app.
+const { getReporterDirectory } = require('../../controllers/adminContributorNetworkController');
+
 const router = express.Router();
 
 // Admin reporter contacts (stub/minimal) - mirrors root implementation placeholder
@@ -122,6 +125,10 @@ router.get('/reporter-directory/lookup', requireAdminAuth, async (req, res) => {
     return res.status(500).json({ ok: false, message: 'Lookup failed' });
   }
 });
+
+// GET /api/admin/community/reporter-directory/unified
+// Returns a unified reporter-centric dataset (one-person-one-profile) with story counts + activity summaries.
+router.get('/reporter-directory/unified', requireAdminAuth, getReporterDirectory);
 
 module.exports = router;
 

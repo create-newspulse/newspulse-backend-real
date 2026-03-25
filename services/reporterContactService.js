@@ -1,5 +1,6 @@
 const ReporterContact = require('../models/ReporterContact');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const { normalizeEmailForIdentity } = require('../lib/identity');
 
 // Helper: safely apply provided value only if not undefined/null
 function applyIfPresent(target, key, value) {
@@ -10,8 +11,7 @@ function applyIfPresent(target, key, value) {
 }
 
 function _normalizeEmail(email) {
-  const e = String(email || '').trim().toLowerCase();
-  return e || null;
+  return normalizeEmailForIdentity(email);
 }
 
 function _parseLocationParts(input) {

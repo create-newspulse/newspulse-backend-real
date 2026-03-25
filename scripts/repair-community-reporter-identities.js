@@ -27,6 +27,8 @@ function parseArgs(argv) {
   const out = {
     write: false,
     onlyMissing: false,
+    force: false,
+    forceIfPlaceholder: false,
     limit: 0,
     since: null,
     until: null,
@@ -39,6 +41,8 @@ function parseArgs(argv) {
     if (a === '--write') out.write = true;
     else if (a === '--dry-run') out.write = false;
     else if (a === '--only-missing') out.onlyMissing = true;
+    else if (a === '--force') out.force = true;
+    else if (a === '--force-if-placeholder') out.forceIfPlaceholder = true;
     else if (a.startsWith('--limit=')) out.limit = Math.max(parseInt(a.split('=')[1] || '0', 10) || 0, 0);
     else if (a.startsWith('--since=')) {
       const d = new Date(a.split('=')[1]);
@@ -68,6 +72,8 @@ async function run() {
       {
         mode: args.write ? 'write' : 'dry-run',
         onlyMissing: args.onlyMissing,
+        force: args.force,
+        forceIfPlaceholder: args.forceIfPlaceholder,
         limit: args.limit || null,
         since: args.since ? args.since.toISOString() : null,
         until: args.until ? args.until.toISOString() : null,
@@ -144,7 +150,7 @@ async function run() {
 
     // 3) Resolve + attach reporter profile
     try {
-      const r = await resolveAndAttachForSubmission(doc);
+      const r = await resolveAndAttachForSubmission(doc, { force: args.force, forceIfPlaceholder: args.forceIfPlaceholder });
       if (r && r.ok) {
         if (r.skipped) profileLinksSkipped += 1;
         else profileLinksOk += 1;

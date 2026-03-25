@@ -7,6 +7,8 @@ const CommunitySubmission = require('../models/CommunitySubmission');
 const ReporterMergeQueue = require('../models/ReporterMergeQueue');
 const ReporterStoryLink = require('../models/ReporterStoryLink');
 const ReporterContact = require('../models/ReporterContact');
+const ReporterBeat = require('../models/ReporterBeat');
+const ReporterCoverage = require('../models/ReporterCoverage');
 
 const { resolveAndAttachForSubmission } = require('../services/reporterIdentityResolution.service');
 
@@ -17,6 +19,394 @@ function isDbReady() {
 function parseIntSafe(v, def) {
   const n = parseInt(String(v ?? ''), 10);
   return Number.isFinite(n) ? n : def;
+}
+
+function parseBool(v) {
+  return String(v || '').trim().toLowerCase() === 'true' || String(v || '').trim() === '1';
+}
+
+function safeMaxDate(...values) {
+  let best = null;
+  for (const v of values) {
+    if (!v) continue;
+    const d = v instanceof Date ? v : new Date(v);
+    if (!Number.isFinite(d.getTime())) continue;
+    if (!best || d.getTime() > best.getTime()) best = d;
+  }
+  return best;
+}
+
+function startOfUtcMonth(d = new Date()) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 0, 0, 0, 0));
+}
+
+function normalizeStrOrNull(v) {
+  const s = v == null ? '' : String(v).trim();
+  return s ? s : null;
+}
+
+function mapVerificationStatus({ profile, reporterContact }) {
+  const rcLevel = normalizeStrOrNull(reporterContact?.verificationLevel);
+  if (rcLevel) return rcLevel;
+  return normalizeStrOrNull(profile?.verificationTier) || 'new';
+}
+
+function mapReporterType({ reporterContact }) {
+  return normalizeStrOrNull(reporterContact?.reporterType) || 'community';
+}
+
+async function aggregateStoryStatsByProfileIds(profileIds) {
+  const ids = (profileIds || []).filter((x) => x && mongoose.isValidObjectId(x)).map((x) => new mongoose.Types.ObjectId(String(x)));
+  if (!ids.length) return new Map();
+
+  const approvedStatuses = [
+    'approved', 'approve', 'approved_final', 'approved_founder', 'approved_by_founder', 'approved_by_admin', 'app',
+    'published', 'publish', 'published_final',
+  ];
+  const publishedStatuses = ['published', 'publish', 'published_final'];
+  const pendingStatuses = [
+    'new', 'pending', 'under_review', 'underreview', 'ai_reviewed',
+    'pending_founder', 'pending_founder_review', 'pendingfounder', 'pendingfounderreview',
+  ];
+  const rejectedStatuses = ['rejected', 'reject', 'trash', 'discarded', 'archived'];
+  const withdrawnStatuses = ['withdrawn'];
+
+  const rows = await CommunitySubmission.aggregate([
+    {
+      $match: {
+        reporterProfileId: { $in: ids },
+        isDeleted: { $ne: true },
+      },
+    },
+    {
+      $addFields: {
+        _statusNorm: {
+          $cond: [
+            { $or: [{ $eq: ['$status', null] }, { $eq: ['$status', ''] }] },
+            '',
+            { $toLower: { $trim: { input: { $toString: '$status' } } } },
+          ],
+        },
+      },
+    },
+    {
+      $group: {
+        _id: '$reporterProfileId',
+        storyCount: { $sum: 1 },
+        approvedCount: { $sum: { $cond: [{ $in: ['$_statusNorm', approvedStatuses] }, 1, 0] } },
+        pendingCount: { $sum: { $cond: [{ $in: ['$_statusNorm', pendingStatuses] }, 1, 0] } },
+        rejectedCount: { $sum: { $cond: [{ $in: ['$_statusNorm', rejectedStatuses] }, 1, 0] } },
+        withdrawnCount: { $sum: { $cond: [{ $in: ['$_statusNorm', withdrawnStatuses] }, 1, 0] } },
+        publishedCount: { $sum: { $cond: [{ $in: ['$_statusNorm', publishedStatuses] }, 1, 0] } },
+        lastStoryAt: { $max: '$createdAt' },
+      },
+    },
+  ]);
+
+  const out = new Map();
+  for (const r of rows || []) {
+    const id = r && r._id ? String(r._id) : null;
+    if (!id) continue;
+    out.set(id, {
+      storyCount: Number(r.storyCount || 0),
+      approvedCount: Number(r.approvedCount || 0),
+      pendingCount: Number(r.pendingCount || 0),
+      rejectedCount: Number(r.rejectedCount || 0),
+      withdrawnCount: Number(r.withdrawnCount || 0),
+      publishedCount: Number(r.publishedCount || 0),
+      lastStoryAt: r.lastStoryAt || null,
+    });
+  }
+  return out;
+}
+
+async function aggregateNotesAndLastActivity(profileIds) {
+  const ids = (profileIds || []).filter((x) => x && mongoose.isValidObjectId(x)).map((x) => new mongoose.Types.ObjectId(String(x)));
+  if (!ids.length) return { map: new Map(), lastActivityMap: new Map() };
+
+  const rows = await ReporterActivityLog.aggregate([
+    { $match: { profileId: { $in: ids } } },
+    {
+      $group: {
+        _id: '$profileId',
+        notesCount: { $sum: { $cond: [{ $eq: ['$type', 'note'] }, 1, 0] } },
+        lastActiveAt: { $max: '$createdAt' },
+      },
+    },
+  ]);
+
+  const map = new Map();
+  const lastActivityMap = new Map();
+  for (const r of rows || []) {
+    const id = r && r._id ? String(r._id) : null;
+    if (!id) continue;
+    map.set(id, Number(r.notesCount || 0));
+    lastActivityMap.set(id, r.lastActiveAt || null);
+  }
+  return { map, lastActivityMap };
+}
+
+async function aggregateTasks(profileIds) {
+  const ids = (profileIds || []).filter((x) => x && mongoose.isValidObjectId(x)).map((x) => new mongoose.Types.ObjectId(String(x)));
+  if (!ids.length) return { tasksCountMap: new Map(), lastTaskAtMap: new Map() };
+
+  const rows = await ReporterTask.aggregate([
+    { $match: { profileId: { $in: ids }, archived: { $ne: true } } },
+    {
+      $group: {
+        _id: '$profileId',
+        tasksCount: { $sum: 1 },
+        lastTaskAt: { $max: '$updatedAt' },
+      },
+    },
+  ]);
+
+  const tasksCountMap = new Map();
+  const lastTaskAtMap = new Map();
+  for (const r of rows || []) {
+    const id = r && r._id ? String(r._id) : null;
+    if (!id) continue;
+    tasksCountMap.set(id, Number(r.tasksCount || 0));
+    lastTaskAtMap.set(id, r.lastTaskAt || null);
+  }
+  return { tasksCountMap, lastTaskAtMap };
+}
+
+async function fetchBeatsByProfileIds(profileIds) {
+  const ids = (profileIds || []).filter((x) => x && mongoose.isValidObjectId(x)).map((x) => new mongoose.Types.ObjectId(String(x)));
+  if (!ids.length) return new Map();
+
+  const rows = await ReporterBeat.find({ profileId: { $in: ids } }).select('profileId beat').lean();
+  const map = new Map();
+  for (const r of rows || []) {
+    const pid = r?.profileId ? String(r.profileId) : null;
+    const beat = normalizeStrOrNull(r?.beat);
+    if (!pid || !beat) continue;
+    if (!map.has(pid)) map.set(pid, []);
+    map.get(pid).push(beat);
+  }
+  for (const [k, arr] of map.entries()) {
+    map.set(k, Array.from(new Set(arr)).sort());
+  }
+  return map;
+}
+
+async function fetchCoverageByProfileIds(profileIds) {
+  const ids = (profileIds || []).filter((x) => x && mongoose.isValidObjectId(x)).map((x) => new mongoose.Types.ObjectId(String(x)));
+  if (!ids.length) return new Map();
+
+  const rows = await ReporterCoverage.find({ profileId: { $in: ids } })
+    .select('profileId coverageScope country stateProvince districtCounty city areaLocality isPrimary')
+    .sort({ isPrimary: -1, updatedAt: -1 })
+    .lean();
+
+  const map = new Map();
+  for (const r of rows || []) {
+    const pid = r?.profileId ? String(r.profileId) : null;
+    if (!pid) continue;
+    if (!map.has(pid)) map.set(pid, []);
+    map.get(pid).push({
+      scope: r.coverageScope || null,
+      country: r.country || null,
+      state: r.stateProvince || null,
+      district: r.districtCounty || null,
+      city: r.city || null,
+      area: r.areaLocality || null,
+      isPrimary: !!r.isPrimary,
+    });
+  }
+  return map;
+}
+
+async function getReporterDirectory(req, res) {
+  try {
+    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database not connected' });
+
+    const page = Math.max(parseIntSafe(req.query.page, 1), 1);
+    const limit = Math.min(Math.max(parseIntSafe(req.query.limit, 50), 1), 200);
+    const skip = (page - 1) * limit;
+    const debug = parseBool(req.query.debug);
+
+    const baseFilter = { mergedIntoProfileId: null };
+
+    const [profiles, total, summaryArr] = await Promise.all([
+      ReporterProfile.find(baseFilter)
+        .sort({ 'stats.lastStoryAt': -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      ReporterProfile.countDocuments(baseFilter),
+      ReporterProfile.aggregate([
+        { $match: baseFilter },
+        {
+          $group: {
+            _id: null,
+            totalReporters: { $sum: 1 },
+            verified: { $sum: { $cond: [{ $in: ['$verificationTier', ['trusted_local', 'verified_journalist']] }, 1, 0] } },
+            missingPhone: { $sum: { $cond: [{ $in: ['missing_phone', '$flags'] }, 1, 0] } },
+            missingLocation: { $sum: { $cond: [{ $in: ['missing_location', '$flags'] }, 1, 0] } },
+            lastSubmissionAt: { $max: '$stats.lastStoryAt' },
+            newestReporterAt: { $max: '$createdAt' },
+          },
+        },
+      ]),
+    ]);
+
+    const profileIds = (profiles || []).map((p) => (p && p._id ? String(p._id) : null)).filter(Boolean);
+
+    const reporterContactIds = (profiles || [])
+      .map((p) => (p && p.reporterContactId ? String(p.reporterContactId) : null))
+      .filter((x) => x && mongoose.isValidObjectId(x));
+
+    const [storyStatsMap, notesAgg, tasksAgg, beatsMap, coverageMap, reporterContacts] = await Promise.all([
+      aggregateStoryStatsByProfileIds(profileIds),
+      aggregateNotesAndLastActivity(profileIds),
+      aggregateTasks(profileIds),
+      fetchBeatsByProfileIds(profileIds),
+      fetchCoverageByProfileIds(profileIds),
+      reporterContactIds.length
+        ? ReporterContact.find({ _id: { $in: reporterContactIds } })
+          .select('fullName email phoneFull country stateName districtName cityTownVillage talukaName reporterType verificationLevel status ethicsStrikes')
+          .lean()
+        : [],
+    ]);
+
+    const reporterContactsById = new Map();
+    for (const rc of reporterContacts || []) {
+      if (rc && rc._id) reporterContactsById.set(String(rc._id), rc);
+    }
+
+    const now = new Date();
+    const monthStart = startOfUtcMonth(now);
+
+    const summaryBase = Array.isArray(summaryArr) && summaryArr[0] ? summaryArr[0] : null;
+    const summary = {
+      totalReporters: Number(summaryBase?.totalReporters || 0),
+      verified: Number(summaryBase?.verified || 0),
+      missingPhone: Number(summaryBase?.missingPhone || 0),
+      missingLocation: Number(summaryBase?.missingLocation || 0),
+      activeThisMonth: 0,
+      newThisMonth: 0,
+      lastSubmissionAt: summaryBase?.lastSubmissionAt || null,
+      asOf: now,
+    };
+
+    // More precise calendar-month counts based on profile fields (indexed).
+    try {
+      const [activeThisMonth, newThisMonth] = await Promise.all([
+        ReporterProfile.countDocuments({ ...baseFilter, 'stats.lastStoryAt': { $gte: monthStart } }),
+        ReporterProfile.countDocuments({ ...baseFilter, createdAt: { $gte: monthStart } }),
+      ]);
+      summary.activeThisMonth = Number(activeThisMonth || 0);
+      summary.newThisMonth = Number(newThisMonth || 0);
+    } catch (_) {}
+
+    const items = (profiles || []).map((p) => {
+      const profileId = p && p._id ? String(p._id) : null;
+      const rc = p && p.reporterContactId ? reporterContactsById.get(String(p.reporterContactId)) : null;
+
+      const story = storyStatsMap.get(profileId) || {
+        storyCount: Number(p?.stats?.totalStories || 0),
+        approvedCount: Number(p?.stats?.approvedStories || 0),
+        pendingCount: Number(p?.stats?.pendingStories || 0),
+        rejectedCount: Number(p?.stats?.rejectedStories || 0),
+        withdrawnCount: Number(p?.stats?.withdrawnStories || 0),
+        publishedCount: Number(p?.stats?.publishedStories || 0),
+        lastStoryAt: p?.stats?.lastStoryAt || null,
+      };
+
+      const email = normalizeStrOrNull(p?.primaryEmail) || normalizeStrOrNull(rc?.email);
+      const phone = normalizeStrOrNull(p?.primaryPhone) || normalizeStrOrNull(rc?.phoneFull);
+
+      const city = normalizeStrOrNull(p?.location?.city) || normalizeStrOrNull(rc?.cityTownVillage);
+      const district = normalizeStrOrNull(p?.location?.districtCounty) || normalizeStrOrNull(rc?.districtName);
+      const state = normalizeStrOrNull(p?.location?.stateProvince) || normalizeStrOrNull(rc?.stateName);
+      const country = normalizeStrOrNull(p?.location?.country) || normalizeStrOrNull(rc?.country);
+
+      const notesCount = Number(notesAgg.map.get(profileId) || 0);
+      const tasksCount = Number(tasksAgg.tasksCountMap.get(profileId) || 0);
+
+      const lastStoryAt = story.lastStoryAt || null;
+      const lastLogAt = notesAgg.lastActivityMap.get(profileId) || null;
+      const lastTaskAt = tasksAgg.lastTaskAtMap.get(profileId) || null;
+      const lastActiveAt = safeMaxDate(lastStoryAt, lastLogAt, lastTaskAt);
+
+      const beats = beatsMap.get(profileId) || [];
+      const coverageAreas = coverageMap.get(profileId) || [];
+      const primaryCoverage = coverageAreas.find((x) => x && x.isPrimary) || null;
+
+      const out = {
+        id: profileId,
+        displayName: normalizeStrOrNull(p?.displayName) || 'Unknown',
+        email: email || null,
+        phone: phone || null,
+        city: city || null,
+        district: district || null,
+        state: state || null,
+        country: country || null,
+        type: mapReporterType({ reporterContact: rc }),
+        verificationStatus: mapVerificationStatus({ profile: p, reporterContact: rc }),
+        activeStatus: normalizeStrOrNull(p?.status) || 'active',
+        strikes: Number(rc?.ethicsStrikes || 0),
+        storyCount: Number(story.storyCount || 0),
+        approvedCount: Number(story.approvedCount || 0),
+        pendingCount: Number(story.pendingCount || 0),
+        rejectedCount: Number(story.rejectedCount || 0),
+        withdrawnCount: Number(story.withdrawnCount || 0),
+        publishedCount: Number(story.publishedCount || 0),
+        lastStoryAt: lastStoryAt,
+        lastActiveAt: lastActiveAt,
+        notesCount,
+        tasksCount,
+        beats,
+        coverage: {
+          scope: normalizeStrOrNull(p?.coverageScope) || (primaryCoverage ? primaryCoverage.scope : null) || null,
+          primary: primaryCoverage || {
+            scope: normalizeStrOrNull(p?.coverageScope) || null,
+            country,
+            state,
+            district,
+            city,
+            area: normalizeStrOrNull(p?.location?.areaLocality) || normalizeStrOrNull(rc?.talukaName) || null,
+            isPrimary: true,
+          },
+        },
+      };
+
+      if (debug) {
+        out.debug = {
+          profile: {
+            userId: p?.userId ? String(p.userId) : null,
+            reporterContactId: p?.reporterContactId ? String(p.reporterContactId) : null,
+            flags: Array.isArray(p?.flags) ? p.flags : [],
+            verificationTier: normalizeStrOrNull(p?.verificationTier) || null,
+            mergedIntoProfileId: p?.mergedIntoProfileId ? String(p.mergedIntoProfileId) : null,
+          },
+          reporterContact: rc
+            ? {
+              id: rc?._id ? String(rc._id) : null,
+              status: normalizeStrOrNull(rc?.status) || null,
+              verificationLevel: normalizeStrOrNull(rc?.verificationLevel) || null,
+            }
+            : null,
+          sources: {
+            email: normalizeStrOrNull(p?.primaryEmail) ? 'profile.primaryEmail' : (normalizeStrOrNull(rc?.email) ? 'reporterContact.email' : null),
+            phone: normalizeStrOrNull(p?.primaryPhone) ? 'profile.primaryPhone' : (normalizeStrOrNull(rc?.phoneFull) ? 'reporterContact.phoneFull' : null),
+            location: (normalizeStrOrNull(p?.location?.city) || normalizeStrOrNull(p?.location?.stateProvince) || normalizeStrOrNull(p?.location?.country) || normalizeStrOrNull(p?.location?.districtCounty))
+              ? 'profile.location'
+              : (rc ? 'reporterContact.location' : null),
+          },
+        };
+      }
+
+      return out;
+    });
+
+    return res.status(200).json({ ok: true, items, total, page, limit, summary });
+  } catch (e) {
+    console.error('[contributor-network][directory] failed', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to load reporter directory' });
+  }
 }
 
 async function listProfilesByFlag(req, res, flag) {
@@ -184,8 +574,16 @@ async function backfillProfiles(req, res) {
 
     const limit = Math.min(Math.max(parseIntSafe(req.body?.limit ?? req.query.limit, 5000), 1), 200000);
     const dryRun = String(req.body?.dryRun ?? req.query.dryRun ?? '').toLowerCase() === 'true';
+    const force = String(req.body?.force ?? req.query.force ?? '').toLowerCase() === 'true';
+    const forceIfPlaceholder = String(req.body?.forceIfPlaceholder ?? req.query.forceIfPlaceholder ?? '').toLowerCase() === 'true';
+    const mode = String(req.body?.mode ?? req.query.mode ?? '').trim().toLowerCase();
+    const scanAll = mode === 'all' || String(req.body?.all ?? req.query.all ?? '').toLowerCase() === 'true';
 
-    const cursor = CommunitySubmission.find({ $or: [{ reporterProfileId: { $exists: false } }, { reporterProfileId: null }] })
+    const filter = scanAll
+      ? { isDeleted: { $ne: true } }
+      : { $or: [{ reporterProfileId: { $exists: false } }, { reporterProfileId: null }] };
+
+    const cursor = CommunitySubmission.find(filter)
       .sort({ createdAt: 1 })
       .limit(limit)
       .cursor();
@@ -195,11 +593,11 @@ async function backfillProfiles(req, res) {
     for await (const sub of cursor) {
       scanned += 1;
       if (dryRun) continue;
-      const out = await resolveAndAttachForSubmission(sub, { req });
+      const out = await resolveAndAttachForSubmission(sub, { req, force, forceIfPlaceholder });
       if (out && out.ok) attached += 1;
     }
 
-    return res.status(200).json({ ok: true, scanned, attached, limit, dryRun });
+    return res.status(200).json({ ok: true, scanned, attached, limit, dryRun, force, forceIfPlaceholder, mode: scanAll ? 'all' : 'missing' });
   } catch (e) {
     console.error('[contributor-network][backfill] failed', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Backfill failed' });
@@ -358,6 +756,7 @@ module.exports = {
   listInactiveContributors,
   highContributionUnverified,
   topContributors,
+  getReporterDirectory,
   profileDebug,
   addNote,
   createTask,

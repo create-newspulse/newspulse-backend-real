@@ -9,6 +9,7 @@ const {
   listInactiveContributors,
   highContributionUnverified,
   topContributors,
+  getReporterDirectory,
   profileDebug,
   addNote,
   createTask,
@@ -28,6 +29,9 @@ router.get('/queues/missing-location', requireAdminAuth, queueMissingLocation);
 router.get('/inactive', requireAdminAuth, listInactiveContributors);
 router.get('/insights/high-contribution-unverified', requireAdminAuth, highContributionUnverified);
 router.get('/insights/top-contributors', requireAdminAuth, topContributors);
+
+// Reporter Contact Directory (unified reporter-centric dataset)
+router.get('/directory', requireAdminAuth, getReporterDirectory);
 
 // CRM primitives
 router.get('/profiles/:profileId/debug', requireAdminAuth, profileDebug);

@@ -9,6 +9,9 @@ const {
   deriveReporterStatsFromSubmissionsByEmail,
 } = require('../services/reporterLookup.service');
 
+// Unified reporter-centric directory (ReporterProfile-based)
+const { getReporterDirectory } = require('../controllers/adminContributorNetworkController');
+
 const router = express.Router();
 
 // GET /api/admin/community/reporter-directory
@@ -88,6 +91,11 @@ router.get('/reporter-directory', requireAdminAuth, async (req, res) => {
     return res.status(500).json({ ok: false, message: 'Failed to load reporter directory' });
   }
 });
+
+// GET /api/admin/community/reporter-directory/unified
+// ReporterProfile-powered directory (supports missing email/phone/location).
+// Response shape matches the admin Reporter Contact Directory needs.
+router.get('/reporter-directory/unified', requireAdminAuth, getReporterDirectory);
 
 // GET /api/admin/community/reporter-directory/lookup?identifier=EMAIL_OR_ID
 // - Accepts email (URL-encoded) or a Mongo ObjectId

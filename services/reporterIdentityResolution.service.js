@@ -7,23 +7,26 @@ const ReporterContactMethod = require('../models/ReporterContactMethod');
 const ReporterCoverage = require('../models/ReporterCoverage');
 const ReporterStoryLink = require('../models/ReporterStoryLink');
 const ReporterActivityLog = require('../models/ReporterActivityLog');
+const ReporterMergeQueue = require('../models/ReporterMergeQueue');
+
+const {
+  normalizeEmailForIdentity,
+  normalizePhoneForIdentity,
+  normalizePersonNameKey,
+  parseLooseLocationString,
+  isPlaceholderEmail,
+} = require('../lib/identity');
 
 function isDbReady() {
   return !!(mongoose.connection && mongoose.connection.readyState === 1);
 }
 
 function normalizeEmail(v) {
-  const s = String(v || '').trim().toLowerCase();
-  return s || null;
+  return normalizeEmailForIdentity(v);
 }
 
 function normalizePhone(v) {
-  const raw = String(v || '').trim();
-  if (!raw) return null;
-  const plus = raw.startsWith('+') ? '+' : '';
-  const digits = raw.replace(/\D+/g, '');
-  const out = plus ? `+${digits}` : digits;
-  return out && out.length >= 6 ? out : null;
+  return normalizePhoneForIdentity(v);
 }
 
 function normalizeLocation(input) {
@@ -333,8 +336,10 @@ async function resolveOrCreateReporterProfile(input) {
     : null;
 
   const userId = input && input.userId ? String(input.userId).trim() : null;
-  const email = normalizeEmail(input && input.email);
-  const phone = normalizePhone(input && input.phone);
+  const emailRaw = input && input.email != null ? String(input.email).trim() : null;
+  const email = normalizeEmail(emailRaw);
+  const phoneRaw = input && input.phone != null ? String(input.phone).trim() : null;
+  const phone = normalizePhone(phoneRaw);
   const displayName = String(input && input.name ? input.name : 'Unknown').trim() || 'Unknown';
   const locationInput = normalizeLocation(input && input.location);
   const hasLocInput = hasAnyLocation(locationInput);
@@ -345,6 +350,10 @@ async function resolveOrCreateReporterProfile(input) {
 
   let profile = null;
   let resolutionMethod = null;
+
+  // Used for safe merge suggestions: if both email+phone exist but map to different profiles.
+  let candidateByEmail = null;
+  let candidateByPhone = null;
 
   if (reporterContactId) {
     profile = await findProfileByReporterContactId(reporterContactId);
@@ -357,24 +366,27 @@ async function resolveOrCreateReporterProfile(input) {
   }
 
   if (!profile && email) {
-    profile = await findProfileByContact('email', email);
+    candidateByEmail = await findProfileByContact('email', email);
+    profile = candidateByEmail;
     if (profile) resolutionMethod = 'email';
   }
 
   if (!profile && phone) {
-    profile = await findProfileByContact('phone', phone);
+    candidateByPhone = await findProfileByContact('phone', phone);
+    profile = candidateByPhone;
     if (profile) resolutionMethod = 'phone';
   }
 
   // Conservative fallback match: name + (city/state) when email/phone missing.
   if (!profile && !email && !phone) {
-    const nameKey = String(displayName || '').trim();
+    const nameKey = normalizePersonNameKey(displayName);
     const cityKey = String(locationInput?.city || '').trim();
     const stateKey = String(locationInput?.stateProvince || '').trim();
-    if (nameKey && nameKey.toLowerCase() !== 'unknown' && (cityKey || stateKey)) {
+    if (nameKey && (cityKey || stateKey)) {
+      const namePattern = `^${escapeRegex(nameKey).replace(/\\\s+/g, '\\\\s+')}$`;
       profile = await ReporterProfile.findOne({
         mergedIntoProfileId: null,
-        displayName: new RegExp(`^${escapeRegex(nameKey)}$`, 'i'),
+        displayName: new RegExp(namePattern, 'i'),
         ...(cityKey ? { 'location.city': cityKey } : {}),
         ...(stateKey ? { 'location.stateProvince': stateKey } : {}),
       }).lean();
@@ -439,6 +451,33 @@ async function resolveOrCreateReporterProfile(input) {
     await ReporterProfile.updateOne({ _id: profile._id }, { $set });
     profile = await ReporterProfile.findById(profile._id).lean();
   }
+
+  // Best-effort merge suggestion: if both email+phone exist (non-placeholder)
+  // and map to different profiles, create a merge queue entry instead of auto-merging.
+  try {
+    if (email && phone) {
+      const byEmail = candidateByEmail || (await findProfileByContact('email', email));
+      const byPhone = candidateByPhone || (await findProfileByContact('phone', phone));
+      const a = byEmail && byEmail._id ? String(byEmail._id) : null;
+      const b = byPhone && byPhone._id ? String(byPhone._id) : null;
+      if (a && b && a !== b) {
+        await ReporterMergeQueue.updateOne(
+          { profileAId: a, profileBId: b },
+          {
+            $setOnInsert: {
+              profileAId: a,
+              profileBId: b,
+              reason: 'duplicate_detected',
+              evidence: { kind: 'email+phone', email, phone },
+              status: 'open',
+              createdBy: { adminId: null, email: null, role: null },
+            },
+          },
+          { upsert: true }
+        );
+      }
+    }
+  } catch (_) {}
 
   // Best-effort enrichment from the ReporterContact directory when available.
   // This prevents the contributor profile from looking "empty" (missing phone/location)
@@ -506,6 +545,7 @@ async function resolveOrCreateReporterProfile(input) {
 
   // Upsert contact methods (best-effort)
   try {
+    // Never store placeholder emails as identity anchors.
     if (email) await upsertContactMethod(profile._id, { type: 'email', value: email, normalized: email, isPrimary: true, source: input?.source || 'system' });
     if (phone) await upsertContactMethod(profile._id, { type: 'phone', value: phone, normalized: phone, isPrimary: !email, source: input?.source || 'system' });
   } catch (_) {}
@@ -518,15 +558,25 @@ async function resolveOrCreateReporterProfile(input) {
   return { ok: true, profile, resolutionMethod, flags };
 }
 
-async function attachSubmissionToReporterProfile(submission, resolveResult, { req } = {}) {
+function shouldForceRelinkSubmission(submission) {
+  // Force relink when the submission uses an obvious placeholder email.
+  const e = String(submission?.reporterEmailNorm || submission?.reporterEmail || submission?.email || submission?.contact?.email || '').trim().toLowerCase();
+  if (e && isPlaceholderEmail(e)) return true;
+  return false;
+}
+
+async function attachSubmissionToReporterProfile(submission, resolveResult, { req, force = false } = {}) {
   if (!submission || !submission._id) return { ok: false, reason: 'missing-submission' };
   if (!resolveResult || !resolveResult.profile || !resolveResult.profile._id) return { ok: false, reason: 'missing-profile' };
   if (!isDbReady()) return { ok: false, reason: 'db-not-ready' };
 
-  if (submission.reporterProfileId) {
+  const existingProfileId = submission.reporterProfileId ? String(submission.reporterProfileId) : null;
+  const nextProfileId = String(resolveResult.profile._id);
+
+  if (existingProfileId && !force) {
     return {
       ok: true,
-      profileId: String(submission.reporterProfileId),
+      profileId: existingProfileId,
       submissionId: String(submission._id),
       skipped: true,
       reason: 'already-linked',
@@ -550,6 +600,13 @@ async function attachSubmissionToReporterProfile(submission, resolveResult, { re
     }
   );
 
+  // If we overwrote an existing link, clean up the old story link row best-effort.
+  if (existingProfileId && existingProfileId !== nextProfileId) {
+    try {
+      await ReporterStoryLink.deleteMany({ submissionId, profileId: new mongoose.Types.ObjectId(existingProfileId) });
+    } catch (_) {}
+  }
+
   // Create story link (idempotent)
   const linkWrite = await ReporterStoryLink.updateOne(
     { profileId, submissionId },
@@ -566,6 +623,13 @@ async function attachSubmissionToReporterProfile(submission, resolveResult, { re
   if (isNewLink) {
     try {
       await recomputeReporterProfileStoryStats(profileId, { reason: 'new-link' });
+    } catch (_) {}
+  }
+
+  // If relinked, recompute the old profile too.
+  if (existingProfileId && existingProfileId !== nextProfileId) {
+    try {
+      await recomputeReporterProfileStoryStats(existingProfileId, { reason: 'relink-old-profile' });
     } catch (_) {}
   }
 
@@ -595,10 +659,14 @@ function identityInputFromSubmission(submission) {
   const name = submission.reporterName || submission.name || submission?.contact?.name || submission?.userName || 'Unknown';
 
   const loc = submission.locationDetail || submission.location || {};
+  const parsedLoose = (!loc?.city && !loc?.state && submission?.reporterLocation)
+    ? parseLooseLocationString(submission.reporterLocation)
+    : { city: null, state: null, country: null };
+
   const location = {
-    city: loc?.city || submission.city || null,
-    state: loc?.state || submission.state || null,
-    country: loc?.country || submission.country || null,
+    city: loc?.city || submission.city || parsedLoose.city || null,
+    state: loc?.state || submission.state || parsedLoose.state || null,
+    country: loc?.country || submission.country || parsedLoose.country || null,
     district: loc?.district || submission?.locationDetail?.district || submission.district || null,
   };
 
@@ -613,13 +681,14 @@ function identityInputFromSubmission(submission) {
   };
 }
 
-async function resolveAndAttachForSubmission(submission, { req } = {}) {
+async function resolveAndAttachForSubmission(submission, { req, force = false, forceIfPlaceholder = false } = {}) {
   try {
     if (!submission) return { ok: false, reason: 'missing-submission' };
+    const shouldForce = force || (forceIfPlaceholder ? shouldForceRelinkSubmission(submission) : false);
     const input = identityInputFromSubmission(submission);
     const resolveResult = await resolveOrCreateReporterProfile(input);
     if (!resolveResult.ok) return resolveResult;
-    return await attachSubmissionToReporterProfile(submission, resolveResult, { req });
+    return await attachSubmissionToReporterProfile(submission, resolveResult, { req, force: shouldForce });
   } catch (e) {
     return { ok: false, reason: e?.message || 'error' };
   }
@@ -638,4 +707,5 @@ module.exports = {
   classifySubmissionStatus,
   updateReporterProfileStatsForStatusChange,
   recomputeReporterProfileStoryStats,
+  shouldForceRelinkSubmission,
 };
