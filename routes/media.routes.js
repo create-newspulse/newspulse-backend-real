@@ -6,6 +6,26 @@ const { shouldLog } = require('../lib/logThrottle');
 
 const router = express.Router();
 
+const PROVIDER = 'cloudinary';
+
+function sendStableStatus(res, payload) {
+  const ok = true;
+  const provider = PROVIDER;
+  const available = Boolean(payload && payload.available);
+  const reason = available ? null : String((payload && payload.reason) || 'Media upload status unavailable');
+  const configured = Boolean(payload && payload.configured);
+  const message = String((payload && payload.message) || (available ? 'Media uploads are ready' : reason));
+
+  return res.status(200).json({
+    ok,
+    provider,
+    available,
+    reason,
+    configured,
+    message,
+  });
+}
+
 // GET /api/media/status
 // GET /admin-api/media/status
 // Always returns a stable JSON contract for admin clients.
@@ -50,12 +70,9 @@ router.get('/status', optionalAdminAuth, (req, res) => {
       });
     }
 
-    return res.status(200).json({
-      ok: true,
-      provider: 'cloudinary',
+    return sendStableStatus(res, {
       available,
       reason,
-      // Backward-compatible fields
       configured,
       message: available ? 'Media uploads are ready' : 'Cloudinary not configured',
     });
@@ -72,12 +89,9 @@ router.get('/status', optionalAdminAuth, (req, res) => {
       });
     }
 
-    return res.status(200).json({
-      ok: true,
-      provider: 'cloudinary',
+    return sendStableStatus(res, {
       available: false,
       reason: 'Media upload status unavailable',
-      // Backward-compatible fields
       configured: false,
       message: 'Cloudinary status unavailable',
     });

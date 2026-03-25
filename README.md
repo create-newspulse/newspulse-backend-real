@@ -23,6 +23,31 @@ Server listens on `PORT` (from `.env` in local dev).
 
 If your frontend dev proxy targets `http://localhost:5000`, make sure your backend `PORT` matches it in local dev. If you hit an `EADDRINUSE` error, free the conflicting process or update the proxy target to the actual backend port.
 
+## Media Upload Status (Admin Contract)
+
+The admin article editor relies on a **stable** media upload status endpoint to decide whether Cover Image uploads are available.
+
+Endpoint(s):
+- `GET /api/media/status`
+- `GET /admin-api/media/status`
+- `GET /admin-api/api/media/status` (compat)
+
+Response contract (top-level keys are stable):
+```json
+{
+  "ok": true,
+  "provider": "cloudinary",
+  "available": false,
+  "reason": "Cloudinary not configured",
+  "configured": false,
+  "message": "Cloudinary not configured"
+}
+```
+
+Notes:
+- `available` is the authoritative capability flag.
+- When `available` is `true`, `reason` is `null`.
+
 ## MongoDB
 
 This backend connects using a single variable: `MONGODB_URI`.
