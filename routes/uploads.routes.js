@@ -9,6 +9,8 @@ const {
   cloudinaryPing,
 } = require('../lib/cloudinary');
 
+const { shouldLog } = require('../lib/logThrottle');
+
 const router = express.Router();
 
 const coverUpload = multer({
@@ -51,13 +53,19 @@ function pickCoverFile(req) {
 router.get('/config', async (_req, res) => {
   try {
     const st = getCloudinaryConfigStatus();
+    const configured = !!st.configured;
     return res.status(200).json({
       ok: true,
       success: true,
       data: {
         cloudinary: {
-          configured: !!st.configured,
+          configured,
           mode: st.mode,
+          available: configured,
+          reason: configured ? null : 'Cloudinary not configured',
+          missing: st.missing,
+          cloudinaryUrlValid: st.cloudinaryUrlValid,
+          env: st.env,
           folder: String(process.env.CLOUDINARY_FOLDER || 'newspulse/articles').trim() || 'newspulse/articles',
         },
       },
@@ -70,6 +78,8 @@ router.get('/config', async (_req, res) => {
         cloudinary: {
           configured: false,
           mode: 'missing',
+          available: false,
+          reason: 'Cloudinary status unavailable',
           folder: String(process.env.CLOUDINARY_FOLDER || 'newspulse/articles').trim() || 'newspulse/articles',
         },
       },
@@ -81,6 +91,13 @@ router.get('/config', async (_req, res) => {
 router.get('/ping', async (_req, res) => {
   try {
     if (!isCloudinaryConfigured()) {
+      try {
+        const st = getCloudinaryConfigStatus();
+        if (shouldLog('uploads.ping.cloudinary.notConfigured', 60_000)) {
+          // eslint-disable-next-line no-console
+          console.warn('[uploads.ping] Cloudinary not configured', { missing: st.missing, cloudinaryUrlValid: st.cloudinaryUrlValid, env: st.env });
+        }
+      } catch (_) {}
       return res.status(503).json({
         ok: false,
         message: 'Cloudinary not configured',
@@ -135,6 +152,13 @@ router.post(
       }
 
       if (!isCloudinaryConfigured()) {
+        try {
+          const st = getCloudinaryConfigStatus();
+          if (shouldLog('uploads.cover.cloudinary.notConfigured', 60_000)) {
+            // eslint-disable-next-line no-console
+            console.warn('[uploads.cover] Cloudinary not configured', { missing: st.missing, cloudinaryUrlValid: st.cloudinaryUrlValid, env: st.env });
+          }
+        } catch (_) {}
         return res.status(503).json({
           ok: false,
           message: 'Cloudinary not configured',

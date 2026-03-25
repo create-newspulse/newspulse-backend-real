@@ -60,6 +60,19 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
   try {
     const { getCloudinaryConfigStatus, initCloudinaryIfConfigured } = require('./lib/cloudinary');
     const st = getCloudinaryConfigStatus();
+
+    // Safe Cloudinary startup diagnostics (do NOT log secret values)
+    // eslint-disable-next-line no-console
+    console.log('[startup][cloudinary] cloud name present:', st?.env?.cloudNamePresent ? 'yes' : 'no');
+    // eslint-disable-next-line no-console
+    console.log('[startup][cloudinary] api key present:', st?.env?.apiKeyPresent ? 'yes' : 'no');
+    // eslint-disable-next-line no-console
+    console.log('[startup][cloudinary] api secret present:', st?.env?.apiSecretPresent ? 'yes' : 'no');
+    // eslint-disable-next-line no-console
+    console.log('[startup][cloudinary] cloudinary url present:', st?.env?.cloudinaryUrlPresent ? 'yes' : 'no');
+    // eslint-disable-next-line no-console
+    console.log('[startup][cloudinary] final cloudinary configured:', st?.configured ? 'yes' : 'no');
+
     // Apply Cloudinary config at startup when available (no network calls).
     if (st.configured) {
       initCloudinaryIfConfigured();
@@ -68,6 +81,8 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
       // eslint-disable-next-line no-console
       console.warn('[startup] Cloudinary not configured; cover image uploads will be unavailable.', {
         missing: st.missing,
+        cloudinaryUrlValid: st.cloudinaryUrlValid,
+        env: st.env,
       });
     }
   } catch (_) {}
