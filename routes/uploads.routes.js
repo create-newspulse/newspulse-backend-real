@@ -9,6 +9,8 @@ const {
   cloudinaryPing,
 } = require('../lib/cloudinary');
 
+const { shouldLog } = require('../lib/logThrottle');
+
 const router = express.Router();
 
 const coverUpload = multer({
@@ -81,6 +83,12 @@ router.get('/config', async (_req, res) => {
 router.get('/ping', async (_req, res) => {
   try {
     if (!isCloudinaryConfigured()) {
+      try {
+        const st = getCloudinaryConfigStatus();
+        if (shouldLog('uploads.cover.cloudinary.missing', 60_000)) {
+          console.warn('[uploads][cloudinary] not configured', { missing: st.missing, env: st.env });
+        }
+      } catch (_) {}
       return res.status(503).json({
         ok: false,
         message: 'Cloudinary not configured',
@@ -135,6 +143,12 @@ router.post(
       }
 
       if (!isCloudinaryConfigured()) {
+        try {
+          const st = getCloudinaryConfigStatus();
+          if (shouldLog('uploads.cover.cloudinary.missing', 60_000)) {
+            console.warn('[uploads][cover] Cloudinary not configured', { missing: st.missing, env: st.env });
+          }
+        } catch (_) {}
         return res.status(503).json({
           ok: false,
           message: 'Cloudinary not configured',

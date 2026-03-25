@@ -61,6 +61,15 @@ Server allows these origins (via `CORS_ORIGIN` env var or hardcoded):
    - [ ] `JWT_SECRET` - Token signing secret
    - [ ] `FOUNDER_EMAIL` - Admin email
    - [ ] `FOUNDER_PASSWORD` - Admin password
+    - [ ] **Cloudinary (required for cover image uploads)**
+       - Option A (recommended):
+          - [ ] `CLOUDINARY_CLOUD_NAME`
+          - [ ] `CLOUDINARY_API_KEY`
+          - [ ] `CLOUDINARY_API_SECRET`
+       - Option B (alternative):
+          - [ ] `CLOUDINARY_URL` in the format `cloudinary://<api_key>:<api_secret>@<cloud_name>`
+       - Optional:
+          - [ ] `CLOUDINARY_FOLDER` (defaults to `newspulse/articles`)
     - [ ] `GOOGLE_TRANSLATE_API_KEY` - Google Translate v2 API key (required for background content translation)
    - [ ] `CORS_ORIGIN` - Comma-separated allowed origins:
      ```

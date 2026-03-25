@@ -64,10 +64,16 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
     if (st.configured) {
       initCloudinaryIfConfigured();
     }
+    // eslint-disable-next-line no-console
+    console.log('[startup] cloudinary configured:', st.configured ? 'yes' : 'no');
+    // eslint-disable-next-line no-console
+    console.log('[startup] upload service available:', st.configured ? 'yes' : 'no');
+
     if (!st.configured) {
       // eslint-disable-next-line no-console
       console.warn('[startup] Cloudinary not configured; cover image uploads will be unavailable.', {
         missing: st.missing,
+        env: st.env,
       });
     }
   } catch (_) {}
