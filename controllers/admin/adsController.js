@@ -5,7 +5,7 @@ const multer = require('multer');
 
 const Ad = require('../../models/Ad');
 const { shouldLog } = require('../../lib/logThrottle');
-const { isCloudinaryConfigured, getCloudinaryConfigStatus } = require('../../lib/cloudinary');
+const { isCloudinaryConfigured } = require('../../lib/cloudinary');
 const {
   ALLOWED_MIME_TYPES,
   MAX_BYTES,
@@ -66,12 +66,12 @@ function _shouldRehostImageUrl(req, imageUrl) {
 function _warnCloudinaryNotConfiguredOnce(reason, url) {
   const key = `ads.cloudinary.missing:${String(reason || 'unknown')}`;
   if (!shouldLog(key, 60_000)) return;
-  let st = null;
-  try { st = getCloudinaryConfigStatus(); } catch (_) {}
   // eslint-disable-next-line no-console
   console.warn('[ads][images] Cloudinary not configured; storing imageUrl as-is', {
     reason,
-    ...(st ? { missing: st.missing, env: st.env } : {}),
+    hasCloudName: !!String(process.env.CLOUDINARY_CLOUD_NAME || '').trim(),
+    hasKey: !!String(process.env.CLOUDINARY_API_KEY || '').trim(),
+    hasSecret: !!String(process.env.CLOUDINARY_API_SECRET || '').trim(),
     url: String(url || '').slice(0, 300),
   });
 }
