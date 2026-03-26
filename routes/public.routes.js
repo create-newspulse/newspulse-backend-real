@@ -12,6 +12,18 @@ const {
   getArticleBaseLocale,
   getAvailableArticleLocales,
 } = require('../services/publicArticleVisibility.service');
+const {
+  normalizeLocale,
+  getRequestedLocale,
+  parseAllowFallback,
+  getStoryGroupId,
+  localizeDocStrict,
+} = require('../services/publicStoryLocale.service');
+const {
+  buildLocaleEligibilityMatch,
+  dedupeLocalizedByStoryGroup,
+  removeInternalPublicFields,
+} = require('../services/publicStoryGroupResolver.service');
 
 const router = express.Router();
 
@@ -51,7 +63,13 @@ function buildReadyTranslationMatch(lang) {
   if (!desired) return null;
   return {
     $and: [
-      { [`translationStatus.${desired}`]: 'ready' },
+      {
+        $or: [
+          { [`translationStatus.${desired}`]: 'ready' },
+          { [`translationStatus.${desired}`]: null },
+          { [`translationStatus.${desired}`]: { $exists: false } },
+        ],
+      },
       { [`translations.${desired}.title`]: { $exists: true, $nin: [null, ''] } },
       { [`translations.${desired}.summary`]: { $exists: true, $nin: [null, ''] } },
       { [`translations.${desired}.content`]: { $exists: true, $nin: [null, ''] } },
@@ -146,10 +164,13 @@ router.get('/stories', async (req, res) => {
 
     const { category, limit = 20, page = 1 } = req.query;
 
-    // Prefer explicit query lang, otherwise use negotiated language (e.g. header x-lang).
-    // Keep backward-compat behavior for non-standard explicit query values.
     const explicitLangRaw = (req.query.lang || req.query.language || '').toString().trim();
-    const negotiatedLangRaw = explicitLangRaw || (req.lang || '');
+    if (explicitLangRaw && !normalizeLocale(explicitLangRaw)) {
+      return res.status(400).json({ success: false, message: 'Invalid lang. Expected en|hi|gu' });
+    }
+
+    const requestedLocale = getRequestedLocale(req, { defaultLocale: 'en' });
+    const fallbackTo = parseAllowFallback(req);
 
     if (!isDbConnected()) {
       return res.json({ success: true, data: [], message: 'Database unavailable' });
@@ -158,37 +179,36 @@ router.get('/stories', async (req, res) => {
     const q = buildPubliclyVisiblePublicArticleFilter();
     if (category) q.category = String(category);
 
-    const desired = normalizeLang(negotiatedLangRaw);
-    if (desired === 'gu') {
-      // Legacy behavior: Gujarati feed shows Gujarati originals immediately.
-      q.language = 'gu';
-    } else if (desired === 'hi' || desired === 'en') {
-      // Hindi/English feeds:
-      // - include originals authored in that language, OR
-      // - include stories with fully-ready cached translations for that language.
-      const originalMatch = buildOriginalLangMatch(desired);
-      const readyMatch = buildReadyTranslationMatch(desired);
-      q.$or = [originalMatch, readyMatch].filter(Boolean);
-    } else if (explicitLangRaw) {
-      // Backward compatible: if a non-standard lang was provided, keep old behavior.
-      q.language = String(explicitLangRaw);
-    }
+    const eligibility = buildLocaleEligibilityMatch(requestedLocale) || (() => {
+      const originalMatch = buildOriginalLangMatch(requestedLocale);
+      const readyMatch = buildReadyTranslationMatch(requestedLocale);
+      return { $or: [originalMatch, readyMatch].filter(Boolean) };
+    })();
+
+    q.$and = Array.isArray(q.$and) ? q.$and : [];
+    if (eligibility) q.$and.push(eligibility);
 
     const lim = Math.min(parseInt(limit, 10) || 20, 50);
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const skip = (pageNum - 1) * lim;
 
-    let stories = await Article.find(q)
+    const storiesRaw = await Article.find(q)
       .sort({ publishedAt: -1, createdAt: -1 })
       .skip(skip)
       .limit(lim)
       .lean();
 
-    if (desired === 'hi' || desired === 'en') {
-      stories = (stories || []).map((s) => applyCachedTranslationToStory(s, desired));
-    }
+    let stories = (storiesRaw || [])
+      .map(withNormalizedImageUrl)
+      .map((s) => localizeDocStrict(s, requestedLocale, {
+        mode: 'list',
+        fallbackTo,
+        logger: console,
+        logContext: { endpoint: 'GET /api/public/stories' },
+      }))
+      .filter(Boolean);
 
-    stories = (stories || []).map(withNormalizedImageUrl);
+    stories = dedupeLocalizedByStoryGroup(stories).map(removeInternalPublicFields);
 
     return res.json({ success: true, data: stories });
   } catch (err) {
@@ -201,6 +221,15 @@ router.get('/stories/:slug', async (req, res) => {
   try {
     res.set('Cache-Control', 'no-store');
 
+    const debugEnabled = String(process.env.DEBUG_PUBLIC_STORIES_DETAIL || process.env.DEBUG_PUBLIC_STORY_DETAIL || '').trim();
+    const shouldDebug = debugEnabled === '1' || debugEnabled.toLowerCase() === 'true' || debugEnabled.toLowerCase() === 'yes';
+    const debug = (event, payload) => {
+      if (!shouldDebug) return;
+      try {
+        console.log('[public-stories][detail]', event, payload || {});
+      } catch (_) {}
+    };
+
     if (!isDbConnected()) {
       return res.status(200).json({ success: false, message: 'Database unavailable' });
     }
@@ -210,9 +239,19 @@ router.get('/stories/:slug', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Missing slug' });
     }
 
+    const explicitLangRaw = (req.query.lang || req.query.language || '').toString().trim();
+    if (explicitLangRaw && !normalizeLocale(explicitLangRaw)) {
+      return res.status(400).json({ success: false, message: 'Invalid lang. Expected en|hi|gu' });
+    }
+
+    const requestedLocale = getRequestedLocale(req, { defaultLocale: 'en' });
+    const fallbackTo = parseAllowFallback(req);
+
     const slugFilter = candidates.length === 1 ? candidates[0] : { $in: candidates };
-    const storyFilter = {
-      ...buildPubliclyVisiblePublicArticleFilter(),
+
+    // Flexible slug lookup: any locale slug can resolve the canonical story group.
+    // Locale selection is handled AFTER lookup via localizeDocStrict().
+    const anySlugClause = {
       $or: [
         { slug: slugFilter },
         { 'slugs.en': slugFilter },
@@ -220,224 +259,65 @@ router.get('/stories/:slug', async (req, res) => {
         { 'slugs.gu': slugFilter },
       ],
     };
-    const story = await Article.findOne(storyFilter).lean();
+
+    const storyFilter = buildPubliclyVisiblePublicArticleFilter();
+    storyFilter.$and = Array.isArray(storyFilter.$and) ? storyFilter.$and : [];
+    storyFilter.$and.push(anySlugClause);
+
+    const story = await Article.findOne(storyFilter)
+      .sort({ publishedAt: -1, createdAt: -1, updatedAt: -1 })
+      .lean();
+
     if (!story) {
       return res.status(404).json({ success: false, message: 'Story not found' });
     }
 
-    const storyWithImageUrl = withNormalizedImageUrl(story);
-
-    const langQueryRaw = (req.query.lang || req.query.language || req.lang || '').toString().trim();
-    const desired = normalizeLang(langQueryRaw);
-
-    const source = getArticleBaseLocale(story);
-    const availableLocales = getAvailableArticleLocales(story);
-
-    if (!langQueryRaw || !desired) {
-      return res.json({
-        success: true,
-        data: storyWithImageUrl,
-        resolvedLang: source,
-        availableLocales,
-      });
-    }
-
-    const existingBucket = story?.translations?.[desired];
-    const hasAll = hasFullTranslation(existingBucket);
-    const now = new Date();
-
-    // Strict language contract:
-    // - Never silently fall back to a different language when a lang is requested.
-    // - Only return 200 when we can serve the requested language.
-    if (desired === source) {
-      const localized = await ensureOnDemandArticleTranslation({
-        article: story,
-        requestedLang: source,
-        logger: console,
-        lockOwner: false,
-        now,
-      });
-
-      if (localized && localized.dbSet && story && story._id) {
-        try {
-          await Article.updateOne({ _id: story._id }, { $set: localized.dbSet }).catch(() => null);
-        } catch (_) {}
-      }
-
-      return res.json({
-        success: true,
-        data: localized && localized.out ? withNormalizedImageUrl(localized.out) : storyWithImageUrl,
-        requestedLang: desired,
-        resolvedLang: source,
-        isTranslated: false,
-        translationPending: false,
-        availableLocales,
-      });
-    }
-
-    // Cached translation available.
-    if (hasAll) {
-      const status = story?.translationStatus?.[desired] ?? null;
-      if (status === 'ready' || status === null) {
-        const localized = applyCachedTranslationToStory(storyWithImageUrl, desired);
-        return res.json({
-          success: true,
-          data: withNormalizedImageUrl(localized),
-          requestedLang: desired,
-          resolvedLang: desired,
-          isTranslated: true,
-          translationPending: false,
-          availableLocales,
-        });
-      }
-    }
-
-    const shouldAutoTranslate = isAutoTranslateOnReadEnabled();
-    if (!shouldAutoTranslate || (!isGoogleTranslateConfigured() && !hasAll)) {
-      return res.status(404).json({
-        success: false,
-        code: 'LOCALE_NOT_AVAILABLE',
-        message: 'Story not available in requested language',
-        requestedLang: desired,
-        resolvedLang: source,
-        translationPending: false,
-        availableLocales,
-      });
-    }
-
-    // If translation is needed and missing, acquire an atomic pending lock to avoid stampede.
-    let lockOwner = false;
-    if (desired !== source && !hasAll) {
-      const status = story?.translationStatus?.[desired] || null;
-      const retryAtRaw = story?.translationNextRetryAt?.[desired] || null;
-      const retryAt = retryAtRaw ? new Date(retryAtRaw) : null;
-
-      if (status === 'pending' || (status === 'failed' && retryAt && now < retryAt)) {
-        return res.status(404).json({
-          success: false,
-          code: 'LOCALE_NOT_AVAILABLE',
-          message: 'Story not available in requested language',
-          requestedLang: desired,
-          resolvedLang: source,
-          translationPending: true,
-          availableLocales,
-        });
-      }
-
-      try {
-        const lockRes = await Article.updateOne(
-          {
-            _id: story._id,
-            $and: [
-              { [`translationStatus.${desired}`]: { $ne: 'pending' } },
-              {
-                $or: [
-                  { [`translationStatus.${desired}`]: { $ne: 'failed' } },
-                  { [`translationNextRetryAt.${desired}`]: { $exists: false } },
-                  { [`translationNextRetryAt.${desired}`]: null },
-                  { [`translationNextRetryAt.${desired}`]: { $lte: now } },
-                ],
-              },
-            ],
-          },
-          {
-            $set: {
-              [`translationStatus.${desired}`]: 'pending',
-              [`translationError.${desired}`]: null,
-              [`translationNextRetryAt.${desired}`]: null,
-            },
-          }
-        );
-
-        const modified = typeof lockRes?.modifiedCount === 'number'
-          ? lockRes.modifiedCount
-          : (typeof lockRes?.nModified === 'number' ? lockRes.nModified : 0);
-        lockOwner = modified === 1;
-      } catch (_) {
-        lockOwner = false;
-      }
-
-      if (!lockOwner) {
-        return res.status(404).json({
-          success: false,
-          code: 'LOCALE_NOT_AVAILABLE',
-          message: 'Story not available in requested language',
-          requestedLang: desired,
-          resolvedLang: source,
-          translationPending: true,
-          availableLocales,
-        });
-      }
-    }
-
-    const localized = await ensureOnDemandArticleTranslation({
-      article: story,
-      requestedLang: langQueryRaw,
-      logger: console,
-      lockOwner,
-      now,
+    debug('resolved_story', {
+      requestedSlug: candidates[0] || null,
+      requestedLocale,
+      storyGroupId: getStoryGroupId(story),
     });
 
-    // Persist on-demand translations (and/or originalLang backfill) without crashing the endpoint.
-    if (localized && localized.dbSet && story && story._id) {
-      try {
-        await Article.updateOne({ _id: story._id }, { $set: localized.dbSet }).catch(() => null);
-      } catch (e) {
-        try {
-          console.warn('[i18n-save-failed][public.stories.getBySlug]', {
-            id: String(story._id || ''),
-            slug: String(story?.slug || ''),
-            requestedLang: String(langQueryRaw || ''),
-            message: e?.message || String(e),
-          });
-        } catch (_) {}
-      }
-    }
+    const storyWithImageUrl = withNormalizedImageUrl(story);
+    const availableLocales = getAvailableArticleLocales(story);
+    const baseLocale = getArticleBaseLocale(story);
 
-    if (localized && localized.translationPending) {
-      try {
-        console.warn('[i18n-missing][public.stories.getBySlug]', {
-          slug: String(story?.slug || ''),
-          category: String(story?.category || ''),
-          requestedLang: String(langQueryRaw || ''),
-          resolvedLang: localized.resolvedLang,
-        });
-      } catch (_) {}
-    }
+    const localized = localizeDocStrict(storyWithImageUrl, requestedLocale, {
+      mode: 'detail',
+      fallbackTo,
+      logger: console,
+      logContext: { endpoint: 'GET /api/public/stories/:slug' },
+    });
 
-    if (localized && localized.translationPending) {
+    if (!localized) {
       return res.status(404).json({
         success: false,
         code: 'LOCALE_NOT_AVAILABLE',
         message: 'Story not available in requested language',
-        requestedLang: desired,
-        resolvedLang: source,
-        translationPending: true,
-        availableLocales: getAvailableArticleLocales(localized && localized.out ? localized.out : story),
-      });
-    }
-
-    const resolvedLang = localized && localized.resolvedLang ? localized.resolvedLang : source;
-    if (resolvedLang !== desired) {
-      return res.status(404).json({
-        success: false,
-        code: 'LOCALE_NOT_AVAILABLE',
-        message: 'Story not available in requested language',
-        requestedLang: desired,
-        resolvedLang,
+        requestedLang: requestedLocale,
+        resolvedLang: baseLocale,
         translationPending: false,
-        availableLocales: getAvailableArticleLocales(localized && localized.out ? localized.out : story),
+        availableLocales,
       });
     }
+
+    debug('localized', {
+      storyGroupId: localized.storyGroupId || null,
+      requestedLocale: localized.requestedLocale || null,
+      returnedLocale: localized.selectedLocale || null,
+      selectedVariant: localized.selectedVariant || null,
+    });
+
+    localized.locale = localized.selectedLocale || localized.resolvedLang || null;
 
     return res.json({
       success: true,
-      data: localized && localized.out ? withNormalizedImageUrl(localized.out) : storyWithImageUrl,
-      requestedLang: desired,
-      resolvedLang: desired,
-      isTranslated: true,
+      data: withNormalizedImageUrl(removeInternalPublicFields(localized)),
+      requestedLang: requestedLocale,
+      resolvedLang: localized.selectedLocale,
+      isTranslated: localized.selectedVariant !== 'original',
       translationPending: false,
-      availableLocales: getAvailableArticleLocales(localized && localized.out ? localized.out : story),
+      availableLocales,
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err?.message || String(err) });

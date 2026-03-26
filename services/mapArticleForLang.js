@@ -25,6 +25,50 @@ function _pickSummary(docLike) {
   return '';
 }
 
+function _stripHtmlForLangDetect(v) {
+  return String(v ?? '').replace(/<[^>]*>/g, ' ');
+}
+
+function _countUnicodeMatches(s, re) {
+  const m = String(s || '').match(re);
+  return m ? m.length : 0;
+}
+
+function inferLangFromDocText(article) {
+  const a = article && typeof article === 'object' ? article : {};
+  const summary = _pickSummary(a);
+  const text = _stripHtmlForLangDetect(`${a.title || ''} ${summary || ''} ${a.content || ''}`);
+  if (!text.trim()) return null;
+
+  const guCount = _countUnicodeMatches(text, /[\u0A80-\u0AFF]/g);
+  const hiCount = _countUnicodeMatches(text, /[\u0900-\u097F]/g);
+  const MIN = 12;
+
+  if (guCount >= MIN && guCount > hiCount) return 'gu';
+  if (hiCount >= MIN && hiCount > guCount) return 'hi';
+  return null;
+}
+
+function inferLangFromTextParts({ title, summary, content } = {}) {
+  const text = _stripHtmlForLangDetect(`${title || ''} ${summary || ''} ${content || ''}`);
+  if (!text.trim()) return null;
+
+  const guCount = _countUnicodeMatches(text, /[\u0A80-\u0AFF]/g);
+  const hiCount = _countUnicodeMatches(text, /[\u0900-\u097F]/g);
+  const MIN = 12;
+
+  if (guCount >= MIN && guCount > hiCount) return 'gu';
+  if (hiCount >= MIN && hiCount > guCount) return 'hi';
+  return null;
+}
+
+function isMismatchedLocaleText(desiredLang, { title, summary, content } = {}) {
+  const desired = normalizeLang(desiredLang);
+  if (!desired) return false;
+  const inferred = inferLangFromTextParts({ title, summary, content });
+  return Boolean(inferred && inferred !== desired);
+}
+
 function _hasFullBucket(bucket) {
   const b = bucket && typeof bucket === 'object' && !Array.isArray(bucket) ? bucket : {};
   return _isNonEmptyString(b.title) && _isNonEmptyString(b.summary) && _isNonEmptyString(b.content);
@@ -39,18 +83,30 @@ function mapArticleForLang(article, lang) {
   if (!desired) return null;
   if (!article || typeof article !== 'object') return null;
 
-  const base = normalizeLang(article.originalLang) || normalizeLang(article.lang || article.language) || 'en';
+  let base = normalizeLang(article.originalLang) || normalizeLang(article.lang || article.language) || null;
+  if (base === 'en' || base === null) {
+    const inferred = inferLangFromDocText(article);
+    if (inferred) base = inferred;
+  }
+  if (!base) return null;
 
   const originalBucket = article?.translations?.[base];
   const originalProvider = _normalizeProvider(originalBucket?.provider || 'manual');
   const originalGeneratedAt = originalBucket?.generatedAt || article?.publishedAt || article?.createdAt || null;
 
   if (desired === base) {
+    const title = String(article.title || '');
+    const summary = String(_pickSummary(article) || '');
+    const content = String(article.content || '');
+    if (!title.trim() || !summary.trim() || !content.trim()) return null;
+
+    if (isMismatchedLocaleText(desired, { title, summary, content })) return null;
+
     return {
       lang: desired,
-      title: String(article.title || ''),
-      summary: String(_pickSummary(article) || ''),
-      content: String(article.content || ''),
+      title,
+      summary,
+      content,
       provider: originalProvider,
       generatedAt: originalGeneratedAt,
       isTranslated: false,
@@ -61,6 +117,14 @@ function mapArticleForLang(article, lang) {
   const status = article?.translationStatus?.[desired] || null;
   const bucket = article?.translations?.[desired];
   if (status !== 'ready' || !_hasFullBucket(bucket)) return null;
+
+  if (isMismatchedLocaleText(desired, {
+    title: bucket?.title,
+    summary: bucket?.summary,
+    content: bucket?.content,
+  })) {
+    return null;
+  }
 
   return {
     lang: desired,

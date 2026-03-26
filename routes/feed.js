@@ -1,13 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const News = require('../models/News');
+const { getRequestedLocale, localizeDocStrict } = require('../services/publicStoryLocale.service');
+const { buildLocaleEligibilityMatch } = require('../services/publicStoryGroupResolver.service');
 
 // GET /api/feed/for-you
 router.get('/for-you', async (req, res) => {
   try {
     const rawLimit = parseInt(req.query.limit || '15', 10);
     const limit = Math.min(Math.max(rawLimit, 1), 50);
-    const language = String(req.query.language || '').toLowerCase();
+    const language = getRequestedLocale(req, { defaultLocale: 'en' });
     const region = String(req.query.region || '').toLowerCase();
 
     const filter = {};
@@ -16,15 +18,28 @@ router.get('/for-you', async (req, res) => {
     if (News.schema.paths.status) filter.status = 'published';
     // Region not present in schema currently; ignore for now
 
+    const eligible = buildLocaleEligibilityMatch(language);
+    if (eligible) filter.$and = (filter.$and || []).concat([eligible]);
+
     const items = await News.find(filter).sort({ createdAt: -1, date: -1 }).limit(limit).lean();
-    const mapped = items.map(doc => ({
-      _id: String(doc._id),
-      title: doc.title,
-      description: doc.description,
-      imageUrl: doc.imageURL || doc.imageUrl || null,
-      category: doc.category || null,
-      publishedAt: doc.date || doc.createdAt || null,
-    }));
+    const mapped = (items || [])
+      .map((doc) => {
+        const localized = localizeDocStrict(doc, language, {
+          mode: 'list',
+          logger: console,
+          logContext: { endpoint: 'GET /api/feed/for-you', region: region || null },
+        });
+        if (!localized) return null;
+        return {
+          _id: String(doc._id),
+          title: localized.title,
+          description: localized.description,
+          imageUrl: doc.imageURL || doc.imageUrl || null,
+          category: doc.category || null,
+          publishedAt: doc.date || doc.createdAt || null,
+        };
+      })
+      .filter(Boolean);
 
     return res.json({ ok: true, items: mapped, total: mapped.length });
   } catch (e) {

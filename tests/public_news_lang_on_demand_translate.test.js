@@ -16,6 +16,7 @@ function restore(originals) {
 function makeFindOneResult(doc, capture) {
   return {
     select() { return this; },
+    sort() { return this; },
     lean: async () => {
       if (typeof capture === 'function') capture();
       return doc;
@@ -39,7 +40,7 @@ test('GET /api/public/news/:slugOrId?lang=hi returns cached translations when pr
     const doc = {
       _id: '507f1f77bcf86cd799439011',
       slug: 's1',
-      slugs: { en: 's1' },
+      slugs: { en: 's1', hi: 's1-hi' },
       status: 'published',
       lang: 'en',
       language: 'en',
@@ -55,7 +56,7 @@ test('GET /api/public/news/:slugOrId?lang=hi returns cached translations when pr
 
     News.findOne = () => makeFindOneResult(doc);
 
-    const res = await request(app).get('/api/public/news/s1?lang=hi');
+    const res = await request(app).get('/api/public/news/s1-hi?lang=hi');
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.title, 'नमस्ते');
     assert.equal(res.body.description, 'सारांश');
@@ -80,7 +81,7 @@ test('GET /api/public/news/:slugOrId?lang=hi falls back to base content when tra
     const doc = {
       _id: '507f1f77bcf86cd799439012',
       slug: 's2',
-      slugs: { en: 's2' },
+      slugs: { en: 's2', hi: 's2-hi' },
       status: 'published',
       lang: 'en',
       language: 'en',
@@ -101,14 +102,8 @@ test('GET /api/public/news/:slugOrId?lang=hi falls back to base content when tra
 
     News.findOne = () => makeFindOneResult(doc);
 
-    const res = await request(app).get('/api/public/news/s2?lang=hi');
-    assert.equal(res.statusCode, 200);
-    assert.equal(res.body.requestedLang, 'hi');
-    assert.equal(res.body.resolvedLang, 'en');
-    assert.equal(res.body.isTranslated, false);
-    assert.equal(res.body.title, 'Hello');
-    assert.equal(res.body.description, 'Summary');
-    assert.equal(res.body.content, '<p>Body</p>');
+    const res = await request(app).get('/api/public/news/s2-hi?lang=hi');
+    assert.equal(res.statusCode, 404);
     assert.equal(updateCalls, 0);
   } finally {
     restore(originals);
@@ -126,7 +121,7 @@ test('GET /api/public/news/:slugOrId?lang=hi falls back to base content when tra
     const doc = {
       _id: '507f1f77bcf86cd799439013',
       slug: 's3',
-      slugs: { en: 's3' },
+      slugs: { en: 's3', hi: 's3-hi' },
       status: 'published',
       lang: 'en',
       language: 'en',
@@ -147,14 +142,8 @@ test('GET /api/public/news/:slugOrId?lang=hi falls back to base content when tra
 
     News.findOne = () => makeFindOneResult(doc);
 
-    const res = await request(app).get('/api/public/news/s3?lang=hi');
-    assert.equal(res.statusCode, 200);
-    assert.equal(res.body.requestedLang, 'hi');
-    assert.equal(res.body.resolvedLang, 'en');
-    assert.equal(res.body.isTranslated, false);
-    assert.equal(res.body.title, 'Hello');
-    assert.equal(res.body.description, 'Summary');
-    assert.equal(res.body.content, 'Body');
+    const res = await request(app).get('/api/public/news/s3-hi?lang=hi');
+    assert.equal(res.statusCode, 404);
     assert.equal(updateCalls, 0);
   } finally {
     restore(originals);

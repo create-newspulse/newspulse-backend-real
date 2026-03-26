@@ -59,7 +59,11 @@ test('GET /api/public/stories/:slug includes normalized imageUrl', async () => {
       coverImage: 'https://example.com/legacy-cover.jpg',
     };
 
-    Article.findOne = () => ({ lean: async () => story });
+    // Endpoint now calls .sort(...).lean() on the query.
+    Article.findOne = () => ({
+      sort() { return this; },
+      lean: async () => story,
+    });
 
     const res = await request(app).get('/api/public/stories/test-story-2');
     assert.equal(res.statusCode, 200);

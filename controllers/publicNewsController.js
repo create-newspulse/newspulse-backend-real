@@ -8,6 +8,14 @@ const { translateHtmlStrict, detectLangFromContent } = require('../services/arti
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
 const { buildPubliclyVisiblePublicArticleFilter } = require('../services/publicArticleVisibility.service');
 const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
+const {
+  normalizeLocale,
+  getRequestedLocale,
+  parseAllowFallback,
+  localizeDocStrict,
+  getStoryGroupId,
+} = require('../services/publicStoryLocale.service');
+const { removeInternalPublicFields } = require('../services/publicStoryGroupResolver.service');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -89,42 +97,8 @@ function applyLangFilter(filter, lang) {
   if (!lang) return;
   const lower = String(lang).trim().toLowerCase();
   const upper = lower.toUpperCase();
-  if (lang === 'gu') {
-    // Safety net for historical/mislabeled data: include clearly-Gujarati content even if lang fields are wrong.
-    // Use a small threshold (12 Gujarati-block chars) to avoid flipping for a single borrowed word.
-    const likelyGujaratiRx = new RegExp('(?:.*[\\u0A80-\\u0AFF]){12}');
-    const likelyGujaratiTextClause = {
-      $or: [
-        { title: { $regex: likelyGujaratiRx } },
-        { description: { $regex: likelyGujaratiRx } },
-        { summary: { $regex: likelyGujaratiRx } },
-        { content: { $regex: likelyGujaratiRx } },
-      ],
-    };
-
-    filter.$and.push({
-      $or: [
-        { lang: { $in: [lower, upper] } },
-        { language: { $in: [lower, upper] } },
-        // Default-to-gu ONLY when neither field provides a language.
-        {
-          $and: [
-            { $or: [{ lang: null }, { lang: { $exists: false } }] },
-            { $or: [{ language: null }, { language: { $exists: false } }] },
-          ],
-        },
-        // If a doc was saved as lang=en/hi but the body is clearly Gujarati, include it in Gujarati feed.
-        {
-          $and: [
-            { $or: [{ lang: { $in: ['en', 'EN', 'hi', 'HI'] } }, { language: { $in: ['en', 'EN', 'hi', 'HI'] } }] },
-            likelyGujaratiTextClause,
-          ],
-        },
-      ],
-    });
-  } else {
-    filter.$and.push({ $or: [{ lang: { $in: [lower, upper] } }, { language: { $in: [lower, upper] } }] });
-  }
+  // Strict locale selection: never default or infer language for public endpoints.
+  filter.$and.push({ $or: [{ lang: { $in: [lower, upper] } }, { language: { $in: [lower, upper] } }] });
 }
 
 function buildOriginalLangMatch(lang) {
@@ -148,7 +122,7 @@ function buildReadyTranslationMatch(lang) {
   // Require: translationStatus.<lang> === 'ready' and full bucket fields exist.
   return {
     $and: [
-      { [`translationStatus.${desired}`]: 'ready' },
+      { $or: [{ [`translationStatus.${desired}`]: 'ready' }, { [`translationStatus.${desired}`]: null }, { [`translationStatus.${desired}`]: { $exists: false } }] },
       { [`translations.${desired}.title`]: { $exists: true, $ne: '' } },
       { [`translations.${desired}.summary`]: { $exists: true, $ne: '' } },
       { [`translations.${desired}.content`]: { $exists: true, $ne: '' } },
@@ -604,6 +578,24 @@ function pickCanonicalSlug(doc, lang) {
   );
 }
 
+function detectMatchedLocaleFromSlugCandidates(docLike, slugCandidates) {
+  const doc = docLike && typeof docLike === 'object' ? docLike : {};
+  const candidates = Array.isArray(slugCandidates) ? slugCandidates.filter(Boolean).map(String) : [];
+
+  const slugs = doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
+  if (slugs) {
+    for (const l of ['en', 'hi', 'gu']) {
+      const v = typeof slugs[l] === 'string' ? slugs[l].trim() : '';
+      if (v && candidates.includes(v)) return l;
+    }
+  }
+
+  const legacy = typeof doc.slug === 'string' ? doc.slug.trim() : '';
+  if (legacy && candidates.includes(legacy)) return 'legacy';
+
+  return null;
+}
+
 function attachLocalizationFields(doc, requestedLang) {
   doc.canonicalSlug = pickCanonicalSlug(doc, requestedLang);
   doc.localizedTitle = doc.title || '';
@@ -770,9 +762,14 @@ async function listPublicNews(req, res) {
     const founderOnly = parseTruthy(req.query.founderOnly);
     const type = String(req.query.type || '').trim().toLowerCase();
 
-    // Default language for public story feed is Gujarati (backward compatible).
-    const requestedLang = getRequestedLang(req) || 'gu';
-    const desired = normalizeLang(requestedLang) || 'gu';
+    const explicitLangRaw = String((req.query && (req.query.lang ?? req.query.language)) ?? '').trim();
+    if (explicitLangRaw && !normalizeLocale(explicitLangRaw)) {
+      return res.status(400).json({ items: [], page, limit, total: 0, totalPages: 1, message: 'Invalid lang. Expected en|hi|gu' });
+    }
+
+    // Default locale for public routes is EN (strict).
+    const desired = getRequestedLocale(req, { defaultLocale: 'en' });
+    const fallbackTo = parseAllowFallback(req);
 
     let q = String(req.query.q || '').trim();
     // Keep keyword search safe and bounded
@@ -791,21 +788,11 @@ async function listPublicNews(req, res) {
     if (topic) filter.$and.push({ topic: new RegExp(`^${escapeRegExp(topic)}$`, 'i') });
     if (state) filter.$and.push({ 'location.state': new RegExp(`^${escapeRegExp(state)}$`, 'i') });
 
-    // Feed rules:
-    // - Gujarati feed shows originals immediately (legacy behavior).
-    // - Hindi/English feeds only show items when either:
-    //   - the original is authored in that language, OR
-    //   - the cached translation bucket is fully ready (no placeholders).
-    if (desired === 'gu') {
-      applyLangFilter(filter, 'gu');
-    } else if (desired === 'hi' || desired === 'en') {
-      filter.$and.push({
-        $or: [
-          buildOriginalLangMatch(desired),
-          buildReadyTranslationMatch(desired),
-        ],
-      });
-    }
+    // Locale rules (strict): include a story only if the requested locale is
+    // either the original/base locale OR a fully-ready cached translation.
+    filter.$and.push({
+      $or: [buildOriginalLangMatch(desired), buildReadyTranslationMatch(desired)],
+    });
 
     const skip = (page - 1) * limit;
     const sort = { publishedAt: -1, createdAt: -1 };
@@ -815,37 +802,42 @@ async function listPublicNews(req, res) {
       News.countDocuments(filter),
     ]);
 
-    let items = (itemsRaw || []).map(withCoverImageUrl);
-
-    // Localize strictly from cached buckets.
-    items = items
-      .map((it) => {
-        const out = { ...it };
-        const base = _resolveBaseLang(out);
-
-        if (desired === base) {
-          out.summary = out.description || '';
-          out.requestedLang = desired;
-          out.resolvedLang = base;
-          out.isTranslated = false;
-          out.lang = desired;
-          out.language = desired;
-          return out;
-        }
-
-        const ok = _applyCachedTranslationInPlace(out, desired);
-        if (!ok) return null;
-        return out;
-      })
+    let items = (itemsRaw || [])
+      .map(withCoverImageUrl)
+      .map((doc) => localizeDocStrict(doc, desired, {
+        mode: 'list',
+        fallbackTo,
+        logger: console,
+        logContext: { endpoint: 'GET /api/public/news' },
+      }))
       .filter(Boolean);
 
-    // Keep response payload stable (don’t emit translation cache).
+    // Dedupe to one record per canonical story group.
+    const bestByGroup = new Map();
     for (const it of items) {
-      try { delete it.translations; } catch (_) {}
-      try { delete it.translationStatus; } catch (_) {}
-      try { delete it.translationError; } catch (_) {}
-      try { delete it.translationNextRetryAt; } catch (_) {}
+      const key = it.storyGroupId || it.slug || String(it._id || '');
+      const prev = bestByGroup.get(key);
+      if (!prev) {
+        bestByGroup.set(key, it);
+        continue;
+      }
+      const prevOrig = prev.selectedVariant === 'original';
+      const itOrig = it.selectedVariant === 'original';
+      if (itOrig && !prevOrig) {
+        bestByGroup.set(key, it);
+        continue;
+      }
+      const prevT = prev.publishAt ? new Date(prev.publishAt).getTime() : (prev.createdAt ? new Date(prev.createdAt).getTime() : 0);
+      const itT = it.publishAt ? new Date(it.publishAt).getTime() : (it.createdAt ? new Date(it.createdAt).getTime() : 0);
+      if (itT > prevT) bestByGroup.set(key, it);
     }
+    items = Array.from(bestByGroup.values()).sort((a, b) => {
+      const at = a.publishAt ? new Date(a.publishAt).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+      const bt = b.publishAt ? new Date(b.publishAt).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+      return bt - at;
+    });
+
+    items = items.map(removeInternalPublicFields);
     const totalPages = Math.max(Math.ceil(total / limit), 1);
 
     return res.status(200).json({ items, page, limit, total, totalPages });
@@ -866,25 +858,35 @@ async function getPublicNewsByTranslationKey(req, res) {
       return res.status(404).json({ message: 'Not found' });
     }
 
-    const requestedLang = getRequestedLang(req);
+    const explicitLangRaw = String((req.query && (req.query.lang ?? req.query.language)) ?? '').trim();
+    if (explicitLangRaw && !normalizeLocale(explicitLangRaw)) {
+      return res.status(400).json({ message: 'Invalid lang. Expected en|hi|gu' });
+    }
+
+    const requestedLocale = getRequestedLocale(req, { defaultLocale: 'en' });
+    const fallbackTo = parseAllowFallback(req);
+
     const base = buildPublicPublishedFilter({});
     base.$and.push({ $or: [{ translationKey }, { translationGroupId: translationKey }] });
 
-    const filter = { ...base, $and: [...(base.$and || [])] };
-    if (requestedLang) applyLangFilter(filter, requestedLang);
-
-    let doc = await News.findOne(filter).select(PUBLIC_SELECT).lean();
-    if (!doc && !requestedLang) {
-      // Default: try Gujarati if not specified.
-      const fallback = { ...base, $and: [...(base.$and || [])] };
-      applyLangFilter(fallback, 'gu');
-      doc = await News.findOne(fallback).select(PUBLIC_SELECT).lean();
-    }
+    const doc = await News.findOne(base)
+      .select(PUBLIC_DETAIL_SELECT)
+      .sort({ publishedAt: -1, createdAt: -1, updatedAt: -1 })
+      .lean();
 
     if (!doc) return res.status(404).json({ message: 'Not found' });
 
-    const out = withCoverImageUrl(doc);
-    return res.status(200).json(out);
+    const out0 = withCoverImageUrl(doc);
+    const localized = localizeDocStrict(out0, requestedLocale, {
+      mode: 'detail',
+      fallbackTo,
+      logger: console,
+      logContext: { endpoint: 'GET /api/public/news/translation' },
+    });
+
+    if (!localized) return res.status(404).json({ message: 'Not found' });
+    attachLocalizationFields(localized, localized.selectedLocale);
+    return res.status(200).json(removeInternalPublicFields(localized, { keepGroupKeys: true }));
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
   }
@@ -910,7 +912,7 @@ async function listPublicNewsTranslations(req, res) {
       .sort({ language: 1, publishedAt: -1, createdAt: -1 })
       .lean();
 
-    const items = (itemsRaw || []).map(withCoverImageUrl);
+    const items = (itemsRaw || []).map(withCoverImageUrl).map(removeInternalPublicFields);
     return res.status(200).json(items);
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
@@ -938,15 +940,21 @@ async function getPublicNewsBySlugOrId(req, res) {
     let doc = null;
     let docSource = 'news';
 
-    // Prefer requested language doc when available.
-    const requestedLang = getRequestedLang(req);
+    const explicitLangRaw = String((req.query && (req.query.lang ?? req.query.language)) ?? '').trim();
+    if (explicitLangRaw && !normalizeLocale(explicitLangRaw)) {
+      return res.status(400).json({ message: 'Invalid lang. Expected en|hi|gu' });
+    }
+
+    const requestedLocale = getRequestedLocale(req, { defaultLocale: 'en' });
+    const fallbackTo = parseAllowFallback(req);
+
     const shouldDebug = debugEnabled && (!debugOnly || debugOnly === slugOrIdRaw);
     const debug = (event, payload) => {
       if (!shouldDebug) return;
       try {
         console.log('[public-news][detail]', event, {
           slugOrId: slugOrIdRaw,
-          requestedLang: requestedLang || null,
+          requestedLocale: requestedLocale || null,
           ...(payload || {}),
         });
       } catch (_) {}
@@ -958,27 +966,26 @@ async function getPublicNewsBySlugOrId(req, res) {
     } else {
       const slugCandidates = getSlugCandidates(slugOrIdRaw);
       const slugFilter = slugCandidates.length === 1 ? slugCandidates[0] : { $in: slugCandidates };
-      lookup.$and.push({
+
+      // Flexible slug lookup: any locale slug can resolve the canonical story group.
+      // Locale selection is handled AFTER lookup via localizeDocStrict().
+      const slugClause = {
         $or: [
           { slug: slugFilter },
           { 'slugs.en': slugFilter },
           { 'slugs.hi': slugFilter },
           { 'slugs.gu': slugFilter },
         ],
-      });
+      };
+      lookup.$and.push(slugClause);
     }
 
     debug('lookup_built', { isObjectIdLike: isObjectIdLike(slugOrIdRaw) });
 
-    if (requestedLang) {
-      const byLangFilter = { ...lookup, $and: [...(lookup.$and || [])] };
-      applyLangFilter(byLangFilter, requestedLang);
-      doc = await News.findOne(byLangFilter).select(PUBLIC_DETAIL_SELECT).lean();
-    }
-
-    if (!doc) {
-      doc = await News.findOne(lookup).select(PUBLIC_DETAIL_SELECT).lean();
-    }
+    doc = await News.findOne(lookup)
+      .select(PUBLIC_DETAIL_SELECT)
+      .sort({ publishedAt: -1, createdAt: -1, updatedAt: -1 })
+      .lean();
 
     if (!doc) {
       // Fallback: regional feeds are backed by PublicArticle (_id differs from News).
@@ -1001,15 +1008,10 @@ async function getPublicNewsBySlugOrId(req, res) {
         });
       }
 
-      let paDoc = null;
-      if (requestedLang) {
-        const paByLang = { ...paLookup, $and: [...(paLookup.$and || [])] };
-        applyLangFilter(paByLang, requestedLang);
-        paDoc = await PublicArticle.findOne(paByLang).select(PUBLIC_ARTICLE_DETAIL_SELECT).lean();
-      }
-      if (!paDoc) {
-        paDoc = await PublicArticle.findOne(paLookup).select(PUBLIC_ARTICLE_DETAIL_SELECT).lean();
-      }
+      const paDoc = await PublicArticle.findOne(paLookup)
+        .select(PUBLIC_ARTICLE_DETAIL_SELECT)
+        .sort({ publishedAt: -1, createdAt: -1, updatedAt: -1 })
+        .lean();
 
       if (paDoc) {
         debug('resolved_public_article', {
@@ -1020,7 +1022,10 @@ async function getPublicNewsBySlugOrId(req, res) {
 
         if (paDoc.sourceNewsId) {
           const bySource = { ...base, _id: paDoc.sourceNewsId, $and: [...(base.$and || [])] };
-          const newsBySource = await News.findOne(bySource).select(PUBLIC_DETAIL_SELECT).lean();
+          const newsBySource = await News.findOne(bySource)
+            .select(PUBLIC_DETAIL_SELECT)
+            .sort({ publishedAt: -1, createdAt: -1, updatedAt: -1 })
+            .lean();
           if (newsBySource) {
             doc = newsBySource;
             docSource = 'news';
@@ -1050,67 +1055,39 @@ async function getPublicNewsBySlugOrId(req, res) {
       publishedAt: doc?.publishedAt || null,
     });
 
-    let out = withCoverImageUrl(doc);
-    const rawForTranslation = { ...out };
-
-    const desired = normalizeLang(requestedLang);
-    if (!desired) {
-      const base = _resolveBaseLang(out);
-      _setBaseLocalizationInPlace(out, base, null);
-      try { delete out.translations; } catch (_) {}
-      try { delete out.translationStatus; } catch (_) {}
-      attachLocalizationFields(out, out.resolvedLang);
-      return res.status(200).json(out);
-    }
-
-    // 1) Prefer cached translation for requested language.
-    // 2) Fall back to other cached languages in order: requested → en → hi → gu → base.
-    // 3) Optionally auto-translate requested language on read (dev-only), if enabled.
-    const baseLang = _resolveBaseLang(out);
-    const cachedRes = _applyBestAvailableCachedLocalizationInPlace(out, desired);
-
-    const shouldAuto = isAutoTranslateOnReadEnabled();
-    const needsRequested = desired !== baseLang && cachedRes.resolvedLang !== desired;
-
-    const allowOnDemandTranslate = docSource === 'news';
-
-    if (shouldAuto && needsRequested && allowOnDemandTranslate && isGoogleTranslateConfigured()) {
-      const now = new Date();
-      const lockOwner = await tryAcquireNewsTranslationLock({ id: out?._id, lang: desired, now });
-      const localized = await ensureOnDemandNewsTranslation({
-        doc: rawForTranslation,
-        requestedLang: desired,
-        logger: console,
-        lockOwner,
-        now,
+    if (!isObjectIdLike(slugOrIdRaw)) {
+      const slugCandidates = getSlugCandidates(slugOrIdRaw);
+      debug('slug_match', {
+        requestedSlug: slugOrIdRaw,
+        matchedLocale: detectMatchedLocaleFromSlugCandidates(doc, slugCandidates),
       });
-
-      if (localized && localized.dbSet && out && out._id) {
-        try {
-          await News.updateOne({ _id: out._id }, { $set: localized.dbSet }).catch(() => null);
-        } catch (_) {}
-      }
-
-      if (localized && localized.out && localized.resolvedLang === desired && localized.translationPending === false) {
-        out = withCoverImageUrl(localized.out);
-        out.requestedLang = desired;
-        out.resolvedLang = desired;
-        out.isTranslated = true;
-        out.summary = out.description || out.summary || '';
-      } else {
-        // Keep the best cached/base fallback already applied.
-        out.requestedLang = desired;
-      }
-    } else {
-      out.requestedLang = desired;
     }
 
-    try { delete out.translations; } catch (_) {}
-    try { delete out.translationStatus; } catch (_) {}
-    try { delete out.translationError; } catch (_) {}
-    try { delete out.translationNextRetryAt; } catch (_) {}
-    attachLocalizationFields(out, out.resolvedLang);
-    return res.status(200).json(out);
+    const out0 = withCoverImageUrl(doc);
+    const localized = localizeDocStrict(out0, requestedLocale, {
+      mode: 'detail',
+      fallbackTo,
+      logger: console,
+      logContext: { endpoint: 'GET /api/public/news/:slugOrId', docSource },
+    });
+
+    if (!localized) {
+      return res.status(404).json({ message: 'Not found' });
+    }
+
+    debug('localized', {
+      storyGroupId: localized.storyGroupId || null,
+      requestedLocale: localized.requestedLocale || null,
+      returnedLocale: localized.selectedLocale || null,
+      selectedVariant: localized.selectedVariant || null,
+    });
+
+    // Alias for frontend readability (do not remove existing lang/language fields).
+    localized.locale = localized.selectedLocale || localized.resolvedLang || null;
+
+    // Backward-compatible detail metadata.
+    attachLocalizationFields(localized, localized.selectedLocale);
+    return res.status(200).json(removeInternalPublicFields(localized));
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
   }
@@ -1121,6 +1098,19 @@ async function getPublicNewsBySlugOrId(req, res) {
 async function getPublicNewsBySlug(req, res) {
   try {
     res.set('Cache-Control', 'no-store');
+
+    const debugEnabled = parseTruthy(process.env.DEBUG_PUBLIC_NEWS_DETAIL) || parseTruthy(process.env.PUBLIC_NEWS_DETAIL_DEBUG);
+    const debugOnly = String(process.env.DEBUG_PUBLIC_NEWS_DETAIL_ID || '').trim();
+    const debug = (event, payload) => {
+      if (!debugEnabled) return;
+      if (debugOnly && payload && typeof payload === 'object') {
+        const idOrSlug = String(payload.slug || payload.slugOrId || payload.slugOrIdRaw || '').trim();
+        if (idOrSlug && idOrSlug !== debugOnly) return;
+      }
+      try {
+        console.log('[public-news][detail-by-slug]', event, payload || {});
+      } catch (_) {}
+    };
 
     const decodedParam = String(req.params.slug ?? '').trim();
     if (!decodedParam) return res.status(400).json({ message: 'Missing slug' });
@@ -1158,7 +1148,33 @@ async function getPublicNewsBySlug(req, res) {
     const slugCandidates = Array.from(candidates).filter(Boolean);
     const slugFilter = slugCandidates.length <= 1 ? (slugCandidates[0] || decodedParam) : { $in: slugCandidates };
 
-    const slugClause = {
+    const explicitLangRaw = String((req.query && (req.query.lang ?? req.query.language)) ?? '').trim();
+    if (explicitLangRaw && !normalizeLocale(explicitLangRaw)) {
+      return res.status(400).json({ message: 'Invalid lang. Expected en|hi|gu' });
+    }
+
+    const requestedLocale = getRequestedLocale(req, { defaultLocale: 'en' });
+    const fallbackTo = parseAllowFallback(req);
+
+    debug('request', {
+      slug: decodedParam,
+      rawFromUrl: rawFromUrl || null,
+      requestedLocale,
+      slugCandidates,
+    });
+
+    // Two-stage slug lookup:
+    // 1) Strict locale lookup: slug + slugs.<requestedLocale>
+    // 2) Fallback: any locale slug can resolve the canonical story group
+    // Locale selection is handled AFTER lookup via localizeDocStrict().
+    const strictSlugClause = {
+      $or: [
+        { slug: slugFilter },
+        { [`slugs.${requestedLocale}`]: slugFilter },
+      ],
+    };
+
+    const flexibleSlugClause = {
       $or: [
         { slug: slugFilter },
         { 'slugs.en': slugFilter },
@@ -1168,76 +1184,52 @@ async function getPublicNewsBySlug(req, res) {
     };
 
     const base = buildPublicPublishedFilter({});
-    const requestedLang = getRequestedLang(req);
-
-    let doc = null;
-    if (requestedLang) {
-      const byLangFilter = { ...base, $and: [...(base.$and || []), slugClause] };
-      applyLangFilter(byLangFilter, requestedLang);
-      doc = await News.findOne(byLangFilter).select(PUBLIC_DETAIL_SELECT).lean();
-    }
+    let doc = await News.findOne({ ...base, $and: [...(base.$and || []), strictSlugClause] })
+      .select(PUBLIC_DETAIL_SELECT)
+      .sort({ publishedAt: -1, createdAt: -1, updatedAt: -1 })
+      .lean();
 
     if (!doc) {
-      doc = await News.findOne({ ...base, $and: [...(base.$and || []), slugClause] }).select(PUBLIC_DETAIL_SELECT).lean();
+      doc = await News.findOne({ ...base, $and: [...(base.$and || []), flexibleSlugClause] })
+        .select(PUBLIC_DETAIL_SELECT)
+        .sort({ publishedAt: -1, createdAt: -1, updatedAt: -1 })
+        .lean();
     }
 
     if (!doc) return res.status(404).json({ message: 'Not found' });
 
-    let out = withCoverImageUrl(doc);
-    const rawForTranslation = { ...out };
+    debug('matched', {
+      slug: decodedParam,
+      matchedLocale: detectMatchedLocaleFromSlugCandidates(doc, slugCandidates),
+      storyGroupId: getStoryGroupId(doc),
+      resolvedId: doc?._id ? String(doc._id) : null,
+    });
 
-    const desired = normalizeLang(requestedLang);
-    if (!desired) {
-      const base = _resolveBaseLang(out);
-      _setBaseLocalizationInPlace(out, base, null);
-      try { delete out.translations; } catch (_) {}
-      try { delete out.translationStatus; } catch (_) {}
-      attachLocalizationFields(out, out.resolvedLang);
-      return res.status(200).json(out);
+    const out0 = withCoverImageUrl(doc);
+    const localized = localizeDocStrict(out0, requestedLocale, {
+      mode: 'detail',
+      fallbackTo,
+      logger: console,
+      logContext: { endpoint: 'GET /api/public/news/slug/:slug', docSource: 'news' },
+    });
+
+    if (!localized) {
+      return res.status(404).json({ message: 'Not found' });
     }
 
-    const baseLang = _resolveBaseLang(out);
-    const cachedRes = _applyBestAvailableCachedLocalizationInPlace(out, desired);
+    debug('localized', {
+      slug: decodedParam,
+      storyGroupId: localized.storyGroupId || null,
+      requestedLocale: localized.requestedLocale || null,
+      returnedLocale: localized.selectedLocale || null,
+      selectedVariant: localized.selectedVariant || null,
+    });
 
-    const shouldAuto = isAutoTranslateOnReadEnabled();
-    const needsRequested = desired !== baseLang && cachedRes.resolvedLang !== desired;
+    // Alias for frontend readability (do not remove existing lang/language fields).
+    localized.locale = localized.selectedLocale || localized.resolvedLang || null;
 
-    if (shouldAuto && needsRequested && isGoogleTranslateConfigured()) {
-      const now = new Date();
-      const lockOwner = await tryAcquireNewsTranslationLock({ id: out?._id, lang: desired, now });
-      const localized = await ensureOnDemandNewsTranslation({
-        doc: rawForTranslation,
-        requestedLang: desired,
-        logger: console,
-        lockOwner,
-        now,
-      });
-
-      if (localized && localized.dbSet && out && out._id) {
-        try {
-          await News.updateOne({ _id: out._id }, { $set: localized.dbSet }).catch(() => null);
-        } catch (_) {}
-      }
-
-      if (localized && localized.out && localized.resolvedLang === desired && localized.translationPending === false) {
-        out = withCoverImageUrl(localized.out);
-        out.requestedLang = desired;
-        out.resolvedLang = desired;
-        out.isTranslated = true;
-        out.summary = out.description || out.summary || '';
-      } else {
-        out.requestedLang = desired;
-      }
-    } else {
-      out.requestedLang = desired;
-    }
-
-    try { delete out.translations; } catch (_) {}
-    try { delete out.translationStatus; } catch (_) {}
-    try { delete out.translationError; } catch (_) {}
-    try { delete out.translationNextRetryAt; } catch (_) {}
-    attachLocalizationFields(out, out.resolvedLang);
-    return res.status(200).json(out);
+    attachLocalizationFields(localized, localized.selectedLocale);
+    return res.status(200).json(removeInternalPublicFields(localized));
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
   }

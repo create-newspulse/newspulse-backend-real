@@ -18,6 +18,9 @@ function makeFindOneResult(doc) {
     select() {
       return this;
     },
+    sort() {
+      return this;
+    },
     lean: async () => doc,
   };
 }
@@ -97,13 +100,7 @@ test('GET /api/public/news/:slugOrId falls back to base content for PublicArticl
     PublicArticle.findOne = () => makeFindOneResult(articleDoc);
 
     const res = await request(app).get('/api/public/news/507f1f77bcf86cd799439098?lang=hi');
-    assert.equal(res.statusCode, 200);
-    assert.equal(res.body.title, 'Hello');
-    assert.equal(res.body.description, 'SummaryB');
-    assert.equal(res.body.content, '<p>BodyB</p>');
-    assert.equal(res.body.requestedLang, 'hi');
-    assert.equal(res.body.resolvedLang, 'en');
-    assert.equal(res.body.isTranslated, false);
+    assert.equal(res.statusCode, 404);
   } finally {
     restore(News, newsOriginals);
     restore(PublicArticle, paOriginals);

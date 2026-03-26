@@ -89,6 +89,35 @@ function _hasFullBucket(bucket) {
   return _isNonEmptyString(b.title) && _isNonEmptyString(b.summary) && _isNonEmptyString(b.content);
 }
 
+function _stripHtmlForLangDetect(v) {
+  return String(v ?? '').replace(/<[^>]*>/g, ' ');
+}
+
+function _countUnicodeMatches(s, re) {
+  const m = String(s || '').match(re);
+  return m ? m.length : 0;
+}
+
+function inferLocaleFromTextParts({ title, summary, content } = {}) {
+  const text = _stripHtmlForLangDetect(`${title || ''} ${summary || ''} ${content || ''}`);
+  if (!text.trim()) return null;
+
+  const guCount = _countUnicodeMatches(text, /[\u0A80-\u0AFF]/g);
+  const hiCount = _countUnicodeMatches(text, /[\u0900-\u097F]/g);
+  const MIN = 12;
+
+  if (guCount >= MIN && guCount > hiCount) return 'gu';
+  if (hiCount >= MIN && hiCount > guCount) return 'hi';
+  return null;
+}
+
+function isMismatchedLocaleText(desiredLang, { title, summary, content } = {}) {
+  const desired = normalizeLang(desiredLang);
+  if (!desired) return false;
+  const inferred = inferLocaleFromTextParts({ title, summary, content });
+  return Boolean(inferred && inferred !== desired);
+}
+
 function _isRateLimitErrorMessage(msg) {
   return /(rate\s*limit\s*exceeded|too\s*many\s*requests|resource\s*exhausted|http[_\s-]*429|\b429\b)/i.test(String(msg || ''));
 }
@@ -200,7 +229,11 @@ function buildPublishTranslationState({ baseLang, title, summary, content, exist
     }
 
     // Preserve any fully translated bucket as a cache hit.
-    if (_hasFullBucket(existingBucket)) {
+    if (_hasFullBucket(existingBucket) && !isMismatchedLocaleText(lang, {
+      title: existingBucket?.title,
+      summary: existingBucket?.summary,
+      content: existingBucket?.content,
+    })) {
       translations[lang] = _sanitizeBucket(existingBucket, { fallbackProvider: 'google', now: at });
       translationStatus[lang] = 'ready';
       translationError[lang] = null;
@@ -529,6 +562,24 @@ async function translateAndSave(newsId, options = {}) {
 
     // Cache hit: translation already complete.
     if (hasFull) {
+      // If a bucket is full but clearly mismatched (e.g. Gujarati stored under en),
+      // treat it as corrupted and re-translate instead of preserving it.
+      const mismatched = isMismatchedLocaleText(dst, {
+        title: bucket?.title,
+        summary: bucket?.summary,
+        content: bucket?.content,
+      });
+
+      if (mismatched) {
+        try {
+          logger.warn?.('[i18n][publish] full bucket mismatched; will retranslate', {
+            id: String(doc0?._id || ''),
+            slug: String(doc0?.slug || ''),
+            from: baseLang,
+            to: dst,
+          });
+        } catch (_) {}
+      } else {
       // Repair legacy/partial metadata: full bucket must always have provider+generatedAt.
       const providerFixed = _normalizeProvider(bucket?.provider) || 'google';
       const generatedAtFixed = bucket?.generatedAt ? new Date(bucket.generatedAt) : null;
@@ -553,7 +604,8 @@ async function translateAndSave(newsId, options = {}) {
           if (docUpdated) await syncPublicArticleFromNews(docUpdated, { logger });
         } catch (_) {}
       }
-      continue;
+        continue;
+      }
     }
 
     // Cooldown: do not retry until nextRetryAt.
@@ -592,6 +644,13 @@ async function translateAndSave(newsId, options = {}) {
 
       if (!titleT || !summaryT || !String(contentT || '').trim()) {
         throw new Error('Translate returned empty output');
+      }
+
+      // Safety check: if translation output clearly matches a different supported
+      // locale script than the requested dst, do not save it as ready.
+      if (isMismatchedLocaleText(dst, { title: titleT, summary: summaryT, content: contentT })) {
+        const inferred = inferLocaleFromTextParts({ title: titleT, summary: summaryT, content: contentT });
+        throw new Error(`Translate returned mismatched locale output (dst=${dst}, inferred=${inferred || 'unknown'})`);
       }
 
       const setOk = {

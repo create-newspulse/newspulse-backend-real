@@ -18,7 +18,12 @@ const {
 const { ensureOnDemandNewsTranslation } = require('../services/newsOnDemandTranslation.service');
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
 
-const { mapArticleForLang } = require('../services/mapArticleForLang');
+const { localizeDocStrict, getRequestedLocale } = require('../services/publicStoryLocale.service');
+const {
+  buildLocaleEligibilityMatch,
+  dedupeLocalizedByStoryGroup,
+  removeInternalPublicFields,
+} = require('../services/publicStoryGroupResolver.service');
 
 const {
   buildPubliclyVisibleNewsArticleFilter,
@@ -882,13 +887,9 @@ router.get('/public/articles', async (req, res, next) => {
     }
 
     const desired = normalizeLanguage(langQueryRaw);
-    if (desired === 'gu') {
-      const originalMatch = _buildOriginalLangMatch('gu');
-      if (originalMatch) query.$and = (query.$and || []).concat([originalMatch]);
-    } else if (desired === 'hi' || desired === 'en') {
-      const originalMatch = _buildOriginalLangMatch(desired);
-      const readyMatch = _buildReadyTranslationMatch(desired);
-      query.$and = (query.$and || []).concat([{ $or: [originalMatch, readyMatch].filter(Boolean) }]);
+    if (desired === 'en' || desired === 'hi' || desired === 'gu') {
+      const eligible = buildLocaleEligibilityMatch(desired);
+      if (eligible) query.$and = (query.$and || []).concat([eligible]);
     } else if (explicitLangRaw) {
       const langNorm = normalizeLanguage(explicitLangRaw);
       if (langNorm) {
@@ -918,35 +919,29 @@ router.get('/public/articles', async (req, res, next) => {
       News.countDocuments(query),
     ]);
 
-    let items = (itemsRaw || []).map(withCoverImageUrl);
+    let items = itemsRaw || [];
 
-    // If a supported language was requested, localize from cached translation buckets.
-    // Keep response shape stable (same fields), just swap title/description/content.
-    if (desired === 'hi' || desired === 'en') {
+    // If a supported language was requested, strictly localize from:
+    // - original bucket (must be complete) OR
+    // - fully-ready cached translations
+    if (desired === 'en' || desired === 'hi' || desired === 'gu') {
       items = items
         .map((doc) => {
-          const mapped = mapArticleForLang(doc, desired);
-          if (!mapped) return null;
-          return {
-            ...doc,
-            title: mapped.title,
-            description: mapped.summary,
-            summary: mapped.summary,
-            content: mapped.content,
-            lang: mapped.lang,
-            language: mapped.lang,
-            requestedLang: desired,
-            resolvedLang: mapped.resolvedLang,
-            isTranslated: mapped.isTranslated,
-          };
+          const localized = localizeDocStrict(withCoverImageUrl(doc), desired, {
+            mode: 'list',
+            logger: console,
+            logContext: { endpoint: 'GET /api/public/articles', category: categoryRaw || null },
+          });
+          if (!localized) return null;
+          return withCoverImageUrl(removeInternalPublicFields(localized));
         })
         .filter(Boolean);
-    } else if (desired === 'gu') {
-      items = items.map((doc) => {
-        const summary = typeof doc.description === 'string' ? doc.description : (typeof doc.summary === 'string' ? doc.summary : '');
-        return { ...doc, summary, lang: 'gu', language: 'gu', requestedLang: 'gu', resolvedLang: 'gu', isTranslated: false };
-      });
+
+      items = dedupeLocalizedByStoryGroup(items);
+    } else {
+      items = (items || []).map(withCoverImageUrl);
     }
+
     return res.status(200).json({ ok: true, success: true, status: 200, data: { items, page, limit, total } });
   } catch (err) {
     return next(err);
@@ -1159,7 +1154,7 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
       return res.status(400).json({ ok: false, success: false, status: 400, message: 'Invalid state' });
     }
 
-    const desired = normalizeLanguage(req.query.lang || req.query.language) || 'gu';
+    const desired = getRequestedLocale(req, { defaultLocale: 'gu' });
 
     const rawDistrict0 = _sanitizeDistrictCityValue(safeDecodeURIComponent(req.query.district || ''));
     const rawCity0 = _sanitizeDistrictCityValue(safeDecodeURIComponent(req.query.city || ''));
@@ -1229,17 +1224,11 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
       } catch (_) {}
     }
 
-    // Query rules:
-    // - If requested lang matches the original language => show originals
-    // - Else => show ONLY fully-ready cached translations for that language
-    if (desired === 'gu') {
-      const originalMatch = _buildOriginalLangMatch('gu');
-      if (originalMatch) filter.$and = (filter.$and || []).concat([originalMatch]);
-    } else if (desired === 'hi' || desired === 'en') {
-      const originalMatch = _buildOriginalLangMatch(desired);
-      const readyMatch = _buildReadyTranslationMatch(desired);
-      filter.$and = (filter.$and || []).concat([{ $or: [originalMatch, readyMatch].filter(Boolean) }]);
-    }
+    // Strict locale eligibility:
+    // - originals authored in desired locale, OR
+    // - fully-ready cached translations for desired locale
+    const eligible = buildLocaleEligibilityMatch(desired);
+    if (eligible) filter.$and = (filter.$and || []).concat([eligible]);
 
     const [itemsRaw, total] = await Promise.all([
       PublicArticle.find(filter)
@@ -1262,22 +1251,32 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
     const bestByKey = new Map();
     for (const doc of (itemsRaw || [])) {
       const imageUrl = _resolveImageUrlFromNewsDoc(doc);
-      const mapped = mapArticleForLang(doc, desired);
-      if (!mapped) continue;
+      const localized = localizeDocStrict(doc, desired, {
+        mode: 'list',
+        logger: console,
+        logContext: {
+          endpoint: 'GET /api/public/regional',
+          stateSlug,
+          districtSlug: districtSlug || null,
+          citySlug: citySlug || null,
+        },
+      });
+      if (!localized) continue;
 
       const out = {
         _id: String(doc._id),
+        // Contract: keep the canonical/original slug (do not swap per-lang slugs).
         slug: doc.slug || null,
         slugs: doc.slugs || null,
         category: doc.category || null,
         stateSlug,
         imageUrl,
-        title: mapped.title,
-        summary: mapped.summary,
-        content: mapped.content,
-        generatedAt: mapped.generatedAt || null,
-        provider: mapped.provider || 'google',
-        __isTranslated: Boolean(mapped.isTranslated),
+        title: localized.title,
+        summary: localized.summary,
+        content: localized.content,
+        generatedAt: (doc?.translations?.[desired]?.generatedAt || doc?.publishedAt || doc?.createdAt || null),
+        provider: (doc?.translations?.[desired]?.provider || 'google'),
+        __isTranslated: Boolean(localized.isTranslated),
       };
 
       const canonicalSlug = (() => {
@@ -1285,6 +1284,9 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
         const v = slugs && slugs[desired] ? String(slugs[desired]).trim() : '';
         return v || '';
       })();
+      // Only treat translationKey/translationGroupId as a true cross-variant group key.
+      // Do NOT use storyGroupId here, since it falls back to _id and would prevent
+      // dedupe-by-slug behavior when group ids are missing.
       const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
       const key = groupKey
         ? `group:${groupKey}`
@@ -1391,13 +1393,9 @@ router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
     const query = buildPubliclyVisibleNewsArticleFilter();
     query.category = 'national';
     query.stateTags = stateSlug;
-    if (desired === 'gu') {
-      const originalMatch = _buildOriginalLangMatch('gu');
-      if (originalMatch) query.$and = (query.$and || []).concat([originalMatch]);
-    } else if (desired === 'hi' || desired === 'en') {
-      const originalMatch = _buildOriginalLangMatch(desired);
-      const readyMatch = _buildReadyTranslationMatch(desired);
-      query.$and = (query.$and || []).concat([{ $or: [originalMatch, readyMatch].filter(Boolean) }]);
+    if (desired === 'en' || desired === 'hi' || desired === 'gu') {
+      const eligible = buildLocaleEligibilityMatch(desired);
+      if (eligible) query.$and = (query.$and || []).concat([eligible]);
     }
     const [itemsRaw, total] = await Promise.all([
       News.find(query).sort({ publishedAt: -1, createdAt: -1 }).skip(skip).limit(limit).lean(),
@@ -1405,46 +1403,20 @@ router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
     ]);
 
     let items = (itemsRaw || []).map(withCoverImageUrl);
-    if (desired) {
-      const bestByKey = new Map();
-      for (const doc of items) {
-        const mapped = mapArticleForLang(doc, desired);
-        if (!mapped) continue;
+    if (desired === 'en' || desired === 'hi' || desired === 'gu') {
+      items = items
+        .map((doc) => {
+          const localized = localizeDocStrict(doc, desired, {
+            mode: 'list',
+            logger: console,
+            logContext: { endpoint: 'GET /api/articles/national/state/:stateSlug', stateSlug },
+          });
+          if (!localized) return null;
+          return withCoverImageUrl(removeInternalPublicFields(localized));
+        })
+        .filter(Boolean);
 
-        // Preserve the existing payload shape but localize fields.
-        const out = { ...doc };
-        out.title = mapped.title;
-        out.description = mapped.summary;
-        out.content = mapped.content;
-        out.lang = desired;
-        out.language = desired;
-        out.translationProvider = mapped.provider || 'google';
-        out.translationGeneratedAt = mapped.generatedAt || null;
-        out.__isTranslated = Boolean(mapped.isTranslated);
-
-        const canonicalSlug = (() => {
-          const slugs = doc && doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
-          const v = slugs && slugs[desired] ? String(slugs[desired]).trim() : '';
-          return v || '';
-        })();
-        const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
-        const key = groupKey
-          ? `group:${groupKey}`
-          : (canonicalSlug ? `cslug:${canonicalSlug}` : (out.slug ? `slug:${out.slug}` : `id:${String(out._id || '')}`));
-        const prev = bestByKey.get(key);
-        if (!prev) {
-          bestByKey.set(key, out);
-          continue;
-        }
-        if (prev.__isTranslated && !out.__isTranslated) {
-          bestByKey.set(key, out);
-        }
-      }
-
-      items = Array.from(bestByKey.values()).map((it) => {
-        try { delete it.__isTranslated; } catch (_) {}
-        return it;
-      });
+      items = dedupeLocalizedByStoryGroup(items);
     }
     return res.status(200).json({
       ok: true,
@@ -1858,7 +1830,23 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     _stripUndefinedKeysInPlace(update);
 
     const beforeStatusNorm = String(before && before.status ? before.status : '').toLowerCase();
-    const nextStatusNorm = update.status ? String(update.status).toLowerCase() : '';
+    let nextStatusNorm = update.status ? String(update.status).toLowerCase() : '';
+
+    // CRITICAL: Never allow published → non-published transitions via generic PUT.
+    // Only the explicit unpublish/archive/delete endpoints may downgrade a published story.
+    if (beforeStatusNorm === 'published' && nextStatusNorm && nextStatusNorm !== 'published') {
+      try {
+        console.warn('[articles.update] blocked status downgrade via PUT', {
+          id: rawId,
+          from: beforeStatusNorm,
+          requested: nextStatusNorm,
+          role: req.admin?.role || null,
+        });
+      } catch (_) {}
+      delete update.status;
+      nextStatusNorm = '';
+    }
+
     const isPublishingNow = beforeStatusNorm !== 'published' && nextStatusNorm === 'published';
 
     // Publish must never block on translation. Translation runs asynchronously after we persist the publish.
@@ -2022,7 +2010,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
       let articleBefore = null;
       try {
-        articleBefore = await PublicArticle.findById(rawId).select('title summary content category').lean();
+        articleBefore = await PublicArticle.findById(rawId).select('title summary content category status').lean();
       } catch (_) {
         // ignore
       }
@@ -2035,6 +2023,23 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         category !== undefined || title !== undefined || summary !== undefined || content !== undefined || bodyText !== undefined
       );
 
+      const requestedArticleStatus = (status !== undefined && status !== null && String(status).trim() !== '')
+        ? String(status).toLowerCase()
+        : '';
+      const beforeArticleStatus = String(articleBefore?.status || '').toLowerCase();
+      const allowArticleStatusUpdate = !(beforeArticleStatus === 'published' && requestedArticleStatus && requestedArticleStatus !== 'published');
+
+      if (!allowArticleStatusUpdate) {
+        try {
+          console.warn('[articles.update] blocked public-article status downgrade via PUT', {
+            id: rawId,
+            from: beforeArticleStatus,
+            requested: requestedArticleStatus,
+            role: req.admin?.role || null,
+          });
+        } catch (_) {}
+      }
+
       const articleUpdate = {
         ...(title !== undefined ? { title } : {}),
         ...(summary !== undefined ? { summary } : {}),
@@ -2042,8 +2047,8 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         ...(category !== undefined ? { category } : {}),
         ...(language !== undefined ? { language: normalizeLanguage(language) || undefined } : {}),
         ...(tagsArr ? { tags: tagsArr, geo } : {}),
-        ...(status !== undefined && status !== null && String(status).trim() !== '' && allowedArticleStatuses.has(String(status).toLowerCase())
-          ? { status: String(status).toLowerCase() }
+        ...(allowArticleStatusUpdate && requestedArticleStatus && allowedArticleStatuses.has(requestedArticleStatus)
+          ? { status: requestedArticleStatus }
           : {}),
         ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
       };

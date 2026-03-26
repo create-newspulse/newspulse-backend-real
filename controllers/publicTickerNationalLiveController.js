@@ -1,7 +1,8 @@
 const BroadcastItem = require('../models/BroadcastItem');
 const Article = require('../models/Article');
 
-const { mapArticleForLang } = require('../services/mapArticleForLang');
+const { localizeDocStrict } = require('../services/publicStoryLocale.service');
+const { buildLocaleEligibilityMatch } = require('../services/publicStoryGroupResolver.service');
 
 const { formatIstTimeText } = require('../src/utils/istDate');
 
@@ -131,6 +132,9 @@ async function getNationalLiveTicker(req, res) {
       $or: [{ publishedAt: { $gte: cutoff } }, { publishedAt: null, createdAt: { $gte: cutoff } }],
     };
 
+    const eligible = buildLocaleEligibilityMatch(lang);
+    if (eligible) articleFilter.$and = (articleFilter.$and || []).concat([eligible]);
+
     // Fetch a few extra and filter strictly by requested lang via cached translations.
     const articleDocs = await Article.find(articleFilter)
       .sort({ publishedAt: -1, createdAt: -1 })
@@ -139,9 +143,13 @@ async function getNationalLiveTicker(req, res) {
 
     const storyItems = (articleDocs || [])
       .map((a) => {
-        const mapped = mapArticleForLang(a, lang);
-        if (!mapped) return null;
-        return mapNationalArticle({ ...a, title: mapped.title }, lang);
+        const localized = localizeDocStrict(a, lang, {
+          mode: 'list',
+          logger: console,
+          logContext: { endpoint: 'GET /api/public/ticker/national-live' },
+        });
+        if (!localized) return null;
+        return mapNationalArticle({ ...a, title: localized.title, slug: localized.slug, slugs: localized.slugs || a.slugs }, lang);
       })
       .filter(Boolean)
       .slice(0, remaining);

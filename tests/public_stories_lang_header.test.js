@@ -17,6 +17,7 @@ test('GET /api/public/stories/:slug honors x-lang header when query lang is abse
     const story = {
       _id: '507f1f77bcf86cd799439011',
       slug: 'test-story',
+      slugs: { hi: 'test-story-hi' },
       status: 'published',
       language: 'en',
       originalLang: 'en',
@@ -28,10 +29,13 @@ test('GET /api/public/stories/:slug honors x-lang header when query lang is abse
       },
     };
 
-    Article.findOne = () => ({ lean: async () => story });
+    Article.findOne = () => ({
+      sort() { return this; },
+      lean: async () => story,
+    });
 
     const res = await request(app)
-      .get('/api/public/stories/test-story')
+      .get('/api/public/stories/test-story-hi')
       .set('x-lang', 'hi');
 
     assert.equal(res.statusCode, 200);
