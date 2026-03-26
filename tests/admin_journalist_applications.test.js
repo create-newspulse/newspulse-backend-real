@@ -25,7 +25,7 @@ function makeFindResult(items) {
 // Provide deterministic data
 const fakeContacts = [
   {
-    _id: 'abc123',
+    _id: '507f1f77bcf86cd799439011',
     fullName: 'Jane Reporter',
     email: 'jane@example.com',
     phoneFull: '+911234567890',
@@ -76,7 +76,7 @@ test('POST verify sets verified + active', async () => {
   const contactStore = { ...fakeContacts[0] };
   ReporterContact.findById = async () => contactStore;
   const res = await request(app)
-    .post('/admin/community/journalist-applications/abc123/verify')
+    .post('/admin/community/journalist-applications/507f1f77bcf86cd799439011/verify')
     .set('Cookie', 'np_admin=admin@newspulse.ai')
     .send();
   assert.strictEqual(res.statusCode, 200);
@@ -89,7 +89,7 @@ test('POST status can bump ethicsStrikes and change status', async () => {
   const mutable = { ...fakeContacts[0], ethicsStrikes: 0, status: 'active' };
   ReporterContact.findById = async () => mutable;
   const res = await request(app)
-    .post('/admin/community/reporters/abc123/status')
+    .post('/admin/community/reporters/507f1f77bcf86cd799439011/status')
     .set('Cookie', 'np_admin=admin@newspulse.ai')
     .send({ status: 'watchlist', addStrike: true, note: 'Test note' });
   assert.strictEqual(res.statusCode, 200);
