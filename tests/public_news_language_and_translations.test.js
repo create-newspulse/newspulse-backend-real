@@ -153,7 +153,7 @@ test('GET /api/public/news supports lang=en and returns feed shape', async () =>
   assert.equal(typeof res.body.totalPages, 'number');
 });
 
-test('GET /api/public/news returns en by default (no lang param)', async () => {
+test('GET /api/public/news returns only gu by default (no lang param)', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const prevFind = News.find;
   const prevCount = News.countDocuments;
@@ -162,40 +162,36 @@ test('GET /api/public/news returns en by default (no lang param)', async () => {
     mongoose.connection.readyState = 1;
 
     const dataset = [
-      { _id: '507f1f77bcf86cd799439011', title: 'en story', description: 'd', content: 'body', lang: 'en', status: 'published' },
-      { _id: '507f1f77bcf86cd799439012', title: 'gu story', description: 'd', content: 'body', lang: 'gu', status: 'published' },
-      {
-        _id: '507f1f77bcf86cd799439013',
-        title: 'gu with en translation',
-        description: 'd',
-        content: 'body',
-        originalLang: 'gu',
-        lang: 'gu',
-        status: 'published',
-        translationStatus: { en: 'ready' },
-        translations: { en: { title: 'en t', summary: 'en s', content: 'en c' } },
-      },
+      { title: 'gu story', description: 'd', lang: 'gu', status: 'published' },
+      { title: 'hi story', description: 'd', lang: 'hi', status: 'published' },
+      { title: 'mislabeled gu', description: 'd', lang: 'en', content: 'ગુજરાતી સમાચાર અહીં લખેલ છે ગુજરાતી સમાચાર અહીં લખેલ છે', status: 'published' },
+      { title: 'missing lang', description: 'd', status: 'published' },
     ];
 
     let lastFilter = null;
     News.find = (filter) => {
       lastFilter = filter;
-      return makeChainableQuery(dataset);
+      return makeChainableQuery(applyLangFilter(dataset, filter));
     };
     News.countDocuments = async (filter) => {
       lastFilter = filter;
-      return dataset.length;
+      return applyLangFilter(dataset, filter).length;
     };
 
     const res = await request(app).get('/api/public/news?category=business&limit=10');
     assert.equal(res.status, 200);
     assert.ok(Array.isArray(res.body.items));
 
-    // Default locale is English.
-    assert.ok(res.body.items.length >= 1);
-    assert.ok(res.body.items.every((it) => it.lang === 'en'));
-    assert.ok(res.body.items.some((it) => it.title === 'en story'));
-    assert.ok(res.body.items.some((it) => it.title === 'en t'));
+    // Ensure the controller applied a default Gujarati filter.
+    const langCond = extractLangFilter(lastFilter);
+    assert.ok(langCond, 'expected a lang filter to be present');
+
+    // Ensure results are normalized to gu and do not include hi.
+    for (const item of res.body.items) {
+      assert.equal(item.lang, 'gu');
+    }
+    assert.ok(res.body.items.some((i) => i.title === 'mislabeled gu'), 'expected clearly-Gujarati content to appear even if stored as lang=en');
+    assert.ok(res.body.items.every((i) => i.title !== 'hi story'));
   } finally {
     News.find = prevFind;
     News.countDocuments = prevCount;
@@ -212,30 +208,28 @@ test('GET /api/public/news returns hi when lang=hi', async () => {
     mongoose.connection.readyState = 1;
 
     const dataset = [
-      { _id: '507f1f77bcf86cd799439021', title: 'gu story', description: 'd', content: 'body', lang: 'gu', status: 'published', translationStatus: { hi: 'pending' } },
-      { _id: '507f1f77bcf86cd799439022', title: 'hi original', description: 'd', content: 'body', originalLang: 'hi', lang: 'hi', status: 'published', translationStatus: { hi: 'pending' } },
+      { title: 'gu story', description: 'd', lang: 'gu', status: 'published', translationStatus: { hi: 'pending' } },
+      { title: 'hi original', description: 'd', originalLang: 'hi', lang: 'hi', status: 'published', translationStatus: { hi: 'pending' } },
       {
-        _id: '507f1f77bcf86cd799439023',
         title: 'gu with hi translation',
         description: 'd',
-        content: 'body',
         originalLang: 'gu',
         lang: 'gu',
         status: 'published',
         translationStatus: { hi: 'ready' },
         translations: { hi: { title: 'hi t', summary: 'hi s', content: 'hi c' } },
       },
-      { _id: '507f1f77bcf86cd799439024', title: 'missing lang', description: 'd', content: 'body', status: 'published', translationStatus: {} },
+      { title: 'missing lang', description: 'd', status: 'published', translationStatus: {} },
     ];
 
     let lastFilter = null;
     News.find = (filter) => {
       lastFilter = filter;
-      return makeChainableQuery(dataset);
+      return makeChainableQuery(applyTranslationReadyFilter(dataset, filter, 'hi'));
     };
     News.countDocuments = async (filter) => {
       lastFilter = filter;
-      return dataset.length;
+      return applyTranslationReadyFilter(dataset, filter, 'hi').length;
     };
 
     const res = await request(app).get('/api/public/news?lang=hi&limit=10');

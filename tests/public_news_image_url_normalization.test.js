@@ -21,7 +21,6 @@ function makeChainableQuery(items) {
 function makeFindOneResult(doc) {
   return {
     select() { return this; },
-    sort() { return this; },
     lean: async () => doc,
   };
 }
@@ -53,7 +52,7 @@ test('GET /api/public/news includes normalized imageUrl (+ alt) when coverImage 
     News.countDocuments = async () => dataset.length;
 
     const res = await request(app)
-      .get('/api/public/news?limit=1&lang=gu')
+      .get('/api/public/news?limit=1')
       .expect(200);
 
     assert.ok(Array.isArray(res.body.items));

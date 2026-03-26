@@ -11,7 +11,6 @@ const News = require('../models/News');
 function makeChainableOne(item) {
   return {
     select() { return this; },
-    sort() { return this; },
     lean: async () => item,
   };
 }
@@ -32,7 +31,6 @@ test('GET /api/public/news/translation returns a published doc by translationKey
       _id: '64b7f2f2f2f2f2f2f2f2f2f2',
       title: 'Hello',
       description: 'Desc',
-      content: 'Body',
       slug: 'hello',
       status: 'published',
       lang: 'en',

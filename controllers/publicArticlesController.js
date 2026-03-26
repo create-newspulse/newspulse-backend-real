@@ -2,22 +2,11 @@ const Article = require('../models/Article');
 const { CATEGORY_VALUES, LANGUAGE_VALUES } = require('../models/Article');
 const mongoose = require('mongoose');
 const { getSlugCandidates } = require('../lib/slug');
-const {
-  normalizeLocale,
-  getRequestedLocale,
-  parseAllowFallback,
-  localizeDocStrict,
-} = require('../services/publicStoryLocale.service');
+const { mapArticleForLang } = require('../services/mapArticleForLang');
 const {
   buildPubliclyVisiblePublicArticleFilter,
   getAvailableArticleLocales,
 } = require('../services/publicArticleVisibility.service');
-const {
-  buildLocaleEligibilityMatch,
-  dedupeLocalizedByStoryGroup,
-  localizeAndShapeListItem,
-  removeInternalPublicFields,
-} = require('../services/publicStoryGroupResolver.service');
 
 function parseBool(v) {
   if (v === undefined || v === null || v === '') return undefined;
@@ -32,8 +21,22 @@ function escapeRegex(s) {
 }
 
 function normalizeLanguage(v) {
-  // Keep backward-compat for existing callers, but prefer shared normalizeLocale().
-  return normalizeLocale(v);
+  const raw = String(v ?? '').trim();
+  if (!raw) return null;
+
+  if (/[\u0A80-\u0AFF]/.test(raw)) return 'gu';
+  if (/[\u0900-\u097F]/.test(raw)) return 'hi';
+
+  const lower = raw.toLowerCase();
+  const primary = lower.split(/[-_]/)[0];
+  if (primary === 'en' || primary === 'hi' || primary === 'gu') return primary;
+
+  const lettersOnly = lower.replace(/[^a-z]/g, '');
+  if (lettersOnly === 'english' || lettersOnly === 'eng') return 'en';
+  if (lettersOnly === 'hindi' || lettersOnly === 'hin') return 'hi';
+  if (lettersOnly === 'gujarati' || lettersOnly === 'gujrati' || lettersOnly === 'guj') return 'gu';
+
+  return null;
 }
 
 function normalizeSlug(slug) {
@@ -76,14 +79,7 @@ async function listArticles(req, res, next) {
 
     const statusRaw = String(req.query.status || '').trim().toLowerCase();
     const category = String(req.query.category || '').trim();
-    const explicitLangRaw = String(req.query.lang || req.query.language || '').trim();
-    if (explicitLangRaw && !normalizeLocale(explicitLangRaw)) {
-      return res.status(400).json({ message: 'Invalid lang (use en, hi, gu)' });
-    }
-
-    // Default locale for public feed is EN (strict).
-    const requestedLocale = getRequestedLocale(req, { defaultLocale: 'en' });
-    const fallbackTo = parseAllowFallback(req);
+    const lang = normalizeLanguage(req.query.lang || req.query.language || req.lang);
     const isBreaking = parseBool(req.query.isBreaking);
 
     const state = String(req.query.state || '').trim();
@@ -107,11 +103,58 @@ async function listArticles(req, res, next) {
       filter.category = category;
     }
 
-    // Always enforce strict locale eligibility even when ?lang is omitted.
-    // This prevents Gujarati/Hindi originals leaking on EN routes.
-    const eligibility = buildLocaleEligibilityMatch(requestedLocale);
-    filter.$and = Array.isArray(filter.$and) ? filter.$and : [];
-    if (eligibility) filter.$and.push(eligibility);
+    if (lang) {
+      if (!LANGUAGE_VALUES.includes(lang)) {
+        return res.status(400).json({ message: 'Invalid lang (use en, hi, gu)' });
+      }
+
+      // Strict language rules:
+      // - If requested lang matches the original language => show originals
+      // - Else => show ONLY fully-ready cached translations for that language
+      if (lang === 'gu') {
+        filter.$and = (filter.$and || []).concat([
+          {
+            $or: [
+              { originalLang: { $in: ['gu', 'GU'] } },
+              {
+                $and: [
+                  { $or: [{ originalLang: null }, { originalLang: { $exists: false } }] },
+                  { language: { $in: ['gu', 'GU'] } },
+                ],
+              },
+            ],
+          },
+        ]);
+      } else {
+        const lower = lang;
+        const upper = lang.toUpperCase();
+        filter.$and = (filter.$and || []).concat([
+          {
+            $or: [
+              {
+                $or: [
+                  { originalLang: { $in: [lower, upper] } },
+                  {
+                    $and: [
+                      { $or: [{ originalLang: null }, { originalLang: { $exists: false } }] },
+                      { language: { $in: [lower, upper] } },
+                    ],
+                  },
+                ],
+              },
+              {
+                $and: [
+                  { [`translationStatus.${lower}`]: 'ready' },
+                  { [`translations.${lower}.title`]: { $exists: true, $nin: [null, ''] } },
+                  { [`translations.${lower}.summary`]: { $exists: true, $nin: [null, ''] } },
+                  { [`translations.${lower}.content`]: { $exists: true, $nin: [null, ''] } },
+                ],
+              },
+            ],
+          },
+        ]);
+      }
+    }
 
     if (isBreaking !== undefined) filter.isBreaking = isBreaking;
 
@@ -133,31 +176,30 @@ async function listArticles(req, res, next) {
 
     const sort = { publishedAt: -1, createdAt: -1 };
 
-    // Over-fetch to account for locale exclusions + group dedupe.
-    const queryLimit = Math.min(limit * 5, 250);
-
     const [itemsRaw, total] = await Promise.all([
-      Article.find(filter).sort(sort).skip(skip).limit(queryLimit).lean(),
+      Article.find(filter).sort(sort).skip(skip).limit(limit).lean(),
       Article.countDocuments(filter),
     ]);
 
-    const localized = (itemsRaw || [])
-      .map((doc) => localizeAndShapeListItem(doc, requestedLocale, {
-        fallbackTo,
-        logger: console,
-        logContext: { endpoint: 'GET /api/articles', category: category || null },
-      }))
-      .filter(Boolean);
-
-    // Dedupe to one record per canonical story group.
-    let items = dedupeLocalizedByStoryGroup(localized)
-      .sort((a, b) => {
-        const at = a.publishedAt ? new Date(a.publishedAt).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
-        const bt = b.publishedAt ? new Date(b.publishedAt).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
-        return bt - at;
-      })
-      .slice(0, limit)
-      .map(removeInternalPublicFields);
+    let items = itemsRaw || [];
+    if (lang) {
+      items = items
+        .map((doc) => {
+          const mapped = mapArticleForLang(doc, lang);
+          if (!mapped) return null;
+          return {
+            ...doc,
+            title: mapped.title,
+            summary: mapped.summary,
+            content: mapped.content,
+            language: mapped.lang,
+            requestedLang: lang,
+            resolvedLang: mapped.resolvedLang,
+            isTranslated: mapped.isTranslated,
+          };
+        })
+        .filter(Boolean);
+    }
 
     const totalPages = Math.max(Math.ceil(total / limit), 1);
 
@@ -196,39 +238,38 @@ async function getArticleBySlug(req, res, next) {
       return res.status(404).json({ message: 'Article not found' });
     }
 
-    const explicitLangRaw = String(req.query.lang || req.query.language || '').trim();
-    if (explicitLangRaw && !normalizeLocale(explicitLangRaw)) {
-      return res.status(400).json({ message: 'Invalid lang (use en, hi, gu)' });
-    }
+    const target = normalizeLanguage(req.query.lang || req.query.language || req.lang);
+    if (target) {
+      const mapped = mapArticleForLang(doc, target);
+      if (!mapped) {
+        return res.status(404).json({
+          message: 'Article not available in requested language',
+          requestedLang: target,
+          availableLocales: getAvailableArticleLocales(doc),
+        });
+      }
 
-    const requestedLocale = getRequestedLocale(req, { defaultLocale: 'en' });
-    const fallbackTo = parseAllowFallback(req);
-
-    const localized = localizeDocStrict(doc, requestedLocale, {
-      mode: 'detail',
-      fallbackTo,
-      logger: console,
-      logContext: { endpoint: 'GET /api/articles/:slug' },
-    });
-
-    if (!localized) {
-      return res.status(404).json({
-        message: 'Article not available in requested language',
-        requestedLang: requestedLocale,
+      const canonicalSlug = (doc.slugs && doc.slugs[target]) ? doc.slugs[target] : (doc.slug || null);
+      return res.json({
+        ...doc,
+        title: mapped.title,
+        summary: mapped.summary,
+        content: mapped.content,
+        language: mapped.lang,
+        requestedLang: target,
+        resolvedLang: mapped.resolvedLang,
+        isTranslated: mapped.isTranslated,
+        canonicalSlug,
         availableLocales: getAvailableArticleLocales(doc),
       });
     }
 
-    const target = localized.selectedLocale || requestedLocale;
-    const canonicalSlug = (doc.slugs && doc.slugs[target]) ? doc.slugs[target] : (doc.slug || null);
-
-    const out = removeInternalPublicFields({
-      ...localized,
+    const canonicalSlug = (doc.slug || null);
+    return res.json({
+      ...doc,
       canonicalSlug,
       availableLocales: getAvailableArticleLocales(doc),
     });
-
-    return res.json(out);
   } catch (e) {
     return next(e);
   }
