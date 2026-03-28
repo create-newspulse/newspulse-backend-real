@@ -153,7 +153,7 @@ test('GET /api/public/news supports lang=en and returns feed shape', async () =>
   assert.equal(typeof res.body.totalPages, 'number');
 });
 
-test('GET /api/public/news returns only gu by default (no lang param)', async () => {
+test('GET /api/public/news defaults to Gujarati localization without requiring lang=gu rows', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const prevFind = News.find;
   const prevCount = News.countDocuments;
@@ -162,36 +162,66 @@ test('GET /api/public/news returns only gu by default (no lang param)', async ()
     mongoose.connection.readyState = 1;
 
     const dataset = [
-      { title: 'gu story', description: 'd', lang: 'gu', status: 'published' },
-      { title: 'hi story', description: 'd', lang: 'hi', status: 'published' },
-      { title: 'mislabeled gu', description: 'd', lang: 'en', content: 'ગુજરાતી સમાચાર અહીં લખેલ છે ગુજરાતી સમાચાર અહીં લખેલ છે', status: 'published' },
-      { title: 'missing lang', description: 'd', status: 'published' },
+      {
+        title: 'English base',
+        description: 'Base summary',
+        content: 'Base content',
+        slug: 'english-base',
+        slugs: { en: 'english-base', gu: 'gujarati-localized' },
+        lang: 'en',
+        originalLang: 'en',
+        status: 'published',
+        translations: {
+          gu: { title: 'ગુજરાતી શીર્ષક', summary: 'ગુજરાતી સારાંશ', content: 'ગુજરાતી વિગતો' },
+        },
+        translationStatus: { gu: 'ready' },
+      },
+      {
+        title: 'English fallback',
+        description: 'Fallback summary',
+        content: 'Fallback content',
+        slug: 'english-fallback',
+        slugs: { en: 'english-fallback' },
+        lang: 'en',
+        originalLang: 'en',
+        status: 'published',
+        translations: {},
+        translationStatus: {},
+      },
     ];
 
     let lastFilter = null;
     News.find = (filter) => {
       lastFilter = filter;
-      return makeChainableQuery(applyLangFilter(dataset, filter));
+      return makeChainableQuery(dataset);
     };
     News.countDocuments = async (filter) => {
       lastFilter = filter;
-      return applyLangFilter(dataset, filter).length;
+      return dataset.length;
     };
 
     const res = await request(app).get('/api/public/news?category=business&limit=10');
     assert.equal(res.status, 200);
     assert.ok(Array.isArray(res.body.items));
+    assert.equal(res.body.items.length, 2);
 
-    // Ensure the controller applied a default Gujarati filter.
     const langCond = extractLangFilter(lastFilter);
-    assert.ok(langCond, 'expected a lang filter to be present');
+    assert.equal(langCond, null, 'did not expect a strict Gujarati row filter');
 
-    // Ensure results are normalized to gu and do not include hi.
-    for (const item of res.body.items) {
-      assert.equal(item.lang, 'gu');
-    }
-    assert.ok(res.body.items.some((i) => i.title === 'mislabeled gu'), 'expected clearly-Gujarati content to appear even if stored as lang=en');
-    assert.ok(res.body.items.every((i) => i.title !== 'hi story'));
+    const localized = res.body.items.find((item) => item.canonicalSlug === 'gujarati-localized');
+    assert.ok(localized, 'expected Gujarati-localized slug to be returned');
+    assert.equal(localized.title, 'ગુજરાતી શીર્ષક');
+    assert.equal(localized.description, 'ગુજરાતી સારાંશ');
+    assert.equal(localized.content, 'ગુજરાતી વિગતો');
+    assert.equal(localized.requestedLang, 'gu');
+    assert.equal(localized.resolvedLang, 'gu');
+
+    const fallback = res.body.items.find((item) => item.slug === 'english-fallback');
+    assert.ok(fallback, 'expected untranslated article to fall back to base content');
+    assert.equal(fallback.title, 'English fallback');
+    assert.equal(fallback.description, 'Fallback summary');
+    assert.equal(fallback.requestedLang, 'gu');
+    assert.equal(fallback.resolvedLang, 'en');
   } finally {
     News.find = prevFind;
     News.countDocuments = prevCount;

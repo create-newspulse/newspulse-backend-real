@@ -2,7 +2,7 @@ const Article = require('../models/Article');
 const { CATEGORY_VALUES, LANGUAGE_VALUES } = require('../models/Article');
 const mongoose = require('mongoose');
 const { getSlugCandidates } = require('../lib/slug');
-const { mapArticleForLang } = require('../services/mapArticleForLang');
+const { mapArticleForLang, localizeArticleForLang } = require('../services/mapArticleForLang');
 const {
   buildPubliclyVisiblePublicArticleFilter,
   getAvailableArticleLocales,
@@ -108,24 +108,9 @@ async function listArticles(req, res, next) {
         return res.status(400).json({ message: 'Invalid lang (use en, hi, gu)' });
       }
 
-      // Strict language rules:
-      // - If requested lang matches the original language => show originals
-      // - Else => show ONLY fully-ready cached translations for that language
-      if (lang === 'gu') {
-        filter.$and = (filter.$and || []).concat([
-          {
-            $or: [
-              { originalLang: { $in: ['gu', 'GU'] } },
-              {
-                $and: [
-                  { $or: [{ originalLang: null }, { originalLang: { $exists: false } }] },
-                  { language: { $in: ['gu', 'GU'] } },
-                ],
-              },
-            ],
-          },
-        ]);
-      } else {
+      // English/Hindi feeds stay strict: originals in that language or fully-ready translations.
+      // Gujarati must localize from the main article record and fall back to base values.
+      if (lang !== 'gu') {
         const lower = lang;
         const upper = lang.toUpperCase();
         filter.$and = (filter.$and || []).concat([
@@ -185,15 +170,17 @@ async function listArticles(req, res, next) {
     if (lang) {
       items = items
         .map((doc) => {
-          const mapped = mapArticleForLang(doc, lang);
+          const mapped = localizeArticleForLang(doc, lang, { fallbackToBase: lang === 'gu' });
           if (!mapped) return null;
           return {
             ...doc,
             title: mapped.title,
             summary: mapped.summary,
             content: mapped.content,
+            slug: mapped.slug,
+            canonicalSlug: mapped.canonicalSlug,
             language: mapped.lang,
-            requestedLang: lang,
+            requestedLang: mapped.requestedLang,
             resolvedLang: mapped.resolvedLang,
             isTranslated: mapped.isTranslated,
           };
@@ -240,7 +227,7 @@ async function getArticleBySlug(req, res, next) {
 
     const target = normalizeLanguage(req.query.lang || req.query.language || req.lang);
     if (target) {
-      const mapped = mapArticleForLang(doc, target);
+      const mapped = localizeArticleForLang(doc, target, { fallbackToBase: true });
       if (!mapped) {
         return res.status(404).json({
           message: 'Article not available in requested language',
@@ -249,17 +236,17 @@ async function getArticleBySlug(req, res, next) {
         });
       }
 
-      const canonicalSlug = (doc.slugs && doc.slugs[target]) ? doc.slugs[target] : (doc.slug || null);
       return res.json({
         ...doc,
         title: mapped.title,
         summary: mapped.summary,
         content: mapped.content,
+        slug: mapped.slug,
         language: mapped.lang,
-        requestedLang: target,
+        requestedLang: mapped.requestedLang,
         resolvedLang: mapped.resolvedLang,
         isTranslated: mapped.isTranslated,
-        canonicalSlug,
+        canonicalSlug: mapped.canonicalSlug,
         availableLocales: getAvailableArticleLocales(doc),
       });
     }

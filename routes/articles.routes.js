@@ -18,7 +18,7 @@ const {
 const { ensureOnDemandNewsTranslation } = require('../services/newsOnDemandTranslation.service');
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
 
-const { mapArticleForLang } = require('../services/mapArticleForLang');
+const { mapArticleForLang, localizeArticleForLang } = require('../services/mapArticleForLang');
 
 const {
   buildPubliclyVisibleNewsArticleFilter,
@@ -882,10 +882,7 @@ router.get('/public/articles', async (req, res, next) => {
     }
 
     const desired = normalizeLanguage(langQueryRaw);
-    if (desired === 'gu') {
-      const originalMatch = _buildOriginalLangMatch('gu');
-      if (originalMatch) query.$and = (query.$and || []).concat([originalMatch]);
-    } else if (desired === 'hi' || desired === 'en') {
+    if (desired === 'hi' || desired === 'en') {
       const originalMatch = _buildOriginalLangMatch(desired);
       const readyMatch = _buildReadyTranslationMatch(desired);
       query.$and = (query.$and || []).concat([{ $or: [originalMatch, readyMatch].filter(Boolean) }]);
@@ -922,10 +919,10 @@ router.get('/public/articles', async (req, res, next) => {
 
     // If a supported language was requested, localize from cached translation buckets.
     // Keep response shape stable (same fields), just swap title/description/content.
-    if (desired === 'hi' || desired === 'en') {
+    if (desired) {
       items = items
         .map((doc) => {
-          const mapped = mapArticleForLang(doc, desired);
+          const mapped = localizeArticleForLang(doc, desired, { fallbackToBase: desired === 'gu' });
           if (!mapped) return null;
           return {
             ...doc,
@@ -933,19 +930,16 @@ router.get('/public/articles', async (req, res, next) => {
             description: mapped.summary,
             summary: mapped.summary,
             content: mapped.content,
+            slug: mapped.slug,
+            canonicalSlug: mapped.canonicalSlug,
             lang: mapped.lang,
             language: mapped.lang,
-            requestedLang: desired,
+            requestedLang: mapped.requestedLang,
             resolvedLang: mapped.resolvedLang,
             isTranslated: mapped.isTranslated,
           };
         })
         .filter(Boolean);
-    } else if (desired === 'gu') {
-      items = items.map((doc) => {
-        const summary = typeof doc.description === 'string' ? doc.description : (typeof doc.summary === 'string' ? doc.summary : '');
-        return { ...doc, summary, lang: 'gu', language: 'gu', requestedLang: 'gu', resolvedLang: 'gu', isTranslated: false };
-      });
     }
     return res.status(200).json({ ok: true, success: true, status: 200, data: { items, page, limit, total } });
   } catch (err) {
@@ -989,6 +983,18 @@ function _buildReadyTranslationMatch(desiredLang) {
       { [`translations.${desired}.content`]: { $exists: true, $ne: '' } },
     ],
   };
+}
+
+function _pickLocaleAwareSlug(doc, requestedLang) {
+  const target = normalizeLanguage(requestedLang) || normalizeLanguage(doc?.originalLang) || normalizeLanguage(doc?.lang || doc?.language) || 'en';
+  const slugs = doc && doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
+  const localized = slugs && slugs[target] ? String(slugs[target]).trim() : '';
+  if (localized) return localized;
+  if (doc && doc.slug) {
+    const base = String(doc.slug).trim();
+    if (base) return base;
+  }
+  return (slugs && (slugs.en || slugs.hi || slugs.gu)) || null;
 }
 
 function _resolveImageUrlFromNewsDoc(doc) {
@@ -1232,10 +1238,7 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
     // Query rules:
     // - If requested lang matches the original language => show originals
     // - Else => show ONLY fully-ready cached translations for that language
-    if (desired === 'gu') {
-      const originalMatch = _buildOriginalLangMatch('gu');
-      if (originalMatch) filter.$and = (filter.$and || []).concat([originalMatch]);
-    } else if (desired === 'hi' || desired === 'en') {
+    if (desired === 'hi' || desired === 'en') {
       const originalMatch = _buildOriginalLangMatch(desired);
       const readyMatch = _buildReadyTranslationMatch(desired);
       filter.$and = (filter.$and || []).concat([{ $or: [originalMatch, readyMatch].filter(Boolean) }]);
@@ -1262,12 +1265,13 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
     const bestByKey = new Map();
     for (const doc of (itemsRaw || [])) {
       const imageUrl = _resolveImageUrlFromNewsDoc(doc);
-      const mapped = mapArticleForLang(doc, desired);
+      const mapped = localizeArticleForLang(doc, desired, { fallbackToBase: desired === 'gu' });
       if (!mapped) continue;
 
       const out = {
         _id: String(doc._id),
-        slug: doc.slug || null,
+        slug: mapped.slug,
+        canonicalSlug: mapped.canonicalSlug,
         slugs: doc.slugs || null,
         category: doc.category || null,
         stateSlug,
@@ -1280,11 +1284,7 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
         __isTranslated: Boolean(mapped.isTranslated),
       };
 
-      const canonicalSlug = (() => {
-        const slugs = doc && doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
-        const v = slugs && slugs[desired] ? String(slugs[desired]).trim() : '';
-        return v || '';
-      })();
+      const canonicalSlug = String(mapped.canonicalSlug || '').trim();
       const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
       const key = groupKey
         ? `group:${groupKey}`
@@ -1391,10 +1391,7 @@ router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
     const query = buildPubliclyVisibleNewsArticleFilter();
     query.category = 'national';
     query.stateTags = stateSlug;
-    if (desired === 'gu') {
-      const originalMatch = _buildOriginalLangMatch('gu');
-      if (originalMatch) query.$and = (query.$and || []).concat([originalMatch]);
-    } else if (desired === 'hi' || desired === 'en') {
+    if (desired === 'hi' || desired === 'en') {
       const originalMatch = _buildOriginalLangMatch(desired);
       const readyMatch = _buildReadyTranslationMatch(desired);
       query.$and = (query.$and || []).concat([{ $or: [originalMatch, readyMatch].filter(Boolean) }]);
@@ -1408,7 +1405,7 @@ router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
     if (desired) {
       const bestByKey = new Map();
       for (const doc of items) {
-        const mapped = mapArticleForLang(doc, desired);
+        const mapped = localizeArticleForLang(doc, desired, { fallbackToBase: desired === 'gu' });
         if (!mapped) continue;
 
         // Preserve the existing payload shape but localize fields.
@@ -1416,17 +1413,15 @@ router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
         out.title = mapped.title;
         out.description = mapped.summary;
         out.content = mapped.content;
-        out.lang = desired;
-        out.language = desired;
+        out.slug = mapped.slug;
+        out.canonicalSlug = mapped.canonicalSlug;
+        out.lang = mapped.lang;
+        out.language = mapped.lang;
         out.translationProvider = mapped.provider || 'google';
         out.translationGeneratedAt = mapped.generatedAt || null;
         out.__isTranslated = Boolean(mapped.isTranslated);
 
-        const canonicalSlug = (() => {
-          const slugs = doc && doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
-          const v = slugs && slugs[desired] ? String(slugs[desired]).trim() : '';
-          return v || '';
-        })();
+        const canonicalSlug = String(mapped.canonicalSlug || '').trim();
         const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
         const key = groupKey
           ? `group:${groupKey}`
@@ -1507,8 +1502,12 @@ router.get('/articles/slug/:slug', async (req, res, next) => {
 
     if (out0 && out0.translations && typeof out0.translations === 'object') {
       const localized = await localizeNewsDocWithOptionalTranslate({ docLike: out0, desiredLang: desired, logger: console });
+      const canonicalSlug = _pickLocaleAwareSlug(out0, desired);
       return res.status(200).json({
         ...withCoverImageUrl(localized.out),
+        slug: canonicalSlug || localized.out?.slug || out0.slug || null,
+        canonicalSlug,
+        localizedSlug: canonicalSlug,
         requestedLang: desired,
         resolvedLang: localized.resolvedLang,
         isTranslated: localized.isTranslated,
@@ -1518,8 +1517,12 @@ router.get('/articles/slug/:slug', async (req, res, next) => {
 
     if (out0 && out0.i18n && typeof out0.i18n === 'object') {
       const localized = localizeFromArticleI18n(out0, desired);
+      const canonicalSlug = _pickLocaleAwareSlug(out0, desired);
       return res.status(200).json({
         ...withCoverImageUrl(localized.out),
+        slug: canonicalSlug || localized.out?.slug || out0.slug || null,
+        canonicalSlug,
+        localizedSlug: canonicalSlug,
         requestedLang: desired,
         resolvedLang: localized.resolvedLang,
         isTranslated: localized.resolvedLang === desired,
@@ -1529,6 +1532,8 @@ router.get('/articles/slug/:slug', async (req, res, next) => {
 
     return res.status(200).json({
       ...out0,
+      canonicalSlug: _pickLocaleAwareSlug(out0, desired),
+      localizedSlug: _pickLocaleAwareSlug(out0, desired),
       requestedLang: desired,
       resolvedLang: normalizeLanguage(out0?.lang) || normalizeLanguage(out0?.language) || desired,
       isTranslated: false,
@@ -1574,8 +1579,12 @@ router.get('/articles/by-slug/:slug', async (req, res, next) => {
 
     if (out0 && out0.translations && typeof out0.translations === 'object') {
       const localized = await localizeNewsDocWithOptionalTranslate({ docLike: out0, desiredLang: desired, logger: console });
+      const canonicalSlug = _pickLocaleAwareSlug(out0, desired);
       return res.status(200).json({
         ...withCoverImageUrl(localized.out),
+        slug: canonicalSlug || localized.out?.slug || out0.slug || null,
+        canonicalSlug,
+        localizedSlug: canonicalSlug,
         requestedLang: desired,
         resolvedLang: localized.resolvedLang,
         isTranslated: localized.isTranslated,
@@ -1585,8 +1594,12 @@ router.get('/articles/by-slug/:slug', async (req, res, next) => {
 
     if (out0 && out0.i18n && typeof out0.i18n === 'object') {
       const localized = localizeFromArticleI18n(out0, desired);
+      const canonicalSlug = _pickLocaleAwareSlug(out0, desired);
       return res.status(200).json({
         ...withCoverImageUrl(localized.out),
+        slug: canonicalSlug || localized.out?.slug || out0.slug || null,
+        canonicalSlug,
+        localizedSlug: canonicalSlug,
         requestedLang: desired,
         resolvedLang: localized.resolvedLang,
         isTranslated: localized.resolvedLang === desired,
@@ -1596,6 +1609,8 @@ router.get('/articles/by-slug/:slug', async (req, res, next) => {
 
     return res.status(200).json({
       ...out0,
+      canonicalSlug: _pickLocaleAwareSlug(out0, desired),
+      localizedSlug: _pickLocaleAwareSlug(out0, desired),
       requestedLang: desired,
       resolvedLang: normalizeLanguage(out0?.lang) || normalizeLanguage(out0?.language) || desired,
       isTranslated: false,

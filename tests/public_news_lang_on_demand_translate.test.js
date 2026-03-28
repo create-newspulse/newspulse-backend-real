@@ -70,6 +70,103 @@ test('GET /api/public/news/:slugOrId?lang=hi returns cached translations when pr
   }
 });
 
+test('GET /api/public/news/:slugOrId?lang=gu resolves localized slug and returns Gujarati fields when present', async () => {
+  const prevReadyState = mongoose.connection.readyState;
+  const originals = { findOne: News.findOne, updateOne: News.updateOne };
+
+  try {
+    mongoose.connection.readyState = 1;
+
+    let updateCalls = 0;
+    News.updateOne = async () => {
+      updateCalls++;
+      return { acknowledged: true, modifiedCount: 1 };
+    };
+
+    const doc = {
+      _id: '507f1f77bcf86cd799439014',
+      slug: 'base-slug',
+      slugs: { en: 'base-slug', gu: 'gu-localized-slug' },
+      status: 'published',
+      lang: 'en',
+      language: 'en',
+      originalLang: 'en',
+      title: 'Hello',
+      description: 'Summary',
+      content: 'Body',
+      translations: {
+        gu: { title: 'હેલો', summary: 'સારાંશ', content: 'મુખ્ય લેખ', generatedAt: new Date().toISOString() },
+      },
+      translationStatus: { gu: 'ready' },
+    };
+
+    News.findOne = () => makeFindOneResult(doc);
+
+    const res = await request(app).get('/api/public/news/gu-localized-slug?lang=gu');
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.title, 'હેલો');
+    assert.equal(res.body.description, 'સારાંશ');
+    assert.equal(res.body.content, 'મુખ્ય લેખ');
+    assert.equal(res.body.requestedLang, 'gu');
+    assert.equal(res.body.resolvedLang, 'gu');
+    assert.equal(res.body.isTranslated, true);
+    assert.equal(res.body.canonicalSlug, 'gu-localized-slug');
+    assert.equal(res.body.localizedSlug, 'gu-localized-slug');
+    assert.equal(updateCalls, 0);
+  } finally {
+    restore(originals);
+    mongoose.connection.readyState = prevReadyState;
+  }
+});
+
+test('GET /api/public/news/:slugOrId?lang=gu falls back to base content but keeps Gujarati canonical slug', async () => {
+  const prevReadyState = mongoose.connection.readyState;
+  const originals = { findOne: News.findOne, updateOne: News.updateOne };
+
+  try {
+    mongoose.connection.readyState = 1;
+
+    let updateCalls = 0;
+    News.updateOne = async () => {
+      updateCalls++;
+      return { acknowledged: true, modifiedCount: 1 };
+    };
+
+    const doc = {
+      _id: '507f1f77bcf86cd799439015',
+      slug: 'base-fallback-slug',
+      slugs: { en: 'base-fallback-slug', gu: 'gu-fallback-slug' },
+      status: 'published',
+      lang: 'en',
+      language: 'en',
+      originalLang: 'en',
+      title: 'Fallback title',
+      description: 'Fallback summary',
+      content: 'Fallback body',
+      translations: {},
+      translationStatus: {},
+      translationNextRetryAt: {},
+    };
+
+    News.findOne = () => makeFindOneResult(doc);
+
+    const res = await request(app).get('/api/public/news/base-fallback-slug?lang=gu');
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.title, 'Fallback title');
+    assert.equal(res.body.description, 'Fallback summary');
+    assert.equal(res.body.content, 'Fallback body');
+    assert.equal(res.body.requestedLang, 'gu');
+    assert.equal(res.body.resolvedLang, 'en');
+    assert.equal(res.body.isTranslated, false);
+    assert.equal(res.body.canonicalSlug, 'gu-fallback-slug');
+    assert.equal(res.body.localizedSlug, 'gu-fallback-slug');
+    assert.equal(updateCalls, 0);
+  } finally {
+    restore(originals);
+    mongoose.connection.readyState = prevReadyState;
+  }
+});
+
 test('GET /api/public/news/:slugOrId?lang=hi falls back to base content when translation is missing (no on-demand translate)', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { findOne: News.findOne, updateOne: News.updateOne };
