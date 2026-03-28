@@ -1,7 +1,8 @@
 const Article = require('../models/Article');
 const { CATEGORY_VALUES, LANGUAGE_VALUES } = require('../models/Article');
 const mongoose = require('mongoose');
-const { getSlugCandidates } = require('../lib/slug');
+const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey, isSupportedPublicCategory } = require('../lib/categories');
+const { getSlugCandidates, detectSlugLocale } = require('../lib/slug');
 const { mapArticleForLang, localizeArticleForLang } = require('../services/mapArticleForLang');
 const {
   buildPubliclyVisiblePublicArticleFilter,
@@ -79,6 +80,7 @@ async function listArticles(req, res, next) {
 
     const statusRaw = String(req.query.status || '').trim().toLowerCase();
     const category = String(req.query.category || '').trim();
+    const canonicalCategory = getCanonicalPublicCategoryKey(category);
     const lang = normalizeLanguage(req.query.lang || req.query.language || req.lang);
     const isBreaking = parseBool(req.query.isBreaking);
 
@@ -97,10 +99,10 @@ async function listArticles(req, res, next) {
     // already enforced by buildPubliclyVisiblePublicArticleFilter()
 
     if (category) {
-      if (!CATEGORY_VALUES.includes(category)) {
+      if (!isSupportedPublicCategory(category, CATEGORY_VALUES)) {
         return res.status(400).json({ message: 'Invalid category' });
       }
-      filter.category = category;
+      filter.category = buildPublicCategoryFilter(canonicalCategory);
     }
 
     if (lang) {
@@ -225,7 +227,8 @@ async function getArticleBySlug(req, res, next) {
       return res.status(404).json({ message: 'Article not found' });
     }
 
-    const target = normalizeLanguage(req.query.lang || req.query.language || req.lang);
+    const explicitTarget = normalizeLanguage(req.query.lang || req.query.language || req.lang);
+    const target = explicitTarget || detectSlugLocale(doc, req.params.slug);
     if (target) {
       const mapped = localizeArticleForLang(doc, target, { fallbackToBase: true });
       if (!mapped) {

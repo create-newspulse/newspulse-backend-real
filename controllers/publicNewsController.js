@@ -7,7 +7,8 @@ const { ensureOnDemandNewsTranslation, hasFullTranslation } = require('../servic
 const { translateHtmlStrict, detectLangFromContent } = require('../services/articleTranslation.service');
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
 const { buildPubliclyVisiblePublicArticleFilter } = require('../services/publicArticleVisibility.service');
-const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
+const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
+const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode, detectSlugLocale } = require('../lib/slug');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -30,7 +31,7 @@ function escapeRegExp(str) {
 }
 
 function normalizeCategorySlug(v) {
-  return String(v || '').trim().toLowerCase();
+  return getCanonicalPublicCategoryKey(v);
 }
 
 function normalizeTopicSlug(v) {
@@ -391,7 +392,7 @@ function buildPublicPublishedFilter({ category, q, founderOnly, type }) {
 
   if (normalizedCategory) {
     // Case-safe for older mixed-case data.
-    filter.category = new RegExp(`^${escapeRegExp(normalizedCategory)}$`, 'i');
+    filter.category = buildPublicCategoryFilter(normalizedCategory);
   }
 
   if (founderOnly) {
@@ -1061,7 +1062,9 @@ async function getPublicNewsBySlugOrId(req, res) {
     let out = withCoverImageUrl(doc);
     const rawForTranslation = { ...out };
 
-    const desired = normalizeLang(requestedLang);
+    const inferredLang = requestedLang ? null : detectSlugLocale(out, slugOrIdRaw);
+    const effectiveRequestedLang = requestedLang || inferredLang;
+    const desired = normalizeLang(effectiveRequestedLang);
     if (!desired) {
       const base = _resolveBaseLang(out);
       _setBaseLocalizationInPlace(out, base, null);
@@ -1194,7 +1197,9 @@ async function getPublicNewsBySlug(req, res) {
     let out = withCoverImageUrl(doc);
     const rawForTranslation = { ...out };
 
-    const desired = normalizeLang(requestedLang);
+    const inferredLang = requestedLang ? null : detectSlugLocale(out, rawFromUrl || decodedParam);
+    const effectiveRequestedLang = requestedLang || inferredLang;
+    const desired = normalizeLang(effectiveRequestedLang);
     if (!desired) {
       const base = _resolveBaseLang(out);
       _setBaseLocalizationInPlace(out, base, null);

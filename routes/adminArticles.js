@@ -3,6 +3,7 @@ const News = require('../models/News');
 const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const { enqueueTranslateAndSave } = require('../services/publishAsyncTranslation.service');
+const { buildTranslationGroupStatus, resolveBaseLang } = require('../services/translationGroupStatus');
 
 const router = express.Router();
 
@@ -145,15 +146,26 @@ router.get('/articles/:id/translation-status', requireAdminAuth, async (req, res
     }
 
     const doc = await News.findById(id)
-      .select('title slug lang language originalLang translationStatus translationError translationUpdatedAt translationNextRetryAt')
+      .select('title slug lang language originalLang translationStatus translationError translationUpdatedAt translationNextRetryAt translationKey translationGroupId')
       .lean();
     if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
+
+    const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
+    const groupDocs = groupKey
+      ? await News.find({ $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }] })
+        .select('_id lang language originalLang translationKey translationGroupId title slug status')
+        .lean()
+      : [doc];
+
+    const groupStatus = buildTranslationGroupStatus(doc, groupDocs);
 
     const out = {
       id: String(doc._id),
       slug: doc.slug || null,
       title: doc.title || null,
-      baseLang: normalizeLangParam(doc.originalLang) || normalizeLangParam(doc.lang) || normalizeLangParam(doc.language) || 'en',
+      baseLang: groupStatus.baseLang,
+      translationGroupKey: groupKey || null,
+      languageStates: groupStatus,
       perLang: {},
     };
 
@@ -163,6 +175,13 @@ router.get('/articles/:id/translation-status', requireAdminAuth, async (req, res
         error: doc?.translationError?.[l] ?? null,
         updatedAt: doc?.translationUpdatedAt?.[l] ?? null,
         nextRetryAt: doc?.translationNextRetryAt?.[l] ?? null,
+        present: groupStatus.perLang[l].present,
+        presence: groupStatus.perLang[l].presence,
+        isSource: groupStatus.perLang[l].isSource,
+        isTranslatedChild: groupStatus.perLang[l].isTranslatedChild,
+        sourceArticleId: groupStatus.perLang[l].sourceArticleId,
+        childArticleId: groupStatus.perLang[l].childArticleId,
+        articleId: groupStatus.perLang[l].articleId,
       };
     }
 
@@ -391,6 +410,15 @@ router.get('/articles/:id', requireAdminAuth, async (req, res) => {
     if (!doc) return res.status(404).json({ ok: false, message: 'Article not found' });
     const article = doc.toJSON(); // include virtuals (e.g. body)
 
+    const baseLang = resolveBaseLang(article);
+    const groupKey = String(article.translationKey || article.translationGroupId || '').trim();
+    const groupDocs = groupKey
+      ? await News.find({ $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }] })
+        .select('_id lang language originalLang translationKey translationGroupId title slug status')
+        .lean()
+      : [article];
+    const translationGroupStatus = buildTranslationGroupStatus({ ...article, originalLang: article.originalLang || baseLang }, groupDocs);
+
     let communityReport = null;
     if (article.source === 'community' && article.communityReportId) {
       try {
@@ -409,7 +437,13 @@ router.get('/articles/:id', requireAdminAuth, async (req, res) => {
       });
     } catch (_) {}
 
-    return res.json({ ok: true, success: true, article, communityReport });
+    return res.json({
+      ok: true,
+      success: true,
+      article,
+      communityReport,
+      translationGroupStatus,
+    });
   } catch (e) {
     console.error('[ADMIN_ARTICLES][detail-error]', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to load article details' });

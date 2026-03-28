@@ -119,6 +119,46 @@ test('GET /api/public/news/:slugOrId?lang=gu resolves localized slug and returns
   }
 });
 
+test('GET /api/public/news/:slugOrId infers Gujarati locale from localized slug when lang is omitted', async () => {
+  const prevReadyState = mongoose.connection.readyState;
+  const originals = { findOne: News.findOne, updateOne: News.updateOne };
+
+  try {
+    mongoose.connection.readyState = 1;
+
+    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+
+    const doc = {
+      _id: '507f1f77bcf86cd799439016',
+      slug: 'base-slug-implicit',
+      slugs: { en: 'base-slug-implicit', gu: 'gu-localized-implicit' },
+      status: 'published',
+      lang: 'en',
+      language: 'en',
+      originalLang: 'en',
+      title: 'Hello implicit',
+      description: 'Summary implicit',
+      content: 'Body implicit',
+      translations: {
+        gu: { title: 'અનુવાદિત', summary: 'ગુજરાતી સાર', content: 'ગુજરાતી બોડી', generatedAt: new Date().toISOString() },
+      },
+      translationStatus: { gu: 'ready' },
+    };
+
+    News.findOne = () => makeFindOneResult(doc);
+
+    const res = await request(app).get('/api/public/news/gu-localized-implicit');
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.requestedLang, 'gu');
+    assert.equal(res.body.resolvedLang, 'gu');
+    assert.equal(res.body.title, 'અનુવાદિત');
+    assert.equal(res.body.canonicalSlug, 'gu-localized-implicit');
+  } finally {
+    restore(originals);
+    mongoose.connection.readyState = prevReadyState;
+  }
+});
+
 test('GET /api/public/news/:slugOrId?lang=gu falls back to base content but keeps Gujarati canonical slug', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { findOne: News.findOne, updateOne: News.updateOne };
@@ -161,6 +201,45 @@ test('GET /api/public/news/:slugOrId?lang=gu falls back to base content but keep
     assert.equal(res.body.canonicalSlug, 'gu-fallback-slug');
     assert.equal(res.body.localizedSlug, 'gu-fallback-slug');
     assert.equal(updateCalls, 0);
+  } finally {
+    restore(originals);
+    mongoose.connection.readyState = prevReadyState;
+  }
+});
+
+test('GET /api/public/news/:slugOrId infers Gujarati locale from slug and falls back explicitly to English base content', async () => {
+  const prevReadyState = mongoose.connection.readyState;
+  const originals = { findOne: News.findOne, updateOne: News.updateOne };
+
+  try {
+    mongoose.connection.readyState = 1;
+
+    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+
+    const doc = {
+      _id: '507f1f77bcf86cd799439017',
+      slug: 'base-fallback-implicit',
+      slugs: { en: 'base-fallback-implicit', gu: 'gu-fallback-implicit' },
+      status: 'published',
+      lang: 'en',
+      language: 'en',
+      originalLang: 'en',
+      title: 'Fallback implicit',
+      description: 'Fallback implicit summary',
+      content: 'Fallback implicit body',
+      translations: {},
+      translationStatus: {},
+      translationNextRetryAt: {},
+    };
+
+    News.findOne = () => makeFindOneResult(doc);
+
+    const res = await request(app).get('/api/public/news/gu-fallback-implicit');
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.requestedLang, 'gu');
+    assert.equal(res.body.resolvedLang, 'en');
+    assert.equal(res.body.title, 'Fallback implicit');
+    assert.equal(res.body.canonicalSlug, 'gu-fallback-implicit');
   } finally {
     restore(originals);
     mongoose.connection.readyState = prevReadyState;

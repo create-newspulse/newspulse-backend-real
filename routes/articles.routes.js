@@ -7,7 +7,8 @@ const Article = News;
 const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const PushHistory = require('../models/PushHistory');
-const { canonicalizeSlug, getSlugCandidates, safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
+const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
+const { canonicalizeSlug, detectSlugLocale, getSlugCandidates, safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 const { INDIA_STATES_UTS, tagStatesFromText, isValidStateSlug } = require('../src/utils/locationTagger');
 const {
@@ -26,6 +27,7 @@ const {
 } = require('../services/publicArticleVisibility.service');
 
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
+const { buildTranslationGroupStatus } = require('../services/translationGroupStatus');
 const {
   buildPendingTranslationState,
   buildPublishTranslationState,
@@ -779,12 +781,12 @@ router.get('/articles', requireAdminAuth, async (req, res, next) => {
     }
 
     if (categoryRaw) {
-      const categoryNorm = String(categoryRaw).trim().toLowerCase();
+      const categoryNorm = getCanonicalPublicCategoryKey(categoryRaw);
       if (categoryNorm === 'regional') {
         // Regional listing should include breaking stories too.
         query.category = { $in: ['regional', 'breaking'] };
       } else {
-        query.category = categoryNorm;
+        query.category = buildPublicCategoryFilter(categoryNorm || categoryRaw);
       }
     }
     if (qRaw) {
@@ -897,11 +899,11 @@ router.get('/public/articles', async (req, res, next) => {
     }
 
     if (categoryRaw) {
-      const categoryNorm = String(categoryRaw).trim().toLowerCase();
+      const categoryNorm = getCanonicalPublicCategoryKey(categoryRaw);
       if (categoryNorm === 'regional') {
         query.category = { $in: ['regional', 'breaking'] };
       } else {
-        query.category = categoryNorm;
+        query.category = buildPublicCategoryFilter(categoryNorm || categoryRaw);
       }
     }
     if (qRaw) {
@@ -1329,34 +1331,65 @@ router.get('/articles/:id/translation-status', requireAdminAuth, async (req, res
     }
 
     const doc = await News.findById(rawId)
-      .select('title slug lang language originalLang translationStatus translationError translationUpdatedAt translationNextRetryAt')
+      .select('title slug lang language originalLang translationStatus translationError translationUpdatedAt translationNextRetryAt translationKey translationGroupId')
       .lean();
     if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
 
-    const baseLang = normalizeLanguage(doc.originalLang) || normalizeLanguage(doc.lang) || normalizeLanguage(doc.language) || 'en';
+    const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
+    const groupDocs = groupKey
+      ? await News.find({ $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }] })
+        .select('_id lang language originalLang translationKey translationGroupId title slug status')
+        .lean()
+      : [doc];
+    const groupStatus = buildTranslationGroupStatus(doc, groupDocs);
+
+    const baseLang = groupStatus.baseLang;
     const out = {
       id: String(doc._id),
       slug: doc.slug || null,
       title: doc.title || null,
       baseLang,
+      translationGroupKey: groupKey || null,
+      languageStates: groupStatus,
       perLang: {
         en: {
           status: doc?.translationStatus?.en ?? null,
           error: doc?.translationError?.en ?? null,
           updatedAt: doc?.translationUpdatedAt?.en ?? null,
           nextRetryAt: doc?.translationNextRetryAt?.en ?? null,
+          present: groupStatus.perLang.en.present,
+          presence: groupStatus.perLang.en.presence,
+          isSource: groupStatus.perLang.en.isSource,
+          isTranslatedChild: groupStatus.perLang.en.isTranslatedChild,
+          sourceArticleId: groupStatus.perLang.en.sourceArticleId,
+          childArticleId: groupStatus.perLang.en.childArticleId,
+          articleId: groupStatus.perLang.en.articleId,
         },
         hi: {
           status: doc?.translationStatus?.hi ?? null,
           error: doc?.translationError?.hi ?? null,
           updatedAt: doc?.translationUpdatedAt?.hi ?? null,
           nextRetryAt: doc?.translationNextRetryAt?.hi ?? null,
+          present: groupStatus.perLang.hi.present,
+          presence: groupStatus.perLang.hi.presence,
+          isSource: groupStatus.perLang.hi.isSource,
+          isTranslatedChild: groupStatus.perLang.hi.isTranslatedChild,
+          sourceArticleId: groupStatus.perLang.hi.sourceArticleId,
+          childArticleId: groupStatus.perLang.hi.childArticleId,
+          articleId: groupStatus.perLang.hi.articleId,
         },
         gu: {
           status: doc?.translationStatus?.gu ?? null,
           error: doc?.translationError?.gu ?? null,
           updatedAt: doc?.translationUpdatedAt?.gu ?? null,
           nextRetryAt: doc?.translationNextRetryAt?.gu ?? null,
+          present: groupStatus.perLang.gu.present,
+          presence: groupStatus.perLang.gu.presence,
+          isSource: groupStatus.perLang.gu.isSource,
+          isTranslatedChild: groupStatus.perLang.gu.isTranslatedChild,
+          sourceArticleId: groupStatus.perLang.gu.sourceArticleId,
+          childArticleId: groupStatus.perLang.gu.childArticleId,
+          articleId: groupStatus.perLang.gu.articleId,
         },
       },
     };
@@ -1495,7 +1528,7 @@ router.get('/articles/slug/:slug', async (req, res, next) => {
     if (!out) return res.status(200).json({ exists: false });
 
     const langRaw = (req.query.lang || req.query.language || req.lang || '').toString().trim();
-    const desired = normalizeLanguage(langRaw);
+    const desired = normalizeLanguage(langRaw) || detectSlugLocale(out, raw);
     if (!desired) return res.status(200).json(withCoverImageUrl(out));
 
     const out0 = withCoverImageUrl(out);
@@ -1572,7 +1605,7 @@ router.get('/articles/by-slug/:slug', async (req, res, next) => {
     if (!out) return res.status(200).json({ exists: false });
 
     const langRaw = (req.query.lang || req.query.language || req.lang || '').toString().trim();
-    const desired = normalizeLanguage(langRaw);
+    const desired = normalizeLanguage(langRaw) || detectSlugLocale(out, raw);
     if (!desired) return res.status(200).json(withCoverImageUrl(out));
 
     const out0 = withCoverImageUrl(out);
@@ -1673,6 +1706,20 @@ router.get('/articles/:id', async (req, res, next) => {
 
     const out = localized.out;
 
+    let translationGroupStatus;
+    const isAdminArticleDetail = String(req.originalUrl || req.path || '').startsWith('/api/admin/')
+      || String(req.originalUrl || req.path || '').startsWith('/admin-api/admin/')
+      || String(req.originalUrl || req.path || '').startsWith('/admin-api/api/admin/');
+    if (isAdminArticleDetail) {
+      const groupKey = String(out0?.translationKey || out0?.translationGroupId || '').trim();
+      const groupDocs = groupKey
+        ? await News.find({ $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }] })
+          .select('_id lang language originalLang translationKey translationGroupId title slug status')
+          .lean()
+        : [out0];
+      translationGroupStatus = buildTranslationGroupStatus(out0, groupDocs);
+    }
+
     if (langNorm && localized.translationPending) {
       try {
         console.warn('[i18n-missing][articles.getById]', {
@@ -1691,6 +1738,7 @@ router.get('/articles/:id', async (req, res, next) => {
       status: 200,
       article: out,
       data: { article: out },
+      ...(translationGroupStatus ? { translationGroupStatus } : {}),
       ...(langNorm ? { requestedLang: langNorm, resolvedLang: localized.resolvedLang, isTranslated: !!localized.isTranslated, translationPending: !!localized.translationPending } : {}),
     });
   } catch (err) {

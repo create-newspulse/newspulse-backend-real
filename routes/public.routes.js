@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 // "Stories" in this backend map to the public Article model.
 // If your frontend uses a different shape/model, tell me and I’ll swap it.
 const Article = require('../models/Article');
+const { buildPublicCategoryFilter } = require('../lib/categories');
 const { getSlugCandidates } = require('../lib/slug');
 const { ensureOnDemandArticleTranslation, normalizeLang, detectLangFromContent, hasFullTranslation } = require('../services/articleTranslation.service');
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
@@ -156,7 +157,7 @@ router.get('/stories', async (req, res) => {
     }
 
     const q = buildPubliclyVisiblePublicArticleFilter();
-    if (category) q.category = String(category);
+    if (category) q.category = buildPublicCategoryFilter(category);
 
     const desired = normalizeLang(negotiatedLangRaw);
     if (desired === 'gu') {
