@@ -4,15 +4,22 @@ const mongoose = require('mongoose');
 // "Stories" in this backend map to the public Article model.
 // If your frontend uses a different shape/model, tell me and I’ll swap it.
 const Article = require('../models/Article');
-const { buildPublicCategoryFilter } = require('../lib/categories');
+const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
 const { getSlugCandidates } = require('../lib/slug');
 const { ensureOnDemandArticleTranslation, normalizeLang, detectLangFromContent, hasFullTranslation } = require('../services/articleTranslation.service');
+const { localizeArticleForLang } = require('../services/mapArticleForLang');
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
 const {
   buildPubliclyVisiblePublicArticleFilter,
   getArticleBaseLocale,
   getAvailableArticleLocales,
 } = require('../services/publicArticleVisibility.service');
+const {
+  getPublicContentGroupKey,
+  getPublicContentLookup,
+  buildPublicContentSiblingOrClauses,
+  pickBestLocalizedGroupDoc,
+} = require('../services/publicCategoryListing.service');
 
 const router = express.Router();
 
@@ -140,6 +147,13 @@ function withNormalizedImageUrl(story) {
   return { ...story, imageUrl };
 }
 
+function logPublicStoriesCategoryDebug(payload) {
+  if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') return;
+  try {
+    console.log('[public.stories.category][debug]', payload);
+  } catch (_) {}
+}
+
 // GET: /api/public/stories?category=&lang=&limit=20&page=1
 router.get('/stories', async (req, res) => {
   try {
@@ -157,20 +171,22 @@ router.get('/stories', async (req, res) => {
     }
 
     const q = buildPubliclyVisiblePublicArticleFilter();
+    const isGroupedCategoryListing = Boolean(category);
     if (category) q.category = buildPublicCategoryFilter(category);
 
     const desired = normalizeLang(negotiatedLangRaw);
-    if (desired === 'gu') {
+    const normalizedCategoryKey = category ? getCanonicalPublicCategoryKey(category) : null;
+    if (!isGroupedCategoryListing && desired === 'gu') {
       // Legacy behavior: Gujarati feed shows Gujarati originals immediately.
       q.language = 'gu';
-    } else if (desired === 'hi' || desired === 'en') {
+    } else if (!isGroupedCategoryListing && (desired === 'hi' || desired === 'en')) {
       // Hindi/English feeds:
       // - include originals authored in that language, OR
       // - include stories with fully-ready cached translations for that language.
       const originalMatch = buildOriginalLangMatch(desired);
       const readyMatch = buildReadyTranslationMatch(desired);
       q.$or = [originalMatch, readyMatch].filter(Boolean);
-    } else if (explicitLangRaw) {
+    } else if (!isGroupedCategoryListing && explicitLangRaw) {
       // Backward compatible: if a non-standard lang was provided, keep old behavior.
       q.language = String(explicitLangRaw);
     }
@@ -179,17 +195,105 @@ router.get('/stories', async (req, res) => {
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const skip = (pageNum - 1) * lim;
 
-    let stories = await Article.find(q)
-      .sort({ publishedAt: -1, createdAt: -1 })
-      .skip(skip)
-      .limit(lim)
-      .lean();
+    let stories = [];
+    if (isGroupedCategoryListing) {
+      const groupedRequestedLang = desired || 'en';
+      const matchedStories = await Article.find(q)
+        .sort({ publishedAt: -1, createdAt: -1 })
+        .lean();
 
-    if (desired === 'hi' || desired === 'en') {
-      stories = (stories || []).map((s) => applyCachedTranslationToStory(s, desired));
+      const lookups = (matchedStories || []).map((story) => getPublicContentLookup(story));
+      const groupKeys = Array.from(new Set(lookups.map((entry) => entry.groupKey).filter(Boolean)));
+      const canonicalSlugs = Array.from(new Set(
+        lookups
+          .filter((entry) => !entry.groupKey && entry.canonicalSlug)
+          .map((entry) => entry.canonicalSlug)
+      ));
+
+      let siblingStories = [];
+      const siblingClauses = buildPublicContentSiblingOrClauses({ groupKeys, canonicalSlugs });
+      if (siblingClauses.length) {
+        const siblingBaseQuery = buildPubliclyVisiblePublicArticleFilter();
+        const siblingQuery = {
+          ...siblingBaseQuery,
+          $and: [
+            ...(Array.isArray(siblingBaseQuery.$and) ? siblingBaseQuery.$and : []),
+            { $or: siblingClauses },
+          ],
+        };
+        siblingStories = await Article.find(siblingQuery)
+          .sort({ publishedAt: -1, createdAt: -1 })
+          .lean();
+      }
+
+      const groupedStories = new Map();
+      for (const story of [...(matchedStories || []), ...(siblingStories || [])]) {
+        const key = getPublicContentGroupKey(story);
+        if (!groupedStories.has(key)) groupedStories.set(key, []);
+        groupedStories.get(key).push(story);
+      }
+
+      const includedKeys = Array.from(new Set((matchedStories || []).map((story) => getPublicContentGroupKey(story))));
+      stories = includedKeys
+        .map((key) => {
+          const picked = pickBestLocalizedGroupDoc(groupedStories.get(key) || [], groupedRequestedLang, { fallbackToBase: true });
+          if (!picked) return null;
+
+          const baseStory = withNormalizedImageUrl(picked.doc);
+          const mapped = picked.mapped;
+          return {
+            ...baseStory,
+            title: mapped.title,
+            summary: mapped.summary,
+            content: mapped.content,
+            slug: mapped.slug,
+            canonicalSlug: mapped.canonicalSlug,
+            language: mapped.lang,
+            requestedLang: mapped.requestedLang,
+            resolvedLang: mapped.resolvedLang,
+            isTranslated: mapped.isTranslated,
+            __sortPublishedAt: new Date(baseStory.publishedAt || 0).getTime() || 0,
+            __sortCreatedAt: new Date(baseStory.createdAt || 0).getTime() || 0,
+          };
+        })
+        .filter(Boolean)
+        .sort((left, right) => {
+          if (right.__sortPublishedAt !== left.__sortPublishedAt) return right.__sortPublishedAt - left.__sortPublishedAt;
+          return right.__sortCreatedAt - left.__sortCreatedAt;
+        })
+        .slice(skip, skip + lim)
+        .map((story) => {
+          try {
+            delete story.__sortPublishedAt;
+            delete story.__sortCreatedAt;
+          } catch (_) {}
+          return story;
+        });
+
+      logPublicStoriesCategoryDebug({
+        requestedLocale: groupedRequestedLang,
+        requestedCategorySlug: category || null,
+        normalizedCategoryKey: normalizedCategoryKey || category || null,
+        matchedTranslationGroupIds: groupKeys,
+        returnedArticles: stories.map((story) => ({
+          id: String(story._id || ''),
+          language: String(story.language || ''),
+          translationGroupId: String(story.translationKey || story.translationGroupId || ''),
+        })),
+      });
+    } else {
+      stories = await Article.find(q)
+        .sort({ publishedAt: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(lim)
+        .lean();
+
+      if (desired === 'hi' || desired === 'en') {
+        stories = (stories || []).map((s) => applyCachedTranslationToStory(s, desired));
+      }
+
+      stories = (stories || []).map(withNormalizedImageUrl);
     }
-
-    stories = (stories || []).map(withNormalizedImageUrl);
 
     return res.json({ success: true, data: stories });
   } catch (err) {

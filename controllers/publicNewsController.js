@@ -9,6 +9,11 @@ const { isGoogleTranslateConfigured } = require('../services/translationEnabled'
 const { buildPubliclyVisiblePublicArticleFilter } = require('../services/publicArticleVisibility.service');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
 const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode, detectSlugLocale } = require('../lib/slug');
+const {
+  getPublicContentGroupKey,
+  getPublicContentLookup,
+  buildPublicContentSiblingOrClauses,
+} = require('../services/publicCategoryListing.service');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -729,6 +734,143 @@ function _debugPublicNewsStory(event, payload) {
   } catch (_) {}
 }
 
+function _debugPublicCategoryListing(payload) {
+  if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') return;
+  try {
+    console.log('[public-news][category]', payload);
+  } catch (_) {}
+}
+
+function _pickBestLocalizedGroupedNewsDoc(groupDocs, requestedLang) {
+  if (!Array.isArray(groupDocs) || !groupDocs.length) return null;
+
+  let best = null;
+  for (const rawDoc of groupDocs) {
+    const doc = { ...rawDoc };
+    const localized = _localizePublicNewsDocInPlace(doc, requestedLang, { fallbackToBase: true });
+    if (!localized.ok) continue;
+
+    let rank = 1;
+    if (localized.resolvedLang === requestedLang) {
+      rank = doc.isTranslated ? 2 : 3;
+    }
+
+    const candidate = {
+      doc,
+      rank,
+      publishedAt: new Date(doc.publishedAt || 0).getTime() || 0,
+      createdAt: new Date(doc.createdAt || 0).getTime() || 0,
+    };
+
+    if (!best) {
+      best = candidate;
+      continue;
+    }
+    if (candidate.rank > best.rank) {
+      best = candidate;
+      continue;
+    }
+    if (candidate.rank === best.rank) {
+      if (candidate.publishedAt > best.publishedAt) {
+        best = candidate;
+        continue;
+      }
+      if (candidate.publishedAt === best.publishedAt && candidate.createdAt > best.createdAt) {
+        best = candidate;
+      }
+    }
+  }
+
+  return best;
+}
+
+async function _resolveGroupedCategoryNewsItems({
+  baseFilter,
+  categoryFilter,
+  requestedLang,
+  page,
+  limit,
+  sort,
+  categorySlug,
+  normalizedCategoryKey,
+}) {
+  const matchedDocs = await News.find(categoryFilter).select(PUBLIC_FEED_SELECT).sort(sort).lean();
+  const lookups = (matchedDocs || []).map((doc) => getPublicContentLookup(doc));
+  const groupKeys = Array.from(new Set(lookups.map((entry) => entry.groupKey).filter(Boolean)));
+  const canonicalSlugs = Array.from(new Set(
+    lookups
+      .filter((entry) => !entry.groupKey && entry.canonicalSlug)
+      .map((entry) => entry.canonicalSlug)
+  ));
+
+  let siblingDocs = [];
+  const siblingClauses = buildPublicContentSiblingOrClauses({ groupKeys, canonicalSlugs });
+  if (siblingClauses.length) {
+    const siblingFilter = {
+      ...baseFilter,
+      $and: [
+        ...((baseFilter && Array.isArray(baseFilter.$and)) ? baseFilter.$and : []),
+        { $or: siblingClauses },
+      ],
+    };
+    siblingDocs = await News.find(siblingFilter).select(PUBLIC_FEED_SELECT).sort(sort).lean();
+  }
+
+  const groupedDocs = new Map();
+  for (const doc of [...(matchedDocs || []), ...(siblingDocs || [])]) {
+    const key = getPublicContentGroupKey(doc);
+    if (!groupedDocs.has(key)) groupedDocs.set(key, []);
+    groupedDocs.get(key).push(doc);
+  }
+
+  const includedKeys = Array.from(new Set((matchedDocs || []).map((doc) => getPublicContentGroupKey(doc))));
+  const resolvedItems = includedKeys
+    .map((key) => {
+      const picked = _pickBestLocalizedGroupedNewsDoc(groupedDocs.get(key) || [], requestedLang);
+      if (!picked) return null;
+
+      const out = withCoverImageUrl(picked.doc);
+      attachLocalizationFields(out, requestedLang);
+      _attachPublicRouteData(out, requestedLang, { fallbackEnabled: true });
+
+      try { delete out.translations; } catch (_) {}
+      try { delete out.translationStatus; } catch (_) {}
+      try { delete out.translationError; } catch (_) {}
+      try { delete out.translationNextRetryAt; } catch (_) {}
+
+      out.__sortPublishedAt = new Date(out.publishedAt || 0).getTime() || 0;
+      out.__sortCreatedAt = new Date(out.createdAt || 0).getTime() || 0;
+      return out;
+    })
+    .filter(Boolean)
+    .sort((left, right) => {
+      if (right.__sortPublishedAt !== left.__sortPublishedAt) return right.__sortPublishedAt - left.__sortPublishedAt;
+      return right.__sortCreatedAt - left.__sortCreatedAt;
+    });
+
+  _debugPublicCategoryListing({
+    requestedLocale: requestedLang,
+    requestedCategorySlug: categorySlug || null,
+    normalizedCategoryKey: normalizedCategoryKey || null,
+    matchedTranslationGroupIds: groupKeys,
+    returnedArticles: resolvedItems.map((item) => ({
+      id: String(item._id || ''),
+      language: String(item.language || item.lang || ''),
+      translationGroupId: String(item.translationKey || item.translationGroupId || ''),
+    })),
+  });
+
+  const total = resolvedItems.length;
+  const skip = (page - 1) * limit;
+  const items = resolvedItems.slice(skip, skip + limit).map((item) => {
+    try { delete item.__sortPublishedAt; } catch (_) {}
+    try { delete item.__sortCreatedAt; } catch (_) {}
+    return item;
+  });
+
+  return { items, total, totalPages: Math.max(Math.ceil(total / limit), 1) };
+}
+
 function buildPendingTranslationResponse(doc, requestedLang) {
   const desired = normalizeLang(requestedLang);
   const source =
@@ -982,10 +1124,12 @@ async function listPublicNews(req, res) {
     if (topic) filter.$and.push({ topic: new RegExp(`^${escapeRegExp(topic)}$`, 'i') });
     if (state) filter.$and.push({ 'location.state': new RegExp(`^${escapeRegExp(state)}$`, 'i') });
 
+    const isGroupedCategoryListing = Boolean(category);
+
     // Feed rules:
     // - By default, locale feeds only expose docs published in that locale.
     // - Base fallback is allowed only when explicitly requested.
-    if (!fallbackEnabled && desired) {
+    if (!isGroupedCategoryListing && !fallbackEnabled && desired) {
       filter.$and.push({
         $or: [
           buildOriginalLangMatch(desired),
@@ -994,49 +1138,76 @@ async function listPublicNews(req, res) {
       });
     }
 
-    const skip = (page - 1) * limit;
     const sort = { publishedAt: -1, createdAt: -1 };
 
-    const [itemsRaw, total] = await Promise.all([
-      News.find(filter).select(PUBLIC_FEED_SELECT).sort(sort).skip(skip).limit(limit).lean(),
-      News.countDocuments(filter),
-    ]);
+    let items = [];
+    let total = 0;
+    let totalPages = 1;
 
-    let items = (itemsRaw || []).map(withCoverImageUrl);
+    if (isGroupedCategoryListing) {
+      const baseFilter = buildPublicPublishedFilter({
+        q: q || undefined,
+        founderOnly,
+        type,
+      });
+      if (topic) baseFilter.$and.push({ topic: new RegExp(`^${escapeRegExp(topic)}$`, 'i') });
+      if (state) baseFilter.$and.push({ 'location.state': new RegExp(`^${escapeRegExp(state)}$`, 'i') });
 
-    // Localize strictly from cached buckets.
-    items = items
-      .map((it) => {
-        const out = { ...it };
-        const localized = _localizePublicNewsDocInPlace(out, desired, { fallbackToBase: fallbackEnabled });
+      const resolved = await _resolveGroupedCategoryNewsItems({
+        baseFilter,
+        categoryFilter: filter,
+        requestedLang: desired,
+        page,
+        limit,
+        sort,
+        categorySlug: req.query.category,
+        normalizedCategoryKey: category,
+      });
+      items = resolved.items;
+      total = resolved.total;
+      totalPages = resolved.totalPages;
+    } else {
+      const skip = (page - 1) * limit;
+      const [itemsRaw, count] = await Promise.all([
+        News.find(filter).select(PUBLIC_FEED_SELECT).sort(sort).skip(skip).limit(limit).lean(),
+        News.countDocuments(filter),
+      ]);
 
-        if (_matchesDebugStory(out)) {
-          _debugPublicNewsStory('list_candidate', {
-            requestedLang: desired,
-            matchedArticleGroup: String(out.translationGroupId || out.translationKey || ''),
-            availableLocales: _getPublishedLocales(out),
-            publishedLocales: localized.publishedLocales,
-            resolverUsed: 'list',
-            excludedReason: localized.ok ? null : localized.excludedReason,
-          });
-        }
+      items = (itemsRaw || []).map(withCoverImageUrl);
 
-        if (!localized.ok) return null;
+      items = items
+        .map((it) => {
+          const out = { ...it };
+          const localized = _localizePublicNewsDocInPlace(out, desired, { fallbackToBase: fallbackEnabled });
 
-        attachLocalizationFields(out, desired);
-        _attachPublicRouteData(out, desired, { fallbackEnabled });
-        return out;
-      })
-      .filter(Boolean);
+          if (_matchesDebugStory(out)) {
+            _debugPublicNewsStory('list_candidate', {
+              requestedLang: desired,
+              matchedArticleGroup: String(out.translationGroupId || out.translationKey || ''),
+              availableLocales: _getPublishedLocales(out),
+              publishedLocales: localized.publishedLocales,
+              resolverUsed: 'list',
+              excludedReason: localized.ok ? null : localized.excludedReason,
+            });
+          }
 
-    // Keep response payload stable (don’t emit translation cache).
-    for (const it of items) {
-      try { delete it.translations; } catch (_) {}
-      try { delete it.translationStatus; } catch (_) {}
-      try { delete it.translationError; } catch (_) {}
-      try { delete it.translationNextRetryAt; } catch (_) {}
+          if (!localized.ok) return null;
+
+          attachLocalizationFields(out, desired);
+          _attachPublicRouteData(out, desired, { fallbackEnabled });
+          return out;
+        })
+        .filter(Boolean);
+
+      for (const it of items) {
+        try { delete it.translations; } catch (_) {}
+        try { delete it.translationStatus; } catch (_) {}
+        try { delete it.translationError; } catch (_) {}
+        try { delete it.translationNextRetryAt; } catch (_) {}
+      }
+      total = count;
+      totalPages = Math.max(Math.ceil(total / limit), 1);
     }
-    const totalPages = Math.max(Math.ceil(total / limit), 1);
 
     return res.status(200).json({ items, page, limit, total, totalPages });
   } catch (e) {
