@@ -19,7 +19,7 @@ const CATEGORY_VALUES = [
 ];
 
 const LANGUAGE_VALUES = ['en', 'hi', 'gu'];
-const STATUS_VALUES = ['draft', 'published'];
+const STATUS_VALUES = ['draft', 'scheduled', 'published', 'archived', 'deleted'];
 
 const TRANSLATION_PROVIDER_VALUES = ['google', 'openai', 'manual'];
 
@@ -120,6 +120,12 @@ const articleSchema = new mongoose.Schema(
     // Used to dedupe feed items across language variants.
     translationKey: { type: String, default: null, index: true },
     translationGroupId: { type: String, default: null, index: true },
+    syncMode: { type: String, enum: ['auto'], default: 'auto', index: true },
+    sourceArticleId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
+    sourceLanguage: { type: String, enum: LANGUAGE_VALUES, default: null, index: true },
+    lastSyncedAt: { type: Date, default: null, index: true },
+    syncVersion: { type: Number, default: 0 },
+    contentFingerprint: { type: String, default: null },
 
     // Stable pointer back to the source News document (so slug changes don't orphan public copies).
     sourceNewsId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
@@ -157,7 +163,10 @@ const articleSchema = new mongoose.Schema(
     },
 
     status: { type: String, enum: STATUS_VALUES, default: 'draft', index: true },
+    scheduledAt: { type: Date, default: null, index: true },
+    publishAt: { type: Date, default: null },
     publishedAt: { type: Date, default: null, index: true },
+    deletedAt: { type: Date, default: null, index: true },
 
     isBreaking: { type: Boolean, default: false, index: true },
 
@@ -165,6 +174,14 @@ const articleSchema = new mongoose.Schema(
       url: { type: String, default: null },
       publicId: { type: String, default: null },
       alt: { type: String, default: null },
+    },
+    externalUrls: { type: [String], default: [] },
+    embeds: { type: [String], default: [] },
+    gallery: { type: [String], default: [] },
+    seo: {
+      metaTitle: { type: String, default: null },
+      metaDescription: { type: String, default: null },
+      canonicalUrl: { type: String, default: null },
     },
     tags: { type: [String], default: [] },
 

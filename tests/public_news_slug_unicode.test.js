@@ -15,7 +15,7 @@ function makeFindOneResult(doc, capture) {
   };
 }
 
-test('GET /api/public/news/slug/:slug is unicode-safe and lang filter is case-safe', async () => {
+test('GET /api/public/news/slug/:slug is unicode-safe and resolves locale after slug lookup', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const prevFindOne = News.findOne;
 
@@ -66,14 +66,9 @@ test('GET /api/public/news/slug/:slug is unicode-safe and lang filter is case-sa
     assert.ok(values.includes(encoded), 'expected raw encoded slug candidate');
     assert.ok(values.includes(unicodeSlug), 'expected decoded unicode slug candidate');
 
-    // Ensure lang filter was applied case-safely via $in.
+    // Detail lookup no longer filters the database by requested lang before resolving the matched article group.
     const langCond = ands.find((c) => Array.isArray(c?.$or) && c.$or.some((x) => x?.lang || x?.language));
-    assert.ok(langCond, 'expected a lang filter condition');
-
-    const langOr = langCond.$or.find((x) => x.lang);
-    assert.ok(langOr && langOr.lang && Array.isArray(langOr.lang.$in), 'expected $in lang clause');
-    assert.ok(langOr.lang.$in.includes('en'));
-    assert.ok(langOr.lang.$in.includes('EN'));
+    assert.equal(langCond, undefined);
   } finally {
     News.findOne = prevFindOne;
     mongoose.connection.readyState = prevReadyState;

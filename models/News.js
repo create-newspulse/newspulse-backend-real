@@ -206,6 +206,12 @@ const newsSchema = new mongoose.Schema({
   // New canonical group key for translations. Keep translationGroupId for backward compatibility.
   translationKey: { type: String, index: true },
   translationGroupId: { type: String, index: true },
+  syncMode: { type: String, enum: ['auto'], default: 'auto', index: true },
+  sourceArticleId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
+  sourceLanguage: { type: String, enum: ['en', 'hi', 'gu', null], default: null, index: true },
+  lastSyncedAt: { type: Date, default: null, index: true },
+  syncVersion: { type: Number, default: 0 },
+  contentFingerprint: { type: String, default: null },
   topic: {
     type: String,
     index: true,
@@ -296,6 +302,14 @@ const newsSchema = new mongoose.Schema({
     url: { type: String, default: null },
     publicId: { type: String, default: null },
     alt: { type: String, default: null },
+  },
+  externalUrls: { type: [String], default: [] },
+  embeds: { type: [String], default: [] },
+  gallery: { type: [String], default: [] },
+  seo: {
+    metaTitle: { type: String, default: null },
+    metaDescription: { type: String, default: null },
+    canonicalUrl: { type: String, default: null },
   },
 
   // Canonical workflow object used by Admin Panel workflow screen.

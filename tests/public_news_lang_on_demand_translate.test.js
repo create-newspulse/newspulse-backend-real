@@ -159,7 +159,7 @@ test('GET /api/public/news/:slugOrId infers Gujarati locale from localized slug 
   }
 });
 
-test('GET /api/public/news/:slugOrId?lang=gu falls back to base content but keeps Gujarati canonical slug', async () => {
+test('GET /api/public/news/:slugOrId?lang=gu returns 404 when Gujarati is not published and fallback is disabled', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { findOne: News.findOne, updateOne: News.updateOne };
 
@@ -191,15 +191,10 @@ test('GET /api/public/news/:slugOrId?lang=gu falls back to base content but keep
     News.findOne = () => makeFindOneResult(doc);
 
     const res = await request(app).get('/api/public/news/base-fallback-slug?lang=gu');
-    assert.equal(res.statusCode, 200);
-    assert.equal(res.body.title, 'Fallback title');
-    assert.equal(res.body.description, 'Fallback summary');
-    assert.equal(res.body.content, 'Fallback body');
+    assert.equal(res.statusCode, 404);
     assert.equal(res.body.requestedLang, 'gu');
-    assert.equal(res.body.resolvedLang, 'en');
-    assert.equal(res.body.isTranslated, false);
-    assert.equal(res.body.canonicalSlug, 'gu-fallback-slug');
-    assert.equal(res.body.localizedSlug, 'gu-fallback-slug');
+    assert.deepEqual(res.body.publishedLocales, ['en']);
+    assert.equal(res.body.translationAvailability.requestedLocalePublished, false);
     assert.equal(updateCalls, 0);
   } finally {
     restore(originals);
@@ -207,7 +202,7 @@ test('GET /api/public/news/:slugOrId?lang=gu falls back to base content but keep
   }
 });
 
-test('GET /api/public/news/:slugOrId infers Gujarati locale from slug and falls back explicitly to English base content', async () => {
+test('GET /api/public/news/:slugOrId infers Gujarati locale from slug and falls back only when explicitly enabled', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { findOne: News.findOne, updateOne: News.updateOne };
 
@@ -234,19 +229,20 @@ test('GET /api/public/news/:slugOrId infers Gujarati locale from slug and falls 
 
     News.findOne = () => makeFindOneResult(doc);
 
-    const res = await request(app).get('/api/public/news/gu-fallback-implicit');
+    const res = await request(app).get('/api/public/news/gu-fallback-implicit?fallback=true');
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.requestedLang, 'gu');
     assert.equal(res.body.resolvedLang, 'en');
     assert.equal(res.body.title, 'Fallback implicit');
-    assert.equal(res.body.canonicalSlug, 'gu-fallback-implicit');
+    assert.equal(res.body.canonicalSlug, 'base-fallback-implicit');
+    assert.equal(res.body.canonicalDetailUrl, '/news/base-fallback-implicit');
   } finally {
     restore(originals);
     mongoose.connection.readyState = prevReadyState;
   }
 });
 
-test('GET /api/public/news/:slugOrId?lang=hi falls back to base content when translation is missing (no on-demand translate)', async () => {
+test('GET /api/public/news/:slugOrId?lang=hi returns 404 when Hindi is not published and fallback is disabled', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { findOne: News.findOne, updateOne: News.updateOne };
 
@@ -278,13 +274,10 @@ test('GET /api/public/news/:slugOrId?lang=hi falls back to base content when tra
     News.findOne = () => makeFindOneResult(doc);
 
     const res = await request(app).get('/api/public/news/s2?lang=hi');
-    assert.equal(res.statusCode, 200);
+    assert.equal(res.statusCode, 404);
     assert.equal(res.body.requestedLang, 'hi');
-    assert.equal(res.body.resolvedLang, 'en');
-    assert.equal(res.body.isTranslated, false);
-    assert.equal(res.body.title, 'Hello');
-    assert.equal(res.body.description, 'Summary');
-    assert.equal(res.body.content, '<p>Body</p>');
+    assert.deepEqual(res.body.publishedLocales, ['en']);
+    assert.equal(res.body.translationAvailability.requestedLocalePublished, false);
     assert.equal(updateCalls, 0);
   } finally {
     restore(originals);
@@ -292,7 +285,7 @@ test('GET /api/public/news/:slugOrId?lang=hi falls back to base content when tra
   }
 });
 
-test('GET /api/public/news/:slugOrId?lang=hi falls back to base content when translation is failed/cooldown', async () => {
+test('GET /api/public/news/:slugOrId?lang=hi falls back to base content only when explicitly enabled', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { findOne: News.findOne, updateOne: News.updateOne };
 
@@ -323,7 +316,7 @@ test('GET /api/public/news/:slugOrId?lang=hi falls back to base content when tra
 
     News.findOne = () => makeFindOneResult(doc);
 
-    const res = await request(app).get('/api/public/news/s3?lang=hi');
+    const res = await request(app).get('/api/public/news/s3?lang=hi&fallback=true');
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.requestedLang, 'hi');
     assert.equal(res.body.resolvedLang, 'en');

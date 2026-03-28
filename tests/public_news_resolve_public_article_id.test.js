@@ -68,7 +68,7 @@ test('GET /api/public/news/:slugOrId resolves PublicArticle _id when News is mis
   }
 });
 
-test('GET /api/public/news/:slugOrId falls back to base content for PublicArticle when requested translation missing', async () => {
+test('GET /api/public/news/:slugOrId returns 404 for PublicArticle when requested locale is not published and fallback is disabled', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const newsOriginals = { findOne: News.findOne };
   const paOriginals = { findOne: PublicArticle.findOne };
@@ -97,13 +97,52 @@ test('GET /api/public/news/:slugOrId falls back to base content for PublicArticl
     PublicArticle.findOne = () => makeFindOneResult(articleDoc);
 
     const res = await request(app).get('/api/public/news/507f1f77bcf86cd799439098?lang=hi');
-    assert.equal(res.statusCode, 200);
-    assert.equal(res.body.title, 'Hello');
-    assert.equal(res.body.description, 'SummaryB');
-    assert.equal(res.body.content, '<p>BodyB</p>');
+    assert.equal(res.statusCode, 404);
     assert.equal(res.body.requestedLang, 'hi');
+    assert.deepEqual(res.body.publishedLocales, ['en']);
+    assert.equal(res.body.translationAvailability.requestedLocalePublished, false);
+  } finally {
+    restore(News, newsOriginals);
+    restore(PublicArticle, paOriginals);
+    mongoose.connection.readyState = prevReadyState;
+  }
+});
+
+test('GET /api/public/news/:slugOrId allows PublicArticle base fallback when explicitly enabled', async () => {
+  const prevReadyState = mongoose.connection.readyState;
+  const newsOriginals = { findOne: News.findOne };
+  const paOriginals = { findOne: PublicArticle.findOne };
+
+  try {
+    mongoose.connection.readyState = 1;
+
+    News.findOne = () => makeFindOneResult(null);
+
+    const articleDoc = {
+      _id: '507f1f77bcf86cd799439097',
+      status: 'published',
+      publishedAt: new Date().toISOString(),
+      slug: 'pa3',
+      slugs: { en: 'pa3', hi: 'pa3-hi' },
+      language: 'en',
+      originalLang: 'en',
+      title: 'Hello C',
+      summary: 'SummaryC',
+      content: '<p>BodyC</p>',
+      translations: {},
+      translationStatus: {},
+      coverImage: { url: null, publicId: null, alt: null },
+    };
+
+    PublicArticle.findOne = () => makeFindOneResult(articleDoc);
+
+    const res = await request(app).get('/api/public/news/507f1f77bcf86cd799439097?lang=hi&fallback=true');
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.title, 'Hello C');
+    assert.equal(res.body.description, 'SummaryC');
     assert.equal(res.body.resolvedLang, 'en');
-    assert.equal(res.body.isTranslated, false);
+    assert.equal(res.body.translationAvailability.requestedLocalePublished, false);
+    assert.equal(res.body.canonicalDetailUrl, '/news/pa3');
   } finally {
     restore(News, newsOriginals);
     restore(PublicArticle, paOriginals);

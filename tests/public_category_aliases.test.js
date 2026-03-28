@@ -57,7 +57,7 @@ test('Science & Technology canonical mapping stays tech with public slug science
   });
 });
 
-test('GET /api/public/news?category=science-technology returns published tech stories across legacy aliases', async () => {
+test('GET /api/public/news?category=science-technology&lang=en returns published tech stories across legacy aliases', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { find: News.find, countDocuments: News.countDocuments };
 
@@ -75,7 +75,7 @@ test('GET /api/public/news?category=science-technology returns published tech st
     News.find = (filter) => makeNewsQuery(docs.filter((doc) => matchesCategoryFilter(filter.category, doc.category)));
     News.countDocuments = async (filter) => docs.filter((doc) => matchesCategoryFilter(filter.category, doc.category)).length;
 
-    const res = await request(app).get('/api/public/news?category=science-technology&limit=10');
+    const res = await request(app).get('/api/public/news?category=science-technology&lang=en&limit=10');
 
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.items.length, 4);

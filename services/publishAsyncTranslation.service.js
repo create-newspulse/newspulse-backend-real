@@ -2,6 +2,7 @@ const News = require('../models/News');
 const { slugifyUnicode } = require('../lib/slug');
 const googleTranslate = require('./googleTranslate.service');
 const { syncPublicArticleFromNews } = require('./syncPublicArticleFromNews.service');
+const { syncTranslationGroupFromMaster } = require('./translationGroupSync.service');
 const { isGoogleTranslateConfigured } = require('./translationEnabled');
 const TranslationJob = require('../models/TranslationJob');
 const os = require('os');
@@ -106,6 +107,16 @@ function _addSeconds(d, seconds) {
 function _retryDelayMinutesForErrorMessage(msg) {
   const m = String(msg || '');
   return _isRateLimitErrorMessage(m) ? 15 : 5;
+}
+
+async function _syncSourceAndGroup(docUpdated, logger, reason) {
+  if (!docUpdated) return;
+  await syncPublicArticleFromNews(docUpdated, { logger });
+  await syncTranslationGroupFromMaster(docUpdated, {
+    logger,
+    reason: reason || 'publish_async_translation',
+    invalidate: String(docUpdated.status || '').toLowerCase() === 'published',
+  });
 }
 
 function buildPendingTranslationState({ baseLang, title, summary, content }) {
@@ -441,7 +452,7 @@ async function translateAndSave(newsId, options = {}) {
 
     try {
       const docUpdated = await News.findByIdAndUpdate(id, { $set: setFail }, { new: true, runValidators: false });
-      if (docUpdated) await syncPublicArticleFromNews(docUpdated, { logger });
+      if (docUpdated) await _syncSourceAndGroup(docUpdated, logger, 'publish_async_translation_config_error');
     } catch (_) {}
 
     try {
@@ -510,7 +521,7 @@ async function translateAndSave(newsId, options = {}) {
             },
             { new: true, runValidators: false }
           );
-          if (docUpdated) await syncPublicArticleFromNews(docUpdated, { logger });
+          if (docUpdated) await _syncSourceAndGroup(docUpdated, logger, 'publish_async_translation_stuck_pending');
         } catch (_) {}
 
         try {
@@ -550,7 +561,7 @@ async function translateAndSave(newsId, options = {}) {
             },
             { new: true, runValidators: false }
           );
-          if (docUpdated) await syncPublicArticleFromNews(docUpdated, { logger });
+          if (docUpdated) await _syncSourceAndGroup(docUpdated, logger, 'publish_async_translation_cache_repair');
         } catch (_) {}
       }
       continue;
@@ -633,10 +644,10 @@ async function translateAndSave(newsId, options = {}) {
         } catch (_) {}
 
         try {
-          await syncPublicArticleFromNews(docUpdated, { logger });
+          await _syncSourceAndGroup(docUpdated, logger, 'publish_async_translation_ready');
         } catch (e) {
           try {
-            logger.warn?.('[i18n][publish] syncPublicArticleFromNews failed', {
+            logger.warn?.('[i18n][publish] sync after translation failed', {
               id: String(doc0?._id || ''),
               slug: String(doc0?.slug || ''),
               message: e?.message || String(e),
@@ -661,7 +672,7 @@ async function translateAndSave(newsId, options = {}) {
           },
           { new: true, runValidators: false }
         );
-        if (docUpdated) await syncPublicArticleFromNews(docUpdated, { logger });
+        if (docUpdated) await _syncSourceAndGroup(docUpdated, logger, 'publish_async_translation_failed');
       } catch (_) {}
 
       try {
@@ -678,7 +689,7 @@ async function translateAndSave(newsId, options = {}) {
     }
   }
 
-  return { ok: true };
+        if (docUpdated) await _syncSourceAndGroup(docUpdated, logger, 'publish_async_translation_failed');
 }
 
 const JOB_TYPE = 'news-publish-translate';

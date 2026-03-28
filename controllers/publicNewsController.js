@@ -49,6 +49,14 @@ function parseTruthy(v) {
   return s === 'true' || s === '1' || s === 'yes' || s === 'y';
 }
 
+function isFallbackModeEnabled(req) {
+  return Boolean(
+    parseTruthy(req?.query?.fallback)
+    || parseTruthy(req?.query?.fallbackToBase)
+    || parseTruthy(req?.query?.allowFallback)
+  );
+}
+
 function isAutoTranslateOnReadEnabled() {
   const s = String(process.env.ENABLE_AUTO_TRANSLATE_ON_READ ?? '').trim().toLowerCase();
   return s === 'true' || s === '1' || s === 'yes' || s === 'y';
@@ -435,6 +443,7 @@ function buildPublicPublishedFilter({ category, q, founderOnly, type }) {
 }
 
 const PUBLIC_SELECT = [
+  'status',
   'title',
   'description',
   'content',
@@ -606,11 +615,118 @@ function pickCanonicalSlug(doc, lang) {
 }
 
 function attachLocalizationFields(doc, requestedLang) {
-  doc.canonicalSlug = pickCanonicalSlug(doc, requestedLang);
+  const desired = normalizeLang(requestedLang);
+  const resolved = normalizeLang(doc?.resolvedLang) || desired || _resolveBaseLang(doc);
+  const publishedLocales = _getPublishedLocales(doc);
+  const safeSlugLang = desired && publishedLocales.includes(desired) ? desired : resolved;
+
+  doc.canonicalSlug = pickCanonicalSlug(doc, safeSlugLang);
   doc.localizedSlug = doc.canonicalSlug;
   doc.localizedTitle = doc.title || '';
   doc.localizedContent = doc.content || '';
   return doc;
+}
+
+function _buildFrontendNewsPath(doc, lang) {
+  const desired = normalizeLang(lang) || _resolveBaseLang(doc);
+  const slug = pickCanonicalSlug(doc, desired) || (doc && doc._id ? String(doc._id) : null);
+  if (!slug) return null;
+
+  const prefix = desired === 'en' ? '' : `/${desired}`;
+  return `${prefix}/news/${encodeURIComponent(String(slug))}`;
+}
+
+function _buildPublicNewsApiPath(doc, requestedLang, { fallbackEnabled = false } = {}) {
+  const desired = normalizeLang(requestedLang);
+  const slug = pickCanonicalSlug(doc, desired) || pickCanonicalSlug(doc, _resolveBaseLang(doc)) || (doc && doc._id ? String(doc._id) : null);
+  if (!slug) return null;
+
+  const params = [];
+  if (desired) params.push(`lang=${encodeURIComponent(desired)}`);
+  if (fallbackEnabled) params.push('fallback=true');
+  return `/api/public/news/${encodeURIComponent(String(slug))}${params.length ? `?${params.join('&')}` : ''}`;
+}
+
+function _getPublishedLocales(doc) {
+  const base = _resolveBaseLang(doc);
+  const out = new Set();
+
+  if (String(doc?.status || '').trim().toLowerCase() === 'published') {
+    out.add(base);
+  }
+
+  for (const lang of ['en', 'hi', 'gu']) {
+    if (lang === base) continue;
+    const bucket = doc?.translations?.[lang];
+    if (!hasFullTranslation(bucket)) continue;
+
+    const status = String(doc?.translationStatus?.[lang] || '').trim().toLowerCase();
+    if (status === 'ready') out.add(lang);
+  }
+
+  return Array.from(out);
+}
+
+function _hasPublishedLocale(doc, lang) {
+  const desired = normalizeLang(lang);
+  if (!desired) return false;
+  return _getPublishedLocales(doc).includes(desired);
+}
+
+function _attachPublicRouteData(doc, requestedLang, { fallbackEnabled = false } = {}) {
+  const requested = normalizeLang(requestedLang) || _resolveBaseLang(doc);
+  const resolved = normalizeLang(doc?.resolvedLang) || _resolveBaseLang(doc);
+  const publishedLocales = _getPublishedLocales(doc);
+  const requestedLocalePublished = publishedLocales.includes(requested);
+  const safeDetailLang = requestedLocalePublished ? requested : resolved;
+
+  doc.locale = requested;
+  doc.articleId = doc && doc._id ? String(doc._id) : null;
+  doc.availableLocales = publishedLocales;
+  doc.publishedLocales = publishedLocales;
+  doc.translationAvailability = {
+    requestedLang: requested,
+    resolvedLang: resolved,
+    isTranslated: Boolean(doc?.isTranslated),
+    requestedLocalePublished,
+    availableLocales: publishedLocales,
+    publishedLocales,
+    fallbackEnabled: Boolean(fallbackEnabled),
+  };
+  doc.canonicalDetailUrl = _buildFrontendNewsPath(doc, safeDetailLang);
+  doc.detailApiUrl = _buildPublicNewsApiPath(doc, requested, { fallbackEnabled });
+  return doc;
+}
+
+function _matchesDebugStory(doc, rawLookupValue) {
+  const target = String(
+    process.env.DEBUG_PUBLIC_NEWS_STORY
+    || process.env.DEBUG_PUBLIC_NEWS_DETAIL_ID
+    || ''
+  ).trim();
+  if (!target) return false;
+
+  const slugs = doc?.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs)
+    ? Object.values(doc.slugs)
+    : [];
+  const candidates = [
+    rawLookupValue,
+    doc?._id,
+    doc?.translationGroupId,
+    doc?.translationKey,
+    doc?.slug,
+    ...slugs,
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+
+  return candidates.includes(target);
+}
+
+function _debugPublicNewsStory(event, payload) {
+  try {
+    console.log('[public-news][locale]', event, payload);
+  } catch (_) {}
 }
 
 function buildPendingTranslationResponse(doc, requestedLang) {
@@ -738,6 +854,58 @@ function _applyRequestedCachedLocalizationOrBaseInPlace(doc, requestedLang) {
   return { resolvedLang: _setBaseLocalizationInPlace(doc, base, requested), translated: false };
 }
 
+function _localizePublicNewsDocInPlace(doc, requestedLang, { fallbackToBase = false } = {}) {
+  const requested = normalizeLang(requestedLang);
+  const base = _resolveBaseLang(doc);
+  const publishedLocales = _getPublishedLocales(doc);
+
+  if (!requested) {
+    return {
+      ok: true,
+      excludedReason: null,
+      publishedLocales,
+      resolvedLang: _setBaseLocalizationInPlace(doc, base, null),
+    };
+  }
+
+  if (requested === base) {
+    return {
+      ok: true,
+      excludedReason: null,
+      publishedLocales,
+      resolvedLang: _setBaseLocalizationInPlace(doc, base, requested),
+    };
+  }
+
+  if (_hasPublishedLocale(doc, requested)) {
+    _applyCachedTranslationInPlace(doc, requested);
+    doc.requestedLang = requested;
+    doc.resolvedLang = requested;
+    return {
+      ok: true,
+      excludedReason: null,
+      publishedLocales,
+      resolvedLang: requested,
+    };
+  }
+
+  if (!fallbackToBase) {
+    return {
+      ok: false,
+      excludedReason: 'requested_locale_not_published',
+      publishedLocales,
+      resolvedLang: null,
+    };
+  }
+
+  return {
+    ok: true,
+    excludedReason: 'fallback_to_base',
+    publishedLocales,
+    resolvedLang: _setBaseLocalizationInPlace(doc, base, requested),
+  };
+}
+
 async function tryAcquireNewsTranslationLock({ id, lang, now = new Date() }) {
   const desired = normalizeLang(lang);
   if (!desired || !id) return false;
@@ -795,6 +963,7 @@ async function listPublicNews(req, res) {
     // Default language for public story feed is Gujarati (backward compatible).
     const requestedLang = getRequestedLang(req) || 'gu';
     const desired = normalizeLang(requestedLang) || 'gu';
+    const fallbackEnabled = isFallbackModeEnabled(req);
 
     let q = String(req.query.q || '').trim();
     // Keep keyword search safe and bounded
@@ -814,11 +983,9 @@ async function listPublicNews(req, res) {
     if (state) filter.$and.push({ 'location.state': new RegExp(`^${escapeRegExp(state)}$`, 'i') });
 
     // Feed rules:
-    // - Gujarati feed shows originals immediately (legacy behavior).
-    // - Hindi/English feeds only show items when either:
-    //   - the original is authored in that language, OR
-    //   - the cached translation bucket is fully ready (no placeholders).
-    if (desired === 'hi' || desired === 'en') {
+    // - By default, locale feeds only expose docs published in that locale.
+    // - Base fallback is allowed only when explicitly requested.
+    if (!fallbackEnabled && desired) {
       filter.$and.push({
         $or: [
           buildOriginalLangMatch(desired),
@@ -841,9 +1008,23 @@ async function listPublicNews(req, res) {
     items = items
       .map((it) => {
         const out = { ...it };
-        const localized = _applyRequestedCachedLocalizationOrBaseInPlace(out, desired);
-        if (!localized) return null;
+        const localized = _localizePublicNewsDocInPlace(out, desired, { fallbackToBase: fallbackEnabled });
+
+        if (_matchesDebugStory(out)) {
+          _debugPublicNewsStory('list_candidate', {
+            requestedLang: desired,
+            matchedArticleGroup: String(out.translationGroupId || out.translationKey || ''),
+            availableLocales: _getPublishedLocales(out),
+            publishedLocales: localized.publishedLocales,
+            resolverUsed: 'list',
+            excludedReason: localized.ok ? null : localized.excludedReason,
+          });
+        }
+
+        if (!localized.ok) return null;
+
         attachLocalizationFields(out, desired);
+        _attachPublicRouteData(out, desired, { fallbackEnabled });
         return out;
       })
       .filter(Boolean);
@@ -946,8 +1127,9 @@ async function getPublicNewsBySlugOrId(req, res) {
     const base = buildPublicPublishedFilter({});
     let doc = null;
     let docSource = 'news';
+    const fallbackEnabled = isFallbackModeEnabled(req);
+    const resolverUsed = isObjectIdLike(slugOrIdRaw) ? 'id' : 'slug';
 
-    // Prefer requested language doc when available.
     const requestedLang = getRequestedLang(req);
     const shouldDebug = debugEnabled && (!debugOnly || debugOnly === slugOrIdRaw);
     const debug = (event, payload) => {
@@ -956,6 +1138,7 @@ async function getPublicNewsBySlugOrId(req, res) {
         console.log('[public-news][detail]', event, {
           slugOrId: slugOrIdRaw,
           requestedLang: requestedLang || null,
+          resolverUsed,
           ...(payload || {}),
         });
       } catch (_) {}
@@ -979,15 +1162,7 @@ async function getPublicNewsBySlugOrId(req, res) {
 
     debug('lookup_built', { isObjectIdLike: isObjectIdLike(slugOrIdRaw) });
 
-    if (requestedLang) {
-      const byLangFilter = { ...lookup, $and: [...(lookup.$and || [])] };
-      applyLangFilter(byLangFilter, requestedLang);
-      doc = await News.findOne(byLangFilter).select(PUBLIC_DETAIL_SELECT).lean();
-    }
-
-    if (!doc) {
-      doc = await News.findOne(lookup).select(PUBLIC_DETAIL_SELECT).lean();
-    }
+    doc = await News.findOne(lookup).select(PUBLIC_DETAIL_SELECT).lean();
 
     if (!doc) {
       // Fallback: regional feeds are backed by PublicArticle (_id differs from News).
@@ -1010,15 +1185,7 @@ async function getPublicNewsBySlugOrId(req, res) {
         });
       }
 
-      let paDoc = null;
-      if (requestedLang) {
-        const paByLang = { ...paLookup, $and: [...(paLookup.$and || [])] };
-        applyLangFilter(paByLang, requestedLang);
-        paDoc = await PublicArticle.findOne(paByLang).select(PUBLIC_ARTICLE_DETAIL_SELECT).lean();
-      }
-      if (!paDoc) {
-        paDoc = await PublicArticle.findOne(paLookup).select(PUBLIC_ARTICLE_DETAIL_SELECT).lean();
-      }
+      const paDoc = await PublicArticle.findOne(paLookup).select(PUBLIC_ARTICLE_DETAIL_SELECT).lean();
 
       if (paDoc) {
         debug('resolved_public_article', {
@@ -1047,6 +1214,17 @@ async function getPublicNewsBySlugOrId(req, res) {
     if (!doc) {
       debug('not_found', {});
       return res.status(404).json({ message: 'Not found' });
+    }
+
+    if (_matchesDebugStory(doc, slugOrIdRaw)) {
+      _debugPublicNewsStory('detail_matched', {
+        requestedLang: requestedLang || null,
+        matchedArticleGroup: String(doc?.translationGroupId || doc?.translationKey || ''),
+        availableLocales: _getPublishedLocales(doc),
+        publishedLocales: _getPublishedLocales(doc),
+        resolverUsed,
+        excludedReason: null,
+      });
     }
 
     debug('resolved_doc', {
@@ -1078,14 +1256,43 @@ async function getPublicNewsBySlugOrId(req, res) {
     // 2) Fall back to other cached languages in order: requested → en → hi → gu → base.
     // 3) Optionally auto-translate requested language on read (dev-only), if enabled.
     const baseLang = _resolveBaseLang(out);
-    const cachedRes = _applyRequestedCachedLocalizationOrBaseInPlace(out, desired);
+    const cachedRes = _localizePublicNewsDocInPlace(out, desired, { fallbackToBase: fallbackEnabled });
+
+    if (!cachedRes.ok) {
+      if (_matchesDebugStory(out, slugOrIdRaw) || shouldDebug) {
+        _debugPublicNewsStory('detail_excluded', {
+          requestedLang: desired,
+          matchedArticleGroup: String(out.translationGroupId || out.translationKey || ''),
+          availableLocales: _getPublishedLocales(out),
+          publishedLocales: cachedRes.publishedLocales,
+          resolverUsed,
+          excludedReason: cachedRes.excludedReason,
+        });
+      }
+
+      return res.status(404).json({
+        message: 'Not found',
+        requestedLang: desired,
+        availableLocales: cachedRes.publishedLocales,
+        publishedLocales: cachedRes.publishedLocales,
+        translationAvailability: {
+          requestedLang: desired,
+          resolvedLang: null,
+          isTranslated: false,
+          requestedLocalePublished: false,
+          availableLocales: cachedRes.publishedLocales,
+          publishedLocales: cachedRes.publishedLocales,
+          fallbackEnabled,
+        },
+      });
+    }
 
     const shouldAuto = isAutoTranslateOnReadEnabled();
     const needsRequested = desired !== baseLang && cachedRes.resolvedLang !== desired;
 
     const allowOnDemandTranslate = docSource === 'news';
 
-    if (shouldAuto && needsRequested && allowOnDemandTranslate && isGoogleTranslateConfigured()) {
+    if (shouldAuto && fallbackEnabled && needsRequested && allowOnDemandTranslate && isGoogleTranslateConfigured()) {
       const now = new Date();
       const lockOwner = await tryAcquireNewsTranslationLock({ id: out?._id, lang: desired, now });
       const localized = await ensureOnDemandNewsTranslation({
@@ -1121,6 +1328,7 @@ async function getPublicNewsBySlugOrId(req, res) {
     try { delete out.translationError; } catch (_) {}
     try { delete out.translationNextRetryAt; } catch (_) {}
     attachLocalizationFields(out, desired);
+    _attachPublicRouteData(out, desired, { fallbackEnabled });
     return res.status(200).json(out);
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
@@ -1181,16 +1389,8 @@ async function getPublicNewsBySlug(req, res) {
     const base = buildPublicPublishedFilter({});
     const requestedLang = getRequestedLang(req);
 
-    let doc = null;
-    if (requestedLang) {
-      const byLangFilter = { ...base, $and: [...(base.$and || []), slugClause] };
-      applyLangFilter(byLangFilter, requestedLang);
-      doc = await News.findOne(byLangFilter).select(PUBLIC_DETAIL_SELECT).lean();
-    }
-
-    if (!doc) {
-      doc = await News.findOne({ ...base, $and: [...(base.$and || []), slugClause] }).select(PUBLIC_DETAIL_SELECT).lean();
-    }
+    const fallbackEnabled = isFallbackModeEnabled(req);
+    const doc = await News.findOne({ ...base, $and: [...(base.$and || []), slugClause] }).select(PUBLIC_DETAIL_SELECT).lean();
 
     if (!doc) return res.status(404).json({ message: 'Not found' });
 
@@ -1210,12 +1410,30 @@ async function getPublicNewsBySlug(req, res) {
     }
 
     const baseLang = _resolveBaseLang(out);
-    const cachedRes = _applyRequestedCachedLocalizationOrBaseInPlace(out, desired);
+    const cachedRes = _localizePublicNewsDocInPlace(out, desired, { fallbackToBase: fallbackEnabled });
+
+    if (!cachedRes.ok) {
+      return res.status(404).json({
+        message: 'Not found',
+        requestedLang: desired,
+        availableLocales: cachedRes.publishedLocales,
+        publishedLocales: cachedRes.publishedLocales,
+        translationAvailability: {
+          requestedLang: desired,
+          resolvedLang: null,
+          isTranslated: false,
+          requestedLocalePublished: false,
+          availableLocales: cachedRes.publishedLocales,
+          publishedLocales: cachedRes.publishedLocales,
+          fallbackEnabled,
+        },
+      });
+    }
 
     const shouldAuto = isAutoTranslateOnReadEnabled();
     const needsRequested = desired !== baseLang && cachedRes.resolvedLang !== desired;
 
-    if (shouldAuto && needsRequested && isGoogleTranslateConfigured()) {
+    if (shouldAuto && fallbackEnabled && needsRequested && isGoogleTranslateConfigured()) {
       const now = new Date();
       const lockOwner = await tryAcquireNewsTranslationLock({ id: out?._id, lang: desired, now });
       const localized = await ensureOnDemandNewsTranslation({
@@ -1250,6 +1468,7 @@ async function getPublicNewsBySlug(req, res) {
     try { delete out.translationError; } catch (_) {}
     try { delete out.translationNextRetryAt; } catch (_) {}
     attachLocalizationFields(out, desired);
+    _attachPublicRouteData(out, desired, { fallbackEnabled });
     return res.status(200).json(out);
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });

@@ -217,6 +217,12 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     translationKey: _safeStr(newsDoc.translationKey) || null,
     translationGroupId: _safeStr(newsDoc.translationGroupId) || (_safeStr(newsDoc.translationKey) || null),
     sourceNewsId: newsDoc._id || null,
+    sourceArticleId: newsDoc.sourceArticleId || newsDoc._id || null,
+    sourceLanguage: normalizeLang(newsDoc.sourceLanguage) || originalLang,
+    syncMode: String(newsDoc.syncMode || 'auto').trim().toLowerCase() || 'auto',
+    lastSyncedAt: newsDoc.lastSyncedAt || null,
+    syncVersion: Number.isFinite(Number(newsDoc.syncVersion)) ? Number(newsDoc.syncVersion) : 0,
+    contentFingerprint: _safeStr(newsDoc.contentFingerprint) || null,
 
     language,
     originalLang,
@@ -253,10 +259,23 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     translationUpdatedAt: _pickPerLangObj(newsDoc.translationUpdatedAt, (v) => _normalizeNullableDate(v), null),
 
     category: newsDoc.category,
-    status: isPublished ? 'published' : 'draft',
+    status: _safeStr(newsDoc.status).toLowerCase() || (isPublished ? 'published' : 'draft'),
+    scheduledAt: newsDoc.scheduledAt || null,
+    publishAt: newsDoc.publishAt || null,
     publishedAt: isPublished ? (newsDoc.publishedAt || new Date()) : null,
+    deletedAt: newsDoc.deletedAt || null,
     isBreaking: String(newsDoc.category || '').toLowerCase() === 'breaking',
     coverImage,
+    externalUrls: Array.isArray(newsDoc.externalUrls) ? newsDoc.externalUrls.filter((v) => _isNonEmptyString(v)) : [],
+    embeds: Array.isArray(newsDoc.embeds) ? newsDoc.embeds.filter((v) => _isNonEmptyString(v)) : [],
+    gallery: Array.isArray(newsDoc.gallery) ? newsDoc.gallery.filter((v) => _isNonEmptyString(v)) : [],
+    seo: newsDoc.seo && typeof newsDoc.seo === 'object' && !Array.isArray(newsDoc.seo)
+      ? {
+          metaTitle: _safeStr(newsDoc.seo.metaTitle) || null,
+          metaDescription: _safeStr(newsDoc.seo.metaDescription) || null,
+          canonicalUrl: _safeStr(newsDoc.seo.canonicalUrl) || null,
+        }
+      : { metaTitle: null, metaDescription: null, canonicalUrl: null },
     tags: (() => {
       const baseTags = Array.isArray(newsDoc.tags) ? newsDoc.tags : [];
       const loc = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location)

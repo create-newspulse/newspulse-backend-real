@@ -27,6 +27,10 @@ const {
 } = require('../services/publicArticleVisibility.service');
 
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
+const {
+  prepareSourceSyncMetadata,
+  syncTranslationGroupFromMaster,
+} = require('../services/translationGroupSync.service');
 const { buildTranslationGroupStatus } = require('../services/translationGroupStatus');
 const {
   buildPendingTranslationState,
@@ -324,7 +328,7 @@ function inferLanguageFromDocText({ title, description, content } = {}) {
 
 function normalizeRetryLang(v) {
   const s = String(v ?? '').trim().toLowerCase();
-  if (s === 'en' || s === 'hi') return s;
+  if (s === 'en' || s === 'hi' || s === 'gu') return s;
   if (s === 'all' || s === '') return 'all';
   return null;
 }
@@ -511,6 +515,86 @@ async function syncArticleFromNews(doc) {
   }
 }
 
+function _parseStringListInput(value) {
+  if (value === undefined) return undefined;
+  if (value === null) return [];
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+  if (raw.startsWith('[')) {
+    try {
+      return _parseStringListInput(JSON.parse(raw));
+    } catch (_) {}
+  }
+  return raw.split(/[\r\n,]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function _parseSeoPayload(value) {
+  if (value === undefined) return undefined;
+  let parsed = value;
+  if (typeof parsed === 'string') {
+    const raw = parsed.trim();
+    if (!raw) {
+      return { metaTitle: null, metaDescription: null, canonicalUrl: null };
+    }
+    try {
+      parsed = JSON.parse(raw);
+    } catch (_) {
+      parsed = { metaTitle: raw, metaDescription: null, canonicalUrl: null };
+    }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { metaTitle: null, metaDescription: null, canonicalUrl: null };
+  }
+  const metaTitle = _normalizeOptionalString(parsed.metaTitle ?? parsed.title) ?? null;
+  const metaDescription = _normalizeOptionalString(parsed.metaDescription ?? parsed.description) ?? null;
+  const canonicalUrl = _normalizeOptionalString(parsed.canonicalUrl ?? parsed.canonical) ?? null;
+  return { metaTitle, metaDescription, canonicalUrl };
+}
+
+function _normalizeSourceArticleId(value) {
+  const raw = _normalizeOptionalString(value);
+  if (!raw) return undefined;
+  return mongoose.Types.ObjectId.isValid(raw) ? raw : undefined;
+}
+
+function _isSourceTranslationDoc(docLike, fallbackId) {
+  const ownId = String(docLike?._id || fallbackId || '').trim();
+  const sourceId = String(docLike?.sourceArticleId || '').trim();
+  return !sourceId || (ownId && sourceId === ownId);
+}
+
+function _buildSharedSyncFieldsFromBody(body) {
+  const externalUrls = _parseStringListInput(body?.externalUrls);
+  const embeds = _parseStringListInput(body?.embeds);
+  const gallery = _parseStringListInput(body?.gallery);
+  const seo = _parseSeoPayload(body?.seo);
+  const sourceArticleId = _normalizeSourceArticleId(body?.sourceArticleId);
+
+  return {
+    ...(externalUrls !== undefined ? { externalUrls } : {}),
+    ...(embeds !== undefined ? { embeds } : {}),
+    ...(gallery !== undefined ? { gallery } : {}),
+    ...(seo !== undefined ? { seo } : {}),
+    ...(sourceArticleId !== undefined ? { sourceArticleId } : {}),
+  };
+}
+
+async function syncMasterArticleGroup(doc, options = {}) {
+  if (!doc || !_isSourceTranslationDoc(doc)) return null;
+  try {
+    return await syncTranslationGroupFromMaster(doc, {
+      logger: console,
+      reason: options.reason || 'article_sync',
+      invalidate: options.invalidate,
+    });
+  } catch (_) {
+    return null;
+  }
+}
+
 // POST /api/articles → create a new article (CMS/admin)
 router.post('/articles', requireAdminAuth, async (req, res, next) => {
   try {
@@ -537,6 +621,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       coverImageUrl,
       coverImage,
     } = body0;
+    const sharedSyncFields = _buildSharedSyncFieldsFromBody(body0);
 
     const tagsArr = parseTags(tags);
     const geo = _geoFromTags(tagsArr);
@@ -665,6 +750,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
         },
       } : {}),
       translationGroupId: translationGroupId || new mongoose.Types.ObjectId().toString(),
+      ...sharedSyncFields,
       tags: tagsArr,
       geo,
       status: initialStatus || 'draft',
@@ -697,10 +783,20 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
 
     const doc = await News.create(createDoc);
 
+    if (_isSourceTranslationDoc(doc)) {
+      Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
+      await doc.save({ validateModifiedOnly: true });
+      await syncMasterArticleGroup(doc, {
+        reason: 'article_create',
+        invalidate: String(doc.status || '').toLowerCase() === 'published',
+      });
+    }
+
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
 
     if (String(doc.status || '').toLowerCase() === 'published') {
-      // Translation queue/review system removed.
+      await syncArticleFromNews(doc);
+      enqueueTranslateAndSave(doc._id, { logger: console });
     }
 
     return res.status(201).json({
@@ -1777,6 +1873,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       coverImageUrl: coverImageUrlRaw,
       coverImage,
     } = requestBody;
+    const sharedSyncFields = _buildSharedSyncFieldsFromBody(requestBody);
 
     // Guard against accidental "undefined"/"null" string inputs from form-data payloads.
     const title = _normalizeOptionalString(titleRaw);
@@ -1819,7 +1916,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     let before = null;
     try {
       before = await News.findById(rawId)
-        .select('title description content translations translationStatus translationError translationNextRetryAt category status workflowStage translationGroupId lang language slugs coverImage coverImageUrl imageURL')
+        .select('title description content translations translationStatus translationError translationNextRetryAt translationUpdatedAt category status workflowStage translationGroupId sourceArticleId originalLang lang language slugs coverImage coverImageUrl imageURL syncVersion')
         .lean();
     } catch (_) {
       // ignore
@@ -1915,6 +2012,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         } : {}),
       } : {}),
       ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
+      ...sharedSyncFields,
     };
 
     // Defensive: remove any accidental undefined keys before updates.
@@ -1923,6 +2021,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     const beforeStatusNorm = String(before && before.status ? before.status : '').toLowerCase();
     const nextStatusNorm = update.status ? String(update.status).toLowerCase() : '';
     const isPublishingNow = beforeStatusNorm !== 'published' && nextStatusNorm === 'published';
+    const shouldTreatAsSyncSource = _isSourceTranslationDoc(before, rawId);
 
     // Publish must never block on translation. Translation runs asynchronously after we persist the publish.
     if (isPublishingNow) {
@@ -1950,10 +2049,26 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         existing: before,
         now,
       });
+      const syncMetadata = shouldTreatAsSyncSource
+        ? prepareSourceSyncMetadata({
+            ...before,
+            ...update,
+            _id: rawId,
+            translationGroupId,
+            lang: baseLang,
+            language: baseLang,
+            originalLang: baseLang,
+            status: 'published',
+            publishedAt: now,
+            translations: pending.translations,
+            translationStatus: pending.translationStatus,
+          }, { now })
+        : {};
 
       const updateOp = {
         $set: {
           ...update,
+          ...syncMetadata,
           translationGroupId,
           // Align publish timestamps similarly to the dedicated publish endpoint.
           status: 'published',
@@ -1987,6 +2102,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
       }
       await syncArticleFromNews(doc);
+      await syncMasterArticleGroup(doc, { reason: 'article_update_publish', invalidate: true });
 
       // Fire-and-forget: never await translation in the request.
       enqueueTranslateAndSave(doc._id, { logger: console });
@@ -2025,8 +2141,23 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       update.stateNames = [];
     }
 
+    if (shouldTreatAsSyncSource) {
+      const now = new Date();
+      const syncMetadata = prepareSourceSyncMetadata({
+        ...before,
+        ...update,
+        _id: rawId,
+        translations: before?.translations,
+        translationStatus: before?.translationStatus,
+        translationError: before?.translationError,
+        translationNextRetryAt: before?.translationNextRetryAt,
+        translationUpdatedAt: before?.translationUpdatedAt,
+      }, { now });
+      Object.assign(update, syncMetadata);
+    }
+
     const updateKeys = Object.keys(update);
-    const META_ONLY_KEYS = new Set(['status', 'scheduledAt', 'publishAt', 'publishedAt', 'deletedAt']);
+    const META_ONLY_KEYS = new Set(['status', 'scheduledAt', 'publishAt', 'publishedAt', 'deletedAt', 'syncMode', 'sourceArticleId', 'sourceLanguage', 'lastSyncedAt', 'syncVersion', 'contentFingerprint']);
     const isMetaOnlyUpdate = updateKeys.length > 0 && updateKeys.every((k) => META_ONLY_KEYS.has(k));
 
     let didMetaOnlyUpdate = false;
@@ -2180,6 +2311,13 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
     // Meta-only updates are intentionally returned early to avoid later full-document validation.
     if (didMetaOnlyUpdate) {
+      if (doc && String(doc.status || '').toLowerCase() === 'published') {
+        await syncArticleFromNews(doc);
+      }
+      await syncMasterArticleGroup(doc, {
+        reason: 'article_update_meta_only',
+        invalidate: ['published', 'scheduled', 'archived', 'deleted'].includes(String(doc?.status || '').toLowerCase()),
+      });
       const obj0 = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
       return res.json({
         ok: true,
@@ -2216,6 +2354,15 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         ensureNewsSlugs(doc);
         await doc.save({ validateModifiedOnly: true });
       }
+    }
+
+    await syncMasterArticleGroup(doc, {
+      reason: 'article_update',
+      invalidate: ['published', 'scheduled', 'archived', 'deleted'].includes(String(doc.status || '').toLowerCase()),
+    });
+
+    if (String(doc.status || '').toLowerCase() === 'published') {
+      await syncArticleFromNews(doc);
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
@@ -2271,6 +2418,9 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     // Publish must never block on translation.
     // Mark translations pending for non-base languages and translate asynchronously.
     markPublishTranslationPending(doc);
+    if (_isSourceTranslationDoc(doc)) {
+      Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
+    }
 
     ensureNewsSlugs(doc);
 
@@ -2292,6 +2442,7 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     await doc.save();
 
     await syncArticleFromNews(doc);
+    await syncMasterArticleGroup(doc, { reason: 'article_publish', invalidate: true });
 
     // Legacy safety net:
     // Ensure any existing public copies reachable by slug/slugs.* are marked published
@@ -2378,7 +2529,7 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
   }
 });
 
-// POST /api/admin/articles/:id/retry-translation?lang=hi|en|all
+// POST /api/admin/articles/:id/retry-translation?lang=hi|gu|en|all
 // Backward compatible: if lang is omitted, defaults to all.
 router.post('/articles/:id/retry-translation', requireAdminAuth, async (req, res) => {
   try {
@@ -2389,16 +2540,16 @@ router.post('/articles/:id/retry-translation', requireAdminAuth, async (req, res
 
     const langParam = normalizeRetryLang(req.query.lang);
     if (!langParam) {
-      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Missing/invalid lang (use hi, en, or all)' });
+      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Missing/invalid lang (use hi, gu, en, or all)' });
     }
 
     const before = await News.findById(id)
-      .select('title description content translationGroupId lang language originalLang translationStatus translationError translationNextRetryAt translationUpdatedAt translations slug slugs status')
+      .select('title description content translationGroupId sourceArticleId syncVersion lang language originalLang translationStatus translationError translationNextRetryAt translationUpdatedAt translations slug slugs status')
       .lean();
     if (!before) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
 
     const baseLang = normalizeLanguage(before.originalLang) || normalizeLanguage(before.lang || before.language) || 'en';
-    const targets = langParam === 'all' ? ['en', 'hi'] : [langParam];
+    const targets = langParam === 'all' ? ['en', 'hi', 'gu'] : [langParam];
     const now = new Date();
 
     const translationGroupId = String(before.translationGroupId || '').trim() || new mongoose.Types.ObjectId().toString();
@@ -2430,10 +2581,23 @@ router.post('/articles/:id/retry-translation', requireAdminAuth, async (req, res
       set[`translations.${t}.generatedAt`] = null;
     }
 
+    if (_isSourceTranslationDoc(before, id)) {
+      Object.assign(set, prepareSourceSyncMetadata({
+        ...before,
+        _id: id,
+        originalLang: baseLang,
+        lang: baseLang,
+        language: baseLang,
+        translationGroupId,
+        translationStatus: { ...(before.translationStatus || {}), ...Object.fromEntries(targets.map((t) => [t, t === baseLang ? 'ready' : 'pending'])) },
+      }, { now }));
+    }
+
     const doc = await News.findByIdAndUpdate(id, { $set: set }, { new: true, runValidators: false });
     if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
 
     await syncArticleFromNews(doc);
+  await syncMasterArticleGroup(doc, { reason: 'article_retry_translation', invalidate: String(doc.status || '').toLowerCase() === 'published' });
     enqueueTranslateAndSave(doc._id, { logger: console });
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
@@ -2468,38 +2632,33 @@ router.post('/articles/:id/unpublish', requireAdminAuth, async (req, res) => {
     const doc = await News.findById(id);
     if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
 
-    const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
-    const groupDocs = groupKey
-      ? await News.find({ $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }] })
-      : [doc];
-
     const now = new Date();
     const actor = getActor(req);
-
-    // Unpublish all variants in the group (prevents duplicates / stale language variants).
-    for (const d of groupDocs) {
-      const fromStage = String(d.workflowStage || 'DRAFT');
-      d.status = toStatus;
-      d.publishedAt = null;
-      d.publishAt = null;
-      d.scheduledAt = null;
-      d.workflowStage = toStatus === 'archived' ? 'ARCHIVED' : 'DRAFT';
-      d.workflowUpdatedAt = now;
-
-      d.workflowHistory = Array.isArray(d.workflowHistory) ? d.workflowHistory : [];
-      d.workflowHistory.push({
-        at: now,
-        byUserId: actor.byUserId,
-        byRole: actor.byRole,
-        action: 'UNPUBLISH',
-        fromStage,
-        toStage: d.workflowStage,
-        note: null,
-      });
-
-      await d.save();
-      await syncArticleFromNews(d);
+    const fromStage = String(doc.workflowStage || 'DRAFT');
+    doc.status = toStatus;
+    doc.publishedAt = null;
+    doc.publishAt = null;
+    doc.scheduledAt = null;
+    doc.workflowStage = toStatus === 'archived' ? 'ARCHIVED' : 'DRAFT';
+    doc.workflowUpdatedAt = now;
+    if (_isSourceTranslationDoc(doc)) {
+      Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
     }
+
+    doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
+    doc.workflowHistory.push({
+      at: now,
+      byUserId: actor.byUserId,
+      byRole: actor.byRole,
+      action: 'UNPUBLISH',
+      fromStage,
+      toStage: doc.workflowStage,
+      note: null,
+    });
+
+    await doc.save();
+    await syncArticleFromNews(doc);
+    await syncMasterArticleGroup(doc, { reason: 'article_unpublish', invalidate: true });
 
     // Legacy cleanup:
     // Older public Article copies may not be linked via sourceNewsId/translationGroupId.
@@ -2521,6 +2680,7 @@ router.post('/articles/:id/unpublish', requireAdminAuth, async (req, res) => {
         or.push({ 'slugs.hi': { $in: slugList } });
         or.push({ 'slugs.gu': { $in: slugList } });
       }
+      const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
       if (groupKey) {
         or.push({ translationKey: groupKey });
         or.push({ translationGroupId: groupKey });
@@ -2594,6 +2754,9 @@ router.post('/articles/:id/schedule', requireAdminAuth, async (req, res) => {
     doc.publishedAt = null;
     doc.workflowStage = 'SCHEDULED';
     doc.workflowUpdatedAt = now;
+    if (_isSourceTranslationDoc(doc)) {
+      Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
+    }
 
     const actor = getActor(req);
     doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
@@ -2608,6 +2771,8 @@ router.post('/articles/:id/schedule', requireAdminAuth, async (req, res) => {
     });
 
     await doc.save();
+    await syncArticleFromNews(doc);
+    await syncMasterArticleGroup(doc, { reason: 'article_schedule', invalidate: true });
 
     try {
       await PushHistory.create({
@@ -2675,6 +2840,13 @@ router.post('/articles/:id/archive', requireAdminAuth, async (req, res) => {
     );
     if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
 
+    if (_isSourceTranslationDoc(doc)) {
+      Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
+      await doc.save({ validateModifiedOnly: true });
+    }
+
+    await syncArticleFromNews(doc);
+    await syncMasterArticleGroup(doc, { reason: 'article_archive', invalidate: true });
     await markPublicCopiesDraftFromNewsDoc(doc);
 
     try {
@@ -2743,6 +2915,13 @@ router.delete('/articles/:id', requireAdminAuth, async (req, res) => {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
     }
 
+    if (_isSourceTranslationDoc(doc)) {
+      Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
+      await doc.save({ validateModifiedOnly: true });
+    }
+
+    await syncArticleFromNews(doc);
+    await syncMasterArticleGroup(doc, { reason: 'article_delete', invalidate: true });
     await markPublicCopiesDraftFromNewsDoc(doc);
 
     try {
