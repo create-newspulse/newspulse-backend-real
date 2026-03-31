@@ -190,7 +190,8 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
   const slug = normalizeSlug(newsDoc.slug);
   if (!slug) return null;
 
-  const isPublished = String(newsDoc.status || '').toLowerCase() === 'published';
+  const normalizedStatus = _safeStr(newsDoc.status).toLowerCase() || 'draft';
+  const isPublished = normalizedStatus === 'published';
   const language = normalizeLang(newsDoc.language || newsDoc.lang) || 'en';
   const originalLang = normalizeLang(newsDoc.originalLang) || language;
   const coverUrl =
@@ -259,11 +260,11 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     translationUpdatedAt: _pickPerLangObj(newsDoc.translationUpdatedAt, (v) => _normalizeNullableDate(v), null),
 
     category: newsDoc.category,
-    status: _safeStr(newsDoc.status).toLowerCase() || (isPublished ? 'published' : 'draft'),
+    status: normalizedStatus || (isPublished ? 'published' : 'draft'),
     scheduledAt: newsDoc.scheduledAt || null,
     publishAt: newsDoc.publishAt || null,
     publishedAt: isPublished ? (newsDoc.publishedAt || new Date()) : null,
-    deletedAt: newsDoc.deletedAt || null,
+    deletedAt: normalizedStatus === 'deleted' ? (newsDoc.deletedAt || new Date()) : null,
     isBreaking: String(newsDoc.category || '').toLowerCase() === 'breaking',
     coverImage,
     externalUrls: Array.isArray(newsDoc.externalUrls) ? newsDoc.externalUrls.filter((v) => _isNonEmptyString(v)) : [],
