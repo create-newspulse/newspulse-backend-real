@@ -2212,7 +2212,6 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
           translationGroupId,
           // Align publish timestamps similarly to the dedicated publish endpoint.
           status: 'published',
-          deletedAt: null,
           publishedAt: now,
           publishAt: null,
           scheduledAt: null,
@@ -2545,7 +2544,6 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
 
     const now = new Date();
     doc.status = 'published';
-    doc.deletedAt = null;
     doc.publishedAt = now;
     doc.publishAt = null;
     doc.scheduledAt = null;
@@ -2624,7 +2622,7 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
       if (or.length) {
         await PublicArticle.updateMany(
           { $or: or },
-          { $set: { status: 'published', deletedAt: null, publishedAt: now, category: doc.category, ...geoSet } },
+          { $set: { status: 'published', publishedAt: now, category: doc.category, ...geoSet } },
           { runValidators: false }
         );
       }
