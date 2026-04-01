@@ -28,6 +28,7 @@ const {
 
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
 const {
+  normalizeTranslationGroupKey,
   prepareSourceSyncMetadata,
   syncTranslationGroupFromMaster,
 } = require('../services/translationGroupSync.service');
@@ -54,7 +55,8 @@ async function markPublicCopiesDraftFromNewsDoc(newsDoc, options = {}) {
   try {
     if (!newsDoc) return;
 
-    const groupKey = String(newsDoc.translationKey || newsDoc.translationGroupId || '').trim();
+    const groupKey = normalizeTranslationGroupKey(newsDoc.translationKey)
+      || normalizeTranslationGroupKey(newsDoc.translationGroupId);
     const slugSet = new Set();
 
     if (newsDoc.slug) slugSet.add(String(newsDoc.slug).trim());
@@ -1523,7 +1525,8 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
       };
 
       const canonicalSlug = String(mapped.canonicalSlug || '').trim();
-      const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
+      const groupKey = normalizeTranslationGroupKey(doc.translationKey)
+        || normalizeTranslationGroupKey(doc.translationGroupId);
       const key = groupKey
         ? `group:${groupKey}`
         : (canonicalSlug ? `cslug:${canonicalSlug}` : (out.slug ? `slug:${out.slug}` : `id:${out._id}`));
@@ -2822,7 +2825,8 @@ router.post('/articles/:id/unpublish', requireAdminAuth, async (req, res) => {
         or.push({ 'slugs.hi': { $in: slugList } });
         or.push({ 'slugs.gu': { $in: slugList } });
       }
-      const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
+      const groupKey = normalizeTranslationGroupKey(doc.translationKey)
+        || normalizeTranslationGroupKey(doc.translationGroupId);
       if (groupKey) {
         or.push({ translationKey: groupKey });
         or.push({ translationGroupId: groupKey });

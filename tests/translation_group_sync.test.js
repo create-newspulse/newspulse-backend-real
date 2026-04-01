@@ -3,9 +3,30 @@ const assert = require('node:assert/strict');
 
 const {
   computeContentFingerprint,
+  normalizeTranslationGroupKey,
+  isChildLinkedToMaster,
   prepareSourceSyncMetadata,
   buildChildNewsSyncPatch,
 } = require('../services/translationGroupSync.service');
+
+test('normalizeTranslationGroupKey rejects empty and placeholder values', () => {
+  assert.equal(normalizeTranslationGroupKey('group-1'), 'group-1');
+  assert.equal(normalizeTranslationGroupKey('  group-2  '), 'group-2');
+  assert.equal(normalizeTranslationGroupKey(''), null);
+  assert.equal(normalizeTranslationGroupKey('   '), null);
+  assert.equal(normalizeTranslationGroupKey('null'), null);
+  assert.equal(normalizeTranslationGroupKey('undefined'), null);
+  assert.equal(normalizeTranslationGroupKey(null), null);
+});
+
+test('isChildLinkedToMaster only allows unlinked or explicitly linked children', () => {
+  const master = { _id: '69c832dfa5f8e74cf2bf87b7' };
+
+  assert.equal(isChildLinkedToMaster(master, { _id: '69c832dfa5f8e74cf2bf87b8', sourceArticleId: null }), true);
+  assert.equal(isChildLinkedToMaster(master, { _id: '69c832dfa5f8e74cf2bf87b8', sourceArticleId: '69c832dfa5f8e74cf2bf87b7' }), true);
+  assert.equal(isChildLinkedToMaster(master, { _id: '69c832dfa5f8e74cf2bf87b8', sourceArticleId: '69c832dfa5f8e74cf2bf87b8' }), false);
+  assert.equal(isChildLinkedToMaster(master, { _id: '69c832dfa5f8e74cf2bf87b8', sourceArticleId: '69c832dfa5f8e74cf2bf9000' }), false);
+});
 
 test('prepareSourceSyncMetadata stamps auto sync metadata and fingerprint', () => {
   const now = new Date('2026-03-29T10:00:00.000Z');
@@ -97,7 +118,7 @@ test('buildChildNewsSyncPatch clears stale child content when translated locale 
   assert.equal(patch.publishedAt, null);
 });
 
-test('buildChildNewsSyncPatch publishes localized child when translated bucket is ready and syncs shared fields', () => {
+test('buildChildNewsSyncPatch publishes localized child when translated bucket is ready and keeps child cover fields', () => {
   const now = new Date('2026-03-29T12:00:00.000Z');
   const master = {
     _id: '69c832dfa5f8e74cf2bf87b7',
@@ -135,6 +156,9 @@ test('buildChildNewsSyncPatch publishes localized child when translated bucket i
     lang: 'gu',
     language: 'gu',
     originalLang: 'gu',
+    coverImage: { url: 'https://example.com/child-cover.jpg', publicId: 'child-cover', alt: 'Child cover' },
+    coverImageUrl: 'https://example.com/child-cover.jpg',
+    imageURL: 'https://example.com/child-cover.jpg',
   }, { now, metadata });
 
   assert.equal(patch.status, 'published');
@@ -150,7 +174,9 @@ test('buildChildNewsSyncPatch publishes localized child when translated bucket i
   assert.deepEqual(patch.externalUrls, ['https://example.com/source']);
   assert.deepEqual(patch.embeds, ['https://youtube.com/embed/demo']);
   assert.deepEqual(patch.gallery, ['https://example.com/gallery-1.jpg']);
-  assert.deepEqual(patch.coverImage, { url: 'https://example.com/cover.jpg', publicId: 'cover-1', alt: 'Cover' });
+  assert.deepEqual(patch.coverImage, { url: 'https://example.com/child-cover.jpg', publicId: 'child-cover', alt: 'Child cover' });
+  assert.equal(patch.coverImageUrl, 'https://example.com/child-cover.jpg');
+  assert.equal(patch.imageURL, 'https://example.com/child-cover.jpg');
   assert.equal(patch.publishedAt.toISOString(), '2026-03-29T09:00:00.000Z');
   assert.equal(patch.sourceLanguage, 'en');
 });

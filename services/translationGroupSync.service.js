@@ -30,6 +30,15 @@ function normalizeNullableString(value) {
   return text || null;
 }
 
+function normalizeTranslationGroupKey(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text) return null;
+  const lowered = text.toLowerCase();
+  if (lowered === 'null' || lowered === 'undefined') return null;
+  return text;
+}
+
 function normalizeStringArray(value) {
   if (!Array.isArray(value)) return [];
   return value
@@ -52,7 +61,23 @@ function getBaseLanguage(docLike) {
 
 function getGroupKey(docLike) {
   const doc = isPlainObject(docLike) ? docLike : {};
-  return normalizeNullableString(doc.translationGroupId || doc.translationKey);
+  return normalizeTranslationGroupKey(doc.translationGroupId)
+    || normalizeTranslationGroupKey(doc.translationKey);
+}
+
+function normalizeObjectIdString(value) {
+  const normalized = normalizeNullableString(value);
+  return normalized || null;
+}
+
+function isChildLinkedToMaster(masterDoc, childDoc) {
+  const masterId = normalizeObjectIdString(masterDoc?._id);
+  const childId = normalizeObjectIdString(childDoc?._id);
+  const childSourceId = normalizeObjectIdString(childDoc?.sourceArticleId);
+
+  if (!masterId || !childId || masterId === childId) return false;
+  if (!childSourceId) return true;
+  return childSourceId === masterId;
 }
 
 function hasFullBucket(bucket) {
@@ -213,6 +238,13 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
     || (localized.title ? slugifyUnicode(localized.title) : null)
     || normalizeNullableString(child.slug)
     || normalizeNullableString(master.slug);
+  const childCoverObject = isPlainObject(child.coverImage) ? cloneSimple(child.coverImage) : null;
+  const childCoverUrl = normalizeNullableString(child?.coverImage?.url)
+    || normalizeNullableString(child.coverImageUrl)
+    || normalizeNullableString(child.imageURL);
+  const nextCoverImage = childCoverObject || (childCoverUrl
+    ? { url: childCoverUrl, publicId: null, alt: null }
+    : null);
 
   const translations = cloneSimple(master.translations || {});
   const translationStatus = cloneSimple(master.translationStatus || {});
@@ -232,9 +264,9 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
     location: cloneSimple(master.location || null),
     stateTags: normalizeStringArray(master.stateTags),
     stateNames: normalizeStringArray(master.stateNames),
-    imageURL: normalizeNullableString(master.imageURL),
-    coverImageUrl: normalizeNullableString(master.coverImageUrl),
-    coverImage: cloneSimple(master.coverImage || null),
+    imageURL: normalizeNullableString(child.imageURL),
+    coverImageUrl: childCoverUrl,
+    coverImage: nextCoverImage,
     externalUrls: normalizeStringArray(master.externalUrls),
     embeds: normalizeStringArray(master.embeds),
     gallery: normalizeStringArray(master.gallery),
@@ -304,6 +336,18 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
 
   const updatedChildren = [];
   for (const child of childDocs) {
+    if (!isChildLinkedToMaster(master, child)) {
+      try {
+        logger.warn?.('[translationGroupSync] skipped unrelated child in translation group', {
+          masterId: String(master._id || ''),
+          childId: String(child._id || ''),
+          translationGroupId: groupKey,
+          childSourceArticleId: normalizeObjectIdString(child.sourceArticleId),
+        });
+      } catch (_) {}
+      continue;
+    }
+
     const patch = buildChildNewsSyncPatch(master, child.toObject ? child.toObject({ virtuals: true }) : child, { now, metadata });
 
     Object.assign(child, patch);
@@ -342,6 +386,8 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
 
 module.exports = {
   computeContentFingerprint,
+  normalizeTranslationGroupKey,
+  isChildLinkedToMaster,
   prepareSourceSyncMetadata,
   buildChildNewsSyncPatch,
   collectTranslationGroupInvalidationTargets,
