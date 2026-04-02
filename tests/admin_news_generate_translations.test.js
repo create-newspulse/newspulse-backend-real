@@ -90,6 +90,7 @@ test('POST /api/admin/news/:id/generate-translations creates missing EN/HI/GU do
     assert.ok(updated);
     assert.equal(String(updated.u.$set.translationKey), 'grp-1');
     assert.equal(String(updated.u.$set.translationGroupId), 'grp-1');
+    assert.equal(String(updated.u.$set.sourceArticleId), id);
 
     // Should create 3 docs.
     assert.equal(created.length, 3);
@@ -100,6 +101,7 @@ test('POST /api/admin/news/:id/generate-translations creates missing EN/HI/GU do
     for (const p of created) {
       assert.equal(p.translationKey, 'grp-1');
       assert.equal(p.translationGroupId, 'grp-1');
+      assert.equal(String(p.sourceArticleId), id);
     }
   } finally {
     restore(originals);

@@ -95,10 +95,14 @@ router.post('/:id/generate-translations', requireAdminAuth, async (req, res) => 
     const translationKey = existingKey || new mongoose.Types.ObjectId().toString();
 
     // Ensure source doc is linked.
-    if (String(sourceDoc.translationKey || '') !== translationKey || String(sourceDoc.translationGroupId || '') !== translationKey) {
+    if (
+      String(sourceDoc.translationKey || '') !== translationKey
+      || String(sourceDoc.translationGroupId || '') !== translationKey
+      || String(sourceDoc.sourceArticleId || '') !== String(sourceDoc._id || '')
+    ) {
       await News.updateOne(
         { _id: id },
-        { $set: { translationKey, translationGroupId: translationKey } }
+        { $set: { translationKey, translationGroupId: translationKey, sourceArticleId: sourceDoc._id } }
       );
     }
 
@@ -143,6 +147,7 @@ router.post('/:id/generate-translations', requireAdminAuth, async (req, res) => 
         language: targetLang,
         translationKey,
         translationGroupId: translationKey,
+        sourceArticleId: sourceDoc._id,
         imageURL: sourceDoc.imageURL,
         coverImageUrl,
         status,

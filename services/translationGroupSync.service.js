@@ -76,7 +76,7 @@ function isChildLinkedToMaster(masterDoc, childDoc) {
   const childSourceId = normalizeObjectIdString(childDoc?.sourceArticleId);
 
   if (!masterId || !childId || masterId === childId) return false;
-  if (!childSourceId) return true;
+  if (!childSourceId) return false;
   return childSourceId === masterId;
 }
 

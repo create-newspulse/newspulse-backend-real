@@ -19,10 +19,10 @@ test('normalizeTranslationGroupKey rejects empty and placeholder values', () => 
   assert.equal(normalizeTranslationGroupKey(null), null);
 });
 
-test('isChildLinkedToMaster only allows unlinked or explicitly linked children', () => {
+test('isChildLinkedToMaster only allows explicitly linked children', () => {
   const master = { _id: '69c832dfa5f8e74cf2bf87b7' };
 
-  assert.equal(isChildLinkedToMaster(master, { _id: '69c832dfa5f8e74cf2bf87b8', sourceArticleId: null }), true);
+  assert.equal(isChildLinkedToMaster(master, { _id: '69c832dfa5f8e74cf2bf87b8', sourceArticleId: null }), false);
   assert.equal(isChildLinkedToMaster(master, { _id: '69c832dfa5f8e74cf2bf87b8', sourceArticleId: '69c832dfa5f8e74cf2bf87b7' }), true);
   assert.equal(isChildLinkedToMaster(master, { _id: '69c832dfa5f8e74cf2bf87b8', sourceArticleId: '69c832dfa5f8e74cf2bf87b8' }), false);
   assert.equal(isChildLinkedToMaster(master, { _id: '69c832dfa5f8e74cf2bf87b8', sourceArticleId: '69c832dfa5f8e74cf2bf9000' }), false);
