@@ -221,7 +221,6 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
   const master = isPlainObject(masterDoc) ? masterDoc : {};
   const child = isPlainObject(childDoc) ? childDoc : {};
   const now = options.now instanceof Date ? options.now : new Date();
-  const propagateCoverMedia = options.propagateCoverMedia === true;
   const metadata = options.metadata || prepareSourceSyncMetadata(master, { now, bumpVersion: false });
   const baseLang = getBaseLanguage(master);
   const childLang = normalizeLang(child.lang || child.language || child.originalLang) || baseLang;
@@ -239,13 +238,12 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
     || (localized.title ? slugifyUnicode(localized.title) : null)
     || normalizeNullableString(child.slug)
     || normalizeNullableString(master.slug);
-  const preferredCoverSource = propagateCoverMedia ? master : child;
-  const preferredCoverObject = isPlainObject(preferredCoverSource.coverImage) ? cloneSimple(preferredCoverSource.coverImage) : null;
-  const preferredCoverUrl = normalizeNullableString(preferredCoverSource?.coverImage?.url)
-    || normalizeNullableString(preferredCoverSource.coverImageUrl)
-    || normalizeNullableString(preferredCoverSource.imageURL);
-  const nextCoverImage = preferredCoverObject || (preferredCoverUrl
-    ? { url: preferredCoverUrl, publicId: null, alt: null }
+  const childCoverObject = isPlainObject(child.coverImage) ? cloneSimple(child.coverImage) : null;
+  const childCoverUrl = normalizeNullableString(child?.coverImage?.url)
+    || normalizeNullableString(child.coverImageUrl)
+    || normalizeNullableString(child.imageURL);
+  const nextCoverImage = childCoverObject || (childCoverUrl
+    ? { url: childCoverUrl, publicId: null, alt: null }
     : null);
 
   const translations = cloneSimple(master.translations || {});
@@ -266,8 +264,8 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
     location: cloneSimple(master.location || null),
     stateTags: normalizeStringArray(master.stateTags),
     stateNames: normalizeStringArray(master.stateNames),
-    imageURL: normalizeNullableString(preferredCoverSource.imageURL) || preferredCoverUrl,
-    coverImageUrl: preferredCoverUrl,
+    imageURL: normalizeNullableString(child.imageURL),
+    coverImageUrl: childCoverUrl,
     coverImage: nextCoverImage,
     externalUrls: normalizeStringArray(master.externalUrls),
     embeds: normalizeStringArray(master.embeds),
@@ -350,11 +348,7 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
       continue;
     }
 
-    const patch = buildChildNewsSyncPatch(master, child.toObject ? child.toObject({ virtuals: true }) : child, {
-      now,
-      metadata,
-      propagateCoverMedia: options.propagateCoverMedia === true,
-    });
+    const patch = buildChildNewsSyncPatch(master, child.toObject ? child.toObject({ virtuals: true }) : child, { now, metadata });
 
     Object.assign(child, patch);
     await child.save({ validateModifiedOnly: true });

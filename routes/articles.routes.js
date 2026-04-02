@@ -671,13 +671,6 @@ function _normalizeSourceArticleId(value) {
   return mongoose.Types.ObjectId.isValid(raw) ? raw : undefined;
 }
 
-function _parseBooleanFlag(value) {
-  if (typeof value === 'boolean') return value;
-  const raw = _normalizeOptionalString(value);
-  if (!raw) return false;
-  return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
-}
-
 function _isSourceTranslationDoc(docLike, fallbackId) {
   const ownId = String(docLike?._id || fallbackId || '').trim();
   const sourceId = String(docLike?.sourceArticleId || '').trim();
@@ -707,7 +700,6 @@ async function syncMasterArticleGroup(doc, options = {}) {
       logger: console,
       reason: options.reason || 'article_sync',
       invalidate: options.invalidate,
-      propagateCoverMedia: options.propagateCoverMedia === true,
     });
   } catch (_) {
     return null;
@@ -2002,7 +1994,6 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const requestBody = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
-    const applyToGroup = _parseBooleanFlag(requestBody.applyToGroup ?? req.query?.applyToGroup);
     // Normalize legacy payloads: CMS sends `summary`, schema requires `description`.
     if (requestBody.summary !== undefined && requestBody.description === undefined) {
       requestBody.description = requestBody.summary;
@@ -2113,7 +2104,6 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const resolvedCoverImageUrl = coverImageUrl ?? imageURL;
-    const hasCoverMediaUpdate = coverImage !== undefined || imageURLRaw !== undefined || coverImageUrlRaw !== undefined;
 
     const coverObj = (coverImage && typeof coverImage === 'object' && !Array.isArray(coverImage)) ? coverImage : null;
     const prevCover = (() => {
@@ -2510,13 +2500,10 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       }
     }
 
-    if (!hasCoverMediaUpdate || applyToGroup) {
-      await syncMasterArticleGroup(doc, {
-        reason: 'article_update',
-        invalidate: ['published', 'scheduled', 'archived', 'deleted'].includes(String(doc.status || '').toLowerCase()),
-        propagateCoverMedia: hasCoverMediaUpdate && applyToGroup,
-      });
-    }
+    await syncMasterArticleGroup(doc, {
+      reason: 'article_update',
+      invalidate: ['published', 'scheduled', 'archived', 'deleted'].includes(String(doc.status || '').toLowerCase()),
+    });
 
     if (String(doc.status || '').toLowerCase() === 'published') {
       await syncArticleFromNews(doc);
