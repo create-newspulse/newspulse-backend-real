@@ -20,7 +20,6 @@ const {
   buildPublicContentSiblingOrClauses,
   pickBestLocalizedGroupDoc,
 } = require('../services/publicCategoryListing.service');
-const { resolvePublicImageFields } = require('../services/publicImageResolver.service');
 
 const router = express.Router();
 
@@ -114,9 +113,38 @@ function applyBestAvailableCachedTranslationToStory(story, requestedLang) {
   return { story: { ...story, language: base }, resolvedLang: base, translated: false };
 }
 
-function withNormalizedImageUrl(story, options = {}) {
+function _normalizeImageUrlCandidate(v) {
+  if (v === null || v === undefined) return null;
+
+  if (typeof v === 'string') {
+    const s = v.trim();
+    return s ? s : null;
+  }
+
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const url = v.url ?? v.src ?? null;
+    if (typeof url === 'string') {
+      const s = url.trim();
+      return s ? s : null;
+    }
+  }
+
+  return null;
+}
+
+function withNormalizedImageUrl(story) {
   if (!story || typeof story !== 'object') return story;
-  return resolvePublicImageFields(story, options);
+
+  const imageUrl =
+    _normalizeImageUrlCandidate(story.imageUrl) ||
+    _normalizeImageUrlCandidate(story.coverImageUrl) ||
+    _normalizeImageUrlCandidate(story.coverImage) ||
+    _normalizeImageUrlCandidate(story.image) ||
+    _normalizeImageUrlCandidate(story.thumbnail) ||
+    _normalizeImageUrlCandidate(Array.isArray(story.images) ? story.images[0] : null) ||
+    null;
+
+  return { ...story, imageUrl };
 }
 
 function logPublicStoriesCategoryDebug(payload) {
@@ -211,7 +239,7 @@ router.get('/stories', async (req, res) => {
           const picked = pickBestLocalizedGroupDoc(groupedStories.get(key) || [], groupedRequestedLang, { fallbackToBase: true });
           if (!picked) return null;
 
-          const baseStory = withNormalizedImageUrl(picked.doc, { debugScope: 'public-stories.category' });
+          const baseStory = withNormalizedImageUrl(picked.doc);
           const mapped = picked.mapped;
           return {
             ...baseStory,
@@ -264,7 +292,7 @@ router.get('/stories', async (req, res) => {
         stories = (stories || []).map((s) => applyCachedTranslationToStory(s, desired));
       }
 
-      stories = (stories || []).map((story) => withNormalizedImageUrl(story, { debugScope: 'public-stories.list' }));
+      stories = (stories || []).map(withNormalizedImageUrl);
     }
 
     return res.json({ success: true, data: stories });

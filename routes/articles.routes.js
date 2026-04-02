@@ -27,7 +27,6 @@ const {
 } = require('../services/publicArticleVisibility.service');
 
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
-const { resolvePublicImageFields } = require('../services/publicImageResolver.service');
 const {
   normalizeTranslationGroupKey,
   prepareSourceSyncMetadata,
@@ -464,9 +463,30 @@ function validatePublishable(doc) {
   return missing;
 }
 
-function withCoverImageUrl(obj, options = {}) {
+function withCoverImageUrl(obj) {
   if (!obj) return obj;
-  return resolvePublicImageFields(obj, options);
+  const coverUrl =
+    (obj.coverImage && typeof obj.coverImage === 'object' && !Array.isArray(obj.coverImage) ? obj.coverImage.url : null) ||
+    (typeof obj.coverImage === 'string' ? obj.coverImage : null) ||
+    obj.coverImageUrl ||
+    obj.imageURL ||
+    null;
+
+  const coverImageObj = (() => {
+    const v = obj.coverImage;
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      return {
+        url: v.url ? String(v.url) : (coverUrl || null),
+        publicId: v.publicId ? String(v.publicId) : null,
+        alt: v.alt ? String(v.alt) : null,
+      };
+    }
+    if (typeof v === 'string') return { url: v, publicId: null, alt: null };
+    if (coverUrl) return { url: coverUrl, publicId: null, alt: null };
+    return v; // leave undefined/null as-is
+  })();
+
+  return { ...obj, coverImageUrl: coverUrl, ...(coverImageObj ? { coverImage: coverImageObj } : {}) };
 }
 
 function _logPublicCategoryListingDebug(payload) {
@@ -522,7 +542,7 @@ async function _resolveGroupedCategoryNewsItems({
       const picked = pickBestLocalizedGroupDoc(groupedDocs.get(key) || [], requestedLang, { fallbackToBase: true });
       if (!picked) return null;
 
-      const doc = withCoverImageUrl(picked.doc, { debugScope: 'public-articles.category' });
+      const doc = withCoverImageUrl(picked.doc);
       const mapped = picked.mapped;
       return {
         ...doc,
@@ -1142,7 +1162,7 @@ router.get('/public/articles', async (req, res, next) => {
         News.countDocuments(query),
       ]);
 
-      items = (itemsRaw || []).map((item) => withCoverImageUrl(item, { debugScope: 'public-articles.list' }));
+      items = (itemsRaw || []).map(withCoverImageUrl);
       total = count;
 
       if (desired) {
@@ -1661,7 +1681,7 @@ router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
       News.countDocuments(query),
     ]);
 
-    let items = (itemsRaw || []).map((item) => withCoverImageUrl(item, { debugScope: 'public-articles.latest' }));
+    let items = (itemsRaw || []).map(withCoverImageUrl);
     if (desired) {
       const bestByKey = new Map();
       for (const doc of items) {
