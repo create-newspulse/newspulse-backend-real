@@ -142,6 +142,69 @@ test('GET /api/public/articles?lang=gu localizes Gujarati fields and falls back 
   }
 });
 
+test('GET /api/public/articles resolves imageUrl per article and ignores stale derived imageUrl fields', async () => {
+  const originals = { find: News.find, countDocuments: News.countDocuments };
+  try {
+    const docs = [
+      {
+        _id: '507f1f77bcf86cd799439111',
+        status: 'published',
+        category: 'national',
+        language: 'en',
+        originalLang: 'en',
+        slug: 'article-one',
+        title: 'Article one',
+        description: 'Summary one',
+        content: '<p>Body one</p>',
+        imageUrl: 'https://img.example/stale-article-1.jpg',
+        coverImageUrl: null,
+        imageURL: null,
+        coverImage: { url: 'https://img.example/article-cover-1.jpg', alt: 'Article one' },
+        publishedAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+      },
+      {
+        _id: '507f1f77bcf86cd799439112',
+        status: 'published',
+        category: 'national',
+        language: 'en',
+        originalLang: 'en',
+        slug: 'article-two',
+        title: 'Article two',
+        description: 'Summary two',
+        content: '<p>Body two</p>',
+        imageUrl: 'https://img.example/stale-article-2.jpg',
+        coverImageUrl: 'https://img.example/article-cover-2.jpg',
+        imageURL: 'https://img.example/article-cover-2.jpg',
+        coverImage: null,
+        publishedAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+      },
+    ];
+
+    News.find = (_query) => ({
+      sort() { return this; },
+      skip() { return this; },
+      limit() { return this; },
+      lean: async () => docs,
+    });
+
+    News.countDocuments = async () => docs.length;
+
+    const res = await request(app).get('/api/public/articles?limit=10&page=1');
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.data.items.length, 2);
+    assert.equal(res.body.data.items[0].imageUrl, 'https://img.example/article-cover-1.jpg');
+    assert.equal(res.body.data.items[1].imageUrl, 'https://img.example/article-cover-2.jpg');
+    assert.notEqual(res.body.data.items[0].imageUrl, res.body.data.items[1].imageUrl);
+  } finally {
+    restore(originals);
+  }
+});
+
 test('GET /api/articles/by-slug/:slug?lang=gu falls back to base content and returns Gujarati canonical slug', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { findOne: News.findOne };

@@ -14,6 +14,7 @@ const {
   getPublicContentLookup,
   buildPublicContentSiblingOrClauses,
 } = require('../services/publicCategoryListing.service');
+const { resolvePublicImageFields, logPublicImageResolution } = require('../services/publicImageResolver.service');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -557,35 +558,19 @@ function _extractFirstImgSrcFromHtml(html) {
   return url;
 }
 
-function withCoverImageUrl(obj) {
-  const out = { ...(obj || {}) };
+function withCoverImageUrl(obj, options = {}) {
+  const resolved = resolvePublicImageFields(obj, { returnMeta: true });
+  const out = resolved.out;
 
-  // Normalize imageUrl with the requested priority, plus legacy fields.
-  // Priority: imageUrl || coverImage || image || thumbnail || images[0] || null
-  const candidates = [];
-  candidates.push(_extractImageUrlFromAny(out.imageUrl));
-  candidates.push(_extractImageUrlFromAny(out.coverImageUrl));
-  candidates.push(_extractImageUrlFromAny(out.coverImage));
-  candidates.push(_extractImageUrlFromAny(out.imageURL));
-  candidates.push(_extractImageUrlFromAny(out.image));
-  candidates.push(_extractImageUrlFromAny(out.thumbnail));
-
-  if (Array.isArray(out.images) && out.images.length) {
-    candidates.push(_extractImageUrlFromAny(out.images[0]));
+  if (!out.imageUrl && options.allowHtmlFallback === true) {
+    const inlineImageUrl = _extractFirstImgSrcFromHtml(out.content) || null;
+    if (inlineImageUrl) {
+      out.imageUrl = inlineImageUrl;
+      out.coverImageUrl = inlineImageUrl;
+      resolved.meta.sourceField = 'content:firstImg';
+      resolved.meta.resolvedCoverImageUrl = inlineImageUrl;
+    }
   }
-
-  let imageUrl = candidates.find(Boolean) || null;
-
-  // Optional fallback: extract from body HTML when no explicit image exists.
-  if (!imageUrl) {
-    imageUrl = _extractFirstImgSrcFromHtml(out.content) || null;
-  }
-
-  out.imageUrl = imageUrl;
-
-  // Keep backward-compatible coverImageUrl populated.
-  const coverFromObj = (out.coverImage && typeof out.coverImage === 'object') ? _normalizeOptionalString(out.coverImage.url) : null;
-  out.coverImageUrl = _normalizeOptionalString(out.coverImageUrl) || _normalizeOptionalString(out.imageURL) || coverFromObj || out.imageUrl || null;
 
   // Normalize optional alt/caption fields (pass-through if present).
   const alt =
@@ -605,6 +590,12 @@ function withCoverImageUrl(obj) {
 
   out.lang = out.lang || out.language || 'gu';
   out.language = out.language || out.lang || 'gu';
+
+  if (options.debugScope) {
+    logPublicImageResolution(options.debugScope, out, resolved.meta);
+  }
+
+  if (options.returnMeta) return { out, meta: resolved.meta };
   return out;
 }
 
@@ -829,7 +820,7 @@ async function _resolveGroupedCategoryNewsItems({
       const picked = _pickBestLocalizedGroupedNewsDoc(groupedDocs.get(key) || [], requestedLang);
       if (!picked) return null;
 
-      const out = withCoverImageUrl(picked.doc);
+      const out = withCoverImageUrl(picked.doc, { debugScope: 'public-news.category' });
       attachLocalizationFields(out, requestedLang);
       _attachPublicRouteData(out, requestedLang, { fallbackEnabled: true });
 
@@ -1173,7 +1164,7 @@ async function listPublicNews(req, res) {
         News.countDocuments(filter),
       ]);
 
-      items = (itemsRaw || []).map(withCoverImageUrl);
+      items = (itemsRaw || []).map((item) => withCoverImageUrl(item, { debugScope: 'public-news.list' }));
 
       items = items
         .map((it) => {
@@ -1271,7 +1262,7 @@ async function listPublicNewsTranslations(req, res) {
       .sort({ language: 1, publishedAt: -1, createdAt: -1 })
       .lean();
 
-    const items = (itemsRaw || []).map(withCoverImageUrl);
+    const items = (itemsRaw || []).map((item) => withCoverImageUrl(item, { debugScope: 'public-news.translations' }));
     return res.status(200).json(items);
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
@@ -1408,7 +1399,7 @@ async function getPublicNewsBySlugOrId(req, res) {
       publishedAt: doc?.publishedAt || null,
     });
 
-    let out = withCoverImageUrl(doc);
+    let out = withCoverImageUrl(doc, { allowHtmlFallback: true });
     const rawForTranslation = { ...out };
 
     const inferredLang = requestedLang ? null : detectSlugLocale(out, slugOrIdRaw);
@@ -1481,7 +1472,7 @@ async function getPublicNewsBySlugOrId(req, res) {
       }
 
       if (localized && localized.out && localized.resolvedLang === desired && localized.translationPending === false) {
-        out = withCoverImageUrl(localized.out);
+        out = withCoverImageUrl(localized.out, { allowHtmlFallback: true });
         out.requestedLang = desired;
         out.resolvedLang = desired;
         out.isTranslated = true;
@@ -1565,7 +1556,7 @@ async function getPublicNewsBySlug(req, res) {
 
     if (!doc) return res.status(404).json({ message: 'Not found' });
 
-    let out = withCoverImageUrl(doc);
+    let out = withCoverImageUrl(doc, { allowHtmlFallback: true });
     const rawForTranslation = { ...out };
 
     const inferredLang = requestedLang ? null : detectSlugLocale(out, rawFromUrl || decodedParam);
@@ -1622,7 +1613,7 @@ async function getPublicNewsBySlug(req, res) {
       }
 
       if (localized && localized.out && localized.resolvedLang === desired && localized.translationPending === false) {
-        out = withCoverImageUrl(localized.out);
+        out = withCoverImageUrl(localized.out, { allowHtmlFallback: true });
         out.requestedLang = desired;
         out.resolvedLang = desired;
         out.isTranslated = true;
