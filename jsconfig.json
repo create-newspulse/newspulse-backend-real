@@ -8,6 +8,19 @@
   "typeAcquisition": {
     "enable": false
   },
+  "include": [
+    "server.js",
+    "controllers/**/*.js",
+    "lib/**/*.js",
+    "middleware/**/*.js",
+    "models/**/*.js",
+    "routes/**/*.js",
+    "scripts/**/*.js",
+    "services/**/*.js",
+    "src/**/*.js",
+    "tests/**/*.js",
+    "utils/**/*.js"
+  ],
   "exclude": [
     "node_modules",
     "**/node_modules/*",
