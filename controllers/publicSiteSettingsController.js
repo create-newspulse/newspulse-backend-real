@@ -2,8 +2,284 @@ const mongoose = require('mongoose');
 const PublicSiteSettings = require('../models/PublicSiteSettings');
 const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.service');
 
+const INSPIRATION_HUB_BOOLEAN_FIELDS = [
+  'enabled',
+  'droneTvEnabled',
+  'autoplayMuted',
+  'showOnHomepage',
+  'showOnCategoryPage',
+];
+
+const INSPIRATION_HUB_TEXT_FIELDS = [
+  'youtubeUrl',
+  'title',
+  'subtitle',
+  'droneTvTitle',
+  'droneTvSubtitle',
+  'dailyWondersTitle',
+  'dailyWondersSubtitle',
+  'narrationText',
+];
+
+const INSPIRATION_HUB_CONTENT_TEXT_FIELDS = [
+  'title',
+  'subtitle',
+  'droneTvTitle',
+  'droneTvSubtitle',
+  'dailyWondersTitle',
+  'dailyWondersSubtitle',
+  'narrationText',
+];
+
+const INSPIRATION_HUB_COLLECTION_FIELDS = [
+  'quotes',
+  'cards',
+];
+
+const INSPIRATION_HUB_LANGS = ['en', 'hi', 'gu'];
+
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
+}
+
+function hasOwn(obj, key) {
+  return !!obj && Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function normalizeOptionalString(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).trim();
+}
+
+function cloneJsonValue(value) {
+  if (value === undefined) return undefined;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasNonEmptyStringField(obj, field) {
+  return normalizeOptionalString(obj && obj[field]).length > 0;
+}
+
+function hasCollectionItems(obj, field) {
+  return Array.isArray(obj && obj[field]) && obj[field].length > 0;
+}
+
+function shouldIncludeContentEntry(entry) {
+  if (!isPlainObject(entry)) return false;
+  for (const field of INSPIRATION_HUB_CONTENT_TEXT_FIELDS) {
+    if (hasNonEmptyStringField(entry, field)) return true;
+  }
+  for (const field of INSPIRATION_HUB_COLLECTION_FIELDS) {
+    if (hasCollectionItems(entry, field)) return true;
+  }
+  return false;
+}
+
+function normalizeInspirationHubContentEntry(entry, fallbackSource) {
+  const sourceEntry = isPlainObject(entry) ? { ...entry } : {};
+  const fallback = isPlainObject(fallbackSource) ? fallbackSource : {};
+  const normalized = { ...sourceEntry };
+
+  for (const field of INSPIRATION_HUB_CONTENT_TEXT_FIELDS) {
+    if (hasOwn(sourceEntry, field)) {
+      normalized[field] = normalizeOptionalString(sourceEntry[field]);
+      continue;
+    }
+
+    if (hasOwn(fallback, field)) {
+      normalized[field] = normalizeOptionalString(fallback[field]);
+    }
+  }
+
+  for (const field of INSPIRATION_HUB_COLLECTION_FIELDS) {
+    if (hasOwn(sourceEntry, field)) {
+      normalized[field] = Array.isArray(sourceEntry[field]) ? cloneJsonValue(sourceEntry[field]) : [];
+      continue;
+    }
+
+    if (hasOwn(fallback, field) && Array.isArray(fallback[field])) {
+      normalized[field] = cloneJsonValue(fallback[field]);
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeInspirationHubContent(content, fallbackSource) {
+  const rawContent = isPlainObject(content) ? content : {};
+  const normalizedContent = {};
+  const langKeys = new Set([...Object.keys(rawContent), ...INSPIRATION_HUB_LANGS]);
+
+  for (const lang of langKeys) {
+    const normalizedEntry = normalizeInspirationHubContentEntry(rawContent[lang], fallbackSource);
+    if (shouldIncludeContentEntry(normalizedEntry)) {
+      normalizedContent[lang] = normalizedEntry;
+    }
+  }
+
+  return normalizedContent;
+}
+
+function extractYouTubeVideoId(rawUrl) {
+  const trimmedUrl = normalizeOptionalString(rawUrl);
+  if (!trimmedUrl) {
+    return { ok: true, videoId: '', normalizedUrl: '' };
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(trimmedUrl);
+  } catch (_) {
+    return { ok: false, message: 'Invalid inspirationHub.youtubeUrl: expected a valid YouTube URL' };
+  }
+
+  const hostname = String(parsed.hostname || '').toLowerCase().replace(/^www\./, '');
+  const pathParts = String(parsed.pathname || '').split('/').filter(Boolean);
+  let videoId = '';
+
+  if (hostname === 'youtu.be') {
+    videoId = pathParts[0] || '';
+  } else if (['youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtube-nocookie.com'].includes(hostname)) {
+    if (parsed.pathname === '/watch') {
+      videoId = parsed.searchParams.get('v') || '';
+    } else if (['embed', 'shorts', 'live'].includes(pathParts[0])) {
+      videoId = pathParts[1] || '';
+    } else {
+      videoId = parsed.searchParams.get('v') || '';
+    }
+  } else {
+    return { ok: false, message: 'Invalid inspirationHub.youtubeUrl: unsupported host' };
+  }
+
+  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+    return { ok: false, message: 'Invalid inspirationHub.youtubeUrl: unsupported YouTube video id' };
+  }
+
+  return { ok: true, videoId, normalizedUrl: trimmedUrl };
+}
+
+function buildYouTubeEmbedUrl(videoId, autoplayMuted) {
+  if (!videoId) return '';
+
+  const params = new URLSearchParams({ rel: '0' });
+  if (autoplayMuted) {
+    params.set('autoplay', '1');
+    params.set('mute', '1');
+    params.set('playsinline', '1');
+  }
+
+  return `https://www.youtube-nocookie.com/embed/${videoId}?${params.toString()}`;
+}
+
+function validateInspirationHubPayload(payload) {
+  const hub = getNested(payload, 'inspirationHub');
+  if (!hub.exists) return null;
+
+  if (hub.value === null) return null;
+
+  if (!hub.value || typeof hub.value !== 'object' || Array.isArray(hub.value)) {
+    return { ok: false, message: 'Invalid value for inspirationHub: expected object' };
+  }
+
+  for (const field of INSPIRATION_HUB_BOOLEAN_FIELDS) {
+    if (hasOwn(hub.value, field) && hub.value[field] !== undefined && typeof hub.value[field] !== 'boolean') {
+      return { ok: false, message: `Invalid type for inspirationHub.${field}: expected boolean` };
+    }
+  }
+
+  for (const field of INSPIRATION_HUB_TEXT_FIELDS) {
+    if (hasOwn(hub.value, field) && hub.value[field] !== undefined && hub.value[field] !== null && typeof hub.value[field] !== 'string') {
+      return { ok: false, message: `Invalid type for inspirationHub.${field}: expected string` };
+    }
+  }
+
+  for (const field of INSPIRATION_HUB_COLLECTION_FIELDS) {
+    if (hasOwn(hub.value, field) && hub.value[field] !== undefined && hub.value[field] !== null && !Array.isArray(hub.value[field])) {
+      return { ok: false, message: `Invalid type for inspirationHub.${field}: expected array` };
+    }
+  }
+
+  if (hasOwn(hub.value, 'content') && hub.value.content !== undefined && hub.value.content !== null) {
+    if (!isPlainObject(hub.value.content)) {
+      return { ok: false, message: 'Invalid value for inspirationHub.content: expected object' };
+    }
+
+    for (const [lang, contentValue] of Object.entries(hub.value.content)) {
+      if (contentValue === null || contentValue === undefined) continue;
+      if (!isPlainObject(contentValue)) {
+        return { ok: false, message: `Invalid value for inspirationHub.content.${lang}: expected object` };
+      }
+
+      for (const field of INSPIRATION_HUB_CONTENT_TEXT_FIELDS) {
+        if (hasOwn(contentValue, field) && contentValue[field] !== undefined && contentValue[field] !== null && typeof contentValue[field] !== 'string') {
+          return { ok: false, message: `Invalid type for inspirationHub.content.${lang}.${field}: expected string` };
+        }
+      }
+
+      for (const field of INSPIRATION_HUB_COLLECTION_FIELDS) {
+        if (hasOwn(contentValue, field) && contentValue[field] !== undefined && contentValue[field] !== null && !Array.isArray(contentValue[field])) {
+          return { ok: false, message: `Invalid type for inspirationHub.content.${lang}.${field}: expected array` };
+        }
+      }
+    }
+  }
+
+  if (hasOwn(hub.value, 'youtubeUrl')) {
+    const parsed = extractYouTubeVideoId(hub.value.youtubeUrl);
+    if (!parsed.ok) return { ok: false, message: parsed.message };
+  }
+
+  return null;
+}
+
+function normalizeInspirationHub(settingsObj) {
+  const base = (settingsObj && typeof settingsObj === 'object') ? settingsObj : {};
+  if (!hasOwn(base, 'inspirationHub')) return base;
+
+  if (!base.inspirationHub || typeof base.inspirationHub !== 'object' || Array.isArray(base.inspirationHub)) {
+    delete base.inspirationHub;
+    return base;
+  }
+
+  const source = base.inspirationHub;
+  const parsed = extractYouTubeVideoId(source.youtubeUrl);
+  const autoplayMuted = typeof source.autoplayMuted === 'boolean' ? source.autoplayMuted : false;
+  const derivedEmbedUrl = parsed.ok ? buildYouTubeEmbedUrl(parsed.videoId, autoplayMuted) : '';
+
+  const normalizedContent = normalizeInspirationHubContent(source.content, source);
+  const normalizedHub = {
+    ...source,
+    enabled: typeof source.enabled === 'boolean' ? source.enabled : false,
+    droneTvEnabled: typeof source.droneTvEnabled === 'boolean' ? source.droneTvEnabled : false,
+    youtubeUrl: parsed.ok ? parsed.normalizedUrl : normalizeOptionalString(source.youtubeUrl),
+    embedUrl: derivedEmbedUrl,
+    title: normalizeOptionalString(source.title),
+    subtitle: normalizeOptionalString(source.subtitle),
+    droneTvTitle: normalizeOptionalString(source.droneTvTitle),
+    droneTvSubtitle: normalizeOptionalString(source.droneTvSubtitle),
+    dailyWondersTitle: normalizeOptionalString(source.dailyWondersTitle),
+    dailyWondersSubtitle: normalizeOptionalString(source.dailyWondersSubtitle),
+    narrationText: normalizeOptionalString(source.narrationText),
+    autoplayMuted,
+    showOnHomepage: typeof source.showOnHomepage === 'boolean' ? source.showOnHomepage : false,
+    showOnCategoryPage: typeof source.showOnCategoryPage === 'boolean' ? source.showOnCategoryPage : false,
+    quotes: Array.isArray(source.quotes) ? cloneJsonValue(source.quotes) : [],
+    cards: Array.isArray(source.cards) ? cloneJsonValue(source.cards) : [],
+  };
+
+  if (Object.keys(normalizedContent).length > 0) {
+    normalizedHub.content = normalizedContent;
+  } else {
+    delete normalizedHub.content;
+  }
+
+  base.inspirationHub = normalizedHub;
+
+  return base;
 }
 
 function ensureCategoryStripEnabled(settingsObj) {
@@ -40,6 +316,8 @@ function ensureCategoryStripEnabled(settingsObj) {
     if (t.speedSec !== undefined && t.speedSeconds === undefined) t.speedSeconds = t.speedSec;
     if (t.speedSeconds !== undefined && t.speedSec === undefined) t.speedSec = t.speedSeconds;
   }
+
+  normalizeInspirationHub(base);
 
   return base;
 }
@@ -150,6 +428,11 @@ async function updateDraftSettings(req, res) {
         ok: false,
         message: 'Invalid value for publicSite.homepage.categoryStripEnabled: expected boolean',
       });
+    }
+
+    const inspirationHubValidationErr = validateInspirationHubPayload(draftData);
+    if (inspirationHubValidationErr) {
+      return res.status(400).json(inspirationHubValidationErr);
     }
 
     const settings = await PublicSiteSettings.getOrCreate();
@@ -275,6 +558,9 @@ async function savePublicSettings(req, res) {
     const validationErr = _validate(newData);
     if (validationErr) return res.status(400).json(validationErr);
 
+    const inspirationHubValidationErr = validateInspirationHubPayload(newData);
+    if (inspirationHubValidationErr) return res.status(400).json(inspirationHubValidationErr);
+
     if (String(req.method || '').toUpperCase() === 'PUT') {
       // Replace draft entirely
       settings.draft = ensureCategoryStripEnabled(newData);
@@ -343,6 +629,7 @@ async function getPublishedSettings(req, res) {
 }
 
 module.exports = {
+  ensureCategoryStripEnabled,
   getPublicSettings,
   getDraftSettings,
   updateDraftSettings,

@@ -227,6 +227,7 @@ const publicTranslationRouter = require('./routes/publicTranslation.routes');
 const publicUiLabelsRouter = require('./routes/publicUiLabels.routes');
 const adminPublicSettingsRouter = require('./routes/adminPublicSettings.routes');
 const PublicSiteSettings = require('./models/PublicSiteSettings');
+const { ensureCategoryStripEnabled } = require('./controllers/publicSiteSettingsController');
 const User = require('./models/User');
 const publicNewsRouter = require('./routes/publicNews.routes');
 const adminNewsTranslationsRouter = require('./routes/adminNewsTranslations.routes');
@@ -1792,16 +1793,18 @@ app.use('/admin/community', communityAdminContactsRoutes);
 async function _publicSettingsNoAuth(_req, res) {
   try {
     const doc = await PublicSiteSettings.getOrCreate();
-    const published = doc?.published || PublicSiteSettings.getDefaultSettings();
+    const published = ensureCategoryStripEnabled(doc?.published || PublicSiteSettings.getDefaultSettings());
     return res.json({
       ok: true,
       version: typeof doc?.version === 'number' ? doc.version : 1,
       public: published,
       published,
-      updatedAt: doc?.updatedAt ? new Date(doc.updatedAt).toISOString() : new Date().toISOString(),
+      updatedAt: doc?.publishedUpdatedAt
+        ? new Date(doc.publishedUpdatedAt).toISOString()
+        : (doc?.updatedAt ? new Date(doc.updatedAt).toISOString() : new Date().toISOString()),
     });
   } catch (e) {
-    const published = PublicSiteSettings.getDefaultSettings();
+    const published = ensureCategoryStripEnabled(PublicSiteSettings.getDefaultSettings());
     return res.json({
       ok: true,
       version: 1,
