@@ -51,52 +51,15 @@ const {
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
 const router = express.Router();
 
-function _debugArticlePropagationEnabled() {
-  const raw = String(process.env.DEBUG_ARTICLE_PROPAGATION || process.env.ARTICLE_PROPAGATION_DEBUG || '').trim().toLowerCase();
-  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
-}
-
-function _safeCoverDebugValue(docLike) {
-  if (!docLike || typeof docLike !== 'object') return null;
-  const coverObj = docLike.coverImage && typeof docLike.coverImage === 'object' && !Array.isArray(docLike.coverImage)
-    ? docLike.coverImage
-    : null;
-  return {
-    coverImageUrl: docLike.coverImageUrl || null,
-    imageURL: docLike.imageURL || null,
-    coverImage: coverObj
-      ? {
-          url: coverObj.url || null,
-          publicId: coverObj.publicId || null,
-          alt: coverObj.alt || null,
-        }
-      : (typeof docLike.coverImage === 'string' ? { url: docLike.coverImage } : null),
-  };
-}
-
-function _logArticlePropagation(scope, payload) {
-  if (!_debugArticlePropagationEnabled()) return;
+async function markPublicCopiesDraftFromNewsDoc(newsDoc, options = {}) {
+  const logger = options.logger || console;
   try {
-    console.log('[article-propagation]', {
-      scope,
-      ...(payload || {}),
-    });
-  } catch (_) {}
-}
+    if (!newsDoc) return;
 
-function _buildLinkedPublicArticleOrClauses(newsDoc, options = {}) {
-  if (!newsDoc) return [];
-  const clauses = [];
-  const sourceId = String(newsDoc._id || '').trim();
-  const includeSlugFallback = options.includeSlugFallback !== false;
-
-  if (sourceId) {
-    clauses.push({ sourceNewsId: newsDoc._id });
-    clauses.push({ sourceArticleId: newsDoc._id });
-  }
-
-  if (includeSlugFallback) {
+    const groupKey = normalizeTranslationGroupKey(newsDoc.translationKey)
+      || normalizeTranslationGroupKey(newsDoc.translationGroupId);
     const slugSet = new Set();
+
     if (newsDoc.slug) slugSet.add(String(newsDoc.slug).trim());
     const slugsObj = newsDoc.slugs && typeof newsDoc.slugs === 'object' && !Array.isArray(newsDoc.slugs) ? newsDoc.slugs : null;
     for (const k of ['en', 'hi', 'gu']) {
@@ -105,38 +68,26 @@ function _buildLinkedPublicArticleOrClauses(newsDoc, options = {}) {
     }
 
     const slugList = Array.from(slugSet).filter(Boolean);
+    const or = [];
+
+    if (newsDoc._id) or.push({ sourceNewsId: newsDoc._id });
     if (slugList.length) {
-      clauses.push({ slug: { $in: slugList } });
-      clauses.push({ 'slugs.en': { $in: slugList } });
-      clauses.push({ 'slugs.hi': { $in: slugList } });
-      clauses.push({ 'slugs.gu': { $in: slugList } });
+      or.push({ slug: { $in: slugList } });
+      or.push({ 'slugs.en': { $in: slugList } });
+      or.push({ 'slugs.hi': { $in: slugList } });
+      or.push({ 'slugs.gu': { $in: slugList } });
     }
-  }
-
-  return clauses;
-}
-
-async function markPublicCopiesDraftFromNewsDoc(newsDoc, options = {}) {
-  const logger = options.logger || console;
-  try {
-    if (!newsDoc) return;
-
-    const or = _buildLinkedPublicArticleOrClauses(newsDoc);
+    if (groupKey) {
+      or.push({ translationKey: groupKey });
+      or.push({ translationGroupId: groupKey });
+    }
 
     if (!or.length) return;
-    const result = await PublicArticle.updateMany(
+    await PublicArticle.updateMany(
       { $or: or },
       { $set: { status: 'draft', publishedAt: null } },
       { runValidators: false }
     );
-
-    _logArticlePropagation('public-copies.mark-draft', {
-      articleId: String(newsDoc._id || ''),
-      translationGroupId: normalizeTranslationGroupKey(newsDoc.translationGroupId) || normalizeTranslationGroupKey(newsDoc.translationKey),
-      sourceArticleId: String(newsDoc.sourceArticleId || ''),
-      matchedClauses: or,
-      modifiedCount: result?.modifiedCount ?? null,
-    });
   } catch (e) {
     try {
       logger.warn?.('[publicCopies][markDraft] failed', { message: e?.message || String(e) });
@@ -2205,18 +2156,6 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     const isPublishingNow = beforeStatusNorm !== 'published' && nextStatusNorm === 'published';
     const shouldTreatAsSyncSource = _isSourceTranslationDoc(before, rawId);
 
-    _logArticlePropagation('article.update.request', {
-      articleId: rawId,
-      translationGroupId: String(before?.translationGroupId || ''),
-      sourceArticleId: String(before?.sourceArticleId || ''),
-      applyToGroup,
-      hasCoverMediaUpdate,
-      beforeStatus: beforeStatusNorm || null,
-      requestedStatus: nextStatusNorm || null,
-      beforeCover: _safeCoverDebugValue(before),
-      requestedCover: _safeCoverDebugValue({ coverImage, coverImageUrl, imageURL }),
-    });
-
     // Publish must never block on translation. Translation runs asynchronously after we persist the publish.
     if (isPublishingNow) {
       if (!before) {
@@ -2297,17 +2236,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
       }
       await syncArticleFromNews(doc);
-      const groupSyncResult = await syncMasterArticleGroup(doc, { reason: 'article_update_publish', invalidate: true });
-
-      _logArticlePropagation('article.update.publish', {
-        articleId: rawId,
-        translationGroupId,
-        sourceArticleId: String(doc.sourceArticleId || ''),
-        touchedChildIds: Array.isArray(groupSyncResult?.childIds) ? groupSyncResult.childIds : [],
-        childrenUpdated: groupSyncResult?.childrenUpdated ?? 0,
-        beforeCover: _safeCoverDebugValue(before),
-        afterCover: _safeCoverDebugValue(doc),
-      });
+      await syncMasterArticleGroup(doc, { reason: 'article_update_publish', invalidate: true });
 
       // Fire-and-forget: never await translation in the request.
       enqueueTranslateAndSave(doc._id, { logger: console });
@@ -2519,16 +2448,9 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       if (doc && String(doc.status || '').toLowerCase() === 'published') {
         await syncArticleFromNews(doc);
       }
-      const groupSyncResult = await syncMasterArticleGroup(doc, {
+      await syncMasterArticleGroup(doc, {
         reason: 'article_update_meta_only',
         invalidate: ['published', 'scheduled', 'archived', 'deleted'].includes(String(doc?.status || '').toLowerCase()),
-      });
-      _logArticlePropagation('article.update.meta-only', {
-        articleId: rawId,
-        translationGroupId: String(doc?.translationGroupId || ''),
-        sourceArticleId: String(doc?.sourceArticleId || ''),
-        touchedChildIds: Array.isArray(groupSyncResult?.childIds) ? groupSyncResult.childIds : [],
-        childrenUpdated: groupSyncResult?.childrenUpdated ?? 0,
       });
       const obj0 = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
       return res.json({
@@ -2569,21 +2491,10 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     if (!hasCoverMediaUpdate || applyToGroup) {
-      const groupSyncResult = await syncMasterArticleGroup(doc, {
+      await syncMasterArticleGroup(doc, {
         reason: 'article_update',
         invalidate: ['published', 'scheduled', 'archived', 'deleted'].includes(String(doc.status || '').toLowerCase()),
         propagateCoverMedia: hasCoverMediaUpdate && applyToGroup,
-      });
-      _logArticlePropagation('article.update.finalize', {
-        articleId: rawId,
-        translationGroupId: String(doc?.translationGroupId || ''),
-        sourceArticleId: String(doc?.sourceArticleId || ''),
-        applyToGroup,
-        hasCoverMediaUpdate,
-        touchedChildIds: Array.isArray(groupSyncResult?.childIds) ? groupSyncResult.childIds : [],
-        childrenUpdated: groupSyncResult?.childrenUpdated ?? 0,
-        beforeCover: _safeCoverDebugValue(before),
-        afterCover: _safeCoverDebugValue(doc),
       });
     }
 
@@ -2629,7 +2540,6 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     await assertSlugUnique(normalizeSlug(doc.slug), id);
 
     const now = new Date();
-    const coverBeforePublish = _safeCoverDebugValue(doc);
     doc.status = 'published';
     doc.deletedAt = null;
     doc.publishedAt = now;
@@ -2670,13 +2580,33 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     await doc.save();
 
     await syncArticleFromNews(doc);
-    const groupSyncResult = await syncMasterArticleGroup(doc, { reason: 'article_publish', invalidate: true });
+    await syncMasterArticleGroup(doc, { reason: 'article_publish', invalidate: true });
 
     // Legacy safety net:
     // Ensure any existing public copies reachable by slug/slugs.* are marked published
     // and have geo.* populated from News location slugs.
     try {
-      const or = _buildLinkedPublicArticleOrClauses(doc);
+      const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
+      const slugs = new Set();
+      if (doc.slug) slugs.add(String(doc.slug).trim());
+      const slugsObj = doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
+      for (const k of ['en', 'hi', 'gu']) {
+        const v = slugsObj && slugsObj[k] ? String(slugsObj[k]).trim() : '';
+        if (v) slugs.add(v);
+      }
+      const slugList = Array.from(slugs).filter(Boolean);
+
+      const or = [];
+      if (slugList.length) {
+        or.push({ slug: { $in: slugList } });
+        or.push({ 'slugs.en': { $in: slugList } });
+        or.push({ 'slugs.hi': { $in: slugList } });
+        or.push({ 'slugs.gu': { $in: slugList } });
+      }
+      if (groupKey) {
+        or.push({ translationKey: groupKey });
+        or.push({ translationGroupId: groupKey });
+      }
 
       const geoState = doc?.geo?.state ?? doc?.location?.stateSlug;
       const geoDistrict = doc?.geo?.district ?? doc?.location?.districtSlug;
@@ -2688,23 +2618,11 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
       };
 
       if (or.length) {
-        const result = await PublicArticle.updateMany(
+        await PublicArticle.updateMany(
           { $or: or },
           { $set: { status: 'published', deletedAt: null, publishedAt: now, category: doc.category, ...geoSet } },
           { runValidators: false }
         );
-
-        _logArticlePropagation('article.publish.public-fallback', {
-          articleId: String(doc._id || ''),
-          translationGroupId: String(doc.translationGroupId || doc.translationKey || ''),
-          sourceArticleId: String(doc.sourceArticleId || ''),
-          touchedChildIds: Array.isArray(groupSyncResult?.childIds) ? groupSyncResult.childIds : [],
-          childrenUpdated: groupSyncResult?.childrenUpdated ?? 0,
-          beforeCover: coverBeforePublish,
-          afterCover: _safeCoverDebugValue(doc),
-          matchedClauses: or,
-          modifiedCount: result?.modifiedCount ?? null,
-        });
       }
     } catch (e) {
       console.warn('[articles.publish] public legacy publish fallback failed', e?.message || e);
