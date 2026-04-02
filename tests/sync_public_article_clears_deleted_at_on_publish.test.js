@@ -29,6 +29,8 @@ test('syncPublicArticleFromNews clears stale deletedAt when source news is publi
         gu: 'published-story-gu',
       },
       category: 'national',
+      track: 'student-voices',
+      tags: ['desk:youth-pulse'],
       status: 'published',
       lang: 'gu',
       language: 'gu',
@@ -47,6 +49,8 @@ test('syncPublicArticleFromNews clears stale deletedAt when source news is publi
     assert.ok(lastUpdate);
     assert.equal(lastUpdate.$set.status, 'published');
     assert.equal(lastUpdate.$set.deletedAt, null);
+    assert.equal(lastUpdate.$set.track, 'student-voices');
+    assert.deepEqual(lastUpdate.$set.tags, ['desk:youth-pulse', 'track:student-voices']);
   } finally {
     PublicArticle.findOneAndUpdate = originalFindOneAndUpdate;
   }

@@ -11,6 +11,10 @@ let CommunityStory = null;
 try { CommunityStory = require('../models/CommunityStory'); } catch (_) { /* optional model */ }
 const CommunitySubmissionModel = require('../models/CommunitySubmission');
 const { upsertReporterContact } = require('../services/reporterContactService');
+const {
+  buildCommunitySubmissionAdminFilter,
+  getSubmissionDeskMetadata,
+} = require('../services/communitySubmissionWorkflow');
 
 function _isMongoReady() {
   return !!(mongoose.connection && mongoose.connection.readyState === 1);
@@ -277,34 +281,26 @@ async function getCommunityReporterQueue(req, res) {
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
     const skip = (page - 1) * limit;
 
-    const mapStatus = (s) => {
-      const key = (s || '').toString().toLowerCase();
-      if (key === 'pending' || key === 'under_review') return ['PENDING_FOUNDER', 'UNDER_REVIEW', 'NEW', 'pending', 'under_review'];
-      if (key === 'approved') return ['APPROVED', 'approved'];
-      if (key === 'rejected') return ['REJECTED', 'rejected'];
-      if (key === 'all') return null;
-      return [s];
-    };
-
-    const filter = {};
-    const mapped = mapStatus(status);
-    if (mapped) filter.status = { $in: mapped };
+    const filter = buildCommunitySubmissionAdminFilter(req.query, { defaultStatus: status });
 
     const [docs, total] = await Promise.all([
       CommunitySubmission.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      CommunitySubmission.countDocuments(mapped ? { status: { $in: mapped } } : {}),
+      CommunitySubmission.countDocuments(filter),
     ]);
 
     const data = docs.map(d => ({
       id: d._id.toString(),
       headline: d.headline || '',
       category: d.category || null,
+      desk: getSubmissionDeskMetadata(d).desk || null,
+      track: getSubmissionDeskMetadata(d).track || null,
       reporter: (d.contact && d.contact.name) || d.reporterName || d.name || 'Unknown',
       reporterName: (d.contact && d.contact.name) || d.reporterName || d.name || null,
       reporterEmail: d.reporterEmailNorm || d.reporterEmail || d.email || (d.contact && d.contact.email) || null,
       reporterPhone: (d.contact && d.contact.phone) || null,
       location: d.reporterLocation || (d.location && d.location.city) || d.city || null,
       locationObj: d.location || d.locationDetail || null,
+      attachments: Array.isArray(d.attachments) ? d.attachments : [],
       priority: d.priority || 'normal',
       aiRisk: typeof d.riskScore === 'number' ? d.riskScore : null,
       status: d.status || 'under_review',

@@ -27,6 +27,7 @@ const {
 } = require('../services/publicArticleVisibility.service');
 
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
+const { ensureTrackTag, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const {
   normalizeTranslationGroupKey,
   prepareSourceSyncMetadata,
@@ -683,6 +684,8 @@ function _buildSharedSyncFieldsFromBody(body) {
   const gallery = _parseStringListInput(body?.gallery);
   const seo = _parseSeoPayload(body?.seo);
   const sourceArticleId = _normalizeSourceArticleId(body?.sourceArticleId);
+  const trackRaw = body?.track;
+  const normalizedTrack = trackRaw === undefined ? undefined : normalizeTrackValue(trackRaw);
 
   return {
     ...(externalUrls !== undefined ? { externalUrls } : {}),
@@ -690,6 +693,7 @@ function _buildSharedSyncFieldsFromBody(body) {
     ...(gallery !== undefined ? { gallery } : {}),
     ...(seo !== undefined ? { seo } : {}),
     ...(sourceArticleId !== undefined ? { sourceArticleId } : {}),
+    ...(normalizedTrack !== undefined ? { track: normalizedTrack } : {}),
   };
 }
 
@@ -723,6 +727,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       content: contentRaw,
       body: bodyRaw,
       category,
+      track: trackRaw,
       language,
       lang: langRaw,
       tags,
@@ -733,8 +738,11 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       coverImage,
     } = body0;
     const sharedSyncFields = _buildSharedSyncFieldsFromBody(body0);
+    if (trackRaw !== undefined && sharedSyncFields.track === null) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid Youth Pulse track' });
+    }
 
-    const tagsArr = parseTags(tags);
+    const tagsArr = ensureTrackTag(parseTags(tags), sharedSyncFields.track);
     const geo = _geoFromTags(tagsArr);
 
     // Guard against accidental "undefined"/"null" string inputs from form-data payloads.
@@ -845,6 +853,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       description: normalizedDescription,
       content: content ?? body ?? '',
       category,
+      ...(sharedSyncFields.track !== undefined ? { track: sharedSyncFields.track } : {}),
       language: langNorm,
       lang: langNorm,
       originalLang: langNorm,
@@ -2007,6 +2016,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       content: contentRaw,
       body: bodyRaw,
       category: categoryRaw,
+      track: trackRaw,
       language: languageRaw,
       lang: langRaw,
       tags,
@@ -2017,6 +2027,9 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       coverImage,
     } = requestBody;
     const sharedSyncFields = _buildSharedSyncFieldsFromBody(requestBody);
+    if (trackRaw !== undefined && sharedSyncFields.track === null) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid Youth Pulse track' });
+    }
 
     // Guard against accidental "undefined"/"null" string inputs from form-data payloads.
     const title = _normalizeOptionalString(titleRaw);
@@ -2124,7 +2137,9 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       if (coverObj.alt !== undefined) nextCover.alt = coverObj.alt ? String(coverObj.alt) : null;
     }
 
-    const tagsArr = tags !== undefined ? parseTags(tags) : null;
+    const tagsArr = tags !== undefined
+      ? ensureTrackTag(parseTags(tags), sharedSyncFields.track !== undefined ? sharedSyncFields.track : before?.track)
+      : (sharedSyncFields.track !== undefined ? ensureTrackTag(before?.tags || [], sharedSyncFields.track) : null);
     const geo = tagsArr ? _geoFromTags(tagsArr) : null;
 
     const beforeBaseLang = normalizeLanguage(before?.originalLang || before?.lang || before?.language) || 'en';
@@ -2135,6 +2150,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       ...(summaryOrDescription !== undefined ? { description: String(summaryOrDescription).trim() } : {}),
       ...(content !== undefined || bodyText !== undefined ? { content: content ?? bodyText ?? '' } : {}),
       ...(category !== undefined ? { category } : {}),
+      ...(sharedSyncFields.track !== undefined ? { track: sharedSyncFields.track } : {}),
       ...((language !== undefined || shouldFixMislabel) ? { language: effectiveLang, lang: effectiveLang, originalLang: effectiveLang } : {}),
       ...(loc.state !== undefined ? { 'location.state': loc.state, 'location.stateSlug': loc.stateSlug ?? null } : {}),
       ...(loc.district !== undefined ? { 'location.district': loc.district, 'location.districtSlug': loc.districtSlug ?? null } : {}),
@@ -2360,7 +2376,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
       let articleBefore = null;
       try {
-        articleBefore = await PublicArticle.findById(rawId).select('title summary content category').lean();
+        articleBefore = await PublicArticle.findById(rawId).select('title summary content category track tags').lean();
       } catch (_) {
         // ignore
       }
@@ -2378,6 +2394,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         ...(summary !== undefined ? { summary } : {}),
         ...(content !== undefined || bodyText !== undefined ? { content: content ?? bodyText ?? '' } : {}),
         ...(category !== undefined ? { category } : {}),
+        ...(sharedSyncFields.track !== undefined ? { track: sharedSyncFields.track } : {}),
         ...(language !== undefined ? { language: normalizeLanguage(language) || undefined } : {}),
         ...(tagsArr ? { tags: tagsArr, geo } : {}),
         ...(status !== undefined && status !== null && String(status).trim() !== '' && allowedArticleStatuses.has(String(status).toLowerCase())

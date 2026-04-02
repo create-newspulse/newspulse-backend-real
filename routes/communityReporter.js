@@ -11,6 +11,12 @@ let ReporterStory = null;
 try { Reporter = require('../newspulse-backend-real-main/models/Reporter'); } catch (_) {}
 try { ReporterStory = require('../newspulse-backend-real-main/models/CommunityStory'); } catch (_) {}
 const { runCommunityAiChecks } = require('../services/communityAi');
+const {
+  extractSubmissionAttachments,
+  inferSubmissionDeskMetadata,
+  normalizeDeskValue,
+  normalizeWorkflowStatus,
+} = require('../services/communitySubmissionWorkflow');
 // NOTE: Phase-1 /submit handler is implemented inline below for clarity and
 // to keep it fully aligned with the public form payload.
 const { requireAdminAuth } = require('../middleware/adminAuth');
@@ -197,6 +203,7 @@ function externalStatus(internal) {
 router.post('/submissions', async (req, res) => {
   try {
     const body = req.body || {};
+    const deskMeta = inferSubmissionDeskMetadata(body);
     const {
       name,
       fullName,
@@ -209,6 +216,14 @@ router.post('/submissions', async (req, res) => {
       city,
       state,
       country,
+      contactEmail,
+      contactPhone,
+      title,
+      content,
+      track,
+      desk,
+      submissionType,
+      intakeSource,
       preferredLanguages,
       heardAbout,
       isProfessionalJournalist,
@@ -223,12 +238,12 @@ router.post('/submissions', async (req, res) => {
       journalistCharterAccepted,
     } = body;
     const errors = [];
-    if (!name || !String(name).trim()) errors.push('name required');
+    if (!(name || fullName) || !String(name || fullName).trim()) errors.push('name required');
     if (!email || !String(email).trim()) errors.push('email required');
-    if (!location || !String(location).trim()) errors.push('location required');
-    if (!category || !String(category).trim()) errors.push('category required');
-    if (!headline || !String(headline).trim()) errors.push('headline required');
-    if (!story || !String(story).trim()) errors.push('story required');
+    if (!location && !city && !state) errors.push('location required');
+    if (!(category || track || deskMeta.track)) errors.push('category required');
+    if (!(headline || title) || !String(headline || title).trim()) errors.push('headline required');
+    if (!(story || content) || !String(story || content).trim()) errors.push('story required');
     if (errors.length) return res.status(400).json({ success: false, message: 'Validation failed', errors });
 
     // Parse location string ("City, State, Country") when frontend sends a single text field.
@@ -248,7 +263,7 @@ router.post('/submissions', async (req, res) => {
       reporterResult = await upsertReporterContactFromPayload({
         name: (fullName || name || '').trim(),
         email: email.trim().toLowerCase(),
-        phone: phone,
+        phone: phone || contactPhone,
         city: (city || locationCityFromText || '').trim(),
         state: (state || locationStateFromText || '').trim(),
         country: (country || locationCountryFromText || '').trim(),
@@ -277,6 +292,10 @@ router.post('/submissions', async (req, res) => {
     const cityNorm = (city || locationCityFromText || locationText || '').trim();
     const stateNorm = (state || locationStateFromText || '').trim();
     const countryNorm = (country || locationCountryFromText || '').trim();
+    const attachments = extractSubmissionAttachments(body);
+    const normalizedHeadline = (headline || title || '').trim();
+    const normalizedStory = (story || content || '').trim();
+    const normalizedCategory = (category || track || deskMeta.track || '').trim();
     // Log reporter email used for saving
     console.log('[COMMUNITY_REPORTER][create] saving submission for reporterEmail:', (email || '').trim().toLowerCase());
     const submission = await CommunitySubmission.create({
@@ -286,17 +305,29 @@ router.post('/submissions', async (req, res) => {
       // Legacy/alias fields for compatibility
       name: (name || '').trim(),
       email: (email || '').trim().toLowerCase(),
-      category: (category || '').trim(),
-      headline: (headline || '').trim(),
-      body: (story || '').trim(), // underlying field
+      category: normalizedCategory,
+      desk: deskMeta.desk || normalizeDeskValue(desk) || undefined,
+      submissionType: deskMeta.submissionType || (submissionType ? String(submissionType).trim().toLowerCase() : undefined),
+      intakeSource: deskMeta.intakeSource || (intakeSource ? String(intakeSource).trim().toLowerCase() : undefined),
+      track: deskMeta.track || undefined,
+      headline: normalizedHeadline,
+      body: normalizedStory,
       // Normalized location object expected by schema
       location: { city: cityNorm || null, state: stateNorm || null, country: countryNorm || null },
       reporterLocation: cityNorm || undefined,
       city: cityNorm || undefined,
       state: stateNorm || undefined,
       country: countryNorm || undefined,
+      contact: {
+        name: (fullName || name || '').trim() || undefined,
+        email: (contactEmail || email || '').trim().toLowerCase() || undefined,
+        phone: (contactPhone || phone || '').trim() || undefined,
+      },
+      attachments,
+      mediaUrl: (attachments[0] && attachments[0].url) || undefined,
+      mediaLink: (attachments[0] && attachments[0].url) || undefined,
       // Defaults
-      status: 'PENDING_FOUNDER',
+      status: deskMeta.isYouthPulse ? 'NEW' : 'PENDING_FOUNDER',
       reporterId: reporterResult ? reporterResult.contactId : undefined,
       sourceType: reporterResult ? (reporterResult.contact.reporterType === 'journalist' ? 'journalist' : 'community') : (isProfessionalJournalist ? 'journalist' : 'community'),
       reporterVerificationLevel: (function () {
@@ -328,6 +359,11 @@ router.post('/submissions', async (req, res) => {
       email: submission.email,
       location: submission.location,
       category: submission.category,
+      desk: submission.desk || null,
+      track: submission.track || null,
+      submissionType: submission.submissionType || null,
+      intakeSource: submission.intakeSource || null,
+      attachments: Array.isArray(submission.attachments) ? submission.attachments : [],
       headline: submission.headline,
       story: submission.body,
       aiHeadline: submission.aiHeadline,
@@ -453,17 +489,20 @@ router.get('/reporter-stories', async (req, res) => {
 // POST /api/community-reporter/submit
 router.post('/submit', async (req, res) => {
   try {
-    const { name, email, location, headline, story, ageGroup } = req.body || {};
+    const body = req.body || {};
+    const deskMeta = inferSubmissionDeskMetadata(body);
+    const { name, email, location, headline, title, story, content, ageGroup } = body;
 
-    if (!name || !email || !headline || !story || !ageGroup) {
+    if (!name || !email || !(headline || title) || !(story || content) || !ageGroup) {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
     const nameNorm = String(name).trim();
     const emailNorm = String(email).trim().toLowerCase();
-    const headlineNorm = String(headline).trim();
-    const storyNorm = String(story).trim();
+    const headlineNorm = String(headline || title).trim();
+    const storyNorm = String(story || content).trim();
     const ageGroupNorm = String(ageGroup).trim();
+    const attachments = extractSubmissionAttachments(body);
 
     const locationObj = (location && typeof location === 'object') ? location : null;
     const locationText = (typeof location === 'string') ? location.trim() : undefined;
@@ -511,13 +550,26 @@ router.post('/submit', async (req, res) => {
         state: locationObj.state ?? null,
         country: locationObj.country ?? null,
       } : (locationText ? { city: parsedCity || locationText || null, state: parsedState || null, country: parsedCountry || null } : { city: null, state: null, country: null }),
+      desk: deskMeta.desk || undefined,
+      submissionType: deskMeta.submissionType || undefined,
+      intakeSource: deskMeta.intakeSource || undefined,
+      track: deskMeta.track || undefined,
+      category: (body.category || body.track || deskMeta.track || '').trim() || undefined,
       headline: headlineNorm,
       story: storyNorm,
       ageGroup: ageGroupNorm,
-      status: 'NEW',
+      status: deskMeta.isYouthPulse ? 'NEW' : 'NEW',
       sourceType: 'community',
       reporterVerificationLevel: 'unverified',
       reporterId: reporterResult ? reporterResult.contactId : undefined,
+      contact: {
+        name: nameNorm,
+        email: emailNorm,
+        phone: (body.phone || body.contactPhone || '').trim() || undefined,
+      },
+      attachments,
+      mediaUrl: (attachments[0] && attachments[0].url) || undefined,
+      mediaLink: (attachments[0] && attachments[0].url) || undefined,
       ipAddress: req.ip ? String(req.ip) : undefined,
       userAgent: req.get('user-agent') ? String(req.get('user-agent')) : undefined,
     });
@@ -535,7 +587,13 @@ router.post('/submit', async (req, res) => {
       console.error('ReporterContact upsert error:', err?.message || err);
     }
 
-    return res.status(201).json({ success: true, id: submission._id && typeof submission._id.toString === 'function' ? submission._id.toString() : submission._id });
+    return res.status(201).json({
+      success: true,
+      id: submission._id && typeof submission._id.toString === 'function' ? submission._id.toString() : submission._id,
+      desk: submission.desk || null,
+      track: submission.track || null,
+      status: submission.status || null,
+    });
   } catch (error) {
     console.error('CommunityReporterSubmit error:', error);
     // Surface validation errors as 400s to avoid noisy 500s for bad payloads.

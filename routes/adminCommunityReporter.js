@@ -7,6 +7,17 @@ const News = require('../models/News');
 const mongoose = require('mongoose');
 const { upsertReporterContact } = require('../services/reporterContactService');
 const { findReporterContactByIdentifier } = require('../services/reporterLookup.service');
+const {
+  WORKFLOW_STATUSES,
+  YOUTH_PULSE_DESK,
+  buildCommunitySubmissionAdminFilter,
+  buildSubmissionAdminView,
+  deriveArticleCategoryFromSubmission,
+  deriveArticleSourceFromSubmission,
+  deriveArticleTagsFromSubmission,
+  getSubmissionDeskMetadata,
+  normalizeWorkflowStatus,
+} = require('../services/communitySubmissionWorkflow');
 
 const {
   adminListReporterContacts,
@@ -109,8 +120,10 @@ async function upsertDraftFromSubmission(submission) {
   const safe = (v) => (v == null ? '' : String(v));
   const title = safe(submission.headline) || 'Untitled';
   const body = safe(submission.body || submission.story);
-  const category = submission.category || undefined;
-  const tags = Array.isArray(submission.aiSuggestedTags) ? submission.aiSuggestedTags : [];
+  const category = deriveArticleCategoryFromSubmission(submission);
+  const tags = deriveArticleTagsFromSubmission(submission);
+  const source = deriveArticleSourceFromSubmission(submission);
+  const track = getSubmissionDeskMetadata(submission).track || null;
 
   const deriveDescription = () => {
     const src = body || title;
@@ -134,9 +147,10 @@ async function upsertDraftFromSubmission(submission) {
       article.description = deriveDescription();
       article.content = body;
       if (category !== undefined) article.category = category;
+      article.track = track;
       article.status = 'draft';
       article.language = article.language || 'en';
-      article.source = 'community';
+      article.source = source;
       article.communityReportId = submission._id;
       if (tags && tags.length) article.tags = tags;
       await article.save();
@@ -146,10 +160,11 @@ async function upsertDraftFromSubmission(submission) {
         description: deriveDescription(),
         content: body,
         category,
+        track,
         tags,
         status: 'draft',
         language: 'en',
-        source: 'community',
+        source,
         communityReportId: submission._id,
       });
       await article.save();
@@ -161,110 +176,122 @@ async function upsertDraftFromSubmission(submission) {
   return article;
 }
 
-// Placeholder admin community-reporter routes to ensure server boots.
-// Keep responses minimal; real implementations can extend these.
-router.get('/submissions', requireAdminAuth, async (req, res) => {
+function buildSubmissionListResponse(items) {
+  return items.map(buildSubmissionAdminView);
+}
+
+async function listAdminSubmissions(req, res, options = {}) {
   try {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limitRaw = Math.max(parseInt(req.query.limit || '20', 10), 1);
     const limit = Math.min(limitRaw, 100);
     const skip = (page - 1) * limit;
-    const { source, q } = req.query || {};
+    const filter = buildCommunitySubmissionAdminFilter(req.query, {
+      defaultStatus: req.query.status || 'pending',
+      forceDesk: options.forceDesk || null,
+    });
 
-    // Map external status query to internal statuses. Default missing to "pending" grouping.
-    const rawStatus = (req.query.status || 'pending').toString().toLowerCase();
-    let statusFilter; // either {$in: [...]} or direct equality string or undefined
-    if (rawStatus === 'pending') {
-      statusFilter = { $in: ['pending', 'PENDING_FOUNDER', 'under_review'] };
-    } else if (rawStatus === 'rejected') {
-      statusFilter = { $in: ['rejected', 'REJECTED'] };
-    } else if (rawStatus === 'approved') {
-      statusFilter = { $in: ['approved', 'APPROVED'] };
-    } else if (rawStatus === 'all') {
-      // No status restriction (future list views). Safer current default is to leave unfiltered.
-      statusFilter = undefined;
-    } else {
-      // Fallback: treat as direct equality to allow future explicit statuses.
-      statusFilter = rawStatus;
-    }
-
-    // Base filter: exclude soft-deleted if your schema uses such flags.
-    // Note: current schema has no deleted flags; keep placeholder for future.
-    const filter = {};
-
-    // Backwards compatibility: submissions without sourceType are treated as community reporters.
-    // (Submissions created before reporter directory integration lacked sourceType.)
-    if (!source || source === 'all') {
-      // no sourceType restriction applied here
-    }
-    if (source === 'community') {
-      filter.$or = [
-        { sourceType: 'community' },
-        { sourceType: { $exists: false } },
-        { sourceType: null },
-      ];
-    } else if (source === 'journalist' || source === 'journalists' || source === 'verified_journalists') {
-      filter.sourceType = 'journalist';
-    } // else source=all -> no sourceType restriction
-
-    // Apply status filter if provided
-    if (statusFilter !== undefined) {
-      filter.status = statusFilter;
-    }
-
-    // Optional simple text search on headline or location
-    if (q && String(q).trim()) {
-      const regex = new RegExp(String(q).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-      filter.$or = (filter.$or || []).concat([
-        { headline: regex },
-        { reporterLocation: regex },
-        { 'location.city': regex },
-        { 'locationDetail.city': regex },
-        { city: regex },
-      ]);
-    }
-
-    const query = CommunitySubmission.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit);
     const [items, total] = await Promise.all([
-      query.lean(),
+      CommunitySubmission.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
       CommunitySubmission.countDocuments(filter),
     ]);
 
-    const mapped = items.map(s => {
-      const reporterName = s.reporterName || s.name || (s.contact && s.contact.name) || null;
-      const reporterEmail = s.reporterEmailNorm || s.reporterEmail || s.email || (s.contact && s.contact.email) || null;
-      const locationObj = s.location || s.locationDetail || null;
-      const locationText = s.reporterLocation || (locationObj && locationObj.city) || s.city || null;
-
-      return {
-        id: s._id.toString(),
-        headline: s.headline,
-        story: s.body,
-        category: s.category,
-        location: locationText,
-        locationObj,
-        status: s.status,
-        sourceType: s.sourceType || 'community', // compatibility default
-        reporterVerificationLevel: s.reporterVerificationLevel || 'community_default',
-        reporterId: s.reporterId || null,
-        reporterName,
-        reporterEmail,
-        reporterPhone: (s.contact && s.contact.phone) || null,
-        riskScore: s.riskScore || 0,
-        flags: s.flags || [],
-        createdAt: s.createdAt,
-      };
-    });
-
-    console.log('[ADMIN_COMMUNITY][list] rawStatus=%s, appliedStatusFilter=%j, count=%d', rawStatus, statusFilter, mapped.length);
-
-    // Response shape expected by admin UI
-    return res.json({ success: true, submissions: mapped, total, page, limit });
+    return res.json({ success: true, submissions: buildSubmissionListResponse(items), total, page, limit });
   } catch (err) {
     console.error('[ADMIN_COMMUNITY_REPORTER][submissions] error', err?.message || err);
     return res.status(500).json({ ok: false, message: 'Failed to load submissions' });
   }
-});
+}
+
+async function updateSubmissionWorkflowStatus(req, res) {
+  try {
+    const { id } = req.params || {};
+    if (!id || !/^[a-fA-F0-9]{24}$/.test(id)) {
+      return res.status(400).json({ ok: false, message: 'Invalid submission id' });
+    }
+
+    const workflowStatus = normalizeWorkflowStatus(
+      req.body?.status || req.body?.workflowStatus || req.body?.nextStatus,
+      null
+    );
+    if (!workflowStatus || !WORKFLOW_STATUSES.includes(workflowStatus)) {
+      return res.status(400).json({ ok: false, message: 'Invalid workflow status' });
+    }
+
+    const submission = await CommunitySubmission.findById(id);
+    if (!submission) return res.status(404).json({ ok: false, message: 'Submission not found' });
+
+    if (workflowStatus === 'PUBLISHED' && !submission.linkedArticleId) {
+      return res.status(409).json({ ok: false, message: 'Publish handoff required before marking submission as PUBLISHED' });
+    }
+
+    submission.status = workflowStatus;
+    if (workflowStatus !== 'REJECTED') {
+      submission.rejectReason = undefined;
+    } else if (req.body?.rejectReason || req.body?.reason) {
+      submission.rejectReason = String(req.body.rejectReason || req.body.reason).trim();
+    }
+
+    try {
+      if ('decisionBy' in submission) submission.decisionBy = (req.admin && (req.admin.email || req.admin.id)) || 'system';
+      if ('decisionAt' in submission) submission.decisionAt = new Date();
+      if ('updatedAt' in submission) submission.updatedAt = new Date();
+    } catch (_) {}
+
+    await submission.save();
+    return res.json({ ok: true, success: true, submission });
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][status-update] error', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to update submission status' });
+  }
+}
+
+async function createSubmissionPublishHandoff(req, res) {
+  try {
+    const { id } = req.params || {};
+    if (!id || !/^[a-fA-F0-9]{24}$/.test(id)) {
+      return res.status(400).json({ ok: false, message: 'Invalid submission id' });
+    }
+
+    const submission = await CommunitySubmission.findById(id);
+    if (!submission) return res.status(404).json({ ok: false, message: 'Submission not found' });
+
+    const currentStatus = normalizeWorkflowStatus(submission.status, submission.status);
+    if (currentStatus !== 'APPROVED' && currentStatus !== 'PUBLISHED') {
+      return res.status(409).json({ ok: false, message: 'Submission must be APPROVED before publish handoff' });
+    }
+
+    const article = await upsertDraftFromSubmission(submission);
+    if (article && article._id) {
+      submission.linkedArticleId = article._id;
+      try { submission.articleId = article._id; } catch (_) {}
+      await submission.save().catch(() => {});
+    }
+
+    return res.json({
+      ok: true,
+      success: true,
+      handoff: 'draft_created',
+      articleId: article && article._id ? String(article._id) : null,
+      submissionId: String(submission._id),
+      submissionStatus: submission.status,
+      desk: getSubmissionDeskMetadata(submission).desk || null,
+    });
+  } catch (e) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][publish-handoff] error', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to create publish handoff' });
+  }
+}
+
+// Placeholder admin community-reporter routes to ensure server boots.
+// Keep responses minimal; real implementations can extend these.
+router.get('/submissions', requireAdminAuth, (req, res) => listAdminSubmissions(req, res));
+router.get('/youth-pulse', requireAdminAuth, (req, res) => listAdminSubmissions(req, res, { forceDesk: YOUTH_PULSE_DESK }));
+router.get('/youth-pulse/submissions', requireAdminAuth, (req, res) => listAdminSubmissions(req, res, { forceDesk: YOUTH_PULSE_DESK }));
+router.patch('/submissions/:id/status', requireAdminAuth, updateSubmissionWorkflowStatus);
+router.patch('/youth-pulse/submissions/:id/status', requireAdminAuth, updateSubmissionWorkflowStatus);
+router.post('/submissions/:id/publish-handoff', requireAdminAuth, createSubmissionPublishHandoff);
+router.post('/youth-pulse/submissions/:id/publish-handoff', requireAdminAuth, createSubmissionPublishHandoff);
 
 // GET /admin/community/journalist-applications
 router.get('/journalist-applications', requireAdminAuth, async (req, res) => {
@@ -427,7 +454,7 @@ router.get('/submissions/:id', requireAdminAuth, async (req, res) => {
     if (!submission) {
       return res.status(404).json({ success: false, message: 'Submission not found' });
     }
-    return res.json({ success: true, submission });
+    return res.json({ success: true, submission: { ...submission, deskMeta: getSubmissionDeskMetadata(submission) } });
   } catch (err) {
     console.error('[ADMIN_COMMUNITY_REPORTER][submission-detail] error', err?.message || err);
     return res.status(500).json({ success: false, message: 'Failed to load submission' });

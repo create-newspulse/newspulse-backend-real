@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
+const { YOUTH_PULSE_TRACKS, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 
 // Workflow stages
 // Admin panel (new) expects lowercase identifiers.
@@ -109,6 +110,16 @@ const newsSchema = new mongoose.Schema({
     set: (v) => {
       if (v === null || v === undefined) return v;
       return String(v).trim().toLowerCase();
+    },
+  },
+  track: {
+    type: String,
+    enum: [...YOUTH_PULSE_TRACKS, null],
+    default: null,
+    index: true,
+    set: (v) => {
+      if (v === null || v === undefined || String(v).trim() === '') return null;
+      return normalizeTrackValue(v);
     },
   },
   // Canonical request/query param is `lang` for News.

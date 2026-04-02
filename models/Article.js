@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
+const { YOUTH_PULSE_TRACKS, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 
 const CATEGORY_VALUES = [
   'breaking',
@@ -110,6 +111,16 @@ const articleSchema = new mongoose.Schema(
     },
 
     category: { type: String, required: true, enum: CATEGORY_VALUES, index: true },
+    track: {
+      type: String,
+      enum: [...YOUTH_PULSE_TRACKS, null],
+      default: null,
+      index: true,
+      set: (v) => {
+        if (v === null || v === undefined || String(v).trim() === '') return null;
+        return normalizeTrackValue(v);
+      },
+    },
     language: { type: String, enum: LANGUAGE_VALUES, default: 'en', index: true },
 
     // Immutable-ish: the language the article was originally authored in.

@@ -2,6 +2,11 @@ const express = require('express');
 const mongoose = require('mongoose');
 const News = require('../models/News');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const {
+  extractSubmissionAttachments,
+  inferSubmissionDeskMetadata,
+  normalizeWorkflowStatus,
+} = require('../services/communitySubmissionWorkflow');
 let requireAdminAuth = (_req, _res, next) => next();
 try { ({ requireAdminAuth } = require('../middleware/adminAuth')); } catch (_) {}
 
@@ -167,6 +172,7 @@ router.post('/stories/submit', async (req, res) => {
       }
     } catch (_) {}
     const body = req.body || {};
+    const deskMeta = inferSubmissionDeskMetadata(body);
     const {
       reporterName,
       name,
@@ -179,6 +185,7 @@ router.post('/stories/submit', async (req, res) => {
       state,
       country,
       location,
+      track,
       isProfessionalJournalist,
       preferredLanguages,
       organisationName,
@@ -230,30 +237,47 @@ router.post('/stories/submit', async (req, res) => {
       return res.status(400).json({ ok: false, code: 'REPORTER_NOT_FOUND', message: 'Reporter profile not found' });
     }
 
+    const initialStatus = await (async () => {
+      try {
+        const { getCommunitySettings } = require('../services/communitySettingsService');
+        const s = await getCommunitySettings();
+        if (deskMeta.isYouthPulse) return 'NEW';
+        return s.safeModeManualReviewOnly ? 'pending' : 'UNDER_REVIEW';
+      } catch (_) {
+        return deskMeta.isYouthPulse ? 'NEW' : 'UNDER_REVIEW';
+      }
+    })();
+
+    const attachments = extractSubmissionAttachments(body);
+
     // Create submission document; force pending in safe mode
     const submission = await CommunitySubmission.create({
       reporterName: normalizedName,
       reporterEmail: normalizedEmail,
       name: normalizedName,
       email: normalizedEmail,
-      category: (category || '').trim(),
+      category: (category || track || deskMeta.track || '').trim(),
+      desk: deskMeta.desk || undefined,
+      submissionType: deskMeta.submissionType || undefined,
+      intakeSource: deskMeta.intakeSource || undefined,
+      track: deskMeta.track || undefined,
       headline: (headline || '').trim(),
       body: (story || '').trim(),
       location: { city: normalizedCity || null, state: normalizedState || null, country: normalizedCountry || null },
       city: normalizedCity || undefined,
       state: normalizedState || undefined,
       country: normalizedCountry || undefined,
+      contact: {
+        name: normalizedName,
+        email: normalizedEmail,
+        phone: (body.phone || body.contactPhone || '').trim() || undefined,
+      },
+      attachments,
+      mediaUrl: (attachments[0] && attachments[0].url) || undefined,
+      mediaLink: (attachments[0] && attachments[0].url) || undefined,
       reporterId: reporterContact && reporterContact._id ? reporterContact._id : undefined,
       sourceType: reporterContact && reporterContact.reporterType === 'journalist' ? 'journalist' : 'community',
-      status: (async () => {
-        try {
-          const { getCommunitySettings } = require('../services/communitySettingsService');
-          const s = await getCommunitySettings();
-          return s.safeModeManualReviewOnly ? 'pending' : 'UNDER_REVIEW';
-        } catch (_) {
-          return 'UNDER_REVIEW';
-        }
-      })(),
+      status: deskMeta.isYouthPulse ? normalizeWorkflowStatus(initialStatus, 'NEW') : initialStatus,
     });
 
     // Contributor network linkage (best-effort; never blocks submission)
@@ -271,9 +295,11 @@ router.post('/stories/submit', async (req, res) => {
       message: 'Story submitted successfully.',
       storyId: submission._id.toString(),
       referenceId,
-      status: 'under_review',
+      status: String(submission.status || 'under_review').toLowerCase(),
       reporterType,
       reporterName: reporterNameOut,
+      desk: submission.desk || null,
+      track: submission.track || null,
     });
   } catch (e) {
     console.error('[COMMUNITY_STORY_SUBMIT][error]', e?.message || e);

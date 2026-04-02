@@ -2,6 +2,7 @@ const Article = require('../models/Article');
 const { CATEGORY_VALUES, LANGUAGE_VALUES } = require('../models/Article');
 const mongoose = require('mongoose');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey, isSupportedPublicCategory } = require('../lib/categories');
+const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { getSlugCandidates, detectSlugLocale } = require('../lib/slug');
 const { mapArticleForLang, localizeArticleForLang } = require('../services/mapArticleForLang');
 const {
@@ -81,6 +82,7 @@ async function listArticles(req, res, next) {
     const statusRaw = String(req.query.status || '').trim().toLowerCase();
     const category = String(req.query.category || '').trim();
     const canonicalCategory = getCanonicalPublicCategoryKey(category);
+    const track = normalizeTrackValue(req.query.track);
     const lang = normalizeLanguage(req.query.lang || req.query.language || req.lang);
     const isBreaking = parseBool(req.query.isBreaking);
 
@@ -103,6 +105,17 @@ async function listArticles(req, res, next) {
         return res.status(400).json({ message: 'Invalid category' });
       }
       filter.category = buildPublicCategoryFilter(canonicalCategory);
+    } else if (track) {
+      filter.category = buildPublicCategoryFilter('youth-pulse');
+    }
+
+    if (req.query.track !== undefined && !track) {
+      return res.status(400).json({ message: 'Invalid Youth Pulse track' });
+    }
+
+    const trackFilter = buildYouthPulseTrackFilter(track, { topicField: null });
+    if (trackFilter) {
+      filter.$and = (filter.$and || []).concat([trackFilter]);
     }
 
     if (lang) {

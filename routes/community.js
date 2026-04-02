@@ -2,17 +2,23 @@ const express = require('express');
 const mongoose = require('mongoose');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const { runCommunityAiReview } = require('../services/communityAiReview');
+const {
+  extractSubmissionAttachments,
+  inferSubmissionDeskMetadata,
+  normalizeWorkflowStatus,
+} = require('../services/communitySubmissionWorkflow');
 const router = express.Router();
 
 // Phase-1 public submission endpoint (POST /api/community/submissions)
 router.post('/submissions', async (req, res) => {
   try {
     const b = req.body || {};
+    const deskMeta = inferSubmissionDeskMetadata(b);
     const userName = (b.userName || b.reporterName || b.name || '').toString().trim();
     const email = (b.email || b.reporterEmail || '').toString().trim().toLowerCase();
-    const headline = (b.headline || '').toString().trim();
+    const headline = (b.headline || b.title || '').toString().trim();
     const body = (b.body || b.story || b.storyText || b.content || '').toString().trim();
-    const category = (b.category || '').toString().trim();
+    const category = (b.category || b.track || deskMeta.track || '').toString().trim();
 
     const city = (b.city || b.location?.city || b.location || b.reporterLocation || '').toString().trim();
     const state = (b.state || b.location?.state || '').toString().trim();
@@ -20,10 +26,11 @@ router.post('/submissions', async (req, res) => {
     const district = (b.district || b.location?.district || '').toString().trim();
     const ageGroup = (b.ageGroup || b.reporterAgeGroup || '').toString().trim();
     const mediaLink = (b.mediaLink || b.mediaUrl || '').toString().trim();
+    const attachments = extractSubmissionAttachments(b);
     const contact = {
       name: (b.contact?.name || b.contactName || userName).toString().trim() || undefined,
       email: (b.contact?.email || b.contactEmail || email).toString().trim() || undefined,
-      phone: (b.contact?.phone || b.contactPhone || '').toString().trim() || undefined,
+      phone: (b.contact?.phone || b.contactPhone || b.phone || '').toString().trim() || undefined,
       preferredContact: (b.contact?.preferredContact || b.preferredContact || 'no_preference').toString().trim() || 'no_preference',
       canContactForThisStory: Boolean(b.contact?.canContactForThisStory ?? b.canContactForThisStory ?? false),
       canContactForFutureStories: Boolean(b.contact?.canContactForFutureStories ?? b.canContactForFutureStories ?? false),
@@ -66,10 +73,17 @@ router.post('/submissions', async (req, res) => {
       reporterLocation: city || undefined,
       locationDetail: { city: city || undefined, state: state || undefined, country: country || undefined, district: district || undefined },
       contact,
+      desk: deskMeta.desk || undefined,
+      submissionType: deskMeta.submissionType || undefined,
+      intakeSource: deskMeta.intakeSource || undefined,
+      track: deskMeta.track || undefined,
+      attachments,
       mediaLink: mediaLink || undefined,
-      mediaUrl: mediaLink || undefined,
+      mediaUrl: mediaLink || (attachments[0] && attachments[0].url) || undefined,
       // Defaults requested
-      status: b.status || 'PENDING_FOUNDER',
+      status: deskMeta.isYouthPulse
+        ? normalizeWorkflowStatus(b.status, 'NEW')
+        : (b.status || 'PENDING_FOUNDER'),
       sourceType: b.sourceType || 'community',
       reporterVerificationLevel: b.reporterVerificationLevel || 'unverified',
       ipAddress,
@@ -137,6 +151,11 @@ router.post('/submissions', async (req, res) => {
         headline: saved.headline,
         body: saved.body,
         category: saved.category,
+        desk: saved.desk || null,
+        track: saved.track || null,
+        submissionType: saved.submissionType || null,
+        intakeSource: saved.intakeSource || null,
+        attachments: Array.isArray(saved.attachments) ? saved.attachments : [],
         mediaLink: saved.mediaLink || null,
         status: saved.status,
         aiTitle: saved.aiTitle || null,

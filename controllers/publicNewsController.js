@@ -8,6 +8,7 @@ const { translateHtmlStrict, detectLangFromContent } = require('../services/arti
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
 const { buildPubliclyVisiblePublicArticleFilter } = require('../services/publicArticleVisibility.service');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
+const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode, detectSlugLocale } = require('../lib/slug');
 const {
   getPublicContentGroupKey,
@@ -386,9 +387,10 @@ async function translatePublicNews(req, res) {
   }
 }
 
-function buildPublicPublishedFilter({ category, q, founderOnly, type }) {
+function buildPublicPublishedFilter({ category, track, q, founderOnly, type }) {
   const now = new Date();
   const normalizedCategory = category ? normalizeCategorySlug(category) : null;
+  const normalizedTrack = normalizeTrackValue(track);
 
   const filter = {
     $and: [
@@ -406,6 +408,13 @@ function buildPublicPublishedFilter({ category, q, founderOnly, type }) {
   if (normalizedCategory) {
     // Case-safe for older mixed-case data.
     filter.category = buildPublicCategoryFilter(normalizedCategory);
+  } else if (normalizedTrack) {
+    filter.category = buildPublicCategoryFilter('youth-pulse');
+  }
+
+  const trackFilter = buildYouthPulseTrackFilter(normalizedTrack);
+  if (trackFilter) {
+    filter.$and.push(trackFilter);
   }
 
   if (founderOnly) {
@@ -456,6 +465,7 @@ const PUBLIC_SELECT = [
   'slugs',
   'tags',
   'category',
+  'track',
   'topic',
   'location',
   'lang',
@@ -1097,6 +1107,7 @@ async function listPublicNews(req, res) {
     const limit = Math.min(Math.max(parseInt(req.query.limit || '30', 10), 1), 100);
 
     const category = normalizeCategorySlug(req.query.category);
+    const track = normalizeTrackValue(req.query.track);
     const topic = normalizeTopicSlug(req.query.topic);
     const state = normalizeLocationPart(req.query.state || req.query.locationState);
     const founderOnly = parseTruthy(req.query.founderOnly);
@@ -1115,8 +1126,13 @@ async function listPublicNews(req, res) {
       return res.status(200).json({ items: [], page, limit, total: 0, totalPages: 1 });
     }
 
+    if (req.query.track !== undefined && !track) {
+      return res.status(400).json({ message: 'Invalid Youth Pulse track' });
+    }
+
     const filter = buildPublicPublishedFilter({
       category: category || undefined,
+      track: track || undefined,
       q: q || undefined,
       founderOnly,
       type,
@@ -1146,6 +1162,7 @@ async function listPublicNews(req, res) {
 
     if (isGroupedCategoryListing) {
       const baseFilter = buildPublicPublishedFilter({
+        track: track || undefined,
         q: q || undefined,
         founderOnly,
         type,

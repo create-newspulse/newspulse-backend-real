@@ -6,6 +6,7 @@ const mongoose = require('mongoose');
 const Article = require('../models/Article');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
 const { getSlugCandidates } = require('../lib/slug');
+const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { ensureOnDemandArticleTranslation, normalizeLang, detectLangFromContent, hasFullTranslation } = require('../services/articleTranslation.service');
 const { localizeArticleForLang } = require('../services/mapArticleForLang');
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
@@ -160,6 +161,7 @@ router.get('/stories', async (req, res) => {
     res.set('Cache-Control', 'no-store');
 
     const { category, limit = 20, page = 1 } = req.query;
+    const track = normalizeTrackValue(req.query.track);
 
     // Prefer explicit query lang, otherwise use negotiated language (e.g. header x-lang).
     // Keep backward-compat behavior for non-standard explicit query values.
@@ -173,6 +175,16 @@ router.get('/stories', async (req, res) => {
     const q = buildPubliclyVisiblePublicArticleFilter();
     const isGroupedCategoryListing = Boolean(category);
     if (category) q.category = buildPublicCategoryFilter(category);
+    else if (track) q.category = buildPublicCategoryFilter('youth-pulse');
+
+    if (req.query.track !== undefined && !track) {
+      return res.status(400).json({ success: false, message: 'Invalid Youth Pulse track' });
+    }
+
+    const trackFilter = buildYouthPulseTrackFilter(track, { topicField: null });
+    if (trackFilter) {
+      q.$and = (q.$and || []).concat([trackFilter]);
+    }
 
     const desired = normalizeLang(negotiatedLangRaw);
     const normalizedCategoryKey = category ? getCanonicalPublicCategoryKey(category) : null;
@@ -214,6 +226,9 @@ router.get('/stories', async (req, res) => {
       const siblingClauses = buildPublicContentSiblingOrClauses({ groupKeys, canonicalSlugs });
       if (siblingClauses.length) {
         const siblingBaseQuery = buildPubliclyVisiblePublicArticleFilter();
+        if (trackFilter) {
+          siblingBaseQuery.$and = (siblingBaseQuery.$and || []).concat([trackFilter]);
+        }
         const siblingQuery = {
           ...siblingBaseQuery,
           $and: [

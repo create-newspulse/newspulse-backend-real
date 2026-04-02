@@ -26,6 +26,10 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   state: { type: String, required: false, trim: true },
   country: { type: String, required: false, trim: true },
   // Submission content
+  desk: { type: String, required: false, trim: true, default: null, index: true },
+  submissionType: { type: String, required: false, trim: true, default: null, index: true },
+  intakeSource: { type: String, required: false, trim: true, default: null, index: true },
+  track: { type: String, required: false, trim: true, default: null, index: true },
   category: { type: String, required: false, trim: true, default: null },
   headline: { type: String, required: true, trim: true, maxlength: 200 },
   // Use `body` as the stored field; accept `story` as an alias so Phase-1 payloads
@@ -33,6 +37,19 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   body: { type: String, required: true, trim: true, maxlength: 50000, alias: 'story' },
   mediaUrl: { type: String, required: false, trim: true },
   mediaLink: { type: String, required: false, trim: true },
+  attachments: {
+    type: [
+      {
+        url: { type: String, trim: true, required: true },
+        name: { type: String, trim: true, default: null },
+        mimeType: { type: String, trim: true, default: null },
+        size: { type: Number, default: null },
+        kind: { type: String, trim: true, default: null },
+      },
+    ],
+    required: false,
+    default: [],
+  },
   // Meta / status
   acceptTerms: { type: Boolean, required: false, default: false },
   acceptedPolicy: { type: Boolean, required: false, default: false },
@@ -144,12 +161,39 @@ CommunitySubmissionSchema.pre('save', function(next) {
 // when legacy endpoints only provide reporterName/reporterEmail.
 CommunitySubmissionSchema.pre('validate', function(next) {
   try {
+    const {
+      extractSubmissionAttachments,
+      inferSubmissionDeskMetadata,
+      normalizeTrackValue,
+    } = require('../services/communitySubmissionWorkflow');
+
     if (!this.name && this.reporterName) this.name = String(this.reporterName).trim();
     if (!this.email && this.reporterEmail) this.email = String(this.reporterEmail).trim().toLowerCase();
 
     // Prefer explicit ageGroup, else fall back to reporterAgeGroup, else keep default.
     if ((!this.ageGroup || this.ageGroup === 'UNKNOWN') && this.reporterAgeGroup) {
       this.ageGroup = String(this.reporterAgeGroup).trim();
+    }
+
+    const meta = inferSubmissionDeskMetadata(this.toObject ? this.toObject() : this);
+    if (meta.desk && !this.desk) this.desk = meta.desk;
+    if (meta.submissionType && !this.submissionType) this.submissionType = meta.submissionType;
+    if (meta.intakeSource && !this.intakeSource) this.intakeSource = meta.intakeSource;
+
+    const normalizedTrack = meta.track || normalizeTrackValue(this.track || this.category);
+    if (normalizedTrack && !this.track) this.track = normalizedTrack;
+    if (!this.category && normalizedTrack) this.category = normalizedTrack;
+
+    if ((!this.mediaUrl || !this.mediaLink || !Array.isArray(this.attachments) || !this.attachments.length)) {
+      const attachments = extractSubmissionAttachments(this.toObject ? this.toObject() : this);
+      if (attachments.length && (!Array.isArray(this.attachments) || !this.attachments.length)) {
+        this.attachments = attachments;
+      }
+      const primaryAttachment = attachments[0] || (Array.isArray(this.attachments) ? this.attachments[0] : null);
+      if (primaryAttachment && primaryAttachment.url) {
+        if (!this.mediaUrl) this.mediaUrl = primaryAttachment.url;
+        if (!this.mediaLink) this.mediaLink = primaryAttachment.url;
+      }
     }
   } catch (_) {}
   next();

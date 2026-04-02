@@ -1,6 +1,7 @@
 const PublicArticle = require('../models/Article');
 const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 const { INDIA_STATES_UTS, isValidStateSlug } = require('../src/utils/locationTagger');
+const { ensureTrackTag, normalizeTrackValue } = require('./communitySubmissionWorkflow');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 
@@ -194,6 +195,7 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
   const isPublished = normalizedStatus === 'published';
   const language = normalizeLang(newsDoc.language || newsDoc.lang) || 'en';
   const originalLang = normalizeLang(newsDoc.originalLang) || language;
+  const track = normalizeTrackValue(newsDoc.track);
   const coverUrl =
     (newsDoc.coverImage && typeof newsDoc.coverImage === 'object' && !Array.isArray(newsDoc.coverImage) ? newsDoc.coverImage.url : null) ||
     newsDoc.coverImageUrl ||
@@ -260,6 +262,7 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     translationUpdatedAt: _pickPerLangObj(newsDoc.translationUpdatedAt, (v) => _normalizeNullableDate(v), null),
 
     category: newsDoc.category,
+    track,
     status: normalizedStatus || (isPublished ? 'published' : 'draft'),
     scheduledAt: newsDoc.scheduledAt || null,
     publishAt: newsDoc.publishAt || null,
@@ -278,7 +281,7 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
         }
       : { metaTitle: null, metaDescription: null, canonicalUrl: null },
     tags: (() => {
-      const baseTags = Array.isArray(newsDoc.tags) ? newsDoc.tags : [];
+      const baseTags = ensureTrackTag(Array.isArray(newsDoc.tags) ? newsDoc.tags : [], track);
       const loc = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location)
         ? {
             state: newsDoc.location.state ?? null,
