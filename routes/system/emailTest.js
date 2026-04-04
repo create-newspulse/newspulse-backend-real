@@ -1,24 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const { sendMail, getTransporter } = require('../../lib/mailer');
+const { sendMail, getTransporter, getMailerStatus } = require('../../lib/mailer');
 
 // GET /system/email-test -> reports configuration status
 router.get('/', (req, res) => {
-  const {
-    SMTP_HOST,
-    SMTP_PORT,
-    SMTP_USER,
-    SMTP_PASS,
-    EMAIL_FROM,
-    SMTP_FROM,
-  } = process.env;
-  const config = {
-    host: !!SMTP_HOST,
-    port: !!SMTP_PORT,
-    user: !!SMTP_USER,
-    pass: !!SMTP_PASS,
-    from: !!(EMAIL_FROM || SMTP_FROM || SMTP_USER),
-  };
+  const status = getMailerStatus();
   // getTransporter may throw if configuration is missing (intentional)
   let transporterReady = false;
   let transporterError = null;
@@ -29,7 +15,7 @@ router.get('/', (req, res) => {
     transporterReady = false;
     transporterError = err?.message || String(err);
   }
-  res.json({ ok: true, config, transporterReady, transporterError });
+  res.json({ ok: true, config: status.resolved, missing: status.missing, transporterReady, transporterError });
 });
 
 // POST /system/email-test/send { to?, subject?, text?, html? }

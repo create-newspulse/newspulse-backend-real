@@ -200,21 +200,21 @@ async function upsertReporterContact(payload) {
 
   const emailNorm = _normalizeEmail(email);
   if (!emailNorm) throw new Error('Reporter email is required');
+  const trimmedName = typeof name === 'string' && name.trim() ? name.trim() : '';
 
   const $set = {};
   const $setOnInsert = {
-    fullName: (typeof name === 'string' && name.trim()) ? name.trim() : 'Unknown',
     email: emailNorm,
-    emailLower: emailNorm,
     reporterType: reporterType === 'journalist' ? 'journalist' : 'community',
     verificationLevel: reporterType === 'journalist' ? 'pending' : 'community_default',
     status: 'active',
   };
+  if (!trimmedName) $setOnInsert.fullName = 'Unknown';
 
   // Always keep emailLower present
   $set.emailLower = emailNorm;
 
-  if (typeof name === 'string' && name.trim()) $set.fullName = name.trim();
+  if (trimmedName) $set.fullName = trimmedName;
   if (typeof phone === 'string' && phone.trim()) $set.phoneFull = phone.trim();
   if (typeof city === 'string' && city.trim()) $set.cityTownVillage = city.trim();
   if (typeof district === 'string' && district.trim()) $set.districtName = district.trim();

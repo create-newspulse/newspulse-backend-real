@@ -3,7 +3,9 @@
  * Test email sender for NewsPulse backend.
  * Usage:
  *   node scripts/test-email.js --to=user@example.com --subject="Test" --text="Hello" --html="<p>Hello</p>"
- * Env vars required: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, (EMAIL_FROM|SMTP_FROM optional)
+ * Env vars required: SMTP_HOST/ADS_SMTP_HOST, SMTP_PORT/ADS_SMTP_PORT,
+ * SMTP_USER/ADS_SMTP_USER, SMTP_PASS/ADS_SMTP_PASS,
+ * (EMAIL_FROM|SMTP_FROM|ADS_SMTP_FROM optional)
  */
 require('dotenv').config();
 const { sendMail, getTransporter } = require('../lib/mailer');
@@ -30,9 +32,9 @@ async function main() {
   if (args.debug) {
     process.env.SMTP_DEBUG = 'true';
   }
-  const to = args.to || process.env.FOUNDER_EMAIL || process.env.SMTP_USER;
+  const to = args.to || process.env.FOUNDER_EMAIL || process.env.SMTP_USER || process.env.ADS_SMTP_USER;
   if (!to) {
-    console.error('No recipient provided (--to) and no fallback (FOUNDER_EMAIL/SMTP_USER).');
+    console.error('No recipient provided (--to) and no fallback (FOUNDER_EMAIL/SMTP_USER/ADS_SMTP_USER).');
     process.exit(1);
   }
   const subject = args.subject || 'NewsPulse Test Email';
@@ -41,14 +43,14 @@ async function main() {
   const transporter = getTransporter();
   if (!transporter) {
     console.error('[TEST-EMAIL] Transporter not available. Missing required env vars?');
-    console.error('Required: SMTP_HOST|SMTP_SERVICE, SMTP_PORT (if HOST used), SMTP_USER, SMTP_PASS');
+    console.error('Required: SMTP_HOST|SMTP_SERVICE (or ADS_SMTP_HOST), SMTP_PORT (or ADS_SMTP_PORT when HOST is used), SMTP_USER (or ADS_SMTP_USER), SMTP_PASS (or ADS_SMTP_PASS)');
     process.exit(3);
   }
   console.log('[TEST-EMAIL] Attempting send...', { to, subject });
   if (process.env.SMTP_DEBUG === 'true') {
     console.log('[TEST-EMAIL] Debug mode active (SMTP_DEBUG=true).');
   }
-  console.log('[TEST-EMAIL] From address resolved as:', process.env.EMAIL_FROM || process.env.SMTP_FROM || process.env.SMTP_USER);
+  console.log('[TEST-EMAIL] From address resolved as:', process.env.EMAIL_FROM || process.env.SMTP_FROM || process.env.ADS_SMTP_FROM || process.env.SMTP_USER || process.env.ADS_SMTP_USER);
   try {
     const info = await sendMail({ to, subject, text, html });
     console.log('[TEST-EMAIL][SUCCESS]', JSON.stringify({

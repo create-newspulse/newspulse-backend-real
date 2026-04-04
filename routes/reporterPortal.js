@@ -7,7 +7,7 @@ const CommunitySubmission = require('../models/CommunitySubmission');
 const OtpToken = require('../models/OtpToken');
 const ReporterContact = require('../models/ReporterContact');
 const ActivityLog = require('../models/ActivityLog');
-const { sendMail, getTransporter } = require('../lib/mailer');
+const { sendMail, getTransporter, getMailerStatus } = require('../lib/mailer');
 const { sendEmail: sendEmailStub } = require('../lib/emailStub');
 const { extractSubmissionAttachments, inferSubmissionDeskMetadata } = require('../services/communitySubmissionWorkflow');
 const { requireReporterPortalAuth, requireReporterPortalOpen } = require('../middleware/reporterPortalAuth');
@@ -426,6 +426,16 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
     const email = normalizeEmail(req.body && req.body.email);
     if (!email) {
       return res.status(400).json({ ok: false, code: 'EMAIL_REQUIRED', message: 'Email is required.' });
+    }
+
+    const mailerStatus = getMailerStatus();
+    if (!mailerStatus.configured) {
+      console.error('[reporter-portal][request-login-otp] mailer unavailable', { missing: mailerStatus.missing });
+      return res.status(503).json({
+        ok: false,
+        code: 'EMAIL_SERVICE_UNAVAILABLE',
+        message: 'Verification email service is temporarily unavailable.',
+      });
     }
 
     const rateLimitKey = getRateLimitKey(req, email);
