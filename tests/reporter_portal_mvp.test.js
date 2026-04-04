@@ -443,6 +443,33 @@ test('reporter portal OTP login, session, and own submissions are scoped to repo
   });
 });
 
+test('reporter auth compatibility routes map to the secure reporter portal flow', async () => {
+  const otpRes = await request(app)
+    .post('/api/reporter-auth/request-code')
+    .send({ email: 'reporter@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+  assert.strictEqual(otpRes.body.ok, true);
+  assert.ok(otpRes.body.devCode);
+  assert.ok(otpRes.body.emailMasked);
+
+  const verifyRes = await request(app)
+    .post('/api/reporter-auth/verify-code')
+    .send({ email: 'reporter@example.com', code: otpRes.body.devCode });
+
+  assert.strictEqual(verifyRes.statusCode, 200);
+  assert.strictEqual(verifyRes.body.ok, true);
+  assert.ok(verifyRes.body.token);
+
+  const sessionRes = await request(app)
+    .get('/api/reporter-auth/session')
+    .set('Authorization', `Bearer ${verifyRes.body.token}`);
+
+  assert.strictEqual(sessionRes.statusCode, 200);
+  assert.strictEqual(sessionRes.body.ok, true);
+  assert.strictEqual(sessionRes.body.reporter.email, 'reporter@example.com');
+});
+
 test('reporter portal can create and edit only allowed submissions on shared CommunitySubmission records', async () => {
   const otpRes = await request(app)
     .post('/api/reporter-portal/auth/request-login-otp')

@@ -154,6 +154,7 @@ const systemRoutes = require('./routes/system.routes');
 const communityRoutes = require(`${BASE}/routes/community`);
 const communityStoriesRouter = require('./routes/communityStories');
 const reporterPortalRouter = require('./routes/reporterPortal');
+const reporterAuthCompatRouter = require('./routes/reporterAuthCompat');
 const adminCommunityRoutes = require(`${BASE}/routes/adminCommunity`);
 const communityAdminContactsRoutes = require(`${BASE}/routes/communityAdminContacts`);
 // Use root-level communityReporter routes to match tests
@@ -1447,6 +1448,7 @@ app.use('/api/community-reporter', communityReporterRoutes);
 app.use('/api/public/community-reporter', communityReporterRoutes);
 app.use('/api/reporter-portal', reporterPortalRouter);
 app.use('/api/community-reporter/portal', reporterPortalRouter);
+app.use('/api/reporter-auth', reporterAuthCompatRouter);
 
 // Founder passkey (WebAuthn) owner-key unlock
 app.use('/api/owner/passkey', ownerPasskeyRouter);
