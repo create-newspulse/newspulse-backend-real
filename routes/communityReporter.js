@@ -21,6 +21,7 @@ const { getEffectiveCommunityAccessState } = require('../services/communityAcces
 // NOTE: Phase-1 /submit handler is implemented inline below for clarity and
 // to keep it fully aligned with the public form payload.
 const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireReporterPortalAuth } = require('../middleware/reporterPortalAuth');
 
 const router = express.Router();
 
@@ -54,6 +55,24 @@ async function requireReporterPortalOpen(req, res, next) {
   } catch (err) {
     return next(err);
   }
+}
+
+function buildReporterPortalOwnershipFilter(reporter) {
+  const email = String(reporter && reporter.email || '').trim().toLowerCase();
+  const clauses = [];
+  if (reporter && reporter.reporterId && mongoose.isValidObjectId(String(reporter.reporterId))) {
+    clauses.push({ reporterId: reporter.reporterId });
+  }
+  if (email) {
+    clauses.push({ reporterEmailNorm: email });
+    clauses.push({ reporterEmail: email });
+    clauses.push({ email });
+    clauses.push({ 'contact.email': email });
+  }
+  return {
+    isDeleted: { $ne: true },
+    ...(clauses.length ? { $or: clauses } : {}),
+  };
 }
 
 function _parseMaxUploadBytes() {
@@ -196,18 +215,15 @@ const _communityReporterIdUpload = (() => {
 router.post('/upload-id', requireCommunityReporterOpen, (req, res) => _communityReporterIdUpload.handler(req, res));
 
 // POST /api/public/community-reporter/:id/withdraw
-router.post('/:id/withdraw', requireReporterPortalOpen, async (req, res) => {
+router.post('/:id/withdraw', requireReporterPortalOpen, requireReporterPortalAuth, async (req, res) => {
   try {
     const { id } = req.params || {};
-    const { reporterId } = req.body || {};
     if (!id || !/^[a-fA-F0-9]{24}$/.test(String(id))) {
       return res.status(400).json({ ok: false, message: 'Invalid story id' });
     }
-    const story = await CommunitySubmission.findById(id);
+    const ownershipFilter = buildReporterPortalOwnershipFilter(req.reporterPortal);
+    const story = await CommunitySubmission.findOne({ _id: id, ...ownershipFilter });
     if (!story) return res.status(404).json({ ok: false, message: 'Story not found' });
-    if (reporterId && story.reporterId && String(story.reporterId) !== String(reporterId)) {
-      return res.status(403).json({ ok: false, message: 'Not your story' });
-    }
     const status = String(story.status || '').toLowerCase();
     if (!['under_review','pending','new','pending_founder'].includes(status)) {
       return res.status(400).json({ ok: false, message: 'You can withdraw only while the story is under review.' });
@@ -415,34 +431,11 @@ router.post('/submissions', requireCommunityReporterOpen, async (req, res) => {
   }
 });
 
-// Public API: list community reporter stories by email for “My Community Stories” page.
-// GET /api/community-reporter/my-stories?email=...
-// Returns a safe public listing filtered by normalized reporter email
-router.get('/my-stories', requireReporterPortalOpen, async (req, res) => {
+// Secure alias for older frontend integrations. Requires verified reporter portal auth.
+router.get('/my-stories', requireReporterPortalOpen, requireReporterPortalAuth, async (req, res) => {
   try {
-    const emailQuery = req.query && req.query.email;
-    const email = String(emailQuery || '').trim().toLowerCase();
-    if (!email) {
-      return res.status(400).json({ success: false, message: 'Email is required' });
-    }
-
-    // In local/test runs without MongoDB, avoid Mongoose command buffering delays.
-    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
-      return res.status(200).json({ success: true, items: [], total: 0, stories: [], submissions: [], message: 'Database unavailable' });
-    }
-
-    // Primary: Phase-1 schema stores email at the top-level `email`.
-    // Fallback: support legacy docs that stored reporterEmail/contact.email.
     const docs = await CommunitySubmission
-      .find({
-        $or: [
-          { email },
-          { reporterEmailNorm: email },
-          { reporterEmail: email },
-          { 'contact.email': email },
-        ],
-        isDeleted: { $ne: true },
-      })
+      .find(buildReporterPortalOwnershipFilter(req.reporterPortal))
       .sort({ createdAt: -1 })
       .lean();
 
@@ -484,23 +477,11 @@ router.get('/my-stories', requireReporterPortalOpen, async (req, res) => {
   }
 });
 
-// Generic stories listing supporting optional ?email= and ?status=
-// GET /api/community-reporter/reporter-stories?email=foo@example.com&status=pending
-router.get('/reporter-stories', requireReporterPortalOpen, async (req, res) => {
+// Secure alias for older frontend integrations. Requires verified reporter portal auth.
+router.get('/reporter-stories', requireReporterPortalOpen, requireReporterPortalAuth, async (req, res) => {
   try {
-    const { email, status } = req.query || {};
-    const filter = {};
-
-    if (email) {
-      const normalized = String(email).trim().toLowerCase();
-      if (normalized) {
-        filter.$or = [
-          { reporterEmail: normalized },
-          { email: normalized },
-          { 'contact.email': normalized },
-        ];
-      }
-    }
+    const { status } = req.query || {};
+    const filter = buildReporterPortalOwnershipFilter(req.reporterPortal);
 
     if (status && status !== 'all') {
       filter.status = status;

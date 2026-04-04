@@ -153,6 +153,7 @@ const aiTrainingInfoRoutes = require(`${BASE}/routes/system/aiTrainingInfo`);
 const systemRoutes = require('./routes/system.routes');
 const communityRoutes = require(`${BASE}/routes/community`);
 const communityStoriesRouter = require('./routes/communityStories');
+const reporterPortalRouter = require('./routes/reporterPortal');
 const adminCommunityRoutes = require(`${BASE}/routes/adminCommunity`);
 const communityAdminContactsRoutes = require(`${BASE}/routes/communityAdminContacts`);
 // Use root-level communityReporter routes to match tests
@@ -1444,6 +1445,8 @@ app.get('/api/community-reporter/queue', getCommunityReporterQueue);
 app.use('/api/community-reporter', communityReporterRoutes);
 // Public alias to match frontend expectation
 app.use('/api/public/community-reporter', communityReporterRoutes);
+app.use('/api/reporter-portal', reporterPortalRouter);
+app.use('/api/community-reporter/portal', reporterPortalRouter);
 
 // Founder passkey (WebAuthn) owner-key unlock
 app.use('/api/owner/passkey', ownerPasskeyRouter);

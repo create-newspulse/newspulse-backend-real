@@ -19,9 +19,12 @@ const YOUTH_PULSE_TRACK_DEFINITIONS = Object.freeze([
 ]);
 
 const WORKFLOW_STATUSES = [
+  'DRAFT',
+  'SUBMITTED',
   'NEW',
   'AI_REVIEWED',
   'UNDER_REVIEW',
+  'NEEDS_REVISION',
   'APPROVED',
   'REJECTED',
   'PUBLISHED',
@@ -104,11 +107,23 @@ function normalizeWorkflowStatus(value, fallback = null) {
   if (!token) return fallback;
 
   switch (token) {
+    case 'draft':
+      return 'DRAFT';
+    case 'submitted':
+    case 'submit':
+      return 'SUBMITTED';
     case 'new':
       return 'NEW';
     case 'ai-reviewed':
     case 'aireviewed':
       return 'AI_REVIEWED';
+    case 'needs-revision':
+    case 'needsrevision':
+    case 'needs_revision':
+    case 'revision-requested':
+    case 'revisionrequested':
+    case 'revision_requested':
+      return 'NEEDS_REVISION';
     case 'under-review':
     case 'underreview':
     case 'review':
@@ -140,10 +155,17 @@ function buildWorkflowStatusFilter(value) {
   if (token === 'pending' || token === 'under-review' || token === 'review') {
     return {
       $in: [
+        'DRAFT',
+        'draft',
+        'SUBMITTED',
+        'submitted',
         'NEW',
         'AI_REVIEWED',
         'UNDER_REVIEW',
+        'NEEDS_REVISION',
         'PENDING_FOUNDER',
+        'needs_revision',
+        'needs revision',
         'pending',
         'new',
         'ai_reviewed',
@@ -156,6 +178,18 @@ function buildWorkflowStatusFilter(value) {
 
   if (token === 'approved') {
     return { $in: ['APPROVED', 'approved'] };
+  }
+
+  if (token === 'draft') {
+    return { $in: ['DRAFT', 'draft'] };
+  }
+
+  if (token === 'submitted') {
+    return { $in: ['SUBMITTED', 'submitted'] };
+  }
+
+  if (token === 'needs-revision' || token === 'needsrevision' || token === 'revision-requested') {
+    return { $in: ['NEEDS_REVISION', 'needs_revision', 'needs revision', 'revision_requested'] };
   }
 
   if (token === 'rejected') {

@@ -84,6 +84,11 @@ const ReporterContactSchema = new mongoose.Schema({
   // --- Verified Journalist / Media Partner fields ---
   reporterType: { type: String, enum: ['community', 'journalist'], default: 'community', index: true },
   verificationLevel: { type: String, enum: ['community_default', 'pending', 'verified', 'limited', 'revoked'], default: 'community_default', index: true },
+  portalAccessEnabled: { type: Boolean, default: true, index: true },
+  portalAuthVersion: { type: Number, default: 0 },
+  lastPortalLoginAt: { type: Date, default: null },
+  pendingPortalEmail: { type: String, trim: true, lowercase: true, default: null, index: true },
+  pendingPortalEmailRequestedAt: { type: Date, default: null },
 
   organisationName: { type: String, trim: true },
   organisationType: { type: String, enum: ['print', 'tv', 'radio', 'digital', 'freelance', 'other'] },
