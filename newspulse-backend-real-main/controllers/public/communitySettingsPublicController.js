@@ -3,6 +3,9 @@ const { getCommunitySettings } = require('../../../services/communitySettingsSer
 async function getPublicCommunitySettings(req, res) {
   try {
     const settings = await getCommunitySettings();
+    res.set('Cache-Control', 'no-store, max-age=0');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
     return res.json({
       ok: true,
       settings: {
@@ -22,6 +25,9 @@ async function getPublicCommunitySettings(req, res) {
     });
   } catch (err) {
     console.error('getPublicCommunitySettings error', err);
+    res.set('Cache-Control', 'no-store, max-age=0');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
     return res.status(500).json({ ok: false, message: 'Failed to load settings' });
   }
 }

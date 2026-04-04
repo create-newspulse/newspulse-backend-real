@@ -25,6 +25,15 @@ function parseCookies(header) {
   return cookies;
 }
 
+function getFounderEmails() {
+  return Array.from(new Set([
+    process.env.FOUNDER_EMAIL,
+    process.env.ADMIN_EMAIL,
+    process.env.FOUNDER_ALT_EMAIL,
+    process.env.ADMIN_ALT_EMAIL,
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+}
+
 async function requireAdminAuth(req, res, next) {
   const authHeader = String(req.headers['authorization'] || '');
   const token = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice('Bearer '.length).trim() : '';
@@ -54,14 +63,14 @@ async function requireAdminAuth(req, res, next) {
       if (effectiveToken.startsWith('np.')) {
         const decoded = decodeNpOpaqueToken(effectiveToken);
         const email = decoded && decoded.email ? decoded.email : 'admin@newspulse.ai';
-        const founderEmail = String(process.env.FOUNDER_EMAIL || 'founder@example.com').toLowerCase();
-        const role = founderEmail && String(email).toLowerCase() === founderEmail ? 'founder' : 'admin';
+        const founderEmails = getFounderEmails();
+        const role = founderEmails.includes(String(email).toLowerCase()) ? 'founder' : 'admin';
         req.admin = { id: 'opaque', email, role, name: role === 'founder' ? 'Founder' : 'Admin' };
         return next();
       }
       const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
       const payload = jwt.verify(effectiveToken, secret);
-      const role = payload.role;
+      const role = String(payload && payload.role ? payload.role : '').toLowerCase();
       if (role !== 'admin' && role !== 'founder' && role !== 'staff' && role !== 'editor' && role !== 'legal') {
         console.warn('[ADMIN_AUTH][403][role] disallowed role', {
           path: req.originalUrl,
@@ -138,8 +147,8 @@ async function requireAdminAuth(req, res, next) {
   if (legacyEmail || accessEmail) {
     const emailValRaw = (legacyEmail || accessEmail);
     const emailVal = String(emailValRaw || '').toLowerCase();
-    const founderEmail = String(process.env.FOUNDER_EMAIL || 'founder@example.com').toLowerCase();
-    const isFounder = founderEmail && emailVal === founderEmail;
+    const founderEmails = getFounderEmails();
+    const isFounder = founderEmails.includes(emailVal);
     req.admin = {
       id: isFounder ? 'founder' : 'legacy-admin',
       email: emailValRaw,
@@ -267,9 +276,17 @@ function requireFounderOnly(req, res, next) {
   // First ensure admin auth passes
   requireAdminAuth(req, res, function onAuthed(err) {
     if (err) return; // express error path
-    const role = (req.admin && req.admin.role) || 'admin';
+    const role = String((req.admin && req.admin.role) || '').toLowerCase();
     if (role !== 'founder') {
-      return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' });
+      return res.status(403).json({
+        ok: false,
+        success: false,
+        status: 403,
+        code: 'FOUNDER_REQUIRED',
+        message: 'Founder role required',
+        requiredRole: 'founder',
+        receivedRole: role || null,
+      });
     }
     return next();
   });

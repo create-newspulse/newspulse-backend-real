@@ -2656,14 +2656,22 @@ app.get('/api/admin/stats', async (req, res) => {
 app.get('/api/community-reporter/config', async (req, res) => {
   try {
     const state = await getEffectiveCommunityAccessState();
+    res.set('Cache-Control', 'no-store, max-age=0');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
     return res.json({
       ok: true,
       communityMyStoriesEnabled: state.communityMyStoriesEnabled,
+      communityReporterClosed: state.communityReporterClosed,
+      communityReporterEnabled: state.communityReporterEnabled,
       reporterPortalClosed: state.reporterPortalClosed,
       reporterPortalEnabled: state.reporterPortalEnabled,
     });
   } catch (err) {
     console.error('[community-reporter:config][error]', err?.message || err);
+    res.set('Cache-Control', 'no-store, max-age=0');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
     return res.status(500).json({ ok: false, message: 'Could not load community reporter config.' });
   }
 });

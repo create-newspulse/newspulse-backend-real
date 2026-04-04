@@ -6,6 +6,9 @@ const { getEffectiveCommunityAccessState } = require('../../services/communityAc
 async function getPublicCommunitySettings(req, res) {
 	try {
 		const state = await getEffectiveCommunityAccessState();
+		res.set('Cache-Control', 'no-store, max-age=0');
+		res.set('Pragma', 'no-cache');
+		res.set('Expires', '0');
 		const settings = {
 			communityReporterEnabled: state.communityReporterEnabled,
 			reporterPortalEnabled: state.reporterPortalEnabled,
@@ -27,6 +30,9 @@ async function getPublicCommunitySettings(req, res) {
 		});
 	} catch (err) {
 		console.error('getPublicCommunitySettings error', err);
+		res.set('Cache-Control', 'no-store, max-age=0');
+		res.set('Pragma', 'no-cache');
+		res.set('Expires', '0');
 		return res.status(200).json({
 			ok: true,
 			settings: {

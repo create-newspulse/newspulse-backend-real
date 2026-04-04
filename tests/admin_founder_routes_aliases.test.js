@@ -144,6 +144,38 @@ test('founder feature toggle aliases accept valid founder auth and reject non-fo
     .set('Authorization', `Bearer ${adminToken}`);
 
   assert.strictEqual(nonFounderRes.statusCode, 403);
+  assert.strictEqual(nonFounderRes.body.code, 'FOUNDER_REQUIRED');
+  assert.strictEqual(nonFounderRes.body.requiredRole, 'founder');
+  assert.strictEqual(nonFounderRes.body.receivedRole, 'admin');
+});
+
+test('opaque founder tokens and legacy founder cookies honor ADMIN_EMAIL fallback when FOUNDER_EMAIL is unset', async () => {
+  const previousFounderEmail = process.env.FOUNDER_EMAIL;
+  const previousAdminEmail = process.env.ADMIN_EMAIL;
+
+  process.env.FOUNDER_EMAIL = '';
+  process.env.ADMIN_EMAIL = 'founder@example.com';
+
+  try {
+    const opaqueFounderToken = `np.${Buffer.from('founder@example.com:1234567890').toString('base64')}`;
+
+    const tokenRes = await request(app)
+      .get('/admin-api/admin/founder/feature-toggles')
+      .set('Authorization', `Bearer ${opaqueFounderToken}`);
+
+    assert.strictEqual(tokenRes.statusCode, 200);
+    assert.strictEqual(tokenRes.body.ok, true);
+
+    const cookieRes = await request(app)
+      .get('/admin-api/admin/founder/feature-toggles')
+      .set('Cookie', 'np_admin=founder@example.com');
+
+    assert.strictEqual(cookieRes.statusCode, 200);
+    assert.strictEqual(cookieRes.body.ok, true);
+  } finally {
+    process.env.FOUNDER_EMAIL = previousFounderEmail;
+    process.env.ADMIN_EMAIL = previousAdminEmail;
+  }
 });
 
 test('founder settings save route safely accepts nested featureToggles payloads', async () => {
