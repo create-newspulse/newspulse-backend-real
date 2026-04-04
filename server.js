@@ -179,6 +179,8 @@ const dashboardStatsRouter = require('./routes/dashboardStats');
 const adminDashboardRoutes = require('./routes/adminDashboard.routes');
 const adminCommunityReporterQueueRouter = require('./routes/admin/communityReporterQueue');
 const adminContributorNetworkRouter = require('./routes/adminContributorNetwork.routes');
+const { getReporterDirectory } = require('./controllers/adminContributorNetworkController');
+const founderRoutesRouter = require('./routes/admin/founderRoutes');
 const founderFeatureTogglesRouter = require('./routes/admin/founderFeatureToggles');
 const alertsRouter = require('./routes/alerts');
 const securityRouter = require('./routes/security');
@@ -262,6 +264,7 @@ let publicCommunitySettingsRouter = null;
 try { publicCommunitySettingsRouter = require(`${BASE}/routes/public/communitySettings`); } catch (_) { console.warn('[init] optional public community settings router not found; skipping'); }
 let publicFeatureTogglesRouter = null;
 try { publicFeatureTogglesRouter = require('./routes/publicFeatureToggles'); } catch (_) { console.warn('[init] optional public feature toggles router not found; skipping'); }
+const { getEffectiveCommunityAccessState } = require('./services/communityAccessToggleService');
 
 const { langMiddleware } = require('./middleware/lang');
 
@@ -1709,7 +1712,14 @@ app.use('/admin-api/api/admin', adminPublicSettingsRouter);
 // Community Reporter Settings router (same mount /api/admin)
 app.use('/api/admin', communityReporterSettingsRouter);
 // Founder feature toggles (admin/founder protected)
+app.use('/api/admin/founder', founderRoutesRouter);
 app.use('/api/admin/founder', founderFeatureTogglesRouter);
+app.use('/admin-api/admin/founder', founderRoutesRouter);
+app.use('/admin-api/admin/founder', founderFeatureTogglesRouter);
+app.use('/admin-api/api/admin/founder', founderRoutesRouter);
+app.use('/admin-api/api/admin/founder', founderFeatureTogglesRouter);
+app.use('/admin/founder', founderRoutesRouter);
+app.use('/admin/founder', founderFeatureTogglesRouter);
 
 // New Admin Panel endpoints (Team/Security/Audit)
 app.use('/api/admin', adminTeamRoutes);
@@ -1789,6 +1799,14 @@ if (feedRoutes) app.use('/api/feed', feedRoutes);
 app.use('/api/admin/community', communityAdminContactsRoutes);
 app.use('/admin-api/admin/community', communityAdminContactsRoutes);
 app.use('/admin/community', communityAdminContactsRoutes);
+for (const p of [
+  '/api/admin/community/contributors',
+  '/admin-api/admin/community/contributors',
+  '/admin-api/api/admin/community/contributors',
+  '/admin/community/contributors',
+]) {
+  app.get(p, requireAdminAuth, getReporterDirectory);
+}
 // Public website settings (safe keys only)
 async function _publicSettingsNoAuth(_req, res) {
   try {
@@ -2635,9 +2653,19 @@ app.get('/api/admin/stats', async (req, res) => {
 });
 
 // Public config
-let _communityReporterFlagCache = { myCommunityStoriesEnabled: false };
-app.get('/api/community-reporter/config', (req, res) => {
-  return res.json({ ok: true, communityMyStoriesEnabled: _communityReporterFlagCache.myCommunityStoriesEnabled });
+app.get('/api/community-reporter/config', async (req, res) => {
+  try {
+    const state = await getEffectiveCommunityAccessState();
+    return res.json({
+      ok: true,
+      communityMyStoriesEnabled: state.communityMyStoriesEnabled,
+      reporterPortalClosed: state.reporterPortalClosed,
+      reporterPortalEnabled: state.reporterPortalEnabled,
+    });
+  } catch (err) {
+    console.error('[community-reporter:config][error]', err?.message || err);
+    return res.status(500).json({ ok: false, message: 'Could not load community reporter config.' });
+  }
 });
 
 // --- AI / System health stubs ---

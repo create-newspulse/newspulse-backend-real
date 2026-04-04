@@ -1,15 +1,13 @@
-const SystemSettings = require('../models/SystemSettings');
-
-async function getOrCreateSystemSettings() {
-  return SystemSettings.getSingleton();
-}
+const { getEffectiveCommunityAccessState } = require('../services/communityAccessToggleService');
 
 async function getPublicFeatureToggles(req, res, next) {
   try {
-    const doc = await getOrCreateSystemSettings();
+    const state = await getEffectiveCommunityAccessState();
     res.json({
-      communityReporterEnabled: !!doc.communityReporterEnabled,
-      reporterPortalEnabled: !!doc.reporterPortalEnabled,
+      communityReporterEnabled: state.communityReporterEnabled,
+      reporterPortalEnabled: state.reporterPortalEnabled,
+      communityReporterClosed: state.communityReporterClosed,
+      reporterPortalClosed: state.reporterPortalClosed,
     });
   } catch (err) {
     next(err);

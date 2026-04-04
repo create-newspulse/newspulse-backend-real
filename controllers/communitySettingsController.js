@@ -1,30 +1,9 @@
 // controllers/communitySettingsController.js
 
 const CommunitySettings = require('../models/CommunitySettings');
-const CommunityFeatureSettings = require('../models/CommunityFeatureSettings');
+const { getEffectiveCommunityAccessState } = require('../services/communityAccessToggleService');
 
 // Defaults if we don't yet have a CommunityFeatureSettings document
-const DEFAULT_FEATURE_SETTINGS = {
-  communityReporterEnabled: true,
-  reporterPortalEnabled: true,
-  allowNewSubmissions: true,
-  allowMyStoriesPortal: true,
-  allowJournalistApplications: true,
-  safeModeManualReviewOnly: false,
-};
-
-// Map DB fields → public flags
-// IMPORTANT: in the UI, ON = closed / hidden, OFF = open / visible.
-function normaliseFeatureFlags(doc) {
-  const s = doc || {};
-  return {
-    // When true → Community Reporter page is CLOSED / HIDDEN for public
-    communityReporterClosed: !!s.communityReporterEnabled,
-    // When true → Reporter Portal login/dashboard is CLOSED / HIDDEN
-    reporterPortalClosed: !!s.reporterPortalEnabled,
-  };
-}
-
 // Make sure there is always exactly ONE settings document
 async function getOrCreateSettings() {
   let doc = await CommunitySettings.findOne();
@@ -126,21 +105,28 @@ async function patchAdminCommunitySettings(req, res, next) {
  */
 async function getPublicCommunitySettings(req, res) {
   try {
-    // Public content: guidelines, notes, etc.  (don't auto-create here)
     const settingsDoc = await CommunitySettings.findOne().lean();
-
-    // Feature toggles stored in separate collection
-    let featureDoc = await CommunityFeatureSettings.findOne({ key: 'community' }).lean();
-    if (!featureDoc) {
-      featureDoc = DEFAULT_FEATURE_SETTINGS;
-    }
-
-    const featureToggles = normaliseFeatureFlags(featureDoc);
+    const state = await getEffectiveCommunityAccessState();
+    const settings = {
+      ...(settingsDoc || {}),
+      communityReporterEnabled: state.communityReporterEnabled,
+      reporterPortalEnabled: state.reporterPortalEnabled,
+      allowNewSubmissions: state.allowNewSubmissions,
+      allowMyStoriesPortal: state.allowMyStoriesPortal,
+      allowJournalistApplications: state.allowJournalistApplications,
+      safeModeManualReviewOnly: state.safeModeManualReviewOnly,
+      communityReporterClosed: state.communityReporterClosed,
+      reporterPortalClosed: state.reporterPortalClosed,
+      communityMyStoriesEnabled: state.communityMyStoriesEnabled,
+    };
 
     return res.json({
       ok: true,
-      settings: settingsDoc || {},
-      featureToggles,
+      settings,
+      featureToggles: {
+        communityReporterClosed: state.communityReporterClosed,
+        reporterPortalClosed: state.reporterPortalClosed,
+      },
     });
   } catch (err) {
     console.error('getPublicCommunitySettings error', err);

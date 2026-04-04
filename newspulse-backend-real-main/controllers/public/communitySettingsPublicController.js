@@ -7,9 +7,17 @@ async function getPublicCommunitySettings(req, res) {
       ok: true,
       settings: {
         communityReporterEnabled: settings.communityReporterEnabled,
+        reporterPortalEnabled: settings.reporterPortalEnabled,
         allowNewSubmissions: settings.allowNewSubmissions,
         allowMyStoriesPortal: settings.allowMyStoriesPortal,
         allowJournalistApplications: settings.allowJournalistApplications,
+        communityReporterClosed: settings.communityReporterClosed,
+        reporterPortalClosed: settings.reporterPortalClosed,
+        communityMyStoriesEnabled: settings.communityMyStoriesEnabled,
+      },
+      featureToggles: {
+        communityReporterClosed: settings.communityReporterClosed,
+        reporterPortalClosed: settings.reporterPortalClosed,
       },
     });
   } catch (err) {

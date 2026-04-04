@@ -17,11 +17,44 @@ const {
   normalizeDeskValue,
   normalizeWorkflowStatus,
 } = require('../services/communitySubmissionWorkflow');
+const { getEffectiveCommunityAccessState } = require('../services/communityAccessToggleService');
 // NOTE: Phase-1 /submit handler is implemented inline below for clarity and
 // to keep it fully aligned with the public form payload.
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
 const router = express.Router();
+
+async function requireCommunityReporterOpen(req, res, next) {
+  try {
+    const state = await getEffectiveCommunityAccessState();
+    if (state.communityReporterClosed) {
+      return res.status(503).json({
+        ok: false,
+        code: 'COMMUNITY_REPORTER_CLOSED',
+        message: 'Community Reporter is currently closed.',
+      });
+    }
+    return next();
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function requireReporterPortalOpen(req, res, next) {
+  try {
+    const state = await getEffectiveCommunityAccessState();
+    if (state.reporterPortalClosed) {
+      return res.status(503).json({
+        ok: false,
+        code: 'REPORTER_PORTAL_CLOSED',
+        message: 'Reporter Portal is currently closed.',
+      });
+    }
+    return next();
+  } catch (err) {
+    return next(err);
+  }
+}
 
 function _parseMaxUploadBytes() {
   const rawMb = process.env.COMMUNITY_REPORTER_MAX_UPLOAD_MB;
@@ -160,10 +193,10 @@ const _communityReporterIdUpload = (() => {
 
 // POST /api/community-reporter/upload-id
 // multipart/form-data: file (required), email (optional), reporterId (optional), note (optional)
-router.post('/upload-id', (req, res) => _communityReporterIdUpload.handler(req, res));
+router.post('/upload-id', requireCommunityReporterOpen, (req, res) => _communityReporterIdUpload.handler(req, res));
 
 // POST /api/public/community-reporter/:id/withdraw
-router.post('/:id/withdraw', async (req, res) => {
+router.post('/:id/withdraw', requireReporterPortalOpen, async (req, res) => {
   try {
     const { id } = req.params || {};
     const { reporterId } = req.body || {};
@@ -200,7 +233,7 @@ function externalStatus(internal) {
 }
 
 // POST /api/community-reporter/submissions (public, no auth)
-router.post('/submissions', async (req, res) => {
+router.post('/submissions', requireCommunityReporterOpen, async (req, res) => {
   try {
     const body = req.body || {};
     const deskMeta = inferSubmissionDeskMetadata(body);
@@ -385,7 +418,7 @@ router.post('/submissions', async (req, res) => {
 // Public API: list community reporter stories by email for “My Community Stories” page.
 // GET /api/community-reporter/my-stories?email=...
 // Returns a safe public listing filtered by normalized reporter email
-router.get('/my-stories', async (req, res) => {
+router.get('/my-stories', requireReporterPortalOpen, async (req, res) => {
   try {
     const emailQuery = req.query && req.query.email;
     const email = String(emailQuery || '').trim().toLowerCase();
@@ -453,7 +486,7 @@ router.get('/my-stories', async (req, res) => {
 
 // Generic stories listing supporting optional ?email= and ?status=
 // GET /api/community-reporter/reporter-stories?email=foo@example.com&status=pending
-router.get('/reporter-stories', async (req, res) => {
+router.get('/reporter-stories', requireReporterPortalOpen, async (req, res) => {
   try {
     const { email, status } = req.query || {};
     const filter = {};
@@ -487,7 +520,7 @@ router.get('/reporter-stories', async (req, res) => {
 
 // Phase 1 endpoints (public): submit + list by email
 // POST /api/community-reporter/submit
-router.post('/submit', async (req, res) => {
+router.post('/submit', requireCommunityReporterOpen, async (req, res) => {
   try {
     const body = req.body || {};
     const deskMeta = inferSubmissionDeskMetadata(body);

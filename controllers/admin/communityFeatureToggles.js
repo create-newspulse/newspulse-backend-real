@@ -1,16 +1,17 @@
 // controllers/admin/communityFeatureToggles.js
-const FeatureToggles = require('../../models/FeatureToggles');
-
-const DEFAULT_TOGGLES = {
-  communityReporterClosed: false,
-  reporterPortalClosed: false,
-};
+const {
+  getEffectiveCommunityAccessState,
+  getFounderToggleDoc,
+  updateFounderToggles,
+} = require('../../services/communityAccessToggleService');
 
 function toAdminResponse(doc) {
   const s = doc || {};
   return {
     communityReporterClosed: !!s.communityReporterClosed,
     reporterPortalClosed: !!s.reporterPortalClosed,
+    communityReporterEnabled: s.communityReporterEnabled !== false,
+    reporterPortalEnabled: s.reporterPortalEnabled !== false,
     updatedAt: s.updatedAt || null,
   };
 }
@@ -20,6 +21,8 @@ function toPublicResponse(doc) {
   return {
     communityReporterClosed: !!s.communityReporterClosed,
     reporterPortalClosed: !!s.reporterPortalClosed,
+    communityReporterEnabled: s.communityReporterEnabled !== false,
+    reporterPortalEnabled: s.reporterPortalEnabled !== false,
     updatedAt: s.updatedAt || null,
   };
 }
@@ -29,12 +32,9 @@ function toPublicResponse(doc) {
 // GET /api/admin/feature-toggles
 async function getCommunityFeatureToggles(req, res) {
   try {
-    let doc = await FeatureToggles.findOne({}).lean();
-    if (!doc) {
-      const created = await FeatureToggles.create({ ...DEFAULT_TOGGLES });
-      doc = created.toObject();
-    }
-    return res.json({ ok: true, settings: toAdminResponse(doc) });
+    await getFounderToggleDoc({ createIfMissing: true });
+    const state = await getEffectiveCommunityAccessState();
+    return res.json({ ok: true, settings: toAdminResponse(state) });
   } catch (err) {
     console.error('getCommunityFeatureToggles error', err);
     return res
@@ -46,21 +46,16 @@ async function getCommunityFeatureToggles(req, res) {
 // PATCH /api/admin/feature-toggles
 async function updateCommunityFeatureToggles(req, res) {
   try {
-    const patch = {};
-    for (const key of Object.keys(DEFAULT_TOGGLES)) {
-      if (req.body && typeof req.body[key] === 'boolean') {
-        patch[key] = req.body[key];
-      }
-    }
+    const patch = {
+      communityReporterClosed: req.body && req.body.communityReporterClosed,
+      reporterPortalClosed: req.body && req.body.reporterPortalClosed,
+    };
 
-    const updatedDoc = await FeatureToggles.findOneAndUpdate(
-      {},
-      { $set: patch },
-      { new: true, upsert: true }
-    ).lean();
+    await updateFounderToggles(patch);
+    const state = await getEffectiveCommunityAccessState();
 
     console.log('[feature-toggles] updated', patch);
-    return res.json({ ok: true, settings: toAdminResponse(updatedDoc) });
+    return res.json({ ok: true, settings: toAdminResponse(state) });
   } catch (err) {
     console.error('updateCommunityFeatureToggles error', err);
     return res
@@ -74,16 +69,21 @@ async function updateCommunityFeatureToggles(req, res) {
 // GET /api/public/feature-toggles
 async function getPublicCommunityFeatureToggles(req, res) {
   try {
-    let doc = await FeatureToggles.findOne({}).lean();
-    if (!doc) {
-      doc = { ...DEFAULT_TOGGLES };
-    }
+    const state = await getEffectiveCommunityAccessState();
     res.set('Cache-Control', 'no-store');
-    return res.json({ ok: true, settings: toPublicResponse(doc) });
+    return res.json({ ok: true, settings: toPublicResponse(state) });
   } catch (err) {
     console.error('getPublicCommunityFeatureToggles error', err);
     res.set('Cache-Control', 'no-store');
-    return res.status(200).json({ ok: true, settings: toPublicResponse(DEFAULT_TOGGLES) });
+    return res.status(200).json({
+      ok: true,
+      settings: toPublicResponse({
+        communityReporterClosed: false,
+        reporterPortalClosed: false,
+        communityReporterEnabled: true,
+        reporterPortalEnabled: true,
+      }),
+    });
   }
 }
 

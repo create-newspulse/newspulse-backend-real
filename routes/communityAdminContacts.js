@@ -97,6 +97,10 @@ router.get('/reporter-directory', requireAdminAuth, async (req, res) => {
 // Response shape matches the admin Reporter Contact Directory needs.
 router.get('/reporter-directory/unified', requireAdminAuth, getReporterDirectory);
 
+// Backward-compatible alias used by some admin panel builds.
+// Canonical route remains /api/admin/community/reporter-directory/unified.
+router.get('/contributors', requireAdminAuth, getReporterDirectory);
+
 // GET /api/admin/community/reporter-directory/lookup?identifier=EMAIL_OR_ID
 // - Accepts email (URL-encoded) or a Mongo ObjectId
 // - Never throws on invalid ObjectId (no CastError)

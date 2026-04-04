@@ -1,10 +1,23 @@
 const CommunitySettings = require('../models/CommunitySettings');
+const { getEffectiveCommunityAccessState } = require('./communityAccessToggleService');
 
 async function getCommunitySettings() {
   const existing = await CommunitySettings.findOne().lean();
-  if (existing) return existing;
-  const created = await CommunitySettings.create({});
-  return created.toObject();
+  const base = existing || (await CommunitySettings.create({})).toObject();
+  const effective = await getEffectiveCommunityAccessState();
+
+  return {
+    ...base,
+    communityReporterEnabled: effective.communityReporterEnabled,
+    reporterPortalEnabled: effective.reporterPortalEnabled,
+    allowNewSubmissions: effective.allowNewSubmissions,
+    allowMyStoriesPortal: effective.allowMyStoriesPortal,
+    allowJournalistApplications: effective.allowJournalistApplications,
+    safeModeManualReviewOnly: effective.safeModeManualReviewOnly,
+    communityReporterClosed: effective.communityReporterClosed,
+    reporterPortalClosed: effective.reporterPortalClosed,
+    communityMyStoriesEnabled: effective.communityMyStoriesEnabled,
+  };
 }
 
 async function updateCommunitySettings(patch = {}) {

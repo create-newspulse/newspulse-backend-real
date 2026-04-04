@@ -1,57 +1,82 @@
 const express = require('express');
-const FounderFeatureToggles = require('../../models/FounderFeatureToggles');
-const { requireAdminAuth, requireFounderAuth } = require('../../middleware/adminAuth');
-const { requireOwnerKey } = require('../../middleware/requireOwnerKey');
+const { requireFounderAuth } = require('../../middleware/adminAuth');
+const {
+	getEffectiveCommunityAccessState,
+	getFounderToggleDoc,
+	updateFounderToggles,
+} = require('../../services/communityAccessToggleService');
+const {
+	getDefaultFounderFeatureToggles,
+	extractFeatureTogglePatch,
+} = require('../../services/founderCommandService');
+
+function formatFeatureToggleResponse(data) {
+	const payload = {
+		communityReporterClosed: !!data?.communityReporterClosed,
+		reporterPortalClosed: !!data?.reporterPortalClosed,
+		communityReporterEnabled: data?.communityReporterEnabled !== false,
+		reporterPortalEnabled: data?.reporterPortalEnabled !== false,
+		updatedAt: data?.updatedAt || null,
+	};
+	return {
+		...payload,
+		ok: true,
+		success: true,
+		status: 200,
+		data: payload,
+		settings: payload,
+	};
+}
+
+async function saveFeatureToggles(req, res) {
+	try {
+		const patch = extractFeatureTogglePatch(req.body || {});
+		const doc = await updateFounderToggles(patch);
+		const effective = await getEffectiveCommunityAccessState();
+
+		res.set('Cache-Control', 'no-store');
+		return res.json(formatFeatureToggleResponse({
+			communityReporterClosed: !!doc?.communityReporterClosed,
+			reporterPortalClosed: !!doc?.reporterPortalClosed,
+			communityReporterEnabled: effective.communityReporterEnabled,
+			reporterPortalEnabled: effective.reporterPortalEnabled,
+			updatedAt: effective.updatedAt,
+		}));
+	} catch (err) {
+		console.error('[FOUNDER_FEATURE_TOGGLES][patch] failed', err?.stack || err?.message || err);
+		return res.status(500).json({
+			ok: false,
+			success: false,
+			status: 500,
+			message: 'Internal error',
+			path: req.originalUrl,
+		});
+	}
+}
 
 const router = express.Router();
 
-async function getOrCreateToggles() {
-	return FounderFeatureToggles.findOneAndUpdate(
-		{ key: "community_feature_toggles" },
-		{
-			$setOnInsert: {
-				key: "community_feature_toggles",
-				communityReporterClosed: false,
-				reporterPortalClosed: false,
-			},
-		},
-		{ new: true, upsert: true }
-	).lean();
-}
-
-router.get('/feature-toggles', requireAdminAuth, async (req, res) => {
-	const doc = await getOrCreateToggles();
-	res.set('Cache-Control', 'no-store');
-	res.json({
-		communityReporterClosed: !!doc.communityReporterClosed,
-		reporterPortalClosed: !!doc.reporterPortalClosed,
-		updatedAt: doc.updatedAt,
-	});
+router.get('/feature-toggles', requireFounderAuth, async (req, res) => {
+	try {
+		const doc = await getFounderToggleDoc({ createIfMissing: true });
+		const effective = await getEffectiveCommunityAccessState();
+		res.set('Cache-Control', 'no-store');
+		res.json(formatFeatureToggleResponse({
+			communityReporterClosed: !!doc?.communityReporterClosed,
+			reporterPortalClosed: !!doc?.reporterPortalClosed,
+			communityReporterEnabled: effective.communityReporterEnabled,
+			reporterPortalEnabled: effective.reporterPortalEnabled,
+			updatedAt: effective.updatedAt,
+		}));
+	} catch (err) {
+		console.error('[FOUNDER_FEATURE_TOGGLES][get] failed', err?.stack || err?.message || err);
+		const fallback = await getDefaultFounderFeatureToggles();
+		res.set('Cache-Control', 'no-store');
+		return res.status(200).json(formatFeatureToggleResponse(fallback));
+	}
 });
 
-router.patch('/feature-toggles', requireAdminAuth, async (req, res) => {
-	// Owner-key unlock required for state-changing operations
-	return requireFounderAuth(req, res, async () => {
-		return requireOwnerKey(req, res, async () => {
-	const { communityReporterClosed, reporterPortalClosed } = req.body || {};
-	const update = {};
-	if (typeof communityReporterClosed === "boolean") update.communityReporterClosed = communityReporterClosed;
-	if (typeof reporterPortalClosed === "boolean") update.reporterPortalClosed = reporterPortalClosed;
-
-	const doc = await FounderFeatureToggles.findOneAndUpdate(
-		{ key: 'community_feature_toggles' },
-		{ $set: update, $setOnInsert: { key: 'community_feature_toggles' } },
-		{ new: true, upsert: true }
-	).lean();
-
-	res.set('Cache-Control', 'no-store');
-	res.json({
-		communityReporterClosed: !!doc.communityReporterClosed,
-		reporterPortalClosed: !!doc.reporterPortalClosed,
-		updatedAt: doc.updatedAt,
-	});
-		});
-	});
-});
+router.patch('/feature-toggles', requireFounderAuth, saveFeatureToggles);
+router.put('/feature-toggles', requireFounderAuth, saveFeatureToggles);
 
 module.exports = router;

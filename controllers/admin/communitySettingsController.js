@@ -1,23 +1,30 @@
 // Public + Admin community settings controller (admin wrapper)
 // Re-export admin handlers and add public-safe handler here for clarity.
 
-const CommunityFeatureSettings = require('../../models/CommunityFeatureSettings');
+const { getEffectiveCommunityAccessState } = require('../../services/communityAccessToggleService');
 
 async function getPublicCommunitySettings(req, res) {
 	try {
-		let doc = await CommunityFeatureSettings.findOne({ key: 'community' }).lean();
-		if (!doc) {
-			doc = { key: 'community' };
-		}
+		const state = await getEffectiveCommunityAccessState();
 		const settings = {
-			communityReporterEnabled: !!doc.communityReporterEnabled,
-			reporterPortalEnabled: !!doc.reporterPortalEnabled,
-			allowNewSubmissions: !!doc.allowNewSubmissions,
-			allowMyStoriesPortal: !!doc.allowMyStoriesPortal,
-			allowJournalistApplications: !!doc.allowJournalistApplications,
-			safeModeManualReviewOnly: !!doc.safeModeManualReviewOnly,
+			communityReporterEnabled: state.communityReporterEnabled,
+			reporterPortalEnabled: state.reporterPortalEnabled,
+			allowNewSubmissions: state.allowNewSubmissions,
+			allowMyStoriesPortal: state.allowMyStoriesPortal,
+			allowJournalistApplications: state.allowJournalistApplications,
+			safeModeManualReviewOnly: state.safeModeManualReviewOnly,
+			communityReporterClosed: state.communityReporterClosed,
+			reporterPortalClosed: state.reporterPortalClosed,
+			communityMyStoriesEnabled: state.communityMyStoriesEnabled,
 		};
-		return res.json({ ok: true, settings });
+		return res.json({
+			ok: true,
+			settings,
+			featureToggles: {
+				communityReporterClosed: state.communityReporterClosed,
+				reporterPortalClosed: state.reporterPortalClosed,
+			},
+		});
 	} catch (err) {
 		console.error('getPublicCommunitySettings error', err);
 		return res.status(200).json({
@@ -29,6 +36,13 @@ async function getPublicCommunitySettings(req, res) {
 				allowMyStoriesPortal: true,
 				allowJournalistApplications: true,
 				safeModeManualReviewOnly: false,
+				communityReporterClosed: false,
+				reporterPortalClosed: false,
+				communityMyStoriesEnabled: true,
+			},
+			featureToggles: {
+				communityReporterClosed: false,
+				reporterPortalClosed: false,
 			},
 		});
 	}
