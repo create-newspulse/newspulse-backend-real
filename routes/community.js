@@ -3,8 +3,10 @@ const mongoose = require('mongoose');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const { runCommunityAiReview } = require('../services/communityAiReview');
 const {
+  COMMUNITY_REPORTER_CATEGORIES,
   extractSubmissionAttachments,
   inferSubmissionDeskMetadata,
+  normalizeCommunityReporterCategory,
   normalizeWorkflowStatus,
 } = require('../services/communitySubmissionWorkflow');
 const router = express.Router();
@@ -18,7 +20,7 @@ router.post('/submissions', async (req, res) => {
     const email = (b.email || b.reporterEmail || '').toString().trim().toLowerCase();
     const headline = (b.headline || b.title || '').toString().trim();
     const body = (b.body || b.story || b.storyText || b.content || '').toString().trim();
-    const category = (b.category || b.track || deskMeta.track || '').toString().trim();
+    const category = (b.category || b.track || '').toString().trim();
 
     const city = (b.city || b.location?.city || b.location || b.reporterLocation || '').toString().trim();
     const state = (b.state || b.location?.state || '').toString().trim();
@@ -47,6 +49,11 @@ router.post('/submissions', async (req, res) => {
     if (headline && headline.length > 200) errors.push('headline must be <= 200 chars');
     if (body && body.length > 10000) errors.push('body must be <= 10000 chars');
 
+    const normalizedCategory = normalizeCommunityReporterCategory(category);
+    if (category && !normalizedCategory) {
+      errors.push(`category must be one of: ${COMMUNITY_REPORTER_CATEGORIES.join(', ')}`);
+    }
+
     if (errors.length) {
       return res.status(400).json({ success: false, ok: false, message: 'Validation failed', errors });
     }
@@ -63,7 +70,7 @@ router.post('/submissions', async (req, res) => {
       reporterEmail: email,
       headline,
       body,
-      category,
+      category: normalizedCategory,
       ageGroup: ageGroup || undefined,
       reporterAgeGroup: ageGroup || undefined,
       city: city || undefined,
@@ -118,7 +125,7 @@ router.post('/submissions', async (req, res) => {
       const ai = await runCommunityAiReview({
         userName,
         city,
-        category,
+        category: normalizedCategory,
         headline,
         body,
         ageGroup,

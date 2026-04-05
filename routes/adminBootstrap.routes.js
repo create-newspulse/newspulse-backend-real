@@ -3,14 +3,14 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 
 const User = require('../models/User');
+const {
+  getLocalFounderSafeDiagnostics,
+  isLocalDevLike,
+  isProductionLike,
+  resolveLocalFounderSeedConfig,
+} = require('../lib/localFounderAuth');
 
 const router = express.Router();
-
-function isProd() {
-  const envRaw = String(process.env.NODE_ENV || 'development').toLowerCase();
-  const isRender = !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
-  return envRaw === 'production' || isRender;
-}
 
 function requireOwnerBootstrapKey(req, res, next) {
   const expected = String(process.env.OWNER_BOOTSTRAP_KEY || '').trim();
@@ -45,12 +45,11 @@ async function anyUsersExist() {
   return count > 0;
 }
 
-async function upsertFounder({ email, password, fullName }) {
+async function ensureFounder({ email, password, fullName }) {
   const rounds = parseInt(process.env.PASSWORD_HASH_ROUNDS || '10', 10);
-  const passwordHash = await bcrypt.hash(password, rounds);
-
   const existing = await User.findOne({ email });
   if (!existing) {
+    const passwordHash = await bcrypt.hash(password, rounds);
     const created = await User.create({
       email,
       name: fullName,
@@ -65,26 +64,58 @@ async function upsertFounder({ email, password, fullName }) {
       createdAt: new Date(),
       lastLoginAt: null,
     });
-    return { created: true, reset: false, userId: String(created._id) };
+    return { created: true, reset: false, updated: false, userId: String(created._id), action: 'created' };
   }
 
-  existing.name = fullName || existing.name;
-  existing.passwordHash = passwordHash;
+  const passwordMatches = existing.passwordHash
+    ? await bcrypt.compare(password, existing.passwordHash).catch(() => false)
+    : false;
+
+  const nextName = fullName || existing.name || 'Founder';
+  const nextPermissions = new Set(Array.isArray(existing.permissions) ? existing.permissions : []);
+  nextPermissions.add('team.manage');
+  nextPermissions.add('audit.read');
+  nextPermissions.add('settings.read');
+
+  const needsMetadataUpdate = existing.name !== nextName
+    || existing.role !== 'founder'
+    || existing.status !== 'active'
+    || existing.mustChangePassword !== false
+    || existing.mustResetPassword !== false
+    || existing.forceReset !== false;
+
+  const hasAllPermissions = Array.isArray(existing.permissions)
+    && existing.permissions.includes('team.manage')
+    && existing.permissions.includes('audit.read')
+    && existing.permissions.includes('settings.read');
+
+  const needsUpdate = !passwordMatches || needsMetadataUpdate || !hasAllPermissions;
+  if (!needsUpdate) {
+    return { created: false, reset: false, updated: false, userId: String(existing._id), action: 'existing' };
+  }
+
+  existing.name = nextName;
   existing.role = 'founder';
   existing.status = 'active';
   existing.mustChangePassword = false;
   existing.mustResetPassword = false;
   existing.forceReset = false;
-  existing.tokenVersion = (typeof existing.tokenVersion === 'number' ? existing.tokenVersion : 0) + 1;
+  existing.permissions = Array.from(nextPermissions);
 
-  const perms = new Set(Array.isArray(existing.permissions) ? existing.permissions : []);
-  perms.add('team.manage');
-  perms.add('audit.read');
-  perms.add('settings.read');
-  existing.permissions = Array.from(perms);
+  if (!passwordMatches) {
+    existing.passwordHash = await bcrypt.hash(password, rounds);
+    existing.tokenVersion = (typeof existing.tokenVersion === 'number' ? existing.tokenVersion : 0) + 1;
+  }
+
 
   await existing.save();
-  return { created: false, reset: true, userId: String(existing._id) };
+  return {
+    created: false,
+    reset: !passwordMatches,
+    updated: true,
+    userId: String(existing._id),
+    action: passwordMatches ? 'updated' : 'reset',
+  };
 }
 
 // POST /api/admin/bootstrap-founder
@@ -109,7 +140,7 @@ router.post('/bootstrap-founder', requireOwnerBootstrapKey, async (req, res) => 
       return res.status(400).json({ ok: false, status: 400, code: 'WEAK_PASSWORD', message: 'Password must be 8+ chars and include letters and numbers' });
     }
 
-    const result = await upsertFounder({ email, password, fullName });
+    const result = await ensureFounder({ email, password, fullName });
     return res.status(200).json({ ok: true, created: result.created, reset: result.reset, userId: result.userId });
   } catch (e) {
     console.error('[bootstrap-founder] failed', e?.message || e);
@@ -123,7 +154,7 @@ router.post('/bootstrap-founder', requireOwnerBootstrapKey, async (req, res) => 
 // - Dev/local: allowed without key
 router.post('/seed-founder', async (req, res, next) => {
   try {
-    if (isProd()) {
+    if (isProductionLike()) {
       return requireOwnerBootstrapKey(req, res, next);
     }
     return next();
@@ -137,28 +168,59 @@ router.post('/seed-founder', async (req, res, next) => {
     }
 
     // In prod, extra safety: require owner key AND allow if no users exist (or explicit intent).
-    if (isProd()) {
+    if (isProductionLike()) {
       const exists = await anyUsersExist();
       if (exists) {
         // Allowed (owner key already validated), but we keep semantics explicit: this is a reset.
       }
     }
 
-    const body = (req.body && typeof req.body === 'object') ? req.body : {};
-    const email = String(body.email || process.env.ADMIN_EMAIL || process.env.FOUNDER_EMAIL || '').trim().toLowerCase();
-    const password = String(body.password || process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS || process.env.FOUNDER_PASSWORD || '').trim();
-    const fullName = String(body.fullName || body.name || process.env.FOUNDER_NAME || 'Founder').trim();
+    const config = resolveLocalFounderSeedConfig(req.body);
+    const email = config.email;
+    const password = config.password;
+    const fullName = config.fullName;
 
     if (!email || !password) {
-      return res.status(400).json({ ok: false, status: 400, code: 'MISSING_FIELDS', message: 'email and password required (or set ADMIN_EMAIL/ADMIN_PASSWORD)' });
+      return res.status(400).json({ ok: false, status: 400, code: 'MISSING_FIELDS', message: 'email and password required (or set ADMIN_SEED_FOUNDER_EMAIL/ADMIN_SEED_FOUNDER_PASSWORD)' });
     }
 
     if (!passwordPolicyOk(password)) {
       return res.status(400).json({ ok: false, status: 400, code: 'WEAK_PASSWORD', message: 'Password must be 8+ chars and include letters and numbers' });
     }
 
-    const result = await upsertFounder({ email, password, fullName });
-    return res.status(200).json({ ok: true, created: result.created, reset: result.reset, userId: result.userId });
+    const result = await ensureFounder({ email, password, fullName });
+    const localDev = isLocalDevLike();
+    const diagnostics = getLocalFounderSafeDiagnostics(req.body);
+    const dbName = mongoose.connection && mongoose.connection.name ? String(mongoose.connection.name) : null;
+
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: 200,
+      code: result.created
+        ? 'FOUNDER_SEEDED'
+        : result.action === 'existing'
+          ? 'FOUNDER_ALREADY_EXISTS'
+          : 'FOUNDER_UPDATED',
+      message: result.created
+        ? 'Founder account seeded.'
+        : result.action === 'existing'
+          ? 'Founder account already exists and is ready for local login.'
+          : result.reset
+            ? 'Founder account exists; local credentials were refreshed.'
+            : 'Founder account exists; founder metadata was refreshed.',
+      created: result.created,
+      reset: result.reset,
+      updated: result.updated,
+      userId: result.userId,
+      founder: {
+        email,
+        fullName,
+        role: 'founder',
+      },
+      ...(dbName ? { dbName } : {}),
+      ...(localDev ? { localDev: diagnostics } : {}),
+    });
   } catch (e) {
     console.error('[seed-founder] failed', e?.message || e);
     return res.status(500).json({ ok: false, status: 500, message: 'Internal error' });

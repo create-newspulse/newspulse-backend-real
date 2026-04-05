@@ -1,5 +1,26 @@
 const YOUTH_PULSE_DESK = 'youth-pulse';
 
+const COMMUNITY_REPORTER_CATEGORIES = Object.freeze([
+  'Regional',
+  'National',
+  'International',
+  'Civic Issue',
+  'Crime / Police',
+  'Government / Public Services',
+  'Politics / Local Leadership',
+  'Education / School / College',
+  'Health / Hospital',
+  'Weather / Disaster',
+  'Business / Market',
+  'Sports',
+  'Youth / Campus',
+  'Lifestyle / Culture',
+  'Entertainment / Events',
+  'Environment',
+  'Achievement / Inspiration',
+  'General Tip',
+]);
+
 const YOUTH_PULSE_TRACKS = [
   'youth-pulse',
   'campus-buzz',
@@ -36,6 +57,19 @@ function normalizeToken(value) {
     .toLowerCase()
     .replace(/[_\s]+/g, '-')
     .replace(/-+/g, '-');
+}
+
+function normalizeCommunityReporterCategory(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return null;
+
+  const lowered = trimmed.toLowerCase();
+  const match = COMMUNITY_REPORTER_CATEGORIES.find((entry) => entry.toLowerCase() === lowered);
+  return match || null;
+}
+
+function isAllowedCommunityReporterCategory(value) {
+  return !!normalizeCommunityReporterCategory(value);
 }
 
 function normalizeDeskValue(value) {
@@ -435,6 +469,7 @@ function deriveArticleTagsFromSubmission(submission) {
 }
 
 module.exports = {
+  COMMUNITY_REPORTER_CATEGORIES,
   WORKFLOW_STATUSES,
   YOUTH_PULSE_DESK,
   YOUTH_PULSE_TRACK_DEFINITIONS,
@@ -449,9 +484,11 @@ module.exports = {
   ensureTrackTag,
   extractSubmissionAttachments,
   getYouthPulseTrackDefinition,
+  isAllowedCommunityReporterCategory,
   getSubmissionDeskMetadata,
   inferSubmissionDeskMetadata,
   isYouthPulseSubmission,
+  normalizeCommunityReporterCategory,
   normalizeDeskValue,
   normalizeTrackValue,
   normalizeWorkflowStatus,

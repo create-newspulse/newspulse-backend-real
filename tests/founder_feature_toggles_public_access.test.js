@@ -129,7 +129,7 @@ test('community reporter and reporter portal public routes are blocked when foun
       name: 'Citizen Reporter',
       email: 'citizen@example.com',
       location: 'Ahmedabad',
-      category: 'local',
+      category: 'Regional',
       headline: 'Test Headline',
       story: 'Test story body content',
     });

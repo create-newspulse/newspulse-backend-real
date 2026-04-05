@@ -34,6 +34,12 @@ if (!process.env.MONGODB_URI && process.env.MONGO_URI) {
   }
 }
 
+const {
+  getLocalFounderSafeDiagnostics,
+  isLocalDevLike,
+  resolveLocalFounderSeedConfig,
+} = require('./lib/localFounderAuth');
+
 // One-time local-dev sanity log to confirm dotenv loaded.
 // (Avoids noisy logs in tests/import mode.)
 if (require.main === module && String(process.env.NODE_ENV || 'development').toLowerCase() !== 'production') {
@@ -45,6 +51,12 @@ if (require.main === module && String(process.env.NODE_ENV || 'development').toL
     hasEmail: !!String(process.env.ADMIN_EMAIL || '').trim(),
     hasPassword: !!String(process.env.ADMIN_PASSWORD || '').trim(),
   });
+
+  if (isLocalDevLike()) {
+    const localFounder = getLocalFounderSafeDiagnostics();
+    // eslint-disable-next-line no-console
+    console.log('[startup][local-founder]', localFounder);
+  }
 }
 
 // Note: Do not fail-fast on missing env vars.
@@ -85,6 +97,19 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
         env: st.env,
       });
     }
+  } catch (_) {}
+
+  try {
+    const { getMediaLibraryProviderStatus } = require('./lib/mediaLibraryStorage');
+    const mediaProvider = getMediaLibraryProviderStatus();
+    // eslint-disable-next-line no-console
+    console.log('[startup][media-upload]', {
+      provider: mediaProvider.provider,
+      providerReady: mediaProvider.ready,
+      uploadDirectoryConfigured: mediaProvider.uploadDirectoryConfigured,
+      bucketConfigured: mediaProvider.bucketConfigured,
+      reason: mediaProvider.reason,
+    });
   } catch (_) {}
 
   try {
@@ -941,6 +966,18 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
     const dbFromUri = _resolvedMongoDbName();
     const db = dbFromUri || mongoose.connection.name || undefined;
     console.log('[startup] MongoDB connected', { db });
+    if (isLocalDevLike()) {
+      try {
+        const founderExists = !!(await User.exists({ role: 'founder' }));
+        console.log('[startup][local-founder-db]', {
+          db,
+          founderExists,
+          ...getLocalFounderSafeDiagnostics(),
+        });
+      } catch (e) {
+        console.warn('[startup][local-founder-db] check failed', e?.message || e);
+      }
+    }
     // Ensure TTL index for Broadcast Center is present.
     try {
       const BroadcastItem = require('./models/BroadcastItem');
@@ -2778,14 +2815,76 @@ function _issueJwt(payload, expiresIn) {
   }
 }
 
-function _adminLoginHandler(req, res) {
+async function _adminLoginHandler(req, res) {
   try {
     const body = req.body || {};
-    const email = String(body.email || process.env.FOUNDER_EMAIL || 'founder@example.com');
+    const localFounderConfig = resolveLocalFounderSeedConfig();
+    const email = String(body.email || localFounderConfig.email || process.env.FOUNDER_EMAIL || 'founder@example.com').trim().toLowerCase();
     const password = String(body.password || '');
-    const expectedEmail = String(process.env.FOUNDER_EMAIL || 'founder@example.com');
-    const expectedPass = String(process.env.FOUNDER_PASSWORD || '');
+    const expectedEmail = String(
+      process.env.ADMIN_EMAIL
+      || process.env.FOUNDER_EMAIL
+      || process.env.ADMIN_SEED_FOUNDER_EMAIL
+      || localFounderConfig.email
+      || 'founder@example.com'
+    ).trim().toLowerCase();
+    const expectedPass = String(
+      process.env.ADMIN_PASSWORD
+      || process.env.ADMIN_PASS
+      || process.env.FOUNDER_PASSWORD
+      || process.env.FOUNDER_PASS
+      || process.env.ADMIN_SEED_FOUNDER_PASSWORD
+      || (isLocalDevLike() ? localFounderConfig.password : '')
+      || ''
+    );
     if (!email || !password) return res.status(400).json({ success: false, message: 'Email and password required' });
+
+    if (mongoose.connection && mongoose.connection.readyState === 1) {
+      const user = await User.findOne({ email });
+      if (user && user.passwordHash) {
+        const okPw = await bcrypt.compare(password, user.passwordHash).catch(() => false);
+        if (okPw) {
+          const role = String(user.role || 'founder').toLowerCase();
+          const name = user.name || localFounderConfig.fullName || 'Founder';
+
+          if (_isTestEnv()) {
+            const accessToken = _makeToken('access');
+            const refreshToken = _makeToken('refresh');
+            _issuedTokens.access.add(accessToken);
+            _issuedTokens.refresh.add(refreshToken);
+            return res.json({ success: true, accessToken, refreshToken, user: { email: user.email } });
+          }
+
+          const accessToken = _issueJwt(
+            { sub: String(user._id || 'founder-1'), email: user.email, role, name, tokenVersion: user.tokenVersion || 0, typ: 'access' },
+            '15m'
+          );
+          const refreshToken = _issueJwt(
+            { sub: String(user._id || 'founder-1'), email: user.email, role, name, tokenVersion: user.tokenVersion || 0, typ: 'refresh' },
+            '30d'
+          );
+
+          if (!accessToken || !refreshToken) {
+            return res.status(500).json({ success: false, message: 'Server misconfigured' });
+          }
+
+          return res.json({ success: true, accessToken, refreshToken, user: { email: user.email } });
+        }
+      }
+
+      if (isLocalDevLike() && email === localFounderConfig.email) {
+        const founderExists = !!(await User.exists({ role: 'founder' }));
+        if (!founderExists) {
+          return res.status(401).json({
+            success: false,
+            code: 'ADMIN_FOUNDER_NOT_SEEDED',
+            message: 'Local founder account is not seeded yet. POST /api/admin/seed-founder before logging in.',
+            founder: getLocalFounderSafeDiagnostics(),
+          });
+        }
+      }
+    }
+
     if (email !== expectedEmail || password !== expectedPass) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
     // In tests, keep the historical access.* tokens that /admin-auth/session accepts.
@@ -2833,7 +2932,8 @@ app.get('/admin-auth/session', (req, res) => {
   if (token === 'invalidtoken') return res.status(200).json({ success: false, user: null });
   const ok = _issuedTokens.access.has(token) || token.startsWith('np.') || token.startsWith('access.');
   if (!ok) return res.status(200).json({ success: false, user: null });
-  const email = process.env.FOUNDER_EMAIL || 'founder@example.com';
+  const localFounderConfig = resolveLocalFounderSeedConfig();
+  const email = process.env.FOUNDER_EMAIL || process.env.ADMIN_EMAIL || localFounderConfig.email || 'founder@example.com';
   return res.json({ success: true, user: { email } });
 });
 
@@ -2858,7 +2958,8 @@ app.post('/admin/refresh', (req, res) => {
     if (!payload || String(payload.typ || '') !== 'refresh') {
       return res.status(401).json({ success: false, message: 'Invalid refresh token' });
     }
-    const email = payload.email || process.env.FOUNDER_EMAIL || 'founder@example.com';
+    const localFounderConfig = resolveLocalFounderSeedConfig();
+    const email = payload.email || process.env.FOUNDER_EMAIL || process.env.ADMIN_EMAIL || localFounderConfig.email || 'founder@example.com';
     const role = payload.role || 'founder';
     const accessToken = _issueJwt(
       { sub: payload.sub || 'founder-1', email, role, name: payload.name || 'Founder', tokenVersion: payload.tokenVersion || 0, typ: 'access' },

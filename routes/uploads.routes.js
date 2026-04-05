@@ -8,6 +8,9 @@ const {
   uploadFromDataUri,
   cloudinaryPing,
 } = require('../lib/cloudinary');
+const { getMediaLibraryProviderStatus } = require('../lib/mediaLibraryStorage');
+const { getIndexedMediaStats, listIndexedMediaRecords } = require('../services/mediaLibraryService');
+const { assertAllowedArticleCoverMimeType } = require('../lib/mediaUploadValidation');
 
 const { shouldLog } = require('../lib/logThrottle');
 
@@ -48,6 +51,32 @@ function pickCoverFile(req) {
 
   return null;
 }
+
+// GET /api/uploads -> media library listing used by admin clients
+router.get('/', (req, res) => {
+  return Promise.resolve().then(async () => {
+    const includeDeleted = String(req.query.includeDeleted || '').trim() === '1' || String(req.query.deleted || '').trim() === '1';
+    const providerStatus = getMediaLibraryProviderStatus();
+    const items = await listIndexedMediaRecords({ includeDeleted, mediaType: req.query.mediaType || null });
+    const counts = await getIndexedMediaStats();
+
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: 200,
+      message: 'Uploads list',
+      data: {
+        provider: providerStatus.provider,
+        uploadConfigured: providerStatus.ready,
+        reason: providerStatus.ready ? null : providerStatus.reason,
+        counts,
+        items,
+      },
+    });
+  }).catch((e) => {
+    return res.status(500).json({ ok: false, success: false, message: e?.message || 'Failed to load uploads' });
+  });
+});
 
 // GET /api/uploads/config -> non-secret capability flags for frontend
 router.get('/config', async (_req, res) => {
@@ -143,13 +172,7 @@ router.post(
         });
       }
 
-      if (!String(file.mimetype || '').toLowerCase().startsWith('image/')) {
-        return res.status(400).json({
-          ok: false,
-          success: false,
-          message: 'Invalid file type (image required)',
-        });
-      }
+      const mimeType = assertAllowedArticleCoverMimeType(file.mimetype);
 
       if (!isCloudinaryConfigured()) {
         try {
@@ -173,7 +196,7 @@ router.post(
       } catch (streamErr) {
         // Fallback: base64 data URI upload (sometimes stream errors show up in certain proxy/env combos)
         try {
-          const mime = String(file.mimetype || 'application/octet-stream');
+          const mime = mimeType || 'application/octet-stream';
           const dataUri = `data:${mime};base64,${file.buffer.toString('base64')}`;
           result = await uploadFromDataUri(dataUri, { folder });
         } catch (dataErr) {
@@ -205,8 +228,6 @@ router.post(
         },
       });
     } catch (err) {
-      console.error('UploadCover error:', err);
-
       const code = err?.code;
       if (code === 'CLOUDINARY_NOT_CONFIGURED') {
         return res.status(503).json({
@@ -216,9 +237,13 @@ router.post(
       }
 
       const status = typeof err?.status === 'number' ? err.status : 500;
+      if (status >= 500) {
+        console.error('UploadCover error:', err);
+      }
       return res.status(status).json({
         ok: false,
         success: false,
+        code: err?.code || undefined,
         message: status === 400 ? (err?.message || 'Bad request') : 'Upload failed',
         error: err?.message || String(err),
       });

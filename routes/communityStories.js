@@ -3,8 +3,10 @@ const mongoose = require('mongoose');
 const News = require('../models/News');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const {
+  COMMUNITY_REPORTER_CATEGORIES,
   extractSubmissionAttachments,
   inferSubmissionDeskMetadata,
+  normalizeCommunityReporterCategory,
   normalizeWorkflowStatus,
 } = require('../services/communitySubmissionWorkflow');
 let requireAdminAuth = (_req, _res, next) => next();
@@ -202,9 +204,13 @@ router.post('/stories/submit', async (req, res) => {
     const normalizedCity = (city || location || '').trim();
     const normalizedState = (state || '').trim();
     const normalizedCountry = (country || '').trim();
+    const normalizedCategory = normalizeCommunityReporterCategory(category || track || null);
 
-    if (!normalizedName || !normalizedEmail || !headline || !story) {
-      return res.status(400).json({ ok: false, code: 'VALIDATION_FAILED', message: 'Missing required fields' });
+    if (!normalizedName || !normalizedEmail || !headline || !story || !normalizedCategory) {
+      const message = normalizedCategory
+        ? 'Missing required fields'
+        : `Category must be one of: ${COMMUNITY_REPORTER_CATEGORIES.join(', ')}`;
+      return res.status(400).json({ ok: false, code: 'VALIDATION_FAILED', message });
     }
 
     // Upsert reporter contact to determine reporterType
@@ -256,7 +262,7 @@ router.post('/stories/submit', async (req, res) => {
       reporterEmail: normalizedEmail,
       name: normalizedName,
       email: normalizedEmail,
-      category: (category || track || deskMeta.track || '').trim(),
+      category: normalizedCategory,
       desk: deskMeta.desk || undefined,
       submissionType: deskMeta.submissionType || undefined,
       intakeSource: deskMeta.intakeSource || undefined,

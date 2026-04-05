@@ -634,7 +634,7 @@ test('reporter portal can create and edit only allowed submissions on shared Com
       action: 'draft',
       headline: 'Portal Draft',
       story: 'Draft story body',
-      category: 'district',
+      category: 'Regional',
     });
 
   assert.strictEqual(createRes.statusCode, 201);
@@ -691,6 +691,28 @@ test('reporter portal submission detail stays scoped to the verified reporter id
 
   assert.strictEqual(otherDetailRes.statusCode, 404);
   assert.strictEqual(otherDetailRes.body.code, 'SUBMISSION_NOT_FOUND');
+});
+
+test('reporter portal rejects unsupported submission categories on create', async () => {
+  const otpRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'reporter@example.com' });
+  const verifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'reporter@example.com', otp: otpRes.body.devCode });
+
+  const createRes = await request(app)
+    .post('/api/reporter-portal/submissions')
+    .set('Authorization', `Bearer ${verifyRes.body.token}`)
+    .send({
+      action: 'draft',
+      headline: 'Bad Category Draft',
+      story: 'Draft story body',
+      category: 'district',
+    });
+
+  assert.strictEqual(createRes.statusCode, 400);
+  assert.strictEqual(createRes.body.code, 'VALIDATION_FAILED');
 });
 
 test('reporter profile update allows safe fields only and blocks direct email change without reverification', async () => {

@@ -8,6 +8,11 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 
 const User = require('../models/User');
+const {
+  getLocalFounderSafeDiagnostics,
+  isLocalDevLike,
+  resolveLocalFounderSeedConfig,
+} = require('../lib/localFounderAuth');
 
 const router = express.Router();
 
@@ -60,6 +65,12 @@ function recordAttempt(ip) {
   loginAttempts.set(ip, arr);
 }
 
+function logLocalAdminRefresh(details) {
+  if (!isLocalDevLike()) return;
+  // eslint-disable-next-line no-console
+  console.log('[admin.refresh.local]', details);
+}
+
 // ─────────────────────────────────────────────
 // PUBLIC: login/logout/health
 // ─────────────────────────────────────────────
@@ -92,15 +103,23 @@ router.post('/login', async (req, res, next) => {
   // Backward-compat:
   // - ADMIN_PASS (legacy naming)
   // - FOUNDER_EMAIL / FOUNDER_PASSWORD (older deployments)
-  const adminEmail = String(process.env.ADMIN_EMAIL || process.env.FOUNDER_EMAIL || '').trim();
+  const localFounderConfig = resolveLocalFounderSeedConfig();
+  const localDev = isLocalDevLike();
+  const adminEmail = String(
+    process.env.ADMIN_EMAIL
+    || process.env.FOUNDER_EMAIL
+    || process.env.ADMIN_SEED_FOUNDER_EMAIL
+    || (localDev ? localFounderConfig.email : '')
+  ).trim();
   const adminPassword = String(
     process.env.ADMIN_PASSWORD
     || process.env.ADMIN_PASS
     || process.env.FOUNDER_PASSWORD
     || process.env.FOUNDER_PASS
-    || ''
+    || process.env.ADMIN_SEED_FOUNDER_PASSWORD
+    || (localDev ? localFounderConfig.password : '')
   ).trim();
-  const founderName = process.env.FOUNDER_NAME || 'Founder';
+  const founderName = process.env.ADMIN_SEED_FOUNDER_NAME || process.env.FOUNDER_NAME || (localDev ? localFounderConfig.fullName : 'Founder');
   const founderId = process.env.FOUNDER_ID || 'founder-001';
   const jwtSecret = String(process.env.JWT_SECRET || '').trim();
 
@@ -112,6 +131,18 @@ router.post('/login', async (req, res, next) => {
   }
 
   const dbReady = mongoose.connection && mongoose.connection.readyState === 1;
+  const dbName = dbReady && mongoose.connection.name ? String(mongoose.connection.name) : null;
+  let localDebugUserFound = false;
+  let localDebugPasswordMatch = false;
+  let localDebugRoleFound = null;
+  const logLocalLoginDebug = (details) => {
+    if (!localDev) return;
+    console.log('[local-admin-login]', {
+      attemptedEmail: email.toLowerCase(),
+      dbName,
+      ...details,
+    });
+  };
 
   // In environments where DB auth is unavailable, we require env-based admin creds.
   // Returning 500 here makes misconfiguration explicit (and keeps tests deterministic).
@@ -136,6 +167,44 @@ router.post('/login', async (req, res, next) => {
       { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' },
     );
   };
+
+  const signRefreshForUser = (u) => {
+    const tokenVersion = typeof u.tokenVersion === 'number' ? u.tokenVersion : 0;
+    return jwt.sign(
+      {
+        sub: String(u._id),
+        userId: String(u._id),
+        email: u.email,
+        name: u.name,
+        role: String(u.role || 'staff').toLowerCase(),
+        tokenVersion,
+        type: 'refresh',
+        typ: 'refresh',
+      },
+      jwtSecret,
+      { expiresIn: process.env.ADMIN_REFRESH_JWT_EXPIRES_IN || '30d' },
+    );
+  };
+
+  const signAccessFallbackToken = (payload) => jwt.sign(
+    {
+      ...payload,
+      type: 'access',
+      typ: 'access',
+    },
+    jwtSecret,
+    { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' },
+  );
+
+  const signRefreshFallbackToken = (payload) => jwt.sign(
+    {
+      ...payload,
+      type: 'refresh',
+      typ: 'refresh',
+    },
+    jwtSecret,
+    { expiresIn: process.env.ADMIN_REFRESH_JWT_EXPIRES_IN || '30d' },
+  );
 
   const setLoginCookies = (token, effectiveEmail) => {
     const isProd = String(process.env.NODE_ENV || 'development').toLowerCase() === 'production'
@@ -171,27 +240,55 @@ router.post('/login', async (req, res, next) => {
   // Primary path: DB-backed user login (works with bootstrap-founder).
   if (dbReady) {
     try {
-      const u = await User.findOne({ email: email.toLowerCase() });
+      const normalizedEmail = email.toLowerCase();
+      const u = await User.findOne({ email: normalizedEmail });
+      let passwordMatch = false;
+      localDebugUserFound = !!u;
+      localDebugRoleFound = u ? String(u.role || '') || null : null;
       if (u) {
         if (u.status === 'suspended') {
+          localDebugPasswordMatch = false;
+          logLocalLoginDebug({ userFound: true, passwordMatch: false, roleFound: localDebugRoleFound, status: 'suspended' });
           return res.status(403).json({ ok: false, message: 'Account suspended' });
         }
         if (u.passwordHash) {
           const okPw = await bcrypt.compare(password, u.passwordHash);
+          passwordMatch = !!okPw;
+          localDebugPasswordMatch = passwordMatch;
           if (okPw) {
+            logLocalLoginDebug({ userFound: true, passwordMatch: true, roleFound: localDebugRoleFound, authSource: 'db' });
             u.lastLoginAt = new Date();
             await u.save();
 
-            const token = signForUser(u);
-            setLoginCookies(token, u.email);
+            const accessToken = signForUser(u);
+            const refreshToken = signRefreshForUser(u);
+            setLoginCookies(accessToken, u.email);
             return res.json({
               ok: true,
-              token,
+              token: accessToken,
+              accessToken,
+              refreshToken,
               user: { id: String(u._id), email: u.email, name: u.name || '', role: String(u.role || 'staff').toLowerCase() },
             });
           }
         }
       }
+
+      logLocalLoginDebug({ userFound: localDebugUserFound, passwordMatch, roleFound: localDebugRoleFound, authSource: 'db-check' });
+
+      if (localDev && normalizedEmail === localFounderConfig.email) {
+        const founderExists = await User.exists({ role: 'founder' });
+        if (!founderExists) {
+          console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=founder-not-seeded`);
+          return res.status(401).json({
+            ok: false,
+            code: 'ADMIN_FOUNDER_NOT_SEEDED',
+            message: 'Local founder account is not seeded yet. POST /api/admin/seed-founder before logging in.',
+            founder: getLocalFounderSafeDiagnostics(),
+          });
+        }
+      }
+
       // Fall through to env login check.
     } catch (e) {
       console.error('[admin/login] db auth failed', e?.message || e);
@@ -201,6 +298,8 @@ router.post('/login', async (req, res, next) => {
 
   // Fallback path: env-based founder login (DB down / maintenance).
   if (adminEmail && adminPassword && email.toLowerCase() === adminEmail.toLowerCase() && password === adminPassword) {
+    localDebugPasswordMatch = true;
+    logLocalLoginDebug({ userFound: false, passwordMatch: true, roleFound: localDebugRoleFound, authSource: 'env-fallback' });
     console.info(`ADMIN LOGIN SUCCESS email=${email} ip=${ip}`);
     const issueToken = async () => {
       // If DB is available, ensure a real User document exists so JWT-based auth
@@ -232,38 +331,44 @@ router.post('/login', async (req, res, next) => {
           await ensured.save();
         }
 
-        return jwt.sign(
-          {
+        return {
+          accessToken: signAccessFallbackToken({
             sub: String(ensured._id),
             userId: String(ensured._id),
             email: ensured.email,
             name: ensured.name,
             role: 'founder',
             tokenVersion: typeof ensured.tokenVersion === 'number' ? ensured.tokenVersion : 0,
-            type: 'access',
-          },
-          jwtSecret,
-          { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' },
-        );
+          }),
+          refreshToken: signRefreshFallbackToken({
+            sub: String(ensured._id),
+            userId: String(ensured._id),
+            email: ensured.email,
+            name: ensured.name,
+            role: 'founder',
+            tokenVersion: typeof ensured.tokenVersion === 'number' ? ensured.tokenVersion : 0,
+          }),
+        };
       }
 
       // DB unavailable: fall back to payload-only auth.
       // requireAuth is designed to accept payload-only when DB is down.
-      return jwt.sign(
-        { sub: founderId, email: adminEmail, name: founderName, role: 'founder', tokenVersion: 0, type: 'access' },
-        jwtSecret,
-        { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' },
-      );
+      return {
+        accessToken: signAccessFallbackToken({ sub: founderId, email: adminEmail, name: founderName, role: 'founder', tokenVersion: 0 }),
+        refreshToken: signRefreshFallbackToken({ sub: founderId, email: adminEmail, name: founderName, role: 'founder', tokenVersion: 0 }),
+      };
     };
 
     Promise.resolve()
       .then(issueToken)
-      .then((token) => {
-        setLoginCookies(token, adminEmail);
+      .then((tokens) => {
+        setLoginCookies(tokens.accessToken, adminEmail);
 
         return res.json({
           ok: true,
-          token,
+          token: tokens.accessToken,
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
           user: {
             id: 'founder',
             email: adminEmail,
@@ -281,6 +386,12 @@ router.post('/login', async (req, res, next) => {
   }
 
   console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=invalid-credentials`);
+  logLocalLoginDebug({
+    userFound: localDebugUserFound,
+    passwordMatch: localDebugPasswordMatch,
+    roleFound: localDebugRoleFound,
+    authSource: 'invalid-credentials',
+  });
   return res.status(401).json({
     ok: false,
     message: 'Invalid admin credentials',
@@ -291,6 +402,63 @@ router.post('/login', async (req, res, next) => {
       },
     } : {}),
   });
+});
+
+router.post('/refresh', async (req, res, next) => {
+  if (req.baseUrl === '/admin') return next();
+
+  logLocalAdminRefresh({
+    phase: 'hit',
+    route: `${req.baseUrl || ''}${req.path || ''}`,
+    hasRefreshToken: !!String(req.body?.refreshToken || '').trim(),
+  });
+
+  const jwtSecret = String(process.env.JWT_SECRET || '').trim();
+  const localFounderConfig = resolveLocalFounderSeedConfig();
+  const fallbackFounderId = process.env.FOUNDER_ID || 'founder-001';
+  const fallbackAdminEmail = String(
+    process.env.ADMIN_EMAIL
+    || process.env.FOUNDER_EMAIL
+    || process.env.ADMIN_SEED_FOUNDER_EMAIL
+    || localFounderConfig.email
+    || ''
+  ).trim().toLowerCase();
+  const fallbackFounderName = process.env.ADMIN_SEED_FOUNDER_NAME || process.env.FOUNDER_NAME || localFounderConfig.fullName || 'Founder';
+  if (!jwtSecret) {
+    logLocalAdminRefresh({ phase: 'error', route: `${req.baseUrl || ''}${req.path || ''}`, status: 500, error: 'JWT_SECRET missing' });
+    return res.status(500).json({ ok: false, success: false, message: 'JWT_SECRET missing' });
+  }
+
+  const refreshToken = String(req.body?.refreshToken || '').trim();
+  if (!refreshToken) {
+    logLocalAdminRefresh({ phase: 'error', route: `${req.baseUrl || ''}${req.path || ''}`, status: 401, error: 'Invalid refresh token' });
+    return res.status(401).json({ ok: false, success: false, message: 'Invalid refresh token' });
+  }
+
+  try {
+    const payload = jwt.verify(refreshToken, jwtSecret);
+    const tokenType = String(payload?.typ || payload?.type || '').toLowerCase();
+    if (tokenType !== 'refresh') {
+      return res.status(401).json({ ok: false, success: false, message: 'Invalid refresh token' });
+    }
+
+    const accessToken = jwt.sign({
+      sub: payload.sub || fallbackFounderId,
+      userId: payload.userId || payload.sub || fallbackFounderId,
+      email: payload.email || fallbackAdminEmail,
+      name: payload.name || fallbackFounderName,
+      role: payload.role || 'founder',
+      tokenVersion: typeof payload.tokenVersion === 'number' ? payload.tokenVersion : 0,
+      type: 'access',
+      typ: 'access',
+    }, jwtSecret, { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' });
+
+    logLocalAdminRefresh({ phase: 'response', route: `${req.baseUrl || ''}${req.path || ''}`, status: 200, dbQueryResultCount: 1, error: null });
+    return res.status(200).json({ ok: true, success: true, accessToken });
+  } catch (_err) {
+    logLocalAdminRefresh({ phase: 'error', route: `${req.baseUrl || ''}${req.path || ''}`, status: 401, dbQueryResultCount: 0, error: 'Invalid refresh token' });
+    return res.status(401).json({ ok: false, success: false, message: 'Invalid refresh token' });
+  }
 });
 
 // POST /api/admin/logout
@@ -337,6 +505,7 @@ router.use((req, res, next) => {
   // Legacy namespace: let server.js handle /admin/* (tests rely on /admin/login, /admin/refresh, /admin/metrics).
   // Exiting the router here prevents this file from shadowing those handlers.
   if (req.baseUrl === '/admin') return next('router');
+  if (req.path === '/seed-founder' || req.path === '/bootstrap-founder') return next('router');
   return requireAdminAuth(req, res, next);
 });
 

@@ -12,8 +12,10 @@ try { Reporter = require('../newspulse-backend-real-main/models/Reporter'); } ca
 try { ReporterStory = require('../newspulse-backend-real-main/models/CommunityStory'); } catch (_) {}
 const { runCommunityAiChecks } = require('../services/communityAi');
 const {
+  COMMUNITY_REPORTER_CATEGORIES,
   extractSubmissionAttachments,
   inferSubmissionDeskMetadata,
+  normalizeCommunityReporterCategory,
   normalizeDeskValue,
   normalizeWorkflowStatus,
 } = require('../services/communitySubmissionWorkflow');
@@ -311,6 +313,15 @@ router.post('/submissions', requireCommunityReporterOpen, async (req, res) => {
     if (!(story || content) || !String(story || content).trim()) errors.push('story required');
     if (errors.length) return res.status(400).json({ success: false, message: 'Validation failed', errors });
 
+    const normalizedCategory = normalizeCommunityReporterCategory(category || track || null);
+    if (!normalizedCategory) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: [`category must be one of: ${COMMUNITY_REPORTER_CATEGORIES.join(', ')}`],
+      });
+    }
+
     // Parse location string ("City, State, Country") when frontend sends a single text field.
     const locationText = (typeof location === 'string') ? String(location).trim() : '';
     const locationParts = locationText
@@ -360,7 +371,6 @@ router.post('/submissions', requireCommunityReporterOpen, async (req, res) => {
     const attachments = extractSubmissionAttachments(body);
     const normalizedHeadline = (headline || title || '').trim();
     const normalizedStory = (story || content || '').trim();
-    const normalizedCategory = (category || track || deskMeta.track || '').trim();
     // Log reporter email used for saving
     console.log('[COMMUNITY_REPORTER][create] saving submission for reporterEmail:', (email || '').trim().toLowerCase());
     const submission = await CommunitySubmission.create({
@@ -532,7 +542,14 @@ router.post('/submit', requireCommunityReporterOpen, async (req, res) => {
     const headlineNorm = String(headline || title).trim();
     const storyNorm = String(story || content).trim();
     const ageGroupNorm = String(ageGroup).trim();
+    const normalizedCategory = normalizeCommunityReporterCategory(body.category || body.track || null);
     const attachments = extractSubmissionAttachments(body);
+
+    if (!normalizedCategory) {
+      return res.status(400).json({
+        message: `Category must be one of: ${COMMUNITY_REPORTER_CATEGORIES.join(', ')}`,
+      });
+    }
 
     const locationObj = (location && typeof location === 'object') ? location : null;
     const locationText = (typeof location === 'string') ? location.trim() : undefined;
@@ -584,7 +601,7 @@ router.post('/submit', requireCommunityReporterOpen, async (req, res) => {
       submissionType: deskMeta.submissionType || undefined,
       intakeSource: deskMeta.intakeSource || undefined,
       track: deskMeta.track || undefined,
-      category: (body.category || body.track || deskMeta.track || '').trim() || undefined,
+      category: normalizedCategory,
       headline: headlineNorm,
       story: storyNorm,
       ageGroup: ageGroupNorm,

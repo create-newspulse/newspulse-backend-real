@@ -5,6 +5,9 @@ const fs = require('fs');
 const { requireAdminAuth } = require('../../middleware/adminAuth');
 
 const { deleteCoverByPublicId } = require('../../lib/cloudinary');
+const { deleteMediaLibraryItem, uploadMediaLibraryFile } = require('../../lib/mediaLibraryStorage');
+const { assertAllowedAdminMediaMimeType } = require('../../lib/mediaUploadValidation');
+const { createIndexedMediaRecord, verifyIndexedMediaRecordVisible } = require('../../services/mediaLibraryService');
 
 const router = express.Router();
 
@@ -12,8 +15,8 @@ const router = express.Router();
 const ok = (res, data = null, message = 'OK') =>
   res.status(200).json({ ok: true, success: true, status: 200, message, data });
 
-const bad = (res, status, message, reqPath, data = null) =>
-  res.status(status).json({ ok: false, success: false, status, message, data, path: reqPath });
+const bad = (res, status, message, reqPath, data = null, code = null) =>
+  res.status(status).json({ ok: false, success: false, status, ...(code ? { code } : {}), message, data, path: reqPath });
 
 // ---- upload setup (local disk) ----
 const uploadDir = path.join(process.cwd(), 'uploads');
@@ -85,24 +88,44 @@ router.post('/media/upload', upload.fields([
   { name: 'file', maxCount: 1 },
   { name: 'media', maxCount: 1 },
   { name: 'image', maxCount: 1 },
-]), (req, res) => {
+]), async (req, res) => {
   const file = pickUploadedFile(req);
   if (!file) return bad(res, 400, 'No file uploaded (field: file)', req.originalUrl);
 
-  const urls = buildUrls(req, file.filename);
+  let uploaded = null;
+  try {
+    assertAllowedAdminMediaMimeType(file.mimetype);
 
-  return ok(
-    res,
-    {
-      fileName: file.filename,
-      mimeType: file.mimetype,
+    uploaded = await uploadMediaLibraryFile(req, {
+      ...file,
+      originalname: file.originalname,
+      mimetype: file.mimetype,
       size: file.size,
-      ...urls,
-      // common aliases
-      fullUrl: urls.url,
-    },
-    'Media uploaded'
-  );
+      buffer: fs.readFileSync(file.path),
+    });
+
+    try { fs.unlinkSync(file.path); } catch (_) {}
+
+    const mediaRecord = await createIndexedMediaRecord(req, uploaded, { source: 'admin-media-library' });
+    await verifyIndexedMediaRecordVisible(mediaRecord.id, { source: 'admin-media-library' });
+
+    return ok(
+      res,
+      {
+        ...mediaRecord,
+        fullUrl: mediaRecord.url,
+      },
+      'Media uploaded and indexed in Media Library.'
+    );
+  } catch (e) {
+    try {
+      if (file && file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+    } catch (_) {}
+    if (uploaded && uploaded.id) {
+      try { await deleteMediaLibraryItem(uploaded.id); } catch (_) {}
+    }
+    return bad(res, e?.status || 500, e?.message || 'Media upload failed', req.originalUrl, null, e?.code || null);
+  }
 });
 
 // NOTE: /api/uploads/cover is implemented in routes/uploads.routes.js

@@ -148,7 +148,7 @@ test('Community submission includes reporterId and verification fields', async (
       name: 'Citizen Reporter',
       email: 'citizen@example.com',
       location: 'Ahmedabad',
-      category: 'local',
+      category: 'Regional',
       headline: 'Test Headline',
       story: 'Test story body content',
     })
@@ -166,6 +166,7 @@ test('Phase-1 /api/community-reporter/submit upserts contact and returns string 
       name: 'Kiran Parmar',
       email: 'krn85397@gmail.com',
       location: 'Ahmedabad, Gujarat',
+      category: 'General Tip',
       headline: 'Hello',
       story: 'Body',
       ageGroup: '18-24',

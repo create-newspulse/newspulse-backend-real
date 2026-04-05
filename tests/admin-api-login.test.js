@@ -27,12 +27,16 @@ test('POST /admin-api/admin/login returns 500 JSON when admin creds missing', as
   const snap = snapshotEnv([
     'ADMIN_EMAIL',
     'ADMIN_PASSWORD',
+    'ADMIN_SEED_FOUNDER_EMAIL',
+    'ADMIN_SEED_FOUNDER_PASSWORD',
     'JWT_SECRET',
   ]);
 
   try {
     delete process.env.ADMIN_EMAIL;
     delete process.env.ADMIN_PASSWORD;
+    delete process.env.ADMIN_SEED_FOUNDER_EMAIL;
+    delete process.env.ADMIN_SEED_FOUNDER_PASSWORD;
     // Ensure JWT_SECRET exists so the missing list is deterministic for this test.
     process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
 
@@ -52,12 +56,16 @@ test('POST /admin-api/admin/login succeeds when ADMIN_* env vars exist', async (
   const snap = snapshotEnv([
     'ADMIN_EMAIL',
     'ADMIN_PASSWORD',
+    'ADMIN_SEED_FOUNDER_EMAIL',
+    'ADMIN_SEED_FOUNDER_PASSWORD',
     'JWT_SECRET',
   ]);
 
   try {
     process.env.ADMIN_EMAIL = 'admin@example.com';
     process.env.ADMIN_PASSWORD = 'pass123';
+    delete process.env.ADMIN_SEED_FOUNDER_EMAIL;
+    delete process.env.ADMIN_SEED_FOUNDER_PASSWORD;
     process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
 
     const res = await request(app)
@@ -78,12 +86,16 @@ test('POST /admin-api/admin/login returns 401 JSON when creds mismatch', async (
   const snap = snapshotEnv([
     'ADMIN_EMAIL',
     'ADMIN_PASSWORD',
+    'ADMIN_SEED_FOUNDER_EMAIL',
+    'ADMIN_SEED_FOUNDER_PASSWORD',
     'JWT_SECRET',
   ]);
 
   try {
     process.env.ADMIN_EMAIL = 'admin@example.com';
     process.env.ADMIN_PASSWORD = 'pass123';
+    delete process.env.ADMIN_SEED_FOUNDER_EMAIL;
+    delete process.env.ADMIN_SEED_FOUNDER_PASSWORD;
     process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
 
     const res = await request(app)
@@ -93,6 +105,36 @@ test('POST /admin-api/admin/login returns 401 JSON when creds mismatch', async (
 
     assert.strictEqual(res.statusCode, 401);
     assert.deepStrictEqual(res.body, { ok: false, message: 'Invalid admin credentials' });
+  } finally {
+    restoreEnv(snap);
+  }
+});
+
+test('POST /admin-api/admin/login succeeds when ADMIN_SEED_FOUNDER_* env vars exist', async () => {
+  const snap = snapshotEnv([
+    'ADMIN_EMAIL',
+    'ADMIN_PASSWORD',
+    'ADMIN_SEED_FOUNDER_EMAIL',
+    'ADMIN_SEED_FOUNDER_PASSWORD',
+    'JWT_SECRET',
+  ]);
+
+  try {
+    delete process.env.ADMIN_EMAIL;
+    delete process.env.ADMIN_PASSWORD;
+    process.env.ADMIN_SEED_FOUNDER_EMAIL = 'seed-founder@example.com';
+    process.env.ADMIN_SEED_FOUNDER_PASSWORD = 'pass12345';
+    process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
+
+    const res = await request(app)
+      .post('/admin-api/admin/login')
+      .send({ email: 'seed-founder@example.com', password: 'pass12345' })
+      .set('Accept', 'application/json');
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.body.ok, true);
+    assert.ok(res.body.token, 'token should be present');
+    assert.strictEqual(res.body.user.email, 'seed-founder@example.com');
   } finally {
     restoreEnv(snap);
   }

@@ -11,7 +11,12 @@ const ActivityLog = require('../models/ActivityLog');
 const { sendMail, getTransporter, getMailerStatus } = require('../lib/mailer');
 const { sendEmail: sendEmailStub } = require('../lib/emailStub');
 const { normalizeEmail } = require('../lib/normalizeEmail');
-const { extractSubmissionAttachments, inferSubmissionDeskMetadata } = require('../services/communitySubmissionWorkflow');
+const {
+  COMMUNITY_REPORTER_CATEGORIES,
+  extractSubmissionAttachments,
+  inferSubmissionDeskMetadata,
+  normalizeCommunityReporterCategory,
+} = require('../services/communitySubmissionWorkflow');
 const {
   requireReporterPortalAuth,
   requireReporterPortalOpen,
@@ -537,7 +542,9 @@ function applySubmissionPatch(doc, payload = {}, reporter) {
   const story = typeof payload.story === 'string'
     ? payload.story.trim()
     : (typeof payload.body === 'string' ? payload.body.trim() : undefined);
-  const category = typeof payload.category === 'string' ? payload.category.trim() : undefined;
+  const category = payload && Object.prototype.hasOwnProperty.call(payload, 'category')
+    ? normalizeCommunityReporterCategory(payload.category)
+    : undefined;
   const phone = typeof payload.phone === 'string'
     ? payload.phone.trim()
     : (typeof payload.contactPhone === 'string' ? payload.contactPhone.trim() : undefined);
@@ -1508,12 +1515,27 @@ router.post('/submissions', requireReporterPortalOpen, requireReporterPortalAuth
     const status = toStoredStatusForCreate(req.body && req.body.action);
     const headline = String(req.body && req.body.headline || '').trim();
     const story = String(req.body && (req.body.story || req.body.body) || '').trim();
+    const normalizedCategory = normalizeCommunityReporterCategory(req.body && req.body.category);
 
     if (status === 'SUBMITTED' && (!headline || !story)) {
       return res.status(400).json({ ok: false, code: 'VALIDATION_FAILED', message: 'Headline and story are required before submission.' });
     }
     if (status === 'DRAFT' && !headline && !story) {
       return res.status(400).json({ ok: false, code: 'VALIDATION_FAILED', message: 'Draft must contain a headline or story.' });
+    }
+    if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'category') && !normalizedCategory) {
+      return res.status(400).json({
+        ok: false,
+        code: 'VALIDATION_FAILED',
+        message: `Category must be one of: ${COMMUNITY_REPORTER_CATEGORIES.join(', ')}`,
+      });
+    }
+    if (!normalizedCategory) {
+      return res.status(400).json({
+        ok: false,
+        code: 'VALIDATION_FAILED',
+        message: `Category must be one of: ${COMMUNITY_REPORTER_CATEGORIES.join(', ')}`,
+      });
     }
 
     const { upsertReporterContactFromPayload } = require('../services/reporterContactService');
@@ -1537,7 +1559,7 @@ router.post('/submissions', requireReporterPortalOpen, requireReporterPortalAuth
       email: req.reporterPortal.email,
       headline,
       body: story,
-      category: String(req.body && req.body.category || '').trim() || (deskMeta.track || null),
+      category: normalizedCategory,
       desk: deskMeta.desk || null,
       submissionType: deskMeta.submissionType || null,
       intakeSource: deskMeta.intakeSource || 'reporter_portal',
@@ -1586,6 +1608,14 @@ router.patch('/submissions/:id', requireReporterPortalOpen, requireReporterPorta
     const submission = await CommunitySubmission.findOne({ _id: id, ...filter });
     if (!submission) {
       return res.status(404).json({ ok: false, code: 'SUBMISSION_NOT_FOUND', message: 'Submission not found.' });
+    }
+
+    if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'category') && !normalizeCommunityReporterCategory(req.body.category)) {
+      return res.status(400).json({
+        ok: false,
+        code: 'VALIDATION_FAILED',
+        message: `Category must be one of: ${COMMUNITY_REPORTER_CATEGORIES.join(', ')}`,
+      });
     }
 
     if (!canEditSubmission(submission)) {
