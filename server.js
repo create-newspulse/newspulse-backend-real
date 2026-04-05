@@ -86,6 +86,36 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
       });
     }
   } catch (_) {}
+
+  try {
+    const { getMailerStatus, getTransporter } = require('./lib/mailer');
+    const mailerStatus = getMailerStatus();
+    // eslint-disable-next-line no-console
+    console.log('[startup][mailer-status]', {
+      productionLike: mailerStatus.productionLike,
+      renderLike: mailerStatus.renderLike,
+      stubMode: mailerStatus.stubMode,
+      configured: mailerStatus.configured,
+      missing: mailerStatus.missing,
+      resolved: mailerStatus.resolved,
+    });
+
+    if (mailerStatus.configured && mailerStatus.stubMode !== true) {
+      try {
+        const transport = getTransporter();
+        // eslint-disable-next-line no-console
+        console.log('[startup][mailer-transporter]', { initialized: !!transport });
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error('[startup][mailer-transporter-failed]', {
+          message: error?.message || String(error),
+          ...(error?.code ? { code: error.code } : {}),
+          ...(error?.responseCode ? { responseCode: error.responseCode } : {}),
+          ...(error?.command ? { command: error.command } : {}),
+        });
+      }
+    }
+  } catch (_) {}
 }
 
 function _redactMongoUri(uri) {

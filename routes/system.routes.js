@@ -1,4 +1,5 @@
 const express = require('express');
+const { getMailerStatus, getTransporter } = require('./../lib/mailer');
 
 // Router used by NewsPulse Admin Panel to silence AI helper + monitor probes
 const router = express.Router();
@@ -46,6 +47,36 @@ router.get('/monitor-hub', (req, res) => {
       publishRuntime: { envDefault: false, override: false, effective: false },
       timestamp: new Date().toISOString(),
       env: process.env.NODE_ENV || 'development',
+    },
+  });
+});
+
+// GET /email-status -> safe mailer diagnostics for direct backend verification
+router.get('/email-status', (_req, res) => {
+  const status = getMailerStatus();
+  let transporterReady = false;
+  let transporterError = null;
+
+  try {
+    const transport = getTransporter();
+    transporterReady = !!transport;
+  } catch (error) {
+    transporterReady = false;
+    transporterError = error?.message || String(error);
+  }
+
+  return res.status(200).json({
+    ok: true,
+    success: true,
+    mailer: {
+      productionLike: status.productionLike,
+      renderLike: status.renderLike,
+      stubMode: status.stubMode,
+      configured: status.configured,
+      missing: status.missing,
+      resolved: status.resolved,
+      transporterReady,
+      transporterError,
     },
   });
 });
