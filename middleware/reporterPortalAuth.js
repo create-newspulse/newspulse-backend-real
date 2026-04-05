@@ -3,12 +3,88 @@ const mongoose = require('mongoose');
 
 const ReporterContact = require('../models/ReporterContact');
 const { getEffectiveCommunityAccessState } = require('../services/communityAccessToggleService');
+const { normalizeEmail } = require('../lib/normalizeEmail');
+
+const REPORTER_PORTAL_COOKIE_NAME = 'reporter_portal_session';
+
+function logReporterSession(payload) {
+  console.log('[reporter-auth][session]', payload);
+}
+
+function logReporterSessionError(payload) {
+  console.error('[reporter-auth][session]', payload);
+}
+
+function logReporterSubmissionsAuth(payload) {
+  console.log('[reporter-submissions][auth]', payload);
+}
+
+function logReporterSubmissionsAuthError(payload) {
+  console.error('[reporter-submissions][auth]', payload);
+}
+
+function buildReporterAuthLogContext(req, extra = {}) {
+  const normalizedEmail = normalizeEmail(
+    extra.normalizedEmail
+    || req?.reporterPortal?.email
+    || req?.body?.email
+    || req?.query?.email
+    || req?.reporterPortalTokenPayload?.email
+  ) || null;
+
+  return {
+    normalizedEmail,
+    sessionExists: !!(req?.reporterPortalTokenPayload || getReporterPortalToken(req)),
+    verified: !!req?.reporterPortal,
+    ...extra,
+  };
+}
+
+function isReporterSessionRequest(req) {
+  const path = String(req?.originalUrl || req?.url || '');
+  return /\/auth\/session(?:$|\?)/i.test(path);
+}
+
+function isReporterSubmissionsRequest(req) {
+  const path = String(req?.originalUrl || req?.url || '');
+  return /\/submissions(?:$|\/|\?)/i.test(path);
+}
+
+function respondReporterSessionMissing(req, res, errorMessage) {
+  const payload = buildReporterAuthLogContext(req, {
+    verified: false,
+    errorMessage,
+  });
+
+  if (isReporterSessionRequest(req)) {
+    logReporterSessionError(payload);
+  }
+  if (isReporterSubmissionsRequest(req)) {
+    logReporterSubmissionsAuthError(payload);
+  }
+
+  return res.status(401).json({
+    ok: false,
+    code: 'REPORTER_SESSION_MISSING',
+    message: 'Reporter session missing or expired.',
+  });
+}
 
 function getBearerToken(req) {
   const auth = String(req.headers.authorization || '');
   if (!auth.toLowerCase().startsWith('bearer ')) return null;
   const token = auth.slice(7).trim();
   return token || null;
+}
+
+function getReporterPortalCookieToken(req) {
+  const cookieToken = req && req.cookies ? req.cookies[REPORTER_PORTAL_COOKIE_NAME] : null;
+  const token = String(cookieToken || '').trim();
+  return token || null;
+}
+
+function getReporterPortalToken(req) {
+  return getBearerToken(req) || getReporterPortalCookieToken(req);
 }
 
 function isDbReady() {
@@ -42,7 +118,7 @@ async function requireReporterPortalOpen(req, res, next) {
 function normalizeReporterPayload(payload) {
   return {
     reporterId: payload && payload.reporterId ? String(payload.reporterId) : (payload && payload.sub ? String(payload.sub) : null),
-    email: payload && payload.email ? String(payload.email).trim().toLowerCase() : null,
+    email: normalizeEmail(payload && payload.email) || null,
     fullName: payload && payload.fullName ? String(payload.fullName) : 'Reporter',
     reporterType: payload && payload.reporterType ? String(payload.reporterType) : 'community',
     verificationLevel: payload && payload.verificationLevel ? String(payload.verificationLevel) : 'community_default',
@@ -52,11 +128,73 @@ function normalizeReporterPayload(payload) {
   };
 }
 
+function normalizeReporterSession(sessionReporter) {
+  return {
+    reporterId: sessionReporter && sessionReporter.reporterId ? String(sessionReporter.reporterId) : null,
+    email: normalizeEmail(sessionReporter && sessionReporter.email) || null,
+    fullName: sessionReporter && sessionReporter.fullName ? String(sessionReporter.fullName) : 'Reporter',
+    reporterType: sessionReporter && sessionReporter.reporterType ? String(sessionReporter.reporterType) : 'community',
+    verificationLevel: sessionReporter && sessionReporter.verificationLevel ? String(sessionReporter.verificationLevel) : 'community_default',
+    portalAccessEnabled: true,
+    portalAuthVersion: typeof sessionReporter?.portalAuthVersion === 'number' ? sessionReporter.portalAuthVersion : 0,
+    status: sessionReporter && sessionReporter.status ? String(sessionReporter.status) : 'active',
+    verified: sessionReporter?.verified === true,
+  };
+}
+
 async function requireReporterPortalAuth(req, res, next) {
+  let payload = null;
   try {
-    const token = getBearerToken(req);
+    const sessionReporter = normalizeReporterSession(req?.session?.reporter);
+    if (sessionReporter.email && sessionReporter.verified) {
+      req.reporterPortal = sessionReporter;
+      req.reporterPortalTokenPayload = req.reporterPortalTokenPayload || null;
+
+      if (!isDbReady()) {
+        if (isReporterSessionRequest(req)) {
+          logReporterSession(buildReporterAuthLogContext(req, { normalizedEmail: sessionReporter.email, sessionExists: true, verified: true }));
+        }
+        if (isReporterSubmissionsRequest(req)) {
+          logReporterSubmissionsAuth(buildReporterAuthLogContext(req, { normalizedEmail: sessionReporter.email, sessionExists: true, verified: true }));
+        }
+        return next();
+      }
+
+      let reporter = null;
+      if (sessionReporter.reporterId && mongoose.isValidObjectId(String(sessionReporter.reporterId))) {
+        reporter = await ReporterContact.findById(sessionReporter.reporterId);
+      }
+      if (!reporter && sessionReporter.email) {
+        reporter = await ReporterContact.findOne({ $or: [{ email: sessionReporter.email }, { emailLower: sessionReporter.email }] });
+      }
+
+      if (reporter) {
+        req.reporterPortal = {
+          reporterId: String(reporter._id),
+          email: normalizeEmail(reporter.email || reporter.emailLower) || null,
+          fullName: reporter.fullName || 'Reporter',
+          reporterType: reporter.reporterType || 'community',
+          verificationLevel: reporter.verificationLevel || 'community_default',
+          portalAccessEnabled: reporter.portalAccessEnabled !== false,
+          portalAuthVersion: typeof reporter.portalAuthVersion === 'number' ? reporter.portalAuthVersion : 0,
+          status: reporter.status || 'active',
+          verified: true,
+        };
+        req._reporterPortalDoc = reporter;
+      }
+
+      if (isReporterSessionRequest(req)) {
+        logReporterSession(buildReporterAuthLogContext(req, { normalizedEmail: req.reporterPortal.email, sessionExists: true, verified: true }));
+      }
+      if (isReporterSubmissionsRequest(req)) {
+        logReporterSubmissionsAuth(buildReporterAuthLogContext(req, { normalizedEmail: req.reporterPortal.email, sessionExists: true, verified: true }));
+      }
+      return next();
+    }
+
+    const token = getReporterPortalToken(req);
     if (!token) {
-      return res.status(401).json({ ok: false, code: 'REPORTER_AUTH_REQUIRED', message: 'Reporter authentication required.' });
+      return respondReporterSessionMissing(req, res, 'No reporter token found in Authorization header or cookie');
     }
 
     const secret = String(process.env.JWT_SECRET || '').trim();
@@ -64,9 +202,9 @@ async function requireReporterPortalAuth(req, res, next) {
       return res.status(500).json({ ok: false, code: 'SERVER_ERROR', message: 'JWT_SECRET missing' });
     }
 
-    const payload = jwt.verify(token, secret);
+    payload = jwt.verify(token, secret);
     if (payload.type !== 'reporter_portal') {
-      return res.status(401).json({ ok: false, code: 'REPORTER_AUTH_REQUIRED', message: 'Reporter authentication required.' });
+      return respondReporterSessionMissing(req, res, 'Reporter token type invalid');
     }
     req.reporterPortalTokenPayload = payload;
 
@@ -76,6 +214,12 @@ async function requireReporterPortalAuth(req, res, next) {
         return res.status(403).json({ ok: false, code: 'REPORTER_PORTAL_FORBIDDEN', message: 'Reporter portal access is disabled for this account.' });
       }
       req.reporterPortal = fallback;
+      if (isReporterSessionRequest(req)) {
+        logReporterSession(buildReporterAuthLogContext(req, { verified: true }));
+      }
+      if (isReporterSubmissionsRequest(req)) {
+        logReporterSubmissionsAuth(buildReporterAuthLogContext(req, { verified: true }));
+      }
       return next();
     }
 
@@ -85,12 +229,24 @@ async function requireReporterPortalAuth(req, res, next) {
       reporter = await ReporterContact.findById(reporterId);
     }
     if (!reporter && payload.email) {
-      const email = String(payload.email).trim().toLowerCase();
+      const email = normalizeEmail(payload.email);
       reporter = await ReporterContact.findOne({ $or: [{ email }, { emailLower: email }] });
     }
 
     if (!reporter) {
-      return res.status(401).json({ ok: false, code: 'REPORTER_AUTH_REQUIRED', message: 'Reporter authentication required.' });
+      const fallback = normalizeReporterPayload(payload);
+      if (!fallback.email) {
+        return respondReporterSessionMissing(req, res, 'Reporter profile lookup failed and token email was unavailable');
+      }
+      req.reporterPortal = fallback;
+      req._reporterPortalDoc = null;
+      if (isReporterSessionRequest(req)) {
+        logReporterSession(buildReporterAuthLogContext(req, { normalizedEmail: fallback.email, verified: true }));
+      }
+      if (isReporterSubmissionsRequest(req)) {
+        logReporterSubmissionsAuth(buildReporterAuthLogContext(req, { normalizedEmail: fallback.email, verified: true }));
+      }
+      return next();
     }
 
     const status = String(reporter.status || 'active').toLowerCase();
@@ -101,12 +257,12 @@ async function requireReporterPortalAuth(req, res, next) {
     const tokenAuthVersion = typeof payload.portalAuthVersion === 'number' ? payload.portalAuthVersion : 0;
     const reporterAuthVersion = typeof reporter.portalAuthVersion === 'number' ? reporter.portalAuthVersion : 0;
     if (tokenAuthVersion !== reporterAuthVersion) {
-      return res.status(401).json({ ok: false, code: 'REPORTER_AUTH_REQUIRED', message: 'Reporter authentication required.' });
+      return respondReporterSessionMissing(req, res, 'Reporter token version no longer matches current reporter auth version');
     }
 
     req.reporterPortal = {
       reporterId: String(reporter._id),
-      email: String(reporter.email || reporter.emailLower || '').trim().toLowerCase(),
+      email: normalizeEmail(reporter.email || reporter.emailLower) || null,
       fullName: reporter.fullName || 'Reporter',
       reporterType: reporter.reporterType || 'community',
       verificationLevel: reporter.verificationLevel || 'community_default',
@@ -115,14 +271,36 @@ async function requireReporterPortalAuth(req, res, next) {
       status: reporter.status || 'active',
     };
     req._reporterPortalDoc = reporter;
+    if (isReporterSessionRequest(req)) {
+      logReporterSession(buildReporterAuthLogContext(req, { normalizedEmail: req.reporterPortal.email, verified: true }));
+    }
+    if (isReporterSubmissionsRequest(req)) {
+      logReporterSubmissionsAuth(buildReporterAuthLogContext(req, { normalizedEmail: req.reporterPortal.email, verified: true }));
+    }
     return next();
   } catch (_error) {
-    return res.status(401).json({ ok: false, code: 'REPORTER_AUTH_REQUIRED', message: 'Reporter authentication required.' });
+    const fallback = normalizeReporterPayload(payload);
+    if (fallback.email) {
+      req.reporterPortalTokenPayload = payload;
+      req.reporterPortal = fallback;
+      req._reporterPortalDoc = null;
+      if (isReporterSessionRequest(req)) {
+        logReporterSession(buildReporterAuthLogContext(req, { normalizedEmail: fallback.email, verified: true }));
+      }
+      if (isReporterSubmissionsRequest(req)) {
+        logReporterSubmissionsAuth(buildReporterAuthLogContext(req, { normalizedEmail: fallback.email, verified: true }));
+      }
+      return next();
+    }
+    return respondReporterSessionMissing(req, res, _error?.message || String(_error));
   }
 }
 
 module.exports = {
   getBearerToken,
+  getReporterPortalCookieToken,
+  getReporterPortalToken,
+  REPORTER_PORTAL_COOKIE_NAME,
   requireReporterPortalAuth,
   requireReporterPortalOpen,
 };

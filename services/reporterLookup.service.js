@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const ReporterContact = require('../models/ReporterContact');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const { normalizeEmail: normalizeReporterEmail } = require('../lib/normalizeEmail');
 
 function safeDecodeURIComponent(value) {
   const raw = value == null ? '' : String(value);
@@ -13,7 +14,7 @@ function safeDecodeURIComponent(value) {
 }
 
 function normalizeEmail(email) {
-  const e = String(email || '').trim().toLowerCase();
+  const e = normalizeReporterEmail(email);
   return e || null;
 }
 
@@ -48,7 +49,11 @@ function buildSubmissionEmailMatch(emailNorm) {
       { reporterEmailNorm: emailNorm },
       { reporterEmail: emailNorm },
       { email: emailNorm },
+      { submittedByEmail: emailNorm },
+      { contactEmail: emailNorm },
       { 'contact.email': emailNorm },
+      { 'reporter.email': emailNorm },
+      { 'reporterProfile.email': emailNorm },
     ],
     isDeleted: { $ne: true },
   };

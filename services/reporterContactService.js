@@ -1,6 +1,6 @@
 const ReporterContact = require('../models/ReporterContact');
 const CommunitySubmission = require('../models/CommunitySubmission');
-const { normalizeEmailForIdentity } = require('../lib/identity');
+const { normalizeEmail } = require('../lib/normalizeEmail');
 
 // Helper: safely apply provided value only if not undefined/null
 function applyIfPresent(target, key, value) {
@@ -11,7 +11,8 @@ function applyIfPresent(target, key, value) {
 }
 
 function _normalizeEmail(email) {
-  return normalizeEmailForIdentity(email);
+  const normalized = normalizeEmail(email);
+  return normalized || null;
 }
 
 function _parseLocationParts(input) {
@@ -213,6 +214,7 @@ async function upsertReporterContact(payload) {
 
   // Always keep emailLower present
   $set.emailLower = emailNorm;
+  $set.reporterKey = emailNorm;
 
   if (trimmedName) $set.fullName = trimmedName;
   if (typeof phone === 'string' && phone.trim()) $set.phoneFull = phone.trim();

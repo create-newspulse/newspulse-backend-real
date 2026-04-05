@@ -50,6 +50,8 @@ const ReporterContactSchema = new mongoose.Schema({
   email: { type: String, required: true, lowercase: true, trim: true, unique: true },
   // Back-compat helper for clients that expect an explicit lowercase field
   emailLower: { type: String, lowercase: true, trim: true, index: true },
+  // Legacy identity anchor used by older production indexes and aggregations.
+  reporterKey: { type: String, trim: true, index: true },
 
   phoneCountryCode: { type: String, default: '+91' },
   phoneNumber: { type: String, trim: true },
@@ -129,6 +131,9 @@ ReporterContactSchema.pre('validate', function(next) {
     if (!this.emailLower && this.email) {
       this.emailLower = String(this.email).trim().toLowerCase();
     }
+    if (!this.reporterKey && (this.emailLower || this.email)) {
+      this.reporterKey = String(this.emailLower || this.email).trim().toLowerCase();
+    }
   } catch (_) {}
   next();
 });
@@ -139,6 +144,10 @@ ReporterContactSchema.index({ email: 1 }, { unique: true });
 ReporterContactSchema.index(
   { emailLower: 1 },
   { unique: true, partialFilterExpression: { emailLower: { $type: 'string' } } }
+);
+ReporterContactSchema.index(
+  { reporterKey: 1 },
+  { unique: true, partialFilterExpression: { reporterKey: { $type: 'string' } } }
 );
 ReporterContactSchema.index({ phoneFull: 1 });
 ReporterContactSchema.index({ stateName: 1, districtName: 1, talukaName: 1, areaType: 1 });

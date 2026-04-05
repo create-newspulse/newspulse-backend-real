@@ -88,8 +88,9 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
   } catch (_) {}
 
   try {
-    const { getMailerStatus, getTransporter } = require('./lib/mailer');
+    const { getMailerStatus, getTransporter, getMailConfig } = require('./lib/mailer');
     const mailerStatus = getMailerStatus();
+    const mailConfig = getMailConfig();
     // eslint-disable-next-line no-console
     console.log('[startup][mailer-status]', {
       productionLike: mailerStatus.productionLike,
@@ -98,6 +99,16 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
       configured: mailerStatus.configured,
       missing: mailerStatus.missing,
       resolved: mailerStatus.resolved,
+    });
+    // eslint-disable-next-line no-console
+    console.log('[startup][reporter-auth-readiness]', {
+      smtpHost: mailConfig.smtpHost || mailConfig.smtpService || null,
+      smtpPort: mailConfig.smtpPort || null,
+      smtpUsernamePresent: !!mailConfig.smtpUser,
+      smtpPasswordPresent: !!mailConfig.smtpPass,
+      fromEmailPresent: !!mailConfig.smtpFrom,
+      reporterAuthSecretPresent: !!String(process.env.JWT_SECRET || '').trim(),
+      reporterSessionSecretPresent: !!String(process.env.REPORTER_PORTAL_SESSION_SECRET || process.env.REPORTER_SESSION_SECRET || process.env.JWT_SECRET || '').trim(),
     });
 
     if (mailerStatus.configured && mailerStatus.stubMode !== true) {
@@ -424,8 +435,13 @@ const allowedOrigins = (() => {
   // This supports the intended workflow: backend runs on Render, local UIs call Render.
   const defaults = [
     'http://localhost:3000',
+    'http://localhost:4173',
     'http://localhost:5173',
     'http://localhost:5174',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:4173',
+    'http://127.0.0.1:5173',
+    'http://127.0.0.1:5174',
     'http://10.46.255.143:5173',
     'https://www.newspulse.co.in',
     'https://newspulse.co.in',

@@ -1,4 +1,5 @@
 const express = require('express');
+const session = require('express-session');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
@@ -9,8 +10,13 @@ const ReporterContact = require('../models/ReporterContact');
 const ActivityLog = require('../models/ActivityLog');
 const { sendMail, getTransporter, getMailerStatus } = require('../lib/mailer');
 const { sendEmail: sendEmailStub } = require('../lib/emailStub');
+const { normalizeEmail } = require('../lib/normalizeEmail');
 const { extractSubmissionAttachments, inferSubmissionDeskMetadata } = require('../services/communitySubmissionWorkflow');
-const { requireReporterPortalAuth, requireReporterPortalOpen } = require('../middleware/reporterPortalAuth');
+const {
+  requireReporterPortalAuth,
+  requireReporterPortalOpen,
+  REPORTER_PORTAL_COOKIE_NAME,
+} = require('../middleware/reporterPortalAuth');
 
 const router = express.Router();
 
@@ -22,15 +28,98 @@ const OTP_VERIFY_RATE_LIMIT = { windowMs: 10 * 60 * 1000, maxAttempts: 10 };
 const otpRequestAttempts = new Map();
 const otpVerifyAttempts = new Map();
 
+function getReporterSessionSecret() {
+  return String(process.env.REPORTER_PORTAL_SESSION_SECRET || process.env.REPORTER_SESSION_SECRET || process.env.JWT_SECRET || '').trim();
+}
+
+function getReporterSessionCookieConfig() {
+  const productionLike = isProductionLike();
+  return {
+    httpOnly: true,
+    sameSite: productionLike ? 'none' : 'lax',
+    secure: productionLike,
+    path: '/',
+    maxAge: 24 * 60 * 60 * 1000,
+  };
+}
+
+const reporterSessionMiddleware = session({
+  name: 'reporter_portal.sid',
+  secret: getReporterSessionSecret() || 'reporter-portal-dev-session-secret',
+  resave: false,
+  saveUninitialized: false,
+  proxy: true,
+  cookie: getReporterSessionCookieConfig(),
+});
+
+function isHttpsRequest(req) {
+  return !!(req && (req.secure || String(req.get('x-forwarded-proto') || '').toLowerCase() === 'https'));
+}
+
+function isLocalhostRequest(req) {
+  const origin = String(req.get('Origin') || '').trim();
+  const host = String(req.get('Host') || '').trim();
+  const target = origin || (host ? `http://${host}` : '');
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(target);
+}
+
+function getReporterPortalCookieOptions(req, expiresAt) {
+  const localRequest = isLocalhostRequest(req) || !isHttpsRequest(req);
+  return {
+    httpOnly: true,
+    sameSite: localRequest ? 'lax' : 'none',
+    secure: localRequest ? false : true,
+    path: '/',
+    ...(expiresAt ? { expires: expiresAt } : {}),
+  };
+}
+
+function setReporterPortalSessionCookie(res, req, token, expiresAt) {
+  res.cookie(REPORTER_PORTAL_COOKIE_NAME, token, getReporterPortalCookieOptions(req, expiresAt));
+}
+
+function clearReporterPortalSessionCookie(res, req) {
+  res.clearCookie(REPORTER_PORTAL_COOKIE_NAME, getReporterPortalCookieOptions(req));
+}
+
+function buildReporterSessionState(reporter) {
+  return {
+    reporterId: reporter && reporter._id ? String(reporter._id) : null,
+    email: normalizeEmail(reporter && (reporter.email || reporter.emailLower)) || null,
+    fullName: reporter && reporter.fullName ? reporter.fullName : 'Reporter',
+    reporterType: reporter && reporter.reporterType ? reporter.reporterType : 'community',
+    verificationLevel: reporter && reporter.verificationLevel ? reporter.verificationLevel : 'community_default',
+    portalAuthVersion: typeof reporter?.portalAuthVersion === 'number' ? reporter.portalAuthVersion : 0,
+    status: reporter && reporter.status ? reporter.status : 'active',
+    verified: true,
+  };
+}
+
+async function saveReporterSession(req, reporter) {
+  if (!req || !req.session) return;
+  req.session.reporter = buildReporterSessionState(reporter);
+  await new Promise((resolve, reject) => {
+    req.session.save((error) => {
+      if (error) return reject(error);
+      return resolve();
+    });
+  });
+}
+
+async function destroyReporterSession(req) {
+  if (!req || !req.session) return;
+  await new Promise((resolve) => {
+    req.session.destroy(() => resolve());
+  });
+}
+
+router.use(reporterSessionMiddleware);
+
 function firstNonEmpty(...values) {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) return value.trim();
   }
   return '';
-}
-
-function normalizeEmail(value) {
-  return String(value || '').trim().toLowerCase();
 }
 
 function normalizeToken(value) {
@@ -87,6 +176,7 @@ function serializeError(error) {
     message: error?.message || String(error),
     ...(error?.code ? { code: error.code } : {}),
     ...(error?.responseCode ? { responseCode: error.responseCode } : {}),
+    ...(error?.response ? { response: error.response } : {}),
     ...(error?.command ? { command: error.command } : {}),
     ...(error?.errno ? { errno: error.errno } : {}),
     ...(error?.syscall ? { syscall: error.syscall } : {}),
@@ -95,13 +185,45 @@ function serializeError(error) {
 
 function createEmailServiceUnavailableError(error) {
   const wrapped = new Error(error?.message || 'Verification email service unavailable');
-  wrapped.code = error?.code || 'EMAIL_SERVICE_UNAVAILABLE';
+  wrapped.code = error?.code || 'REPORTER_EMAIL_UNAVAILABLE';
   wrapped.responseCode = error?.responseCode;
   wrapped.command = error?.command;
   wrapped.errno = error?.errno;
   wrapped.syscall = error?.syscall;
-  wrapped.safeClientCode = 'EMAIL_SERVICE_UNAVAILABLE';
+  wrapped.safeClientCode = 'REPORTER_EMAIL_UNAVAILABLE';
   return wrapped;
+}
+
+function createAcceptedOtpRequestError(error) {
+  const wrapped = new Error(error?.message || 'OTP request accepted without deliverable email');
+  wrapped.code = error?.code || 'OTP_REQUEST_ACCEPTED';
+  wrapped.responseCode = error?.responseCode;
+  wrapped.response = error?.response;
+  wrapped.command = error?.command;
+  wrapped.errno = error?.errno;
+  wrapped.syscall = error?.syscall;
+  wrapped.safeClientCode = 'OTP_REQUEST_ACCEPTED';
+  return wrapped;
+}
+
+function isRecipientDeliveryIssue(error) {
+  const responseCode = Number(error?.responseCode);
+  const command = String(error?.command || '').toUpperCase();
+  const code = String(error?.code || '').toUpperCase();
+
+  if (['EMAIL_RECIPIENT_REJECTED', 'EENVELOPE'].includes(code)) return true;
+  if (command.includes('RCPT')) return true;
+  if ([550, 551, 552, 553, 554].includes(responseCode)) return true;
+  return false;
+}
+
+function buildOtpAcceptedResponse(email, extra = {}) {
+  return {
+    ok: true,
+    message: 'If a reporter account exists for this email, an OTP has been sent.',
+    ...(email ? { emailMasked: maskEmail(email) } : {}),
+    ...extra,
+  };
 }
 
 function buildOtpLogContext(req, email, extra = {}) {
@@ -110,6 +232,7 @@ function buildOtpLogContext(req, email, extra = {}) {
     method: req.method,
     ip: getClientIp(req),
     ...(email ? { emailMasked: maskEmail(email) } : {}),
+    ...(email ? { normalizedEmail: email } : {}),
     ...(req.get('Origin') ? { origin: req.get('Origin') } : {}),
     ...(req.get('Referer') ? { referer: req.get('Referer') } : {}),
     productionLike: isProductionLike(),
@@ -118,6 +241,64 @@ function buildOtpLogContext(req, email, extra = {}) {
     hasJwtSecret: !!String(process.env.JWT_SECRET || '').trim(),
     jwtExpiresIn: getReporterJwtExpiresIn(),
     ...extra,
+  };
+}
+
+function logReporterAuth(stage, payload) {
+  console.log(`[reporter-auth][${stage}]`, payload);
+}
+
+function logReporterAuthError(stage, payload) {
+  console.error(`[reporter-auth][${stage}]`, payload);
+}
+
+function logReporterSubmissions(stage, payload) {
+  console.log(`[reporter-submissions][${stage}]`, payload);
+}
+
+function logReporterSubmissionsError(stage, payload) {
+  console.error(`[reporter-submissions][${stage}]`, payload);
+}
+
+function buildReporterSubmissionLogContext(req, extra = {}) {
+  return {
+    route: '/api/reporter-portal/submissions',
+    normalizedEmail: normalizeEmail(req?.reporterPortal?.email),
+    sessionExists: !!req?.reporterPortalTokenPayload,
+    reporterProfileFound: !!req?._reporterPortalDoc,
+    resultCount: 0,
+    ...extra,
+  };
+}
+
+function getReporterMailerReadiness() {
+  const mailerStatus = getMailerStatus();
+  let transporterReady = mailerStatus.stubMode === true;
+  let transporterError = null;
+
+  if (mailerStatus.stubMode && isProductionLike()) {
+    transporterReady = false;
+    transporterError = 'EMAIL_MODE=stub is not allowed in production-like environments';
+  } else if (!mailerStatus.stubMode && mailerStatus.configured) {
+    try {
+      transporterReady = !!getTransporter();
+      if (!transporterReady) {
+        transporterError = 'Reporter mail transporter returned null';
+      }
+    } catch (error) {
+      transporterReady = false;
+      transporterError = error?.message || String(error);
+    }
+  } else if (!mailerStatus.configured) {
+    transporterError = mailerStatus.missing.length
+      ? `Missing mailer env: ${mailerStatus.missing.join(', ')}`
+      : 'Reporter mailer is not configured';
+  }
+
+  return {
+    ...mailerStatus,
+    transporterReady,
+    transporterError,
   };
 }
 
@@ -148,6 +329,10 @@ async function logReporterActivity(type, email, meta = {}) {
 
 function getReporterJwtExpiresIn() {
   return String(process.env.REPORTER_PORTAL_JWT_EXPIRES_IN || '24h').trim() || '24h';
+}
+
+function getOtpResendCooldownMs() {
+  return Math.max(Number(process.env.REPORTER_OTP_RESEND_COOLDOWN_MS || 60 * 1000), 0);
 }
 
 function getTokenExpiresAt(token) {
@@ -235,12 +420,16 @@ function buildReporterOwnershipFilter(reporter) {
     clauses.push({ reporterEmailNorm: email });
     clauses.push({ reporterEmail: email });
     clauses.push({ email });
+    clauses.push({ submittedByEmail: email });
+    clauses.push({ contactEmail: email });
     clauses.push({ 'contact.email': email });
+    clauses.push({ 'reporter.email': email });
+    clauses.push({ 'reporterProfile.email': email });
   }
 
   return {
     isDeleted: { $ne: true },
-    ...(clauses.length ? { $or: clauses } : {}),
+    ...(clauses.length ? { $or: clauses } : { _id: null }),
   };
 }
 
@@ -417,6 +606,9 @@ async function sendReporterOtpEmail(email, code) {
       emailMasked: maskEmail(email),
       error: serializeError(error),
     });
+    if (isRecipientDeliveryIssue(error)) {
+      throw createAcceptedOtpRequestError(error);
+    }
     throw createEmailServiceUnavailableError(error);
   }
   const accepted = Array.isArray(info && info.accepted) ? info.accepted.map((value) => String(value || '').toLowerCase()) : [];
@@ -427,7 +619,7 @@ async function sendReporterOtpEmail(email, code) {
       emailMasked: maskEmail(email),
       accepted,
     });
-    throw createEmailServiceUnavailableError(error);
+    throw createAcceptedOtpRequestError(error);
   }
   console.log('[reporter-portal][mail][sent]', {
     emailMasked: maskEmail(email),
@@ -450,17 +642,43 @@ async function resolveReporterFromEmail(email) {
       { reporterEmailNorm: normalizedEmail },
       { reporterEmail: normalizedEmail },
       { email: normalizedEmail },
+      { submittedByEmail: normalizedEmail },
+      { contactEmail: normalizedEmail },
       { 'contact.email': normalizedEmail },
+      { 'reporter.email': normalizedEmail },
+      { 'reporterProfile.email': normalizedEmail },
     ],
   }).sort({ createdAt: -1 });
 
-  if (!latestSubmission) return null;
+  if (latestSubmission) {
+    const { upsertReporterContactFromSubmission } = require('../services/reporterContactService');
+    const result = await upsertReporterContactFromSubmission(latestSubmission.toObject ? latestSubmission.toObject() : latestSubmission);
+    reporter = result && result.contact ? result.contact : null;
+    if (!reporter && result && result.contactId) {
+      reporter = await ReporterContact.findById(result.contactId);
+    }
+  }
 
-  const { upsertReporterContactFromSubmission } = require('../services/reporterContactService');
-  const result = await upsertReporterContactFromSubmission(latestSubmission.toObject ? latestSubmission.toObject() : latestSubmission);
-  reporter = result && result.contact ? result.contact : null;
-  if (!reporter && result && result.contactId) {
-    reporter = await ReporterContact.findById(result.contactId);
+  if (reporter) return reporter;
+
+  try {
+    const { upsertReporterContact } = require('../services/reporterContactService');
+    const result = await upsertReporterContact({
+      email: normalizedEmail,
+      name: 'Reporter',
+      reporterType: 'community',
+    });
+    reporter = result && result.contact ? result.contact : null;
+    if (!reporter && result && result.contactId) {
+      reporter = await ReporterContact.findById(result.contactId);
+    }
+  } catch (error) {
+    logReporterAuthError('request-code', {
+      route: '/api/reporter-auth/request-code',
+      normalizedEmail,
+      transporterReady: false,
+      errorMessage: error?.message || String(error),
+    });
   }
   return reporter;
 }
@@ -478,7 +696,11 @@ async function backfillReporterOwnership(reporter) {
         { reporterEmailNorm: normalizedEmail },
         { reporterEmail: normalizedEmail },
         { email: normalizedEmail },
+        { submittedByEmail: normalizedEmail },
+        { contactEmail: normalizedEmail },
         { 'contact.email': normalizedEmail },
+        { 'reporter.email': normalizedEmail },
+        { 'reporterProfile.email': normalizedEmail },
       ],
     },
     {
@@ -505,6 +727,8 @@ async function updateReporterSubmissionIdentity(reporter, nextEmail, nextName) {
         reporterEmail: email,
         reporterEmailNorm: email,
         email,
+        submittedByEmail: email,
+        contactEmail: email,
         reporterName: name,
         name,
         'contact.email': email,
@@ -543,25 +767,44 @@ async function loadOwnedSubmissions(reporter) {
 }
 
 router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, res) => {
+  let createdOtpRecord = null;
+  let email = '';
   try {
-    console.log('[reporter-portal][request-login-otp][received]', buildOtpLogContext(req));
-    const email = normalizeEmail(req.body && req.body.email);
-    console.log('[reporter-portal][request-login-otp][email-normalized]', buildOtpLogContext(req, email));
+    logReporterAuth('request-code', buildOtpLogContext(req, undefined, {
+      route: '/api/reporter-auth/request-code',
+      action: 'received',
+    }));
+    email = normalizeEmail(req.body && req.body.email);
+    logReporterAuth('request-code', buildOtpLogContext(req, email, {
+      route: '/api/reporter-auth/request-code',
+      action: 'normalized-email',
+    }));
     if (!email) {
       return res.status(400).json({ ok: false, code: 'EMAIL_REQUIRED', message: 'Email is required.' });
     }
 
-    const mailerStatus = getMailerStatus();
-    console.log('[reporter-portal][request-login-otp][mailer-status]', buildOtpLogContext(req, email, {
+    const mailerStatus = getReporterMailerReadiness();
+    logReporterAuth('request-code', buildOtpLogContext(req, email, {
+      route: '/api/reporter-auth/request-code',
+      action: 'mailer-status',
       mailerConfigured: mailerStatus.configured,
+      transporterReady: mailerStatus.transporterReady,
       missing: mailerStatus.missing,
       resolved: mailerStatus.resolved,
+      errorMessage: mailerStatus.transporterError,
     }));
-    if (!mailerStatus.configured) {
-      console.error('[reporter-portal][request-login-otp] mailer unavailable', { missing: mailerStatus.missing });
+    if (!mailerStatus.configured || !mailerStatus.transporterReady) {
+      logReporterAuthError('request-code', {
+        route: '/api/reporter-auth/request-code',
+        normalizedEmail: email,
+        transporterReady: mailerStatus.transporterReady,
+        missing: mailerStatus.missing,
+        resolved: mailerStatus.resolved,
+        errorMessage: mailerStatus.transporterError,
+      });
       return res.status(503).json({
         ok: false,
-        code: 'EMAIL_SERVICE_UNAVAILABLE',
+        code: 'REPORTER_EMAIL_UNAVAILABLE',
         message: 'Verification email service is temporarily unavailable.',
       });
     }
@@ -575,14 +818,35 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
 
     const reporter = await resolveReporterFromEmail(email);
     if (!reporter) {
-      await logReporterActivity('reporter_portal_otp_request_unknown_email', email, { ip: getClientIp(req) });
-      return res.status(200).json({ ok: true, message: 'If a reporter account exists for this email, an OTP has been sent.' });
+      logReporterAuthError('request-code', {
+        route: '/api/reporter-auth/request-code',
+        normalizedEmail: email,
+        transporterReady: mailerStatus.transporterReady,
+        errorMessage: 'Reporter identity could not be created or resolved',
+      });
+      return res.status(500).json({ ok: false, code: 'OTP_REQUEST_FAILED', message: 'Failed to request login OTP.' });
     }
 
     const status = String(reporter.status || 'active').toLowerCase();
     if (status === 'suspended' || status === 'banned' || reporter.portalAccessEnabled === false) {
       await logReporterActivity('reporter_portal_otp_request_blocked', email, { ip: getClientIp(req), status, portalAccessEnabled: reporter.portalAccessEnabled !== false });
-      return res.status(200).json({ ok: true, message: 'If a reporter account exists for this email, an OTP has been sent.' });
+      return res.status(200).json(buildOtpAcceptedResponse());
+    }
+
+    const existingOtp = await OtpToken.findOne({ email, purpose: REPORTER_PORTAL_OTP_PURPOSE, used: false }).sort({ createdAt: -1 });
+    if (existingOtp && existingOtp.createdAt && existingOtp.expiresAt && new Date(existingOtp.expiresAt) > new Date()) {
+      const elapsedMs = Date.now() - new Date(existingOtp.createdAt).getTime();
+      const cooldownMs = getOtpResendCooldownMs();
+      if (elapsedMs < cooldownMs) {
+        const retryAfterSec = Math.max(1, Math.ceil((cooldownMs - elapsedMs) / 1000));
+        await logReporterActivity('reporter_portal_otp_request_cooldown_active', email, { ip: getClientIp(req), retryAfterSec });
+        return res.status(429).json({
+          ok: false,
+          code: 'COOLDOWN_ACTIVE',
+          message: 'Please wait before requesting another verification code.',
+          retryAfterSec,
+        });
+      }
     }
 
     await OtpToken.updateMany(
@@ -592,29 +856,57 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
 
     const code = generateOtp();
     const expiresAt = new Date(Date.now() + OTP_EXPIRY_MS);
-    console.log('[reporter-portal][request-login-otp][otp-generated]', buildOtpLogContext(req, email, {
+    logReporterAuth('request-code', buildOtpLogContext(req, email, {
+      route: '/api/reporter-auth/request-code',
+      action: 'otp-generated',
       expiresAt: expiresAt.toISOString(),
       otpLength: code.length,
     }));
     const codeHash = await bcrypt.hash(code, 10);
-    await OtpToken.create({ email, purpose: REPORTER_PORTAL_OTP_PURPOSE, codeHash, expiresAt, used: false });
+    createdOtpRecord = await OtpToken.create({ email, purpose: REPORTER_PORTAL_OTP_PURPOSE, codeHash, expiresAt, used: false });
     await sendReporterOtpEmail(email, code);
     await logReporterActivity('reporter_portal_otp_requested', email, { ip: getClientIp(req), reporterId: reporter && reporter._id ? String(reporter._id) : null });
+    logReporterAuth('request-code', {
+      route: '/api/reporter-auth/request-code',
+      normalizedEmail: email,
+      transporterReady: mailerStatus.transporterReady,
+      action: 'otp-sent',
+    });
 
     return res.status(200).json({
-      ok: true,
-      message: 'If a reporter account exists for this email, an OTP has been sent.',
-      emailMasked: maskEmail(email),
+      ...buildOtpAcceptedResponse(email),
       ...(shouldExposeDevOtp() ? { devCode: code } : {}),
     });
   } catch (error) {
-    console.error('[reporter-portal][request-login-otp] failed', serializeError(error));
-    if (error && error.safeClientCode === 'EMAIL_SERVICE_UNAVAILABLE') {
+    if (createdOtpRecord && createdOtpRecord.used === false && typeof createdOtpRecord.save === 'function') {
+      try {
+        createdOtpRecord.used = true;
+        await createdOtpRecord.save();
+      } catch (cleanupError) {
+        logReporterAuthError('request-code', {
+          route: '/api/reporter-auth/request-code',
+          normalizedEmail: email,
+          transporterReady: false,
+          errorMessage: cleanupError?.message || String(cleanupError),
+        });
+      }
+    }
+    logReporterAuthError('request-code', {
+      route: '/api/reporter-auth/request-code',
+      normalizedEmail: email,
+      transporterReady: false,
+      errorMessage: error?.message || String(error),
+      error: serializeError(error),
+    });
+    if (error && error.safeClientCode === 'REPORTER_EMAIL_UNAVAILABLE') {
       return res.status(503).json({
         ok: false,
-        code: 'EMAIL_SERVICE_UNAVAILABLE',
+        code: 'REPORTER_EMAIL_UNAVAILABLE',
         message: 'Verification email service is temporarily unavailable.',
       });
+    }
+    if (error && error.safeClientCode === 'OTP_REQUEST_ACCEPTED') {
+      return res.status(200).json(buildOtpAcceptedResponse(email));
     }
     return res.status(500).json({ ok: false, code: 'OTP_REQUEST_FAILED', message: 'Failed to request login OTP.' });
   }
@@ -624,6 +916,14 @@ router.post('/auth/verify-login-otp', requireReporterPortalOpen, async (req, res
   try {
     const email = normalizeEmail(req.body && req.body.email);
     const otp = String(req.body && (req.body.otp || req.body.code) || '').trim();
+    logReporterAuth('verify', {
+      route: '/api/reporter-auth/verify-code',
+      normalizedEmail: email,
+      sessionExists: false,
+      verified: false,
+      transporterReady: null,
+      action: 'received',
+    });
     if (!email || !otp) {
       return res.status(400).json({ ok: false, code: 'OTP_REQUIRED', message: 'Email and OTP are required.' });
     }
@@ -657,6 +957,14 @@ router.post('/auth/verify-login-otp', requireReporterPortalOpen, async (req, res
     const reporter = await resolveReporterFromEmail(email);
     if (!reporter) {
       await logReporterActivity('reporter_portal_login_failed', email, { ip: getClientIp(req), reason: 'reporter_not_found' });
+      logReporterAuthError('verify-code', {
+        route: '/api/reporter-auth/verify-code',
+        normalizedEmail: email,
+        sessionExists: false,
+        verified: false,
+        transporterReady: null,
+        errorMessage: 'Reporter account not found after OTP verification',
+      });
       return res.status(403).json({ ok: false, code: 'REPORTER_NOT_FOUND', message: 'Reporter account not found.' });
     }
 
@@ -680,6 +988,17 @@ router.post('/auth/verify-login-otp', requireReporterPortalOpen, async (req, res
     const submissions = await loadOwnedSubmissions({ reporterId: reporter._id, email });
     const { summary } = buildSummary(submissions);
     await logReporterActivity('reporter_portal_login', email, { ip: getClientIp(req), reporterId: String(reporter._id), expiresAt });
+    await saveReporterSession(req, reporter);
+    setReporterPortalSessionCookie(res, req, token, expiresAt);
+    logReporterAuth('verify', {
+      route: '/api/reporter-auth/verify-code',
+      normalizedEmail: email,
+      sessionExists: true,
+      verified: true,
+      transporterReady: null,
+      resultCount: submissions.length,
+      action: 'verified',
+    });
 
     return res.status(200).json({
       ok: true,
@@ -695,7 +1014,14 @@ router.post('/auth/verify-login-otp', requireReporterPortalOpen, async (req, res
       summary,
     });
   } catch (error) {
-    console.error('[reporter-portal][verify-login-otp] failed', error && error.message ? error.message : error);
+    logReporterAuthError('verify', {
+      route: '/api/reporter-auth/verify-code',
+      normalizedEmail: normalizeEmail(req.body && req.body.email),
+      sessionExists: false,
+      verified: false,
+      transporterReady: null,
+      errorMessage: error?.message || String(error),
+    });
     return res.status(500).json({ ok: false, code: 'OTP_VERIFY_FAILED', message: 'Failed to verify login OTP.' });
   }
 });
@@ -710,6 +1036,8 @@ router.post('/auth/logout', requireReporterPortalOpen, requireReporterPortalAuth
     const currentVersion = typeof reporterDoc.portalAuthVersion === 'number' ? reporterDoc.portalAuthVersion : 0;
     reporterDoc.portalAuthVersion = currentVersion + 1;
     await reporterDoc.save();
+    await destroyReporterSession(req);
+    clearReporterPortalSessionCookie(res, req);
     await logReporterActivity('reporter_portal_logout', req.reporterPortal.email, { ip: getClientIp(req), reporterId: String(reporterDoc._id) });
     return res.status(200).json({ ok: true, message: 'Logged out successfully.' });
   } catch (error) {
@@ -891,11 +1219,27 @@ router.post('/profile/email/confirm-change', requireReporterPortalOpen, requireR
 
 router.get('/auth/session', requireReporterPortalOpen, requireReporterPortalAuth, async (req, res) => {
   try {
+    logReporterAuth('session', {
+      route: '/api/reporter-auth/session',
+      normalizedEmail: normalizeEmail(req.reporterPortal && req.reporterPortal.email),
+      sessionExists: !!req.reporterPortalTokenPayload,
+      verified: !!req.reporterPortal,
+      action: 'start',
+    });
     const submissions = await loadOwnedSubmissions(req.reporterPortal);
     const { summary } = buildSummary(submissions);
     const expiresAt = req.reporterPortalTokenPayload && req.reporterPortalTokenPayload.exp
       ? new Date(req.reporterPortalTokenPayload.exp * 1000)
       : null;
+
+    logReporterAuth('session', {
+      route: '/api/reporter-auth/session',
+      normalizedEmail: normalizeEmail(req.reporterPortal && req.reporterPortal.email),
+      sessionExists: !!req.reporterPortalTokenPayload,
+      verified: !!req.reporterPortal,
+      resultCount: submissions.length,
+      action: 'success',
+    });
 
     return res.status(200).json({
       ok: true,
@@ -914,7 +1258,13 @@ router.get('/auth/session', requireReporterPortalOpen, requireReporterPortalAuth
       summary,
     });
   } catch (error) {
-    console.error('[reporter-portal][session] failed', error && error.message ? error.message : error);
+    logReporterAuthError('session', {
+      route: '/api/reporter-auth/session',
+      normalizedEmail: normalizeEmail(req.reporterPortal && req.reporterPortal.email),
+      sessionExists: !!req.reporterPortalTokenPayload,
+      verified: !!req.reporterPortal,
+      errorMessage: error?.message || String(error),
+    });
     return res.status(500).json({ ok: false, code: 'SESSION_LOAD_FAILED', message: 'Failed to load reporter session.' });
   }
 });
@@ -947,6 +1297,7 @@ router.get('/submissions', requireReporterPortalOpen, requireReporterPortalAuth,
     const limit = Math.min(Math.max(parseInt(req.query && req.query.limit || '20', 10), 1), 100);
     const status = String(req.query && req.query.status || '').trim();
     const q = String(req.query && req.query.q || '').trim().toLowerCase();
+    logReporterSubmissions('start', buildReporterSubmissionLogContext(req));
 
     const submissions = await loadOwnedSubmissions(req.reporterPortal);
     const filtered = submissions.filter((submission) => {
@@ -960,10 +1311,15 @@ router.get('/submissions', requireReporterPortalOpen, requireReporterPortalAuth,
 
     const start = (page - 1) * limit;
     const items = filtered.slice(start, start + limit).map(mapSubmission);
+    logReporterSubmissions('success', buildReporterSubmissionLogContext(req, {
+      resultCount: items.length,
+      total: filtered.length,
+    }));
 
     return res.status(200).json({
       ok: true,
       items,
+      total: filtered.length,
       meta: {
         total: filtered.length,
         page,
@@ -971,8 +1327,10 @@ router.get('/submissions', requireReporterPortalOpen, requireReporterPortalAuth,
       },
     });
   } catch (error) {
-    console.error('[reporter-portal][submissions] failed', error && error.message ? error.message : error);
-    return res.status(500).json({ ok: false, code: 'SUBMISSIONS_LOAD_FAILED', message: 'Failed to load submissions.' });
+    logReporterSubmissionsError('error', buildReporterSubmissionLogContext(req, {
+      errorMessage: error?.message || String(error),
+    }));
+    return res.status(500).json({ ok: false, code: 'REPORTER_SUBMISSIONS_FETCH_FAILED', message: 'Failed to load submissions.' });
   }
 });
 
