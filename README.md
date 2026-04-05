@@ -560,7 +560,8 @@ To enable OTP and other email sends, set these environment variables (Render das
 | `SMTP_SERVICE` | `gmail` | Optional shortcut (use instead of HOST/PORT) |
 | `SMTP_USER` | `newspulse.team@gmail.com` | Gmail address (must match App Password) |
 | `SMTP_PASS` | `<app-password>` | 16‑char Gmail App Password (not regular password) |
-| `EMAIL_FROM` | `"NewsPulse Admin <newspulse.team@gmail.com>"` | Display name + sender |
+| `FROM_EMAIL` | `"NewsPulse Admin <newspulse.team@gmail.com>"` | Supported sender alias |
+| `EMAIL_FROM` | `"NewsPulse Admin <newspulse.team@gmail.com>"` | Preferred display name + sender |
 | `SMTP_FROM` | `noreply@newspulse.co.in` | Optional envelope override |
 | `OTP_ALLOW_ANY` | `0` (prod) / `1` (dev) | Gating: restrict OTP requests to founder email |
 | `OTP_EMAIL_TIMEOUT_MS` | `5000` | Max wait before background send detaches |
@@ -582,6 +583,7 @@ node scripts/test-email.js --to=your-test@gmail.com
 ```
 If you see `[EMAIL][transporter-ready]` followed by `[EMAIL][sent]` with your address in `accepted`, the configuration is working. If not:
 - Check for missing vars printed by `[EMAIL][config-error]`.
+- If your environment uses `FROM_EMAIL`, the backend now accepts that alias alongside `EMAIL_FROM` and `SMTP_FROM`.
 - With `SMTP_DEBUG=true` review low-level protocol logs.
 - Confirm the Gmail App Password is correct and not revoked.
 
