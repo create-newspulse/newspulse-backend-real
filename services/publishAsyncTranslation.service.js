@@ -688,8 +688,6 @@ async function translateAndSave(newsId, options = {}) {
       } catch (_) {}
     }
   }
-
-        if (docUpdated) await _syncSourceAndGroup(docUpdated, logger, 'publish_async_translation_failed');
 }
 
 const JOB_TYPE = 'news-publish-translate';
