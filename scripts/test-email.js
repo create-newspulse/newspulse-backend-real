@@ -5,7 +5,7 @@
  *   node scripts/test-email.js --to=user@example.com --subject="Test" --text="Hello" --html="<p>Hello</p>"
  * Env vars required: SMTP_HOST/ADS_SMTP_HOST, SMTP_PORT/ADS_SMTP_PORT,
  * SMTP_USER/ADS_SMTP_USER, SMTP_PASS/ADS_SMTP_PASS,
- * (EMAIL_FROM|SMTP_FROM|ADS_SMTP_FROM optional)
+ * (EMAIL_FROM|MAIL_FROM|FROM_EMAIL|ADS_SMTP_FROM optional, SMTP_FROM envelope-only)
  */
 require('dotenv').config();
 const { sendMail, getTransporter } = require('../lib/mailer');
@@ -50,7 +50,8 @@ async function main() {
   if (process.env.SMTP_DEBUG === 'true') {
     console.log('[TEST-EMAIL] Debug mode active (SMTP_DEBUG=true).');
   }
-  console.log('[TEST-EMAIL] From address resolved as:', process.env.EMAIL_FROM || process.env.SMTP_FROM || process.env.ADS_SMTP_FROM || process.env.SMTP_USER || process.env.ADS_SMTP_USER);
+  console.log('[TEST-EMAIL] From header resolved as:', process.env.EMAIL_FROM || process.env.MAIL_FROM || process.env.FROM_EMAIL || process.env.ADS_SMTP_FROM || process.env.SMTP_USER || process.env.ADS_SMTP_USER);
+  console.log('[TEST-EMAIL] Envelope from resolved as:', process.env.SMTP_FROM || '(default transport envelope)');
   try {
     const info = await sendMail({ to, subject, text, html });
     console.log('[TEST-EMAIL][SUCCESS]', JSON.stringify({

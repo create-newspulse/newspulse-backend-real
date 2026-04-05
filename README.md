@@ -588,7 +588,7 @@ node scripts/test-email.js --to=your-test@gmail.com
 ```
 If you see `[EMAIL][transporter-ready]` followed by `[EMAIL][sent]` with your address in `accepted`, the configuration is working. If not:
 - Check for missing vars printed by `[EMAIL][config-error]`.
-- If your environment uses `MAIL_FROM` or `FROM_EMAIL`, the backend now accepts those aliases alongside `EMAIL_FROM` and `SMTP_FROM`.
+- The visible sender header comes from `EMAIL_FROM`, `MAIL_FROM`, `FROM_EMAIL`, or `ADS_SMTP_FROM` (then falls back to the SMTP auth user). `SMTP_FROM` is envelope-only.
 - With `SMTP_DEBUG=true` review low-level protocol logs.
 - Confirm the Gmail App Password is correct and not revoked.
 
