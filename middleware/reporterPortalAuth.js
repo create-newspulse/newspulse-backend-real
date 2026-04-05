@@ -33,9 +33,14 @@ function buildReporterAuthLogContext(req, extra = {}) {
   ) || null;
 
   return {
+    route: extra.route || String(req?.originalUrl || req?.url || ''),
     normalizedEmail,
-    sessionExists: !!(req?.reporterPortalTokenPayload || getReporterPortalToken(req)),
-    verified: !!req?.reporterPortal,
+    authModel: extra.authModel || req?.reporterPortalAuthModel || 'none',
+    sessionExists: !!req?.session?.reporter,
+    verified: extra.verified !== undefined ? extra.verified : !!req?.reporterPortal,
+    collectionsQueried: extra.collectionsQueried || [],
+    totalRecordsFound: extra.totalRecordsFound ?? 0,
+    reasonForZero: extra.reasonForZero || null,
     ...extra,
   };
 }
@@ -54,6 +59,8 @@ function respondReporterSessionMissing(req, res, errorMessage) {
   const payload = buildReporterAuthLogContext(req, {
     verified: false,
     errorMessage,
+    reasonForZero: 'auth-missing',
+    collectionsQueried: ['CommunitySubmission'],
   });
 
   if (isReporterSessionRequest(req)) {
@@ -83,8 +90,18 @@ function getReporterPortalCookieToken(req) {
   return token || null;
 }
 
+function getReporterPortalTokenDetails(req) {
+  const bearerToken = getBearerToken(req);
+  if (bearerToken) return { token: bearerToken, authModel: 'bearer-token' };
+
+  const cookieToken = getReporterPortalCookieToken(req);
+  if (cookieToken) return { token: cookieToken, authModel: 'cookie-token' };
+
+  return { token: null, authModel: 'none' };
+}
+
 function getReporterPortalToken(req) {
-  return getBearerToken(req) || getReporterPortalCookieToken(req);
+  return getReporterPortalTokenDetails(req).token;
 }
 
 function isDbReady() {
@@ -147,6 +164,7 @@ async function requireReporterPortalAuth(req, res, next) {
   try {
     const sessionReporter = normalizeReporterSession(req?.session?.reporter);
     if (sessionReporter.email && sessionReporter.verified) {
+      req.reporterPortalAuthModel = 'session';
       req.reporterPortal = sessionReporter;
       req.reporterPortalTokenPayload = req.reporterPortalTokenPayload || null;
 
@@ -192,7 +210,8 @@ async function requireReporterPortalAuth(req, res, next) {
       return next();
     }
 
-    const token = getReporterPortalToken(req);
+    const { token, authModel } = getReporterPortalTokenDetails(req);
+    req.reporterPortalAuthModel = authModel;
     if (!token) {
       return respondReporterSessionMissing(req, res, 'No reporter token found in Authorization header or cookie');
     }

@@ -24,6 +24,18 @@ const { requireAdminAuth } = require('../middleware/adminAuth');
 const { requireReporterPortalAuth } = require('../middleware/reporterPortalAuth');
 
 const router = express.Router();
+const REPORTER_EMAIL_LOOKUP_FIELDS = [
+  'reporterEmailNorm',
+  'reporterEmail',
+  'email',
+  'submittedByEmail',
+  'contactEmail',
+  'authorEmail',
+  'contact.email',
+  'reporter.email',
+  'reporterProfile.email',
+  'contributor.email',
+];
 
 async function requireCommunityReporterOpen(req, res, next) {
   try {
@@ -60,14 +72,18 @@ async function requireReporterPortalOpen(req, res, next) {
 function buildReporterPortalOwnershipFilter(reporter) {
   const email = String(reporter && reporter.email || '').trim().toLowerCase();
   const clauses = [];
+  const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (reporter && reporter.reporterId && mongoose.isValidObjectId(String(reporter.reporterId))) {
     clauses.push({ reporterId: reporter.reporterId });
   }
   if (email) {
-    clauses.push({ reporterEmailNorm: email });
-    clauses.push({ reporterEmail: email });
-    clauses.push({ email });
-    clauses.push({ 'contact.email': email });
+    const caseInsensitive = new RegExp(`^${escapeRegex(email)}$`, 'i');
+    for (const field of REPORTER_EMAIL_LOOKUP_FIELDS) {
+      clauses.push({ [field]: email });
+      if (field !== 'reporterEmailNorm') {
+        clauses.push({ [field]: caseInsensitive });
+      }
+    }
   }
   return {
     isDeleted: { $ne: true },

@@ -17,6 +17,7 @@ const SystemSettings = require('../models/SystemSettings');
 const ReporterContact = require('../models/ReporterContact');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const OtpToken = require('../models/OtpToken');
+const reporterPortalRouter = require('../routes/reporterPortal');
 
 let founderDoc;
 let legacyFeatureDoc;
@@ -83,6 +84,10 @@ function matchesFilter(doc, filter) {
     }
 
     const actual = getPathValue(doc, key);
+
+    if (expected instanceof RegExp) {
+      return expected.test(String(actual || ''));
+    }
 
     if (expected && typeof expected === 'object' && !Array.isArray(expected)) {
       if (Object.prototype.hasOwnProperty.call(expected, '$ne')) {
@@ -307,6 +312,9 @@ reporterIdentityResolutionService.resolveAndAttachForSubmission = async () => ({
 const app = require('../server');
 
 test.beforeEach(() => {
+  if (typeof reporterPortalRouter.resetRateLimitsForTests === 'function') {
+    reporterPortalRouter.resetRateLimitsForTests();
+  }
   try {
     mongoose.connection.readyState = 1;
     mongoose.connection.name = 'newspulse-test';
@@ -496,6 +504,52 @@ test('reporter portal auth session and submissions work with localhost cookie au
 
   const submissionsRes = await agent
     .get('/api/reporter-portal/submissions')
+    .set('Origin', 'http://localhost:5173');
+
+  assert.strictEqual(submissionsRes.statusCode, 200);
+  assert.strictEqual(submissionsRes.body.total, 2);
+});
+
+test('reporter auth compatibility routes keep cookie auth stable when host is 127.0.0.1 and origin is localhost', async () => {
+  const agent = request.agent(app);
+
+  const otpRes = await agent
+    .post('/api/reporter-auth/request-code')
+    .set('Host', '127.0.0.1:5000')
+    .set('Origin', 'http://localhost:5173')
+    .send({ email: 'reporter@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+
+  const verifyRes = await agent
+    .post('/api/reporter-auth/verify-code')
+    .set('Host', '127.0.0.1:5000')
+    .set('Origin', 'http://localhost:5173')
+    .send({ email: 'reporter@example.com', code: otpRes.body.devCode });
+
+  assert.strictEqual(verifyRes.statusCode, 200);
+  assert.ok(Array.isArray(verifyRes.headers['set-cookie']));
+  assert.ok(verifyRes.headers['set-cookie'].some((value) => value.includes('reporter_portal_session=')));
+  assert.ok(verifyRes.headers['set-cookie'].some((value) => value.includes('reporter_portal.sid=')));
+
+  const sessionRes = await agent
+    .get('/api/reporter-auth/session')
+    .set('Host', '127.0.0.1:5000')
+    .set('Origin', 'http://localhost:5173');
+
+  assert.strictEqual(sessionRes.statusCode, 200);
+  assert.strictEqual(sessionRes.body.reporter.email, 'reporter@example.com');
+
+  const dashboardRes = await agent
+    .get('/api/reporter-auth/dashboard/summary')
+    .set('Host', '127.0.0.1:5000')
+    .set('Origin', 'http://localhost:5173');
+
+  assert.strictEqual(dashboardRes.statusCode, 200);
+
+  const submissionsRes = await agent
+    .get('/api/reporter-auth/submissions')
+    .set('Host', '127.0.0.1:5000')
     .set('Origin', 'http://localhost:5173');
 
   assert.strictEqual(submissionsRes.statusCode, 200);
@@ -983,4 +1037,74 @@ test('reporter session endpoint returns stable missing-session code when auth is
 
   assert.strictEqual(res.statusCode, 401);
   assert.strictEqual(res.body.code, 'REPORTER_SESSION_MISSING');
+});
+
+test('reporter portal counts linked articles as published outcomes and exposes them in published filters', async () => {
+  submissionStore[1].status = 'APPROVED';
+  submissionStore[1].linkedArticleId = '507f1f77bcf86cd7994390aa';
+  submissionStore[1].articleId = '507f1f77bcf86cd7994390aa';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'reporter@example.com' });
+
+  const verifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'reporter@example.com', otp: otpRes.body.devCode });
+
+  const dashboardRes = await request(app)
+    .get('/api/reporter-portal/dashboard/summary')
+    .set('Authorization', `Bearer ${verifyRes.body.token}`);
+
+  assert.strictEqual(dashboardRes.statusCode, 200);
+  assert.deepStrictEqual(dashboardRes.body.summary, {
+    totalSubmissions: 2,
+    pending: 1,
+    approved: 0,
+    rejected: 0,
+    published: 1,
+  });
+
+  const publishedRes = await request(app)
+    .get('/api/reporter-portal/submissions?status=published')
+    .set('Authorization', `Bearer ${verifyRes.body.token}`);
+
+  assert.strictEqual(publishedRes.statusCode, 200);
+  assert.strictEqual(publishedRes.body.total, 1);
+  assert.strictEqual(publishedRes.body.items[0].portalStatus, 'PUBLISHED');
+});
+
+test('reporter portal ownership lookup finds legacy mixed-case email records across fallback fields', async () => {
+  submissionStore.push({
+    _id: '507f1f77bcf86cd799439099',
+    reporterId: '507f191e810c19729de860ff',
+    reporterEmail: 'Reporter@Example.com',
+    reporterEmailNorm: undefined,
+    email: 'Reporter@Example.com',
+    headline: 'Legacy Mixed Case',
+    body: 'Legacy body',
+    category: 'district',
+    status: 'APPROVED',
+    createdAt: new Date('2026-04-05T09:30:00.000Z'),
+    updatedAt: new Date('2026-04-05T09:30:00.000Z'),
+    isDeleted: false,
+    contact: { email: 'Reporter@Example.com', name: 'Reporter One' },
+    attachments: [],
+  });
+
+  const otpRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'reporter@example.com' });
+
+  const verifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'reporter@example.com', otp: otpRes.body.devCode });
+
+  const submissionsRes = await request(app)
+    .get('/api/reporter-portal/submissions')
+    .set('Authorization', `Bearer ${verifyRes.body.token}`);
+
+  assert.strictEqual(submissionsRes.statusCode, 200);
+  assert.strictEqual(submissionsRes.body.total, 3);
+  assert.ok(submissionsRes.body.items.some((item) => item.id === '507f1f77bcf86cd799439099'));
 });

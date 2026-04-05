@@ -27,9 +27,46 @@ const OTP_REQUEST_RATE_LIMIT = { windowMs: 15 * 60 * 1000, maxAttempts: 8 };
 const OTP_VERIFY_RATE_LIMIT = { windowMs: 10 * 60 * 1000, maxAttempts: 10 };
 const otpRequestAttempts = new Map();
 const otpVerifyAttempts = new Map();
+const REPORTER_EMAIL_LOOKUP_FIELDS = [
+  'reporterEmailNorm',
+  'reporterEmail',
+  'email',
+  'submittedByEmail',
+  'contactEmail',
+  'authorEmail',
+  'contact.email',
+  'reporter.email',
+  'reporterProfile.email',
+  'contributor.email',
+];
 
 function getReporterSessionSecret() {
   return String(process.env.REPORTER_PORTAL_SESSION_SECRET || process.env.REPORTER_SESSION_SECRET || process.env.JWT_SECRET || '').trim();
+}
+
+function isLoopbackHostname(hostname) {
+  return /^(localhost|127\.0\.0\.1)$/i.test(String(hostname || '').trim());
+}
+
+function buildLoopbackCanonicalUrl(req) {
+  try {
+    const origin = String(req.get('Origin') || '').trim();
+    const host = String(req.get('Host') || '').trim();
+    if (!origin || !host) return null;
+
+    const originUrl = new URL(origin);
+    const requestHost = host.split(':')[0];
+    const requestPort = host.includes(':') ? host.split(':').slice(1).join(':') : '';
+    const originHost = String(originUrl.hostname || '').trim();
+    const protocol = String(req.get('x-forwarded-proto') || originUrl.protocol || (req.secure ? 'https:' : 'http:')).trim();
+
+    if (!isLoopbackHostname(originHost) || !isLoopbackHostname(requestHost)) return null;
+    if (originHost.toLowerCase() === requestHost.toLowerCase()) return null;
+
+    return `${protocol}//${originHost}${requestPort ? `:${requestPort}` : ''}${req.originalUrl || req.url}`;
+  } catch (_) {
+    return null;
+  }
 }
 
 function getReporterSessionCookieConfig() {
@@ -113,6 +150,11 @@ async function destroyReporterSession(req) {
   });
 }
 
+function redirectLoopbackReporterHost(req, res, next) {
+  return next();
+}
+
+router.use(redirectLoopbackReporterHost);
 router.use(reporterSessionMiddleware);
 
 function firstNonEmpty(...values) {
@@ -238,6 +280,9 @@ function buildOtpLogContext(req, email, extra = {}) {
     productionLike: isProductionLike(),
     renderLike: isRenderLike(),
     baseUrlConfigured: !!getReporterPortalBaseUrl(),
+    authModel: extra.authModel || req?.reporterPortalAuthModel || 'none',
+    sessionPresent: extra.sessionPresent !== undefined ? extra.sessionPresent : !!req?.session?.reporter,
+    verified: extra.verified !== undefined ? extra.verified : false,
     hasJwtSecret: !!String(process.env.JWT_SECRET || '').trim(),
     jwtExpiresIn: getReporterJwtExpiresIn(),
     ...extra,
@@ -260,13 +305,46 @@ function logReporterSubmissionsError(stage, payload) {
   console.error(`[reporter-submissions][${stage}]`, payload);
 }
 
+function logReporterDashboard(stage, payload) {
+  console.log(`[reporter-dashboard][${stage}]`, payload);
+}
+
+function logReporterDashboardError(stage, payload) {
+  console.error(`[reporter-dashboard][${stage}]`, payload);
+}
+
+function getReporterCollectionsQueried() {
+  return ['CommunitySubmission'];
+}
+
+function buildReporterDataLogContext(req, extra = {}) {
+  const totalRecordsFound = Number(extra.totalRecordsFound || 0);
+  return {
+    normalizedEmail: normalizeEmail(req?.reporterPortal?.email),
+    authModel: extra.authModel || req?.reporterPortalAuthModel || (req?.session?.reporter ? 'session' : (req?.reporterPortalTokenPayload ? 'token' : 'none')),
+    sessionPresent: extra.sessionPresent !== undefined ? extra.sessionPresent : !!req?.session?.reporter,
+    sessionExists: !!req?.session?.reporter,
+    verified: extra.verified !== undefined ? extra.verified : !!req?.reporterPortal,
+    collectionsQueried: extra.collectionsQueried || getReporterCollectionsQueried(),
+    totalRecordsFound,
+    reasonForZero: extra.reasonForZero || (totalRecordsFound === 0 ? 'no-records-found' : null),
+    ...extra,
+  };
+}
+
 function buildReporterSubmissionLogContext(req, extra = {}) {
   return {
     route: '/api/reporter-portal/submissions',
     normalizedEmail: normalizeEmail(req?.reporterPortal?.email),
-    sessionExists: !!req?.reporterPortalTokenPayload,
+    sessionPresent: extra.sessionPresent !== undefined ? extra.sessionPresent : !!req?.session?.reporter,
+    sessionExists: !!req?.session?.reporter,
+    verified: extra.verified !== undefined ? extra.verified : !!req?.reporterPortal,
     reporterProfileFound: !!req?._reporterPortalDoc,
     resultCount: 0,
+    authModel: req?.reporterPortalAuthModel || (req?.session?.reporter ? 'session' : (req?.reporterPortalTokenPayload ? 'token' : 'none')),
+    collectionsQueried: extra.collectionsQueried || getReporterCollectionsQueried(),
+    totalRecordsFound: extra.totalRecordsFound || 0,
+    reasonForZero: extra.reasonForZero || null,
     ...extra,
   };
 }
@@ -335,6 +413,25 @@ function getOtpResendCooldownMs() {
   return Math.max(Number(process.env.REPORTER_OTP_RESEND_COOLDOWN_MS || 60 * 1000), 0);
 }
 
+function escapeRegex(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildReporterEmailLookupClauses(email) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return [];
+
+  const caseInsensitive = new RegExp(`^${escapeRegex(normalizedEmail)}$`, 'i');
+  const clauses = [];
+  for (const field of REPORTER_EMAIL_LOOKUP_FIELDS) {
+    clauses.push({ [field]: normalizedEmail });
+    if (field !== 'reporterEmailNorm') {
+      clauses.push({ [field]: caseInsensitive });
+    }
+  }
+  return clauses;
+}
+
 function getTokenExpiresAt(token) {
   try {
     const payload = jwt.decode(token);
@@ -380,6 +477,17 @@ function toPortalStatus(rawStatus) {
   return 'UNDER_REVIEW';
 }
 
+function isPublishedSubmission(doc) {
+  if (!doc || typeof doc !== 'object') return false;
+  if (toPortalStatus(doc.status) === 'PUBLISHED') return true;
+  return !!(doc.linkedArticleId || doc.articleId || doc.publishedAt);
+}
+
+function getSubmissionPortalStatus(doc) {
+  if (isPublishedSubmission(doc)) return 'PUBLISHED';
+  return toPortalStatus(doc && doc.status);
+}
+
 function toStoredStatusForCreate(action) {
   return normalizeToken(action) === 'draft' ? 'DRAFT' : 'SUBMITTED';
 }
@@ -396,14 +504,14 @@ function toStoredStatusForUpdate(currentPortalStatus, action) {
 }
 
 function canEditSubmission(doc) {
-  const portalStatus = toPortalStatus(doc && doc.status);
+  const portalStatus = getSubmissionPortalStatus(doc);
   return portalStatus === 'DRAFT' || portalStatus === 'NEEDS_REVISION';
 }
 
-function matchesPortalStatus(rawStatus, requestedStatus) {
+function matchesPortalStatus(doc, requestedStatus) {
   const requested = normalizeToken(requestedStatus);
   if (!requested || requested === 'all') return true;
-  const portalStatus = toPortalStatus(rawStatus);
+  const portalStatus = getSubmissionPortalStatus(doc);
   if (requested === 'pending') {
     return ['DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'NEEDS_REVISION'].includes(portalStatus);
   }
@@ -416,16 +524,7 @@ function buildReporterOwnershipFilter(reporter) {
   if (reporter && reporter.reporterId && mongoose.isValidObjectId(String(reporter.reporterId))) {
     clauses.push({ reporterId: reporter.reporterId });
   }
-  if (email) {
-    clauses.push({ reporterEmailNorm: email });
-    clauses.push({ reporterEmail: email });
-    clauses.push({ email });
-    clauses.push({ submittedByEmail: email });
-    clauses.push({ contactEmail: email });
-    clauses.push({ 'contact.email': email });
-    clauses.push({ 'reporter.email': email });
-    clauses.push({ 'reporterProfile.email': email });
-  }
+  clauses.push(...buildReporterEmailLookupClauses(email));
 
   return {
     isDeleted: { $ne: true },
@@ -502,7 +601,7 @@ function mapSubmission(doc) {
     category: doc && doc.category ? doc.category : null,
     desk: doc && doc.desk ? doc.desk : null,
     track: doc && doc.track ? doc.track : null,
-    portalStatus: toPortalStatus(doc && doc.status),
+    portalStatus: getSubmissionPortalStatus(doc),
     rawStatus: doc && doc.status ? doc.status : null,
     canEdit: canEditSubmission(doc),
     createdAt: doc && doc.createdAt ? doc.createdAt : null,
@@ -538,7 +637,7 @@ function buildSummary(submissions) {
   };
 
   submissions.forEach((submission) => {
-    const portalStatus = toPortalStatus(submission && submission.status);
+    const portalStatus = getSubmissionPortalStatus(submission);
     breakdown[portalStatus] = (breakdown[portalStatus] || 0) + 1;
     if (['DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'NEEDS_REVISION'].includes(portalStatus)) summary.pending += 1;
     if (portalStatus === 'APPROVED') summary.approved += 1;
@@ -638,16 +737,7 @@ async function resolveReporterFromEmail(email) {
 
   const latestSubmission = await CommunitySubmission.findOne({
     isDeleted: { $ne: true },
-    $or: [
-      { reporterEmailNorm: normalizedEmail },
-      { reporterEmail: normalizedEmail },
-      { email: normalizedEmail },
-      { submittedByEmail: normalizedEmail },
-      { contactEmail: normalizedEmail },
-      { 'contact.email': normalizedEmail },
-      { 'reporter.email': normalizedEmail },
-      { 'reporterProfile.email': normalizedEmail },
-    ],
+    $or: buildReporterEmailLookupClauses(normalizedEmail),
   }).sort({ createdAt: -1 });
 
   if (latestSubmission) {
@@ -692,16 +782,7 @@ async function backfillReporterOwnership(reporter) {
     {
       isDeleted: { $ne: true },
       reporterId: { $exists: false },
-      $or: [
-        { reporterEmailNorm: normalizedEmail },
-        { reporterEmail: normalizedEmail },
-        { email: normalizedEmail },
-        { submittedByEmail: normalizedEmail },
-        { contactEmail: normalizedEmail },
-        { 'contact.email': normalizedEmail },
-        { 'reporter.email': normalizedEmail },
-        { 'reporterProfile.email': normalizedEmail },
-      ],
+      $or: buildReporterEmailLookupClauses(normalizedEmail),
     },
     {
       $set: {
@@ -778,6 +859,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
     logReporterAuth('request-code', buildOtpLogContext(req, email, {
       route: '/api/reporter-auth/request-code',
       action: 'normalized-email',
+      returnedStatusCode: null,
     }));
     if (!email) {
       return res.status(400).json({ ok: false, code: 'EMAIL_REQUIRED', message: 'Email is required.' });
@@ -787,6 +869,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
     logReporterAuth('request-code', buildOtpLogContext(req, email, {
       route: '/api/reporter-auth/request-code',
       action: 'mailer-status',
+      returnedStatusCode: null,
       mailerConfigured: mailerStatus.configured,
       transporterReady: mailerStatus.transporterReady,
       missing: mailerStatus.missing,
@@ -797,6 +880,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       logReporterAuthError('request-code', {
         route: '/api/reporter-auth/request-code',
         normalizedEmail: email,
+        returnedStatusCode: 503,
         transporterReady: mailerStatus.transporterReady,
         missing: mailerStatus.missing,
         resolved: mailerStatus.resolved,
@@ -859,6 +943,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
     logReporterAuth('request-code', buildOtpLogContext(req, email, {
       route: '/api/reporter-auth/request-code',
       action: 'otp-generated',
+      returnedStatusCode: null,
       expiresAt: expiresAt.toISOString(),
       otpLength: code.length,
     }));
@@ -869,6 +954,9 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
     logReporterAuth('request-code', {
       route: '/api/reporter-auth/request-code',
       normalizedEmail: email,
+      sessionPresent: !!req?.session?.reporter,
+      verified: false,
+      returnedStatusCode: 200,
       transporterReady: mailerStatus.transporterReady,
       action: 'otp-sent',
     });
@@ -886,6 +974,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
         logReporterAuthError('request-code', {
           route: '/api/reporter-auth/request-code',
           normalizedEmail: email,
+          returnedStatusCode: 500,
           transporterReady: false,
           errorMessage: cleanupError?.message || String(cleanupError),
         });
@@ -894,6 +983,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
     logReporterAuthError('request-code', {
       route: '/api/reporter-auth/request-code',
       normalizedEmail: email,
+      returnedStatusCode: error && error.safeClientCode === 'REPORTER_EMAIL_UNAVAILABLE' ? 503 : (error && error.safeClientCode === 'OTP_REQUEST_ACCEPTED' ? 200 : 500),
       transporterReady: false,
       errorMessage: error?.message || String(error),
       error: serializeError(error),
@@ -919,8 +1009,11 @@ router.post('/auth/verify-login-otp', requireReporterPortalOpen, async (req, res
     logReporterAuth('verify', {
       route: '/api/reporter-auth/verify-code',
       normalizedEmail: email,
+      authModel: 'mixed',
+      sessionPresent: false,
       sessionExists: false,
       verified: false,
+      returnedStatusCode: null,
       transporterReady: null,
       action: 'received',
     });
@@ -960,8 +1053,11 @@ router.post('/auth/verify-login-otp', requireReporterPortalOpen, async (req, res
       logReporterAuthError('verify-code', {
         route: '/api/reporter-auth/verify-code',
         normalizedEmail: email,
+        authModel: 'mixed',
+        sessionPresent: false,
         sessionExists: false,
         verified: false,
+        returnedStatusCode: 403,
         transporterReady: null,
         errorMessage: 'Reporter account not found after OTP verification',
       });
@@ -993,8 +1089,11 @@ router.post('/auth/verify-login-otp', requireReporterPortalOpen, async (req, res
     logReporterAuth('verify', {
       route: '/api/reporter-auth/verify-code',
       normalizedEmail: email,
+      authModel: 'mixed',
+      sessionPresent: true,
       sessionExists: true,
       verified: true,
+      returnedStatusCode: 200,
       transporterReady: null,
       resultCount: submissions.length,
       action: 'verified',
@@ -1017,8 +1116,11 @@ router.post('/auth/verify-login-otp', requireReporterPortalOpen, async (req, res
     logReporterAuthError('verify', {
       route: '/api/reporter-auth/verify-code',
       normalizedEmail: normalizeEmail(req.body && req.body.email),
+      authModel: 'mixed',
+      sessionPresent: !!req?.session?.reporter,
       sessionExists: false,
       verified: false,
+      returnedStatusCode: 500,
       transporterReady: null,
       errorMessage: error?.message || String(error),
     });
@@ -1219,27 +1321,27 @@ router.post('/profile/email/confirm-change', requireReporterPortalOpen, requireR
 
 router.get('/auth/session', requireReporterPortalOpen, requireReporterPortalAuth, async (req, res) => {
   try {
-    logReporterAuth('session', {
+    logReporterAuth('session', buildReporterDataLogContext(req, {
       route: '/api/reporter-auth/session',
-      normalizedEmail: normalizeEmail(req.reporterPortal && req.reporterPortal.email),
-      sessionExists: !!req.reporterPortalTokenPayload,
       verified: !!req.reporterPortal,
+      returnedStatusCode: null,
       action: 'start',
-    });
+    }));
     const submissions = await loadOwnedSubmissions(req.reporterPortal);
     const { summary } = buildSummary(submissions);
     const expiresAt = req.reporterPortalTokenPayload && req.reporterPortalTokenPayload.exp
       ? new Date(req.reporterPortalTokenPayload.exp * 1000)
       : null;
 
-    logReporterAuth('session', {
+    logReporterAuth('session', buildReporterDataLogContext(req, {
       route: '/api/reporter-auth/session',
-      normalizedEmail: normalizeEmail(req.reporterPortal && req.reporterPortal.email),
-      sessionExists: !!req.reporterPortalTokenPayload,
       verified: !!req.reporterPortal,
       resultCount: submissions.length,
+      totalRecordsFound: submissions.length,
+      reasonForZero: submissions.length === 0 ? 'no-records-found' : null,
+      returnedStatusCode: 200,
       action: 'success',
-    });
+    }));
 
     return res.status(200).json({
       ok: true,
@@ -1258,35 +1360,68 @@ router.get('/auth/session', requireReporterPortalOpen, requireReporterPortalAuth
       summary,
     });
   } catch (error) {
-    logReporterAuthError('session', {
+    logReporterAuthError('session', buildReporterDataLogContext(req, {
       route: '/api/reporter-auth/session',
-      normalizedEmail: normalizeEmail(req.reporterPortal && req.reporterPortal.email),
-      sessionExists: !!req.reporterPortalTokenPayload,
       verified: !!req.reporterPortal,
+      returnedStatusCode: 500,
       errorMessage: error?.message || String(error),
-    });
+    }));
     return res.status(500).json({ ok: false, code: 'SESSION_LOAD_FAILED', message: 'Failed to load reporter session.' });
   }
 });
 
 router.get('/dashboard/summary', requireReporterPortalOpen, requireReporterPortalAuth, async (req, res) => {
   try {
+    logReporterDashboard('stats', buildReporterDataLogContext(req, {
+      route: '/api/reporter-portal/dashboard/summary',
+      returnedStatusCode: null,
+      action: 'start',
+    }));
     const submissions = await loadOwnedSubmissions(req.reporterPortal);
     const { summary } = buildSummary(submissions);
+    logReporterDashboard('stats', buildReporterDataLogContext(req, {
+      route: '/api/reporter-portal/dashboard/summary',
+      action: 'success',
+      totalRecordsFound: submissions.length,
+      resultCount: submissions.length,
+      reasonForZero: submissions.length === 0 ? 'no-records-found' : null,
+      returnedStatusCode: 200,
+    }));
     return res.status(200).json({ ok: true, summary });
   } catch (error) {
-    console.error('[reporter-portal][dashboard-summary] failed', error && error.message ? error.message : error);
+    logReporterDashboardError('stats', buildReporterDataLogContext(req, {
+      route: '/api/reporter-portal/dashboard/summary',
+      returnedStatusCode: 500,
+      errorMessage: error?.message || String(error),
+    }));
     return res.status(500).json({ ok: false, code: 'DASHBOARD_SUMMARY_FAILED', message: 'Failed to load dashboard summary.' });
   }
 });
 
 router.get('/submissions/stats', requireReporterPortalOpen, requireReporterPortalAuth, async (req, res) => {
   try {
+    logReporterDashboard('stats', buildReporterDataLogContext(req, {
+      route: '/api/reporter-portal/submissions/stats',
+      returnedStatusCode: null,
+      action: 'start',
+    }));
     const submissions = await loadOwnedSubmissions(req.reporterPortal);
     const stats = buildSummary(submissions);
+    logReporterDashboard('stats', buildReporterDataLogContext(req, {
+      route: '/api/reporter-portal/submissions/stats',
+      action: 'success',
+      totalRecordsFound: submissions.length,
+      resultCount: submissions.length,
+      reasonForZero: submissions.length === 0 ? 'no-records-found' : null,
+      returnedStatusCode: 200,
+    }));
     return res.status(200).json({ ok: true, ...stats });
   } catch (error) {
-    console.error('[reporter-portal][submission-stats] failed', error && error.message ? error.message : error);
+    logReporterDashboardError('stats', buildReporterDataLogContext(req, {
+      route: '/api/reporter-portal/submissions/stats',
+      returnedStatusCode: 500,
+      errorMessage: error?.message || String(error),
+    }));
     return res.status(500).json({ ok: false, code: 'SUBMISSION_STATS_FAILED', message: 'Failed to load submission stats.' });
   }
 });
@@ -1297,11 +1432,14 @@ router.get('/submissions', requireReporterPortalOpen, requireReporterPortalAuth,
     const limit = Math.min(Math.max(parseInt(req.query && req.query.limit || '20', 10), 1), 100);
     const status = String(req.query && req.query.status || '').trim();
     const q = String(req.query && req.query.q || '').trim().toLowerCase();
-    logReporterSubmissions('start', buildReporterSubmissionLogContext(req));
+    logReporterSubmissions('list', buildReporterSubmissionLogContext(req, {
+      returnedStatusCode: null,
+      action: 'start',
+    }));
 
     const submissions = await loadOwnedSubmissions(req.reporterPortal);
     const filtered = submissions.filter((submission) => {
-      if (!matchesPortalStatus(submission.status, status)) return false;
+      if (!matchesPortalStatus(submission, status)) return false;
       if (!q) return true;
       const haystack = [submission.headline, submission.body, submission.category, submission.desk, submission.track]
         .map((value) => String(value || '').toLowerCase())
@@ -1311,9 +1449,13 @@ router.get('/submissions', requireReporterPortalOpen, requireReporterPortalAuth,
 
     const start = (page - 1) * limit;
     const items = filtered.slice(start, start + limit).map(mapSubmission);
-    logReporterSubmissions('success', buildReporterSubmissionLogContext(req, {
+    logReporterSubmissions('list', buildReporterSubmissionLogContext(req, {
+      action: 'success',
       resultCount: items.length,
+      totalRecordsFound: submissions.length,
       total: filtered.length,
+      reasonForZero: submissions.length === 0 ? 'no-records-found' : (filtered.length === 0 ? 'filtered-empty' : null),
+      returnedStatusCode: 200,
     }));
 
     return res.status(200).json({
@@ -1327,7 +1469,9 @@ router.get('/submissions', requireReporterPortalOpen, requireReporterPortalAuth,
       },
     });
   } catch (error) {
-    logReporterSubmissionsError('error', buildReporterSubmissionLogContext(req, {
+    logReporterSubmissionsError('list', buildReporterSubmissionLogContext(req, {
+      action: 'error',
+      returnedStatusCode: 500,
       errorMessage: error?.message || String(error),
     }));
     return res.status(500).json({ ok: false, code: 'REPORTER_SUBMISSIONS_FETCH_FAILED', message: 'Failed to load submissions.' });
@@ -1448,7 +1592,7 @@ router.patch('/submissions/:id', requireReporterPortalOpen, requireReporterPorta
       return res.status(409).json({ ok: false, code: 'SUBMISSION_NOT_EDITABLE', message: 'This submission can no longer be edited.' });
     }
 
-    const nextStatus = toStoredStatusForUpdate(toPortalStatus(submission.status), req.body && req.body.action);
+    const nextStatus = toStoredStatusForUpdate(getSubmissionPortalStatus(submission), req.body && req.body.action);
     applySubmissionPatch(submission, req.body || {}, req.reporterPortal);
 
     if (nextStatus === 'SUBMITTED' && (!String(submission.headline || '').trim() || !String(submission.body || '').trim())) {
@@ -1472,5 +1616,10 @@ router.patch('/submissions/:id', requireReporterPortalOpen, requireReporterPorta
     return res.status(500).json({ ok: false, code: 'SUBMISSION_UPDATE_FAILED', message: 'Failed to update submission.' });
   }
 });
+
+router.resetRateLimitsForTests = function resetRateLimitsForTests() {
+  otpRequestAttempts.clear();
+  otpVerifyAttempts.clear();
+};
 
 module.exports = router;
