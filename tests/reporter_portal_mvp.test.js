@@ -468,6 +468,20 @@ test('reporter auth compatibility routes map to the secure reporter portal flow'
   assert.strictEqual(sessionRes.statusCode, 200);
   assert.strictEqual(sessionRes.body.ok, true);
   assert.strictEqual(sessionRes.body.reporter.email, 'reporter@example.com');
+
+  const logoutRes = await request(app)
+    .post('/api/reporter-auth/logout')
+    .set('Authorization', `Bearer ${verifyRes.body.token}`);
+
+  assert.strictEqual(logoutRes.statusCode, 200);
+  assert.strictEqual(logoutRes.body.ok, true);
+
+  const expiredSessionRes = await request(app)
+    .get('/api/reporter-auth/session')
+    .set('Authorization', `Bearer ${verifyRes.body.token}`);
+
+  assert.strictEqual(expiredSessionRes.statusCode, 401);
+  assert.strictEqual(expiredSessionRes.body.code, 'REPORTER_AUTH_REQUIRED');
 });
 
 test('reporter portal can create and edit only allowed submissions on shared CommunitySubmission records', async () => {
@@ -518,6 +532,69 @@ test('reporter portal can create and edit only allowed submissions on shared Com
 
   assert.strictEqual(forbiddenEditRes.statusCode, 409);
   assert.strictEqual(forbiddenEditRes.body.code, 'SUBMISSION_NOT_EDITABLE');
+});
+
+test('reporter portal submission detail stays scoped to the verified reporter identity', async () => {
+  const otpRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'reporter@example.com' });
+  const verifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'reporter@example.com', otp: otpRes.body.devCode });
+  const token = verifyRes.body.token;
+
+  const ownDetailRes = await request(app)
+    .get('/api/reporter-portal/submissions/507f1f77bcf86cd799439011')
+    .set('Authorization', `Bearer ${token}`);
+
+  assert.strictEqual(ownDetailRes.statusCode, 200);
+  assert.strictEqual(ownDetailRes.body.ok, true);
+  assert.strictEqual(ownDetailRes.body.item.id, '507f1f77bcf86cd799439011');
+
+  const otherDetailRes = await request(app)
+    .get('/api/reporter-portal/submissions/507f1f77bcf86cd799439013')
+    .set('Authorization', `Bearer ${token}`);
+
+  assert.strictEqual(otherDetailRes.statusCode, 404);
+  assert.strictEqual(otherDetailRes.body.code, 'SUBMISSION_NOT_FOUND');
+});
+
+test('reporter profile update allows safe fields only and blocks direct email change without reverification', async () => {
+  const otpRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'reporter@example.com' });
+  const verifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'reporter@example.com', otp: otpRes.body.devCode });
+  const token = verifyRes.body.token;
+
+  const updateRes = await request(app)
+    .patch('/api/reporter-portal/profile')
+    .set('Authorization', `Bearer ${token}`)
+    .send({
+      fullName: 'Reporter One Updated',
+      phone: '+91-9000000000',
+      country: 'India',
+      stateName: 'Gujarat',
+      districtName: 'Rajkot',
+      cityTownVillage: 'Rajkot',
+    });
+
+  assert.strictEqual(updateRes.statusCode, 200);
+  assert.strictEqual(updateRes.body.ok, true);
+  assert.strictEqual(updateRes.body.profile.fullName, 'Reporter One Updated');
+  assert.strictEqual(updateRes.body.profile.phone, '+91-9000000000');
+  assert.strictEqual(reporterDoc.fullName, 'Reporter One Updated');
+  assert.strictEqual(reporterDoc.phoneFull, '+91-9000000000');
+
+  const blockedEmailChangeRes = await request(app)
+    .patch('/api/reporter-portal/profile')
+    .set('Authorization', `Bearer ${token}`)
+    .send({ email: 'blocked-change@example.com' });
+
+  assert.strictEqual(blockedEmailChangeRes.statusCode, 400);
+  assert.strictEqual(blockedEmailChangeRes.body.code, 'EMAIL_REVERIFICATION_REQUIRED');
+  assert.strictEqual(reporterDoc.email, 'reporter@example.com');
 });
 
 test('reporter portal routes are denied when the reporter portal toggle is closed', async () => {
