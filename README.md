@@ -560,9 +560,14 @@ To enable OTP and other email sends, set these environment variables (Render das
 | `SMTP_SERVICE` | `gmail` | Optional shortcut (use instead of HOST/PORT) |
 | `SMTP_USER` | `newspulse.team@gmail.com` | Gmail address (must match App Password) |
 | `SMTP_PASS` | `<app-password>` | 16‑char Gmail App Password (not regular password) |
+| `MAIL_FROM` | `"NewsPulse Admin <newspulse.team@gmail.com>"` | Supported sender alias |
 | `FROM_EMAIL` | `"NewsPulse Admin <newspulse.team@gmail.com>"` | Supported sender alias |
 | `EMAIL_FROM` | `"NewsPulse Admin <newspulse.team@gmail.com>"` | Preferred display name + sender |
 | `SMTP_FROM` | `noreply@newspulse.co.in` | Optional envelope override |
+| `APP_BASE_URL` | `https://www.newspulse.co.in` | Preferred public base URL for reporter portal/runtime diagnostics |
+| `SITE_URL` | `https://www.newspulse.co.in` | Fallback public base URL alias |
+| `JWT_SECRET` | `<64+ random chars>` | Required for reporter portal session tokens |
+| `REPORTER_PORTAL_JWT_EXPIRES_IN` | `24h` | Reporter portal session token lifetime |
 | `OTP_ALLOW_ANY` | `0` (prod) / `1` (dev) | Gating: restrict OTP requests to founder email |
 | `OTP_EMAIL_TIMEOUT_MS` | `5000` | Max wait before background send detaches |
 | `OTP_DEV_ECHO` | `0` | When `1` echoes OTP in response (dev only) |
@@ -574,7 +579,7 @@ Gmail Setup:
 1. Enable 2FA on the account.
 2. Create an App Password (select Mail + Other). Use that as `SMTP_PASS`.
 3. Use either explicit host/port (`smtp.gmail.com`, `465`, `SMTP_SECURE=true`) or set `SMTP_SERVICE=gmail`.
-4. Set `EMAIL_FROM` to include a friendly display name.
+4. Set `EMAIL_FROM` (or `MAIL_FROM` / `FROM_EMAIL`) to include a friendly display name.
 
 Testing Locally:
 ```bash
@@ -583,9 +588,14 @@ node scripts/test-email.js --to=your-test@gmail.com
 ```
 If you see `[EMAIL][transporter-ready]` followed by `[EMAIL][sent]` with your address in `accepted`, the configuration is working. If not:
 - Check for missing vars printed by `[EMAIL][config-error]`.
-- If your environment uses `FROM_EMAIL`, the backend now accepts that alias alongside `EMAIL_FROM` and `SMTP_FROM`.
+- If your environment uses `MAIL_FROM` or `FROM_EMAIL`, the backend now accepts those aliases alongside `EMAIL_FROM` and `SMTP_FROM`.
 - With `SMTP_DEBUG=true` review low-level protocol logs.
 - Confirm the Gmail App Password is correct and not revoked.
+
+Reporter Portal production notes:
+- Production-like environments now reject `EMAIL_MODE=stub`; real SMTP config is required.
+- `OTP_DEV_ECHO` is ignored in production-like environments, so the OTP is never echoed in live responses.
+- For Render env changes, save the variables in the dashboard and redeploy the service. A restart/redeploy is required for Node to pick up new env values.
 
 Render Deployment:
 - Add each SMTP/OTP variable in the Render dashboard (do NOT commit real secrets).

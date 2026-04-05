@@ -22,6 +22,13 @@ const OTP_VERIFY_RATE_LIMIT = { windowMs: 10 * 60 * 1000, maxAttempts: 10 };
 const otpRequestAttempts = new Map();
 const otpVerifyAttempts = new Map();
 
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
 function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -55,6 +62,63 @@ function getClientIp(req) {
     || req.socket?.remoteAddress
     || 'unknown'
   ).trim();
+}
+
+function isRenderLike() {
+  return !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
+}
+
+function isProductionLike() {
+  return String(process.env.NODE_ENV || '').toLowerCase() === 'production' || isRenderLike();
+}
+
+function getReporterPortalBaseUrl() {
+  return firstNonEmpty(process.env.APP_BASE_URL, process.env.SITE_URL, process.env.PUBLIC_BASE_URL, process.env.RENDER_EXTERNAL_URL);
+}
+
+function shouldExposeDevOtp() {
+  if (String(process.env.NODE_ENV || '').toLowerCase() === 'test') return true;
+  if (isProductionLike()) return false;
+  return String(process.env.OTP_DEV_ECHO || '') === '1';
+}
+
+function serializeError(error) {
+  return {
+    message: error?.message || String(error),
+    ...(error?.code ? { code: error.code } : {}),
+    ...(error?.responseCode ? { responseCode: error.responseCode } : {}),
+    ...(error?.command ? { command: error.command } : {}),
+    ...(error?.errno ? { errno: error.errno } : {}),
+    ...(error?.syscall ? { syscall: error.syscall } : {}),
+  };
+}
+
+function createEmailServiceUnavailableError(error) {
+  const wrapped = new Error(error?.message || 'Verification email service unavailable');
+  wrapped.code = error?.code || 'EMAIL_SERVICE_UNAVAILABLE';
+  wrapped.responseCode = error?.responseCode;
+  wrapped.command = error?.command;
+  wrapped.errno = error?.errno;
+  wrapped.syscall = error?.syscall;
+  wrapped.safeClientCode = 'EMAIL_SERVICE_UNAVAILABLE';
+  return wrapped;
+}
+
+function buildOtpLogContext(req, email, extra = {}) {
+  return {
+    path: req.originalUrl || req.url,
+    method: req.method,
+    ip: getClientIp(req),
+    ...(email ? { emailMasked: maskEmail(email) } : {}),
+    ...(req.get('Origin') ? { origin: req.get('Origin') } : {}),
+    ...(req.get('Referer') ? { referer: req.get('Referer') } : {}),
+    productionLike: isProductionLike(),
+    renderLike: isRenderLike(),
+    baseUrlConfigured: !!getReporterPortalBaseUrl(),
+    hasJwtSecret: !!String(process.env.JWT_SECRET || '').trim(),
+    jwtExpiresIn: getReporterJwtExpiresIn(),
+    ...extra,
+  };
 }
 
 function getRateLimitKey(req, subject) {
@@ -298,21 +362,78 @@ function buildSummary(submissions) {
 
 async function sendReporterOtpEmail(email, code) {
   const subject = 'News Pulse Reporter Portal OTP';
-  const text = `Your News Pulse Reporter Portal OTP is: ${code}. It is valid for 10 minutes.`;
+  const baseUrl = getReporterPortalBaseUrl();
+  const text = [
+    `Your News Pulse Reporter Portal OTP is: ${code}. It is valid for 10 minutes.`,
+    baseUrl ? `Requested from: ${baseUrl}` : '',
+  ].filter(Boolean).join(' ');
   const stubMode = (process.env.EMAIL_MODE || '').toLowerCase() === 'stub';
 
+  console.log('[reporter-portal][mail][prepare]', buildOtpLogContext({
+    originalUrl: '/api/reporter-auth/request-code',
+    url: '/api/reporter-auth/request-code',
+    method: 'POST',
+    get: () => undefined,
+    headers: {},
+    ip: 'internal',
+    socket: null,
+  }, email, {
+    mode: stubMode ? 'stub' : 'smtp',
+    baseUrl,
+  }));
+
   if (stubMode) {
+    if (isProductionLike()) {
+      throw createEmailServiceUnavailableError({ message: 'EMAIL_MODE=stub is not allowed in production', code: 'EMAIL_STUB_FORBIDDEN' });
+    }
     await sendEmailStub({ to: email, subject, text });
+    console.log('[reporter-portal][mail][sent]', { emailMasked: maskEmail(email), mode: 'stub' });
     return { method: 'stub' };
   }
 
-  const transporter = getTransporter();
-  if (!transporter) throw new Error('Email transporter not configured');
-  const info = await sendMail({ to: email, subject, text, html: `<p>${text}</p>` });
+  let transporter = null;
+  try {
+    transporter = getTransporter();
+    console.log('[reporter-portal][mail][transporter-initialized]', {
+      emailMasked: maskEmail(email),
+      hasTransporter: !!transporter,
+      productionLike: isProductionLike(),
+      baseUrlConfigured: !!baseUrl,
+    });
+  } catch (error) {
+    console.error('[reporter-portal][mail][transporter-failed]', {
+      emailMasked: maskEmail(email),
+      error: serializeError(error),
+    });
+    throw createEmailServiceUnavailableError(error);
+  }
+  if (!transporter) throw createEmailServiceUnavailableError({ message: 'Email transporter not configured', code: 'EMAIL_TRANSPORTER_MISSING' });
+
+  let info;
+  try {
+    info = await sendMail({ to: email, subject, text, html: `<p>${text}</p>` });
+  } catch (error) {
+    console.error('[reporter-portal][mail][send-failed]', {
+      emailMasked: maskEmail(email),
+      error: serializeError(error),
+    });
+    throw createEmailServiceUnavailableError(error);
+  }
   const accepted = Array.isArray(info && info.accepted) ? info.accepted.map((value) => String(value || '').toLowerCase()) : [];
   if (!accepted.includes(email)) {
-    throw new Error('SMTP did not accept recipient');
+    const error = new Error('SMTP did not accept recipient');
+    error.code = 'EMAIL_RECIPIENT_REJECTED';
+    console.error('[reporter-portal][mail][recipient-rejected]', {
+      emailMasked: maskEmail(email),
+      accepted,
+    });
+    throw createEmailServiceUnavailableError(error);
   }
+  console.log('[reporter-portal][mail][sent]', {
+    emailMasked: maskEmail(email),
+    mode: 'smtp',
+    acceptedCount: accepted.length,
+  });
   return { method: 'email' };
 }
 
@@ -423,12 +544,19 @@ async function loadOwnedSubmissions(reporter) {
 
 router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, res) => {
   try {
+    console.log('[reporter-portal][request-login-otp][received]', buildOtpLogContext(req));
     const email = normalizeEmail(req.body && req.body.email);
+    console.log('[reporter-portal][request-login-otp][email-normalized]', buildOtpLogContext(req, email));
     if (!email) {
       return res.status(400).json({ ok: false, code: 'EMAIL_REQUIRED', message: 'Email is required.' });
     }
 
     const mailerStatus = getMailerStatus();
+    console.log('[reporter-portal][request-login-otp][mailer-status]', buildOtpLogContext(req, email, {
+      mailerConfigured: mailerStatus.configured,
+      missing: mailerStatus.missing,
+      resolved: mailerStatus.resolved,
+    }));
     if (!mailerStatus.configured) {
       console.error('[reporter-portal][request-login-otp] mailer unavailable', { missing: mailerStatus.missing });
       return res.status(503).json({
@@ -464,6 +592,10 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
 
     const code = generateOtp();
     const expiresAt = new Date(Date.now() + OTP_EXPIRY_MS);
+    console.log('[reporter-portal][request-login-otp][otp-generated]', buildOtpLogContext(req, email, {
+      expiresAt: expiresAt.toISOString(),
+      otpLength: code.length,
+    }));
     const codeHash = await bcrypt.hash(code, 10);
     await OtpToken.create({ email, purpose: REPORTER_PORTAL_OTP_PURPOSE, codeHash, expiresAt, used: false });
     await sendReporterOtpEmail(email, code);
@@ -473,10 +605,17 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       ok: true,
       message: 'If a reporter account exists for this email, an OTP has been sent.',
       emailMasked: maskEmail(email),
-      ...((process.env.NODE_ENV === 'test' || String(process.env.OTP_DEV_ECHO || '') === '1') ? { devCode: code } : {}),
+      ...(shouldExposeDevOtp() ? { devCode: code } : {}),
     });
   } catch (error) {
-    console.error('[reporter-portal][request-login-otp] failed', error && error.message ? error.message : error);
+    console.error('[reporter-portal][request-login-otp] failed', serializeError(error));
+    if (error && error.safeClientCode === 'EMAIL_SERVICE_UNAVAILABLE') {
+      return res.status(503).json({
+        ok: false,
+        code: 'EMAIL_SERVICE_UNAVAILABLE',
+        message: 'Verification email service is temporarily unavailable.',
+      });
+    }
     return res.status(500).json({ ok: false, code: 'OTP_REQUEST_FAILED', message: 'Failed to request login OTP.' });
   }
 });
