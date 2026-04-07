@@ -13,6 +13,9 @@ function logReporterSession(payload) {
 
 function logReporterSessionError(payload) {
   console.error('[reporter-auth][session]', payload);
+const OtpToken = require('../models/OtpToken');
+const REPORTER_PORTAL_LOGIN_CHALLENGE_COOKIE_NAME = 'reporter_portal_login_challenge';
+const REPORTER_PORTAL_LOGIN_CHALLENGE_PURPOSE = 'reporter_portal_login';
 }
 
 function logReporterSubmissionsAuth(payload) {
@@ -50,6 +53,11 @@ function isReporterSessionRequest(req) {
   return /\/auth\/session(?:$|\?)/i.test(path);
 }
 
+function isReporterAuthCompatRequest(req) {
+  const path = String(req?.originalUrl || req?.url || '');
+  return req?.reporterAuthCompat === true || /\/api\/reporter-auth(?:\/|$)/i.test(path);
+}
+
 function isReporterSubmissionsRequest(req) {
   const path = String(req?.originalUrl || req?.url || '');
   return /\/submissions(?:$|\/|\?)/i.test(path);
@@ -75,6 +83,95 @@ function respondReporterSessionMissing(req, res, errorMessage) {
     code: 'REPORTER_SESSION_MISSING',
     message: 'Reporter session missing or expired.',
   });
+}
+
+function respondReporterSessionExpired(req, res, errorMessage) {
+  const payload = buildReporterAuthLogContext(req, {
+    verified: false,
+    errorMessage,
+    reasonForZero: 'session-expired',
+    collectionsQueried: ['CommunitySubmission'],
+  });
+
+  if (isReporterSessionRequest(req)) {
+    logReporterSessionError(payload);
+  }
+  if (isReporterSubmissionsRequest(req)) {
+    logReporterSubmissionsAuthError(payload);
+  }
+
+  return res.status(401).json({
+    ok: false,
+    code: 'SESSION_EXPIRED',
+    message: 'Session expired. Request a new verification code.',
+  });
+}
+
+function getReporterLoginChallengeCookieToken(req) {
+  const cookieToken = req && req.cookies ? req.cookies[REPORTER_PORTAL_LOGIN_CHALLENGE_COOKIE_NAME] : null;
+  const token = String(cookieToken || '').trim();
+  return token || null;
+}
+
+function getReporterChallengeSecret() {
+  return String(process.env.REPORTER_PORTAL_SESSION_SECRET || process.env.REPORTER_SESSION_SECRET || process.env.JWT_SECRET || '').trim();
+}
+
+function decodeReporterLoginChallengeToken(req) {
+  const token = getReporterLoginChallengeCookieToken(req);
+  if (!token) return null;
+  const secret = getReporterChallengeSecret();
+  if (!secret) return null;
+
+  const payload = jwt.verify(token, secret);
+  if (payload?.type !== 'reporter_portal_login_challenge') return null;
+
+  return {
+    challengeId: payload.challengeId ? String(payload.challengeId) : null,
+    email: normalizeEmail(payload.email) || null,
+    purpose: payload.purpose ? String(payload.purpose) : REPORTER_PORTAL_LOGIN_CHALLENGE_PURPOSE,
+    expiresAt: payload.exp ? new Date(payload.exp * 1000) : null,
+  };
+}
+
+function resolveOtpChallengeStatus(challenge, now = new Date()) {
+  if (!challenge || typeof challenge !== 'object') return null;
+  const rawStatus = String(challenge.status || '').trim().toLowerCase();
+  if (['active', 'expired', 'consumed', 'replaced'].includes(rawStatus)) return rawStatus;
+  if (challenge.consumedAt || challenge.used === true) return 'consumed';
+  if (challenge.expiresAt && new Date(challenge.expiresAt).getTime() <= now.getTime()) return 'expired';
+  return 'active';
+}
+
+async function resolveCompatPendingChallenge(req) {
+  const pending = decodeReporterLoginChallengeToken(req);
+  if (!pending || !pending.challengeId || !pending.email) return { ok: false, reason: 'missing' };
+  if (!isDbReady()) return { ok: true, pending, reason: 'cookie_only' };
+
+  const challenge = await OtpToken.findOne({
+    email: pending.email,
+    purpose: pending.purpose || REPORTER_PORTAL_LOGIN_CHALLENGE_PURPOSE,
+    challengeId: pending.challengeId,
+  });
+
+  if (!challenge) return { ok: false, reason: 'missing', pending };
+
+  const status = resolveOtpChallengeStatus(challenge);
+  if (status !== 'active') {
+    return { ok: false, reason: status, pending, challenge };
+  }
+
+  return {
+    ok: true,
+    pending: {
+      challengeId: pending.challengeId,
+      email: pending.email,
+      purpose: pending.purpose || REPORTER_PORTAL_LOGIN_CHALLENGE_PURPOSE,
+      expiresAt: challenge.expiresAt || pending.expiresAt || null,
+    },
+    challenge,
+    reason: 'active',
+  };
 }
 
 function getBearerToken(req) {
@@ -213,6 +310,20 @@ async function requireReporterPortalAuth(req, res, next) {
     const { token, authModel } = getReporterPortalTokenDetails(req);
     req.reporterPortalAuthModel = authModel;
     if (!token) {
+      if (isReporterAuthCompatRequest(req) && isReporterSessionRequest(req)) {
+        try {
+          const pendingChallenge = await resolveCompatPendingChallenge(req);
+          if (pendingChallenge.ok) {
+            req.reporterPortalPendingChallenge = pendingChallenge.pending;
+            return next();
+          }
+          if (pendingChallenge.reason && pendingChallenge.reason !== 'missing') {
+            return respondReporterSessionExpired(req, res, `Pending reporter login challenge ${pendingChallenge.reason}`);
+          }
+        } catch (pendingError) {
+          return respondReporterSessionExpired(req, res, pendingError?.message || 'Pending reporter login challenge missing');
+        }
+      }
       return respondReporterSessionMissing(req, res, 'No reporter token found in Authorization header or cookie');
     }
 

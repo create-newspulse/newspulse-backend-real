@@ -604,7 +604,9 @@ test('reporter auth compatibility routes keep cookie auth stable when host is 12
 });
 
 test('reporter auth compatibility routes map to the secure reporter portal flow', async () => {
-  const otpRes = await request(app)
+  const agent = request.agent(app);
+
+  const otpRes = await agent
     .post('/api/reporter-auth/request-code')
     .send({ email: 'reporter@example.com' });
 
@@ -613,7 +615,7 @@ test('reporter auth compatibility routes map to the secure reporter portal flow'
   assert.ok(otpRes.body.devCode);
   assert.ok(otpRes.body.emailMasked);
 
-  const verifyRes = await request(app)
+  const verifyRes = await agent
     .post('/api/reporter-auth/verify-code')
     .send({ email: 'reporter@example.com', code: otpRes.body.devCode });
 
@@ -621,7 +623,7 @@ test('reporter auth compatibility routes map to the secure reporter portal flow'
   assert.strictEqual(verifyRes.body.ok, true);
   assert.ok(verifyRes.body.token);
 
-  const sessionRes = await request(app)
+  const sessionRes = await agent
     .get('/api/reporter-auth/session')
     .set('Authorization', `Bearer ${verifyRes.body.token}`);
 
@@ -982,6 +984,65 @@ test('reporter OTP verification survives in-memory reset because the challenge i
 
   assert.strictEqual(verifyRes.statusCode, 200);
   assert.strictEqual(verifyRes.body.ok, true);
+});
+
+test('reporter-auth compat session returns pending challenge state during the OTP window', async () => {
+  const agent = request.agent(app);
+  reporterDoc.email = 'compat.pending@example.com';
+  reporterDoc.emailLower = 'compat.pending@example.com';
+
+  const otpRes = await agent
+    .post('/api/reporter-auth/request-code')
+    .send({ email: 'compat.pending@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+
+  const sessionRes = await agent
+    .get('/api/reporter-auth/session');
+
+  assert.strictEqual(sessionRes.statusCode, 200);
+  assert.strictEqual(sessionRes.body.ok, true);
+  assert.strictEqual(sessionRes.body.authenticated, false);
+  assert.strictEqual(sessionRes.body.challenge.email, 'compat.pending@example.com');
+  assert.strictEqual(sessionRes.body.challenge.status, 'pending');
+});
+
+test('reporter-auth compat verify-code returns clean session-expired error when pre-auth session is missing', async () => {
+  reporterDoc.email = 'compat.expired@example.com';
+  reporterDoc.emailLower = 'compat.expired@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-auth/request-code')
+    .send({ email: 'compat.expired@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+
+  const verifyRes = await request(app)
+    .post('/api/reporter-auth/verify-code')
+    .send({ email: 'compat.expired@example.com', otp: otpRes.body.devCode });
+
+  assert.strictEqual(verifyRes.statusCode, 401);
+  assert.strictEqual(verifyRes.body.code, 'SESSION_EXPIRED');
+});
+
+test('reporter-auth compat verify-code succeeds with the latest OTP and active challenge session', async () => {
+  const agent = request.agent(app);
+  reporterDoc.email = 'compat.success@example.com';
+  reporterDoc.emailLower = 'compat.success@example.com';
+
+  const otpRes = await agent
+    .post('/api/reporter-auth/request-code')
+    .send({ email: 'compat.success@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+
+  const verifyRes = await agent
+    .post('/api/reporter-auth/verify-code')
+    .send({ email: 'compat.success@example.com', otp: otpRes.body.devCode });
+
+  assert.strictEqual(verifyRes.statusCode, 200);
+  assert.strictEqual(verifyRes.body.ok, true);
+  assert.strictEqual(verifyRes.body.reporter.email, 'compat.success@example.com');
 });
 
 test('reporter email change requires OTP verification and invalidates old session', async () => {

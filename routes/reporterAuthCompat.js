@@ -7,6 +7,8 @@ const router = express.Router();
 function forwardToReporterPortal(targetPath) {
   return (req, res, next) => {
     try {
+      req.reporterAuthCompat = true;
+      req.reporterAuthCompatPath = req.originalUrl || req.url || targetPath;
       const queryIndex = String(req.url || '').indexOf('?');
       const query = queryIndex >= 0 ? String(req.url || '').slice(queryIndex) : '';
       req.url = `${targetPath}${query}`;
