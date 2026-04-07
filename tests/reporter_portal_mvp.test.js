@@ -1007,6 +1007,20 @@ test('reporter-auth compat session returns pending challenge state during the OT
   assert.strictEqual(sessionRes.body.challenge.status, 'pending');
 });
 
+test('reporter-auth compat request-code issues a pending challenge cookie for the OTP session window', async () => {
+  reporterDoc.email = 'compat.cookie@example.com';
+  reporterDoc.emailLower = 'compat.cookie@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-auth/request-code')
+    .send({ email: 'compat.cookie@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+  assert.ok(Array.isArray(otpRes.headers['set-cookie']));
+  assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('reporter_portal_login_challenge=')));
+  assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('HttpOnly')));
+});
+
 test('reporter-auth compat verify-code returns clean session-expired error when pre-auth session is missing', async () => {
   reporterDoc.email = 'compat.expired@example.com';
   reporterDoc.emailLower = 'compat.expired@example.com';

@@ -1,11 +1,14 @@
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
+const OtpToken = require('../models/OtpToken');
 const ReporterContact = require('../models/ReporterContact');
 const { getEffectiveCommunityAccessState } = require('../services/communityAccessToggleService');
 const { normalizeEmail } = require('../lib/normalizeEmail');
 
 const REPORTER_PORTAL_COOKIE_NAME = 'reporter_portal_session';
+const REPORTER_PORTAL_LOGIN_CHALLENGE_COOKIE_NAME = 'reporter_portal_login_challenge';
+const REPORTER_PORTAL_LOGIN_CHALLENGE_PURPOSE = 'reporter_portal_login';
 
 function logReporterSession(payload) {
   console.log('[reporter-auth][session]', payload);
@@ -13,9 +16,6 @@ function logReporterSession(payload) {
 
 function logReporterSessionError(payload) {
   console.error('[reporter-auth][session]', payload);
-const OtpToken = require('../models/OtpToken');
-const REPORTER_PORTAL_LOGIN_CHALLENGE_COOKIE_NAME = 'reporter_portal_login_challenge';
-const REPORTER_PORTAL_LOGIN_CHALLENGE_PURPOSE = 'reporter_portal_login';
 }
 
 function logReporterSubmissionsAuth(payload) {
@@ -428,9 +428,11 @@ async function requireReporterPortalAuth(req, res, next) {
 
 module.exports = {
   getBearerToken,
+  getReporterLoginChallengeCookieToken,
   getReporterPortalCookieToken,
   getReporterPortalToken,
   REPORTER_PORTAL_COOKIE_NAME,
+  REPORTER_PORTAL_LOGIN_CHALLENGE_COOKIE_NAME,
   requireReporterPortalAuth,
   requireReporterPortalOpen,
 };
