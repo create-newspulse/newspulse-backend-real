@@ -1,6 +1,7 @@
 const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
@@ -28,6 +29,7 @@ const router = express.Router();
 const REPORTER_PORTAL_OTP_PURPOSE = 'reporter_portal_login';
 const REPORTER_PORTAL_EMAIL_CHANGE_OTP_PURPOSE = 'reporter_portal_email_change';
 const OTP_EXPIRY_MS = 10 * 60 * 1000;
+const OTP_CHALLENGE_LOOKBACK_LIMIT = 10;
 const OTP_REQUEST_RATE_LIMIT = { windowMs: 15 * 60 * 1000, maxAttempts: 8 };
 const OTP_VERIFY_RATE_LIMIT = { windowMs: 10 * 60 * 1000, maxAttempts: 10 };
 const otpRequestAttempts = new Map();
@@ -229,6 +231,220 @@ function shouldExposeDevOtp() {
   if (String(process.env.NODE_ENV || '').toLowerCase() === 'test') return true;
   if (isProductionLike()) return false;
   return String(process.env.OTP_DEV_ECHO || '') === '1';
+}
+
+function shouldLogReporterOtp() {
+  if (String(process.env.REPORTER_OTP_DEBUG || '').trim() === '1') return true;
+  return String(process.env.NODE_ENV || '').toLowerCase() !== 'production';
+}
+
+function logReporterOtp(payload) {
+  if (!shouldLogReporterOtp()) return;
+  try {
+    console.log('[reporter-otp]', payload);
+  } catch (_) {}
+}
+
+function buildReporterOtpFailure(reason) {
+  if (reason === 'replaced') {
+    return {
+      statusCode: 400,
+      body: {
+        ok: false,
+        code: 'OTP_REPLACED',
+        message: 'This code was replaced by a newer OTP. Please use the latest code.',
+      },
+    };
+  }
+  if (reason === 'expired') {
+    return {
+      statusCode: 400,
+      body: {
+        ok: false,
+        code: 'OTP_EXPIRED',
+        message: 'This code has expired. Please request a new OTP.',
+      },
+    };
+  }
+  if (reason === 'consumed') {
+    return {
+      statusCode: 400,
+      body: {
+        ok: false,
+        code: 'OTP_ALREADY_USED',
+        message: 'This code has already been used. Please request a new OTP.',
+      },
+    };
+  }
+  return {
+    statusCode: 400,
+    body: {
+      ok: false,
+      code: 'INVALID_OTP',
+      message: 'Could not verify this code.',
+    },
+  };
+}
+
+function buildReporterOtpChallengeId() {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return crypto.randomBytes(16).toString('hex');
+}
+
+function resolveOtpChallengeStatus(challenge, now = new Date()) {
+  if (!challenge || typeof challenge !== 'object') return null;
+  const rawStatus = normalizeToken(challenge.status || '');
+  if (['active', 'expired', 'consumed', 'replaced'].includes(rawStatus)) return rawStatus;
+  if (challenge.consumedAt || challenge.used === true) return 'consumed';
+  if (challenge.expiresAt && new Date(challenge.expiresAt).getTime() <= now.getTime()) return 'expired';
+  return 'active';
+}
+
+async function saveOtpChallengeState(challenge, status, patch = {}) {
+  if (!challenge || typeof challenge !== 'object') return challenge;
+
+  const next = {
+    ...patch,
+    status,
+    used: status === 'consumed',
+  };
+
+  if (status !== 'consumed' && next.consumedAt === undefined) next.consumedAt = null;
+  if (status !== 'expired' && next.expiredAt === undefined) next.expiredAt = null;
+  if (status !== 'replaced' && next.replacedAt === undefined) next.replacedAt = null;
+  if (status !== 'replaced' && next.replacedByChallengeId === undefined) next.replacedByChallengeId = null;
+
+  Object.assign(challenge, next);
+
+  if (typeof challenge.save === 'function') {
+    await challenge.save();
+  }
+
+  return challenge;
+}
+
+async function loadRecentOtpChallenges(email, purpose, limit = OTP_CHALLENGE_LOOKBACK_LIMIT) {
+  const docs = await OtpToken.find({ email, purpose }).sort({ createdAt: -1 }).limit(limit);
+  return Array.isArray(docs) ? docs : [];
+}
+
+async function expireStaleOtpChallenges(challenges, now = new Date()) {
+  for (const challenge of Array.isArray(challenges) ? challenges : []) {
+    if (resolveOtpChallengeStatus(challenge, now) !== 'expired') continue;
+    const storedStatus = normalizeToken(challenge.status || '');
+    if (storedStatus === 'expired') continue;
+    await saveOtpChallengeState(challenge, 'expired', {
+      expiredAt: challenge.expiredAt || now,
+      consumedAt: null,
+    });
+  }
+}
+
+function getLatestActiveOtpChallenge(challenges, now = new Date()) {
+  return (Array.isArray(challenges) ? challenges : []).find((challenge) => resolveOtpChallengeStatus(challenge, now) === 'active') || null;
+}
+
+async function replaceActiveOtpChallenges(challenges, replacementChallengeId, now = new Date()) {
+  for (const challenge of Array.isArray(challenges) ? challenges : []) {
+    if (resolveOtpChallengeStatus(challenge, now) !== 'active') continue;
+    await saveOtpChallengeState(challenge, 'replaced', {
+      replacedAt: now,
+      replacedByChallengeId: replacementChallengeId || null,
+      consumedAt: null,
+      expiredAt: null,
+    });
+  }
+}
+
+async function createReporterOtpChallenge(email, purpose, code, now = new Date()) {
+  const challengeId = buildReporterOtpChallengeId();
+  const expiresAt = new Date(now.getTime() + OTP_EXPIRY_MS);
+  const codeHash = await bcrypt.hash(code, 10);
+  const challenge = await OtpToken.create({
+    email,
+    purpose,
+    challengeId,
+    codeHash,
+    createdAt: now,
+    expiresAt,
+    status: 'active',
+    used: false,
+    consumedAt: null,
+    expiredAt: null,
+    replacedAt: null,
+    replacedByChallengeId: null,
+  });
+
+  return challenge;
+}
+
+async function findMatchingOtpChallenge(challenges, otp) {
+  for (const challenge of Array.isArray(challenges) ? challenges : []) {
+    if (!challenge || !challenge.codeHash) continue;
+    const matches = await bcrypt.compare(otp, challenge.codeHash);
+    if (matches) return challenge;
+  }
+  return null;
+}
+
+async function verifyReporterOtpChallenge(email, purpose, otp) {
+  const now = new Date();
+  const recentChallenges = await loadRecentOtpChallenges(email, purpose);
+  await expireStaleOtpChallenges(recentChallenges, now);
+
+  const latestChallenge = recentChallenges[0] || null;
+  const latestActiveChallenge = getLatestActiveOtpChallenge(recentChallenges, now);
+  logReporterOtp({
+    email,
+    action: 'verify.lookup',
+    challengeId: latestActiveChallenge?.challengeId || latestChallenge?.challengeId || null,
+    hasActiveChallenge: !!latestActiveChallenge,
+    reason: latestActiveChallenge ? 'latest_active_loaded' : (resolveOtpChallengeStatus(latestChallenge, now) || 'missing'),
+  });
+
+  if (!latestActiveChallenge) {
+    const matchedHistorical = await findMatchingOtpChallenge(recentChallenges, otp);
+    const failureReason = matchedHistorical
+      ? resolveOtpChallengeStatus(matchedHistorical, now)
+      : resolveOtpChallengeStatus(latestChallenge, now) || 'invalid';
+    return {
+      ok: false,
+      reason: failureReason === 'active' ? 'invalid' : failureReason,
+      challenge: matchedHistorical || latestChallenge || null,
+      hasActiveChallenge: false,
+    };
+  }
+
+  const latestMatches = await bcrypt.compare(otp, latestActiveChallenge.codeHash);
+  if (latestMatches) {
+    return {
+      ok: true,
+      challenge: latestActiveChallenge,
+      reason: 'verified',
+      hasActiveChallenge: true,
+    };
+  }
+
+  const matchedHistorical = await findMatchingOtpChallenge(
+    recentChallenges.filter((challenge) => String(challenge?._id || '') !== String(latestActiveChallenge?._id || '')),
+    otp
+  );
+
+  if (matchedHistorical) {
+    return {
+      ok: false,
+      reason: resolveOtpChallengeStatus(matchedHistorical, now) || 'invalid',
+      challenge: matchedHistorical,
+      hasActiveChallenge: true,
+    };
+  }
+
+  return {
+    ok: false,
+    reason: 'invalid',
+    challenge: latestActiveChallenge,
+    hasActiveChallenge: true,
+  };
 }
 
 function serializeError(error) {
@@ -995,7 +1211,9 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       return res.status(200).json(buildOtpAcceptedResponse());
     }
 
-    const existingOtp = await OtpToken.findOne({ email, purpose: REPORTER_PORTAL_OTP_PURPOSE, used: false }).sort({ createdAt: -1 });
+    const otpChallenges = await loadRecentOtpChallenges(email, REPORTER_PORTAL_OTP_PURPOSE);
+    await expireStaleOtpChallenges(otpChallenges);
+    const existingOtp = getLatestActiveOtpChallenge(otpChallenges);
     if (existingOtp && existingOtp.createdAt && existingOtp.expiresAt && new Date(existingOtp.expiresAt) > new Date()) {
       const elapsedMs = Date.now() - new Date(existingOtp.createdAt).getTime();
       const cooldownMs = getOtpResendCooldownMs();
@@ -1011,22 +1229,25 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       }
     }
 
-    await OtpToken.updateMany(
-      { email, purpose: REPORTER_PORTAL_OTP_PURPOSE, used: false },
-      { $set: { used: true } }
-    );
-
     const code = generateOtp();
-    const expiresAt = new Date(Date.now() + OTP_EXPIRY_MS);
+    const challengeIssuedAt = new Date();
+    createdOtpRecord = await createReporterOtpChallenge(email, REPORTER_PORTAL_OTP_PURPOSE, code, challengeIssuedAt);
+    await replaceActiveOtpChallenges(otpChallenges, createdOtpRecord.challengeId, challengeIssuedAt);
+    const expiresAt = createdOtpRecord.expiresAt;
     logReporterAuth('request-code', buildOtpLogContext(req, email, {
       route: '/api/reporter-auth/request-code',
       action: 'otp-generated',
       returnedStatusCode: null,
-      expiresAt: expiresAt.toISOString(),
+      expiresAt: new Date(expiresAt).toISOString(),
       otpLength: code.length,
     }));
-    const codeHash = await bcrypt.hash(code, 10);
-    createdOtpRecord = await OtpToken.create({ email, purpose: REPORTER_PORTAL_OTP_PURPOSE, codeHash, expiresAt, used: false });
+    logReporterOtp({
+      email,
+      action: 'request.challenge-created',
+      challengeId: createdOtpRecord.challengeId || String(createdOtpRecord._id || ''),
+      hasActiveChallenge: true,
+      reason: 'created',
+    });
     await sendReporterOtpEmail(email, code);
     await logReporterActivity('reporter_portal_otp_requested', email, { ip: getClientIp(req), reporterId: reporter && reporter._id ? String(reporter._id) : null });
     logReporterAuth('request-code', {
@@ -1044,10 +1265,12 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       ...(shouldExposeDevOtp() ? { devCode: code } : {}),
     });
   } catch (error) {
-    if (createdOtpRecord && createdOtpRecord.used === false && typeof createdOtpRecord.save === 'function') {
+    if (createdOtpRecord && resolveOtpChallengeStatus(createdOtpRecord) === 'active') {
       try {
-        createdOtpRecord.used = true;
-        await createdOtpRecord.save();
+        await saveOtpChallengeState(createdOtpRecord, 'expired', {
+          expiredAt: new Date(),
+          consumedAt: null,
+        });
       } catch (cleanupError) {
         logReporterAuthError('request-code', {
           route: '/api/reporter-auth/request-code',
@@ -1084,6 +1307,7 @@ router.post('/auth/verify-login-otp', requireReporterPortalOpen, async (req, res
   try {
     const email = normalizeEmail(req.body && req.body.email);
     const otp = String(req.body && (req.body.otp || req.body.code) || '').trim();
+    logReporterOtp({ email, action: 'verify.received', challengeId: null, hasActiveChallenge: false, reason: null });
     logReporterAuth('verify', {
       route: '/api/reporter-auth/verify-code',
       normalizedEmail: email,
@@ -1106,24 +1330,34 @@ router.post('/auth/verify-login-otp', requireReporterPortalOpen, async (req, res
       return res.status(429).json({ ok: false, code: 'OTP_VERIFY_RATE_LIMITED', message: 'Too many verification attempts. Please try again later.' });
     }
 
-    const otpRecord = await OtpToken.findOne({ email, purpose: REPORTER_PORTAL_OTP_PURPOSE, used: false }).sort({ createdAt: -1 });
-    if (!otpRecord || !otpRecord.expiresAt || new Date() > new Date(otpRecord.expiresAt)) {
-      await logReporterActivity('reporter_portal_otp_verify_failed', email, { ip: getClientIp(req), reason: 'expired_or_missing' });
-      return res.status(400).json({ ok: false, code: 'INVALID_OTP', message: 'Invalid or expired OTP.' });
+    const verification = await verifyReporterOtpChallenge(email, REPORTER_PORTAL_OTP_PURPOSE, otp);
+    if (!verification.ok) {
+      await logReporterActivity('reporter_portal_otp_verify_failed', email, { ip: getClientIp(req), reason: verification.reason || 'invalid' });
+      logReporterOtp({
+        email,
+        action: 'verify.failed',
+        challengeId: verification.challenge?.challengeId || String(verification.challenge?._id || ''),
+        hasActiveChallenge: verification.hasActiveChallenge === true,
+        reason: verification.reason || 'invalid',
+      });
+      const failure = buildReporterOtpFailure(verification.reason);
+      return res.status(failure.statusCode).json(failure.body);
     }
 
-    const matches = await bcrypt.compare(otp, otpRecord.codeHash);
-    if (!matches) {
-      await logReporterActivity('reporter_portal_otp_verify_failed', email, { ip: getClientIp(req), reason: 'invalid_code' });
-      return res.status(400).json({ ok: false, code: 'INVALID_OTP', message: 'Invalid or expired OTP.' });
-    }
+    const otpRecord = verification.challenge;
 
     clearRateLimit(otpVerifyAttempts, rateLimitKey);
 
-    otpRecord.used = true;
-    if (typeof otpRecord.save === 'function') {
-      await otpRecord.save();
-    }
+    await saveOtpChallengeState(otpRecord, 'consumed', {
+      consumedAt: new Date(),
+    });
+    logReporterOtp({
+      email,
+      action: 'verify.success',
+      challengeId: otpRecord.challengeId || String(otpRecord._id || ''),
+      hasActiveChallenge: true,
+      reason: 'consumed',
+    });
 
     const reporter = await resolveReporterFromEmail(email);
     if (!reporter) {
@@ -1305,15 +1539,18 @@ router.post('/profile/email/request-change', requireReporterPortalOpen, requireR
       return res.status(409).json({ ok: false, code: 'EMAIL_ALREADY_IN_USE', message: 'That email is already linked to another reporter account.' });
     }
 
-    await OtpToken.updateMany(
-      { email: nextEmail, purpose: REPORTER_PORTAL_EMAIL_CHANGE_OTP_PURPOSE, used: false },
-      { $set: { used: true } }
-    );
-
+    const existingEmailChangeChallenges = await loadRecentOtpChallenges(nextEmail, REPORTER_PORTAL_EMAIL_CHANGE_OTP_PURPOSE);
+    await expireStaleOtpChallenges(existingEmailChangeChallenges);
     const code = generateOtp();
-    const expiresAt = new Date(Date.now() + OTP_EXPIRY_MS);
-    const codeHash = await bcrypt.hash(code, 10);
-    await OtpToken.create({ email: nextEmail, purpose: REPORTER_PORTAL_EMAIL_CHANGE_OTP_PURPOSE, codeHash, expiresAt, used: false });
+    const createdChallenge = await createReporterOtpChallenge(nextEmail, REPORTER_PORTAL_EMAIL_CHANGE_OTP_PURPOSE, code);
+    await replaceActiveOtpChallenges(existingEmailChangeChallenges, createdChallenge.challengeId, new Date(createdChallenge.createdAt || Date.now()));
+    logReporterOtp({
+      email: nextEmail,
+      action: 'email-change.challenge-created',
+      challengeId: createdChallenge.challengeId || String(createdChallenge._id || ''),
+      hasActiveChallenge: true,
+      reason: 'created',
+    });
 
     reporterDoc.pendingPortalEmail = nextEmail;
     reporterDoc.pendingPortalEmailRequestedAt = new Date();
@@ -1357,22 +1594,33 @@ router.post('/profile/email/confirm-change', requireReporterPortalOpen, requireR
       return res.status(429).json({ ok: false, code: 'OTP_VERIFY_RATE_LIMITED', message: 'Too many verification attempts. Please try again later.' });
     }
 
-    const otpRecord = await OtpToken.findOne({ email: nextEmail, purpose: REPORTER_PORTAL_EMAIL_CHANGE_OTP_PURPOSE, used: false }).sort({ createdAt: -1 });
-    if (!otpRecord || !otpRecord.expiresAt || new Date() > new Date(otpRecord.expiresAt)) {
-      return res.status(400).json({ ok: false, code: 'INVALID_OTP', message: 'Invalid or expired OTP.' });
+    const verification = await verifyReporterOtpChallenge(nextEmail, REPORTER_PORTAL_EMAIL_CHANGE_OTP_PURPOSE, otp);
+    if (!verification.ok) {
+      logReporterOtp({
+        email: nextEmail,
+        action: 'email-change.verify-failed',
+        challengeId: verification.challenge?.challengeId || String(verification.challenge?._id || ''),
+        hasActiveChallenge: verification.hasActiveChallenge === true,
+        reason: verification.reason || 'invalid',
+      });
+      const failure = buildReporterOtpFailure(verification.reason);
+      return res.status(failure.statusCode).json(failure.body);
     }
 
-    const matches = await bcrypt.compare(otp, otpRecord.codeHash);
-    if (!matches) {
-      return res.status(400).json({ ok: false, code: 'INVALID_OTP', message: 'Invalid or expired OTP.' });
-    }
+    const otpRecord = verification.challenge;
 
     clearRateLimit(otpVerifyAttempts, verifyLimitKey);
 
-    otpRecord.used = true;
-    if (typeof otpRecord.save === 'function') {
-      await otpRecord.save();
-    }
+    await saveOtpChallengeState(otpRecord, 'consumed', {
+      consumedAt: new Date(),
+    });
+    logReporterOtp({
+      email: nextEmail,
+      action: 'email-change.verify-success',
+      challengeId: otpRecord.challengeId || String(otpRecord._id || ''),
+      hasActiveChallenge: true,
+      reason: 'consumed',
+    });
 
     const previousEmail = normalizeEmail(reporterDoc.email || reporterDoc.emailLower);
     reporterDoc.email = nextEmail;

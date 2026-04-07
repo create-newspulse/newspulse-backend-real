@@ -96,6 +96,21 @@ function matchesFilter(doc, filter) {
       if (Object.prototype.hasOwnProperty.call(expected, '$exists')) {
         return expected.$exists ? actual !== undefined : actual === undefined;
       }
+      if (Object.prototype.hasOwnProperty.call(expected, '$lte')) {
+        return actual !== undefined && new Date(actual).getTime() <= new Date(expected.$lte).getTime();
+      }
+      if (Object.prototype.hasOwnProperty.call(expected, '$lt')) {
+        return actual !== undefined && new Date(actual).getTime() < new Date(expected.$lt).getTime();
+      }
+      if (Object.prototype.hasOwnProperty.call(expected, '$gte')) {
+        return actual !== undefined && new Date(actual).getTime() >= new Date(expected.$gte).getTime();
+      }
+      if (Object.prototype.hasOwnProperty.call(expected, '$gt')) {
+        return actual !== undefined && new Date(actual).getTime() > new Date(expected.$gt).getTime();
+      }
+      if (Object.prototype.hasOwnProperty.call(expected, '$in')) {
+        return Array.isArray(expected.$in) && expected.$in.some((value) => String(actual || '') === String(value || ''));
+      }
     }
 
     return String(actual || '') === String(expected || '');
@@ -246,11 +261,7 @@ OtpToken.create = async (payload) => {
 };
 
 OtpToken.findOne = (filter) => {
-  const matches = otpStore.filter((item) => {
-    return normalizeEmail(item.email) === normalizeEmail(filter.email)
-      && item.purpose === filter.purpose
-      && item.used === filter.used;
-  });
+  const matches = otpStore.filter((item) => matchesFilter(item, filter));
   return {
     sort: async () => {
       const latest = matches.sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0] || null;
@@ -265,6 +276,42 @@ OtpToken.findOne = (filter) => {
           return this;
         },
       };
+    },
+  };
+};
+
+OtpToken.find = (filter) => {
+  const matches = otpStore.filter((item) => matchesFilter(item, filter));
+  return {
+    sort(sortSpec) {
+      const [[field, direction]] = Object.entries(sortSpec || { createdAt: -1 });
+      matches.sort((left, right) => {
+        const leftVal = left && left[field] ? new Date(left[field]).getTime() : 0;
+        const rightVal = right && right[field] ? new Date(right[field]).getTime() : 0;
+        return direction < 0 ? rightVal - leftVal : leftVal - rightVal;
+      });
+      return this;
+    },
+    limit(amount) {
+      this._limit = amount;
+      return this;
+    },
+    then(resolve, reject) {
+      try {
+        const slice = matches.slice(0, this._limit == null ? matches.length : this._limit).map((item) => ({
+          ...clone(item),
+          save: async function save() {
+            const next = clone(this);
+            delete next.save;
+            const index = otpStore.findIndex((entry) => String(entry._id) === String(next._id));
+            if (index >= 0) otpStore[index] = next;
+            return this;
+          },
+        }));
+        return Promise.resolve(slice).then(resolve, reject);
+      } catch (error) {
+        return Promise.reject(error).then(resolve, reject);
+      }
     },
   };
 };
@@ -853,6 +900,88 @@ test('reporter OTP resend cooldown returns a controlled response', async () => {
   } finally {
     process.env.REPORTER_OTP_RESEND_COOLDOWN_MS = '0';
   }
+});
+
+test('reporter OTP resend replaces the older challenge and returns a clear replaced-code failure', async () => {
+  reporterDoc.email = 'replace@example.com';
+  reporterDoc.emailLower = 'replace@example.com';
+
+  const firstRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'replace@example.com' });
+
+  assert.strictEqual(firstRes.statusCode, 200);
+  assert.ok(firstRes.body.devCode);
+
+  otpStore[0].createdAt = new Date(Date.now() - 61 * 1000);
+
+  const secondRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'replace@example.com' });
+
+  assert.strictEqual(secondRes.statusCode, 200);
+  assert.ok(secondRes.body.devCode);
+  assert.notStrictEqual(firstRes.body.devCode, secondRes.body.devCode);
+
+  const oldVerifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'replace@example.com', otp: firstRes.body.devCode });
+
+  assert.strictEqual(oldVerifyRes.statusCode, 400);
+  assert.strictEqual(oldVerifyRes.body.code, 'OTP_REPLACED');
+
+  const newVerifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'replace@example.com', otp: secondRes.body.devCode });
+
+  assert.strictEqual(newVerifyRes.statusCode, 200);
+  assert.strictEqual(newVerifyRes.body.ok, true);
+});
+
+test('reporter OTP keeps the latest challenge active after a failed verification attempt', async () => {
+  reporterDoc.email = 'retry@example.com';
+  reporterDoc.emailLower = 'retry@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'retry@example.com' });
+
+  const badVerifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'retry@example.com', otp: '000000' });
+
+  assert.strictEqual(badVerifyRes.statusCode, 400);
+  assert.strictEqual(badVerifyRes.body.code, 'INVALID_OTP');
+
+  const goodVerifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'retry@example.com', otp: otpRes.body.devCode });
+
+  assert.strictEqual(goodVerifyRes.statusCode, 200);
+  assert.strictEqual(goodVerifyRes.body.ok, true);
+});
+
+test('reporter OTP verification survives in-memory reset because the challenge is stored in the database model', async () => {
+  reporterDoc.email = 'restartsafe@example.com';
+  reporterDoc.emailLower = 'restartsafe@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'restartsafe@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+  assert.ok(otpRes.body.devCode);
+
+  if (typeof reporterPortalRouter.resetRateLimitsForTests === 'function') {
+    reporterPortalRouter.resetRateLimitsForTests();
+  }
+
+  const verifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'restartsafe@example.com', otp: otpRes.body.devCode });
+
+  assert.strictEqual(verifyRes.statusCode, 200);
+  assert.strictEqual(verifyRes.body.ok, true);
 });
 
 test('reporter email change requires OTP verification and invalidates old session', async () => {
