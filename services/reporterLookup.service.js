@@ -51,9 +51,11 @@ function buildSubmissionEmailMatch(emailNorm) {
       { email: emailNorm },
       { submittedByEmail: emailNorm },
       { contactEmail: emailNorm },
+      { authorEmail: emailNorm },
       { 'contact.email': emailNorm },
       { 'reporter.email': emailNorm },
       { 'reporterProfile.email': emailNorm },
+      { 'contributor.email': emailNorm },
     ],
     isDeleted: { $ne: true },
   };

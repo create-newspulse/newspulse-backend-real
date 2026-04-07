@@ -15,6 +15,78 @@ function _normalizeEmail(email) {
   return normalized || null;
 }
 
+function _normalizeText(value) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+function _normalizePhoneValue(value) {
+  const raw = _normalizeText(value);
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length < 7) return null;
+  if (/^0+$/.test(digits)) return null;
+  return raw.replace(/\s+/g, '');
+}
+
+function _firstNormalizedPhone(...values) {
+  for (const value of values) {
+    const normalized = _normalizePhoneValue(value);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+function _extractSubmissionContactChannels(submission) {
+  return {
+    sourcePhone: _firstNormalizedPhone(
+      submission?.contact?.phone,
+      submission?.phone,
+      submission?.mobile,
+      submission?.mobileNumber,
+      submission?.contactNumber,
+      submission?.reporterPhone,
+      submission?.reporterMobile,
+      submission?.reporter?.phone,
+      submission?.reporter?.mobile,
+      submission?.reporter?.mobileNumber,
+      submission?.reporter?.contactNumber
+    ),
+    sourceMobile: _firstNormalizedPhone(
+      submission?.mobile,
+      submission?.mobileNumber,
+      submission?.reporterMobile,
+      submission?.reporter?.mobile,
+      submission?.reporter?.mobileNumber,
+      submission?.contactNumber
+    ),
+    sourceWhatsapp: _firstNormalizedPhone(
+      submission?.contact?.whatsappNumber,
+      submission?.whatsappNumber,
+      submission?.whatsapp,
+      submission?.reporter?.whatsapp,
+      submission?.reporter?.whatsappNumber
+    ),
+  };
+}
+
+function _isManualOverrideEnabled(contact, key) {
+  return !!(contact && contact.directoryManualOverrides && contact.directoryManualOverrides[key] && contact.directoryManualOverrides[key].enabled === true);
+}
+
+function _setSourceField(set, contact, fieldName, value, manualOverrideKey) {
+  if (_isManualOverrideEnabled(contact, manualOverrideKey)) return;
+  if (value === undefined || value === null || value === '') return;
+  set[fieldName] = value;
+}
+
+function _setSourceStat(set, key, value) {
+  if (value === undefined || value === null) return;
+  set[`stats.${key}`] = value;
+}
+
 function _parseLocationParts(input) {
   if (!input) return { city: null, district: null, state: null, country: null };
 
@@ -68,7 +140,13 @@ function _buildSubmissionEmailMatch(emailNorm) {
       { reporterEmailNorm: emailNorm },
       { reporterEmail: emailNorm },
       { email: emailNorm },
+      { submittedByEmail: emailNorm },
+      { contactEmail: emailNorm },
+      { authorEmail: emailNorm },
       { 'contact.email': emailNorm },
+      { 'reporter.email': emailNorm },
+      { 'reporterProfile.email': emailNorm },
+      { 'contributor.email': emailNorm },
     ],
     isDeleted: { $ne: true },
   };
@@ -91,11 +169,9 @@ async function upsertReporterContactFromSubmission(submission) {
     (submission?.contact?.name && String(submission.contact.name).trim()) ||
     'Unknown reporter';
 
-  const phone =
-    (submission?.contact?.phone && String(submission.contact.phone).trim()) ||
-    (submission?.phone && String(submission.phone).trim()) ||
-    (submission?.whatsapp && String(submission.whatsapp).trim()) ||
-    '';
+  const { sourcePhone, sourceMobile, sourceWhatsapp } = _extractSubmissionContactChannels(submission);
+  const phone = sourcePhone || sourceMobile || '';
+  const whatsapp = sourceWhatsapp || '';
 
   const locationInput =
     submission?.locationDetail ||
@@ -158,10 +234,11 @@ async function upsertReporterContactFromSubmission(submission) {
   const lastStoryTitle = latest?.headline ? String(latest.headline).trim() : '';
   const lastStoryAt = latest?.createdAt || null;
 
-  return upsertReporterContact({
+  const out = await upsertReporterContact({
     name,
     email: emailNorm,
     phone,
+    whatsapp,
     city: city || undefined,
     district: district || undefined,
     state: state || undefined,
@@ -174,10 +251,26 @@ async function upsertReporterContactFromSubmission(submission) {
       rejectedStories: Number(rejected || 0),
       withdrawnStories: Number(withdrawn || 0),
       publishedStories: Number(published || 0),
+      firstStoryAt: latest?.createdAt || null,
       lastStoryAt,
       lastStoryTitle,
     },
   });
+
+  if (String(process.env.NODE_ENV || '').toLowerCase() !== 'production' || String(process.env.REPORTER_CONTACTS_DEBUG || '').trim() === '1') {
+    console.log('[reporter-contact][contact-sync]', {
+      email: emailNorm,
+      sourcePhone: sourcePhone || null,
+      sourceMobile: sourceMobile || null,
+      sourceWhatsapp: sourceWhatsapp || null,
+      storedPhone: out?.contact?.phoneFull || out?.contact?.phoneNumber || null,
+      storedWhatsapp: out?.contact?.whatsappNumber || null,
+      responsePhone: out?.contact?.phoneFull || out?.contact?.phoneNumber || null,
+      responseWhatsapp: out?.contact?.whatsappNumber || null,
+    });
+  }
+
+  return out;
 }
 
 /**
@@ -190,10 +283,16 @@ async function upsertReporterContact(payload) {
     name,
     email,
     phone,
+    whatsapp,
+    alternatePhone,
     city,
     district,
     state,
     country,
+    beat,
+    area,
+    notes,
+    verificationLevel,
     reporterType,
     // Optional: stats (when calling from backfills)
     stats,
@@ -203,13 +302,23 @@ async function upsertReporterContact(payload) {
   if (!emailNorm) throw new Error('Reporter email is required');
   const trimmedName = typeof name === 'string' && name.trim() ? name.trim() : '';
 
+  let existing = null;
+  try {
+    if (ReporterContact?.db?.readyState === 1 && typeof ReporterContact.findOne === 'function') {
+      existing = await ReporterContact.findOne({ $or: [{ emailLower: emailNorm }, { email: emailNorm }] });
+    }
+  } catch (_) {}
+
+  const normalizedVerificationLevel = _normalizeText(verificationLevel);
   const $set = {};
   const $setOnInsert = {
     email: emailNorm,
     reporterType: reporterType === 'journalist' ? 'journalist' : 'community',
-    verificationLevel: reporterType === 'journalist' ? 'pending' : 'community_default',
     status: 'active',
   };
+  if (!normalizedVerificationLevel) {
+    $setOnInsert.verificationLevel = reporterType === 'journalist' ? 'pending' : 'community_default';
+  }
   if (!trimmedName) $setOnInsert.fullName = 'Unknown';
 
   // Always keep emailLower present
@@ -217,20 +326,29 @@ async function upsertReporterContact(payload) {
   $set.reporterKey = emailNorm;
 
   if (trimmedName) $set.fullName = trimmedName;
-  if (typeof phone === 'string' && phone.trim()) $set.phoneFull = phone.trim();
-  if (typeof city === 'string' && city.trim()) $set.cityTownVillage = city.trim();
-  if (typeof district === 'string' && district.trim()) $set.districtName = district.trim();
-  if (typeof state === 'string' && state.trim()) $set.stateName = state.trim();
-  if (typeof country === 'string' && country.trim()) $set.country = country.trim();
+  _setSourceField($set, existing, 'phoneFull', _normalizePhoneValue(phone), 'phone');
+  _setSourceField($set, existing, 'whatsappNumber', _normalizePhoneValue(whatsapp), 'whatsapp');
+  _setSourceField($set, existing, 'alternatePhone', _normalizePhoneValue(alternatePhone), 'alternatePhone');
+  _setSourceField($set, existing, 'cityTownVillage', _normalizeText(city), 'city');
+  _setSourceField($set, existing, 'districtName', _normalizeText(district), 'district');
+  _setSourceField($set, existing, 'stateName', _normalizeText(state), 'state');
+  _setSourceField($set, existing, 'country', _normalizeText(country), 'country');
+  _setSourceField($set, existing, 'primaryBeat', _normalizeText(beat), 'beat');
+  _setSourceField($set, existing, 'areaName', _normalizeText(area), 'area');
+  _setSourceField($set, existing, 'notes', _normalizeText(notes), 'notes');
+  if (!_isManualOverrideEnabled(existing, 'verificationLevel') && normalizedVerificationLevel) {
+    $set.verificationLevel = normalizedVerificationLevel;
+  }
 
   if (stats && typeof stats === 'object') {
-    if (typeof stats.totalStories === 'number') $set['stats.totalStories'] = stats.totalStories;
-    if (typeof stats.approvedStories === 'number') $set['stats.approvedStories'] = stats.approvedStories;
-    if (typeof stats.pendingStories === 'number') $set['stats.pendingStories'] = stats.pendingStories;
-    if (typeof stats.rejectedStories === 'number') $set['stats.rejectedStories'] = stats.rejectedStories;
-    if (typeof stats.withdrawnStories === 'number') $set['stats.withdrawnStories'] = stats.withdrawnStories;
-    if (typeof stats.publishedStories === 'number') $set['stats.publishedStories'] = stats.publishedStories;
-    if (stats.lastStoryAt) $set['stats.lastStoryAt'] = stats.lastStoryAt;
+    if (typeof stats.totalStories === 'number') _setSourceStat($set, 'totalStories', stats.totalStories);
+    if (typeof stats.approvedStories === 'number') _setSourceStat($set, 'approvedStories', stats.approvedStories);
+    if (typeof stats.pendingStories === 'number') _setSourceStat($set, 'pendingStories', stats.pendingStories);
+    if (typeof stats.rejectedStories === 'number') _setSourceStat($set, 'rejectedStories', stats.rejectedStories);
+    if (typeof stats.withdrawnStories === 'number') _setSourceStat($set, 'withdrawnStories', stats.withdrawnStories);
+    if (typeof stats.publishedStories === 'number') _setSourceStat($set, 'publishedStories', stats.publishedStories);
+    if (stats.firstStoryAt) _setSourceStat($set, 'firstStoryAt', stats.firstStoryAt);
+    if (stats.lastStoryAt) _setSourceStat($set, 'lastStoryAt', stats.lastStoryAt);
     if (typeof stats.lastStoryTitle === 'string' && stats.lastStoryTitle.trim()) {
       $set['stats.lastStoryTitle'] = stats.lastStoryTitle.trim();
     }
@@ -257,9 +375,16 @@ async function upsertReporterContactFromPayload(payload) {
     name,
     email,
     phone,
+    whatsapp,
+    alternatePhone,
     city,
+    district,
     state,
     country,
+    beat,
+    area,
+    notes,
+    verificationLevel,
     reporterType,
     languages,
     interests,
@@ -279,9 +404,16 @@ async function upsertReporterContactFromPayload(payload) {
     name,
     email,
     phone,
+    whatsapp,
+    alternatePhone,
     city,
+    district,
     state,
     country,
+    beat,
+    area,
+    notes,
+    verificationLevel,
     reporterType,
     ...(stats ? { stats } : {}),
   });

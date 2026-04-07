@@ -41,8 +41,29 @@ const StatsSchema = new mongoose.Schema({
   rejectedStories: { type: Number, default: 0 },
   withdrawnStories: { type: Number, default: 0 },
   publishedStories: { type: Number, default: 0 },
+  firstStoryAt: { type: Date },
   lastStoryAt: { type: Date },
   lastStoryTitle: { type: String, trim: true },
+}, { _id: false });
+
+const ManualOverrideFieldSchema = new mongoose.Schema({
+  enabled: { type: Boolean, default: false },
+  updatedAt: { type: Date, default: null },
+  updatedBy: { type: mongoose.Schema.Types.Mixed, default: null },
+}, { _id: false });
+
+const DirectoryManualOverridesSchema = new mongoose.Schema({
+  phone: { type: ManualOverrideFieldSchema, default: () => ({}) },
+  whatsapp: { type: ManualOverrideFieldSchema, default: () => ({}) },
+  alternatePhone: { type: ManualOverrideFieldSchema, default: () => ({}) },
+  city: { type: ManualOverrideFieldSchema, default: () => ({}) },
+  district: { type: ManualOverrideFieldSchema, default: () => ({}) },
+  state: { type: ManualOverrideFieldSchema, default: () => ({}) },
+  country: { type: ManualOverrideFieldSchema, default: () => ({}) },
+  beat: { type: ManualOverrideFieldSchema, default: () => ({}) },
+  area: { type: ManualOverrideFieldSchema, default: () => ({}) },
+  notes: { type: ManualOverrideFieldSchema, default: () => ({}) },
+  verificationLevel: { type: ManualOverrideFieldSchema, default: () => ({}) },
 }, { _id: false });
 
 const ReporterContactSchema = new mongoose.Schema({
@@ -56,6 +77,8 @@ const ReporterContactSchema = new mongoose.Schema({
   phoneCountryCode: { type: String, default: '+91' },
   phoneNumber: { type: String, trim: true },
   phoneFull: { type: String, trim: true },
+  whatsappNumber: { type: String, trim: true },
+  alternatePhone: { type: String, trim: true },
 
   country: { type: String, default: 'India' },
   stateCode: { type: String, trim: true },
@@ -63,10 +86,12 @@ const ReporterContactSchema = new mongoose.Schema({
   districtName: { type: String, trim: true },
   talukaName: { type: String, trim: true },
   cityTownVillage: { type: String, trim: true },
+  areaName: { type: String, trim: true },
 
   areaType: { type: String, enum: AREA_TYPE_ENUM, default: 'OTHER' },
 
   beats: [{ type: String, enum: BEAT_ENUM }],
+  primaryBeat: { type: String, trim: true },
 
   status: { type: String, enum: STATUS_ENUM, default: 'active', index: true },
 
@@ -82,6 +107,7 @@ const ReporterContactSchema = new mongoose.Schema({
   stats: { type: StatsSchema, default: () => ({}) },
 
   notes: { type: String, trim: true },
+  directoryManualOverrides: { type: DirectoryManualOverridesSchema, default: () => ({}) },
 
   // --- Verified Journalist / Media Partner fields ---
   reporterType: { type: String, enum: ['community', 'journalist'], default: 'community', index: true },
@@ -150,6 +176,7 @@ ReporterContactSchema.index(
   { unique: true, partialFilterExpression: { reporterKey: { $type: 'string' } } }
 );
 ReporterContactSchema.index({ phoneFull: 1 });
+ReporterContactSchema.index({ whatsappNumber: 1 });
 ReporterContactSchema.index({ stateName: 1, districtName: 1, talukaName: 1, areaType: 1 });
 ReporterContactSchema.index({ fullName: 'text', cityTownVillage: 'text', districtName: 'text' });
 // Optimized index for journalist application queries

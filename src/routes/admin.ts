@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import { requireAdminAuth } from '../../middleware/adminAuth';
 import { CommunityReporterStory } from '../models/communityReporterStory';
+const { adminListReporterContacts } = require('../../controllers/communityReporterController');
 
 const router = Router();
 
@@ -57,46 +58,7 @@ router.get('/community/reporters', adminGuard, async (req, res, next) => {
 // Reporter contacts directory with story aggregation
 router.get('/community/reporter-contacts', adminGuard, async (req, res, next) => {
   try {
-    const page = Number(req.query.page) || 1;
-    const limit = Number(req.query.limit) || 50;
-    const skip = (page - 1) * limit;
-
-    // Group stories by reporter email as identifier
-    const pipeline: any[] = [
-      { $match: { source: 'community' } },
-      {
-        $group: {
-          _id: '$email',
-          name: { $first: '$reporterName' },
-          email: { $first: '$email' },
-          phone: { $first: '$phone' },
-          city: { $first: '$city' },
-          district: { $first: '$district' },
-          state: { $first: '$state' },
-          country: { $first: '$country' },
-          totalStories: { $sum: 1 },
-          approvedStories: { $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] } },
-          pendingStories: { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
-          lastStoryAt: { $max: '$createdAt' },
-        },
-      },
-      { $sort: { totalStories: -1, lastStoryAt: -1 } },
-      { $skip: skip },
-      { $limit: limit },
-    ];
-
-    const items = await (CommunityReporterStory as any).aggregate(pipeline);
-
-    // Compute total distinct reporters using a separate pipeline with $count
-    const countPipeline: any[] = [
-      { $match: { source: 'community' } },
-      { $group: { _id: '$email' } },
-      { $count: 'total' },
-    ];
-    const totalAgg = await (CommunityReporterStory as any).aggregate(countPipeline);
-    const total = totalAgg?.[0]?.total || items.length;
-
-    res.json({ items, page, limit, total });
+    return adminListReporterContacts(req, res);
   } catch (err) {
     next(err);
   }

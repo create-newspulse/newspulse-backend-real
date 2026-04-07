@@ -21,10 +21,19 @@ const {
 
 const {
   adminListReporterContacts,
+  getReporterContactDirectorySummary,
+  getReporterContactDetail,
+  getReporterContactProfile,
+  updateReporterContactDirectoryProfile,
   adminListReporterContactStories,
   backfillReporterContactsFromSubmissions,
   deleteReporterContact,
   deactivateReporterContact,
+  hideReporterContact,
+  archiveReporterContact,
+  restoreReporterContact,
+  permanentlyDeleteReporterContact,
+  forcePermanentlyDeleteReporterContact,
   reassignReporterContactStories,
   bulkDeleteReporterContacts,
   deleteCommunityReporterStory,
@@ -37,13 +46,39 @@ const {
 const router = express.Router();
 
 // --- Final contract: contacts + stories (ONLY under /api/admin/community-reporter) ---
+router.get('/contacts/summary', requireAdminAuth, getReporterContactDirectorySummary);
 router.get('/contacts', requireAdminAuth, adminListReporterContacts);
+router.get('/contacts/:id', requireAdminAuth, getReporterContactDetail);
+router.get('/contacts/:id/profile', requireAdminAuth, getReporterContactProfile);
+router.patch('/contacts/:id', requireFounderOrAdmin, updateReporterContactDirectoryProfile);
 router.get('/contacts/:id/stories', requireAdminAuth, adminListReporterContactStories);
 router.post('/contacts/backfill', requireFounderOrAdmin, backfillReporterContactsFromSubmissions);
+router.post('/contacts/rebuild', requireFounderOrAdmin, backfillReporterContactsFromSubmissions);
 router.delete('/contacts/:id', requireFounderOrAdmin, deleteReporterContact);
+router.post('/contacts/:id/hide', requireFounderOrAdmin, hideReporterContact);
+router.patch('/contacts/:id/hide', requireFounderOrAdmin, hideReporterContact);
+router.delete('/contacts/:id/hide', requireFounderOrAdmin, hideReporterContact);
+router.post('/contacts/:id/remove', requireFounderOrAdmin, hideReporterContact);
+router.patch('/contacts/:id/remove', requireFounderOrAdmin, hideReporterContact);
+router.delete('/contacts/:id/remove', requireFounderOrAdmin, hideReporterContact);
+router.post('/contacts/:id/remove-from-directory', requireFounderOrAdmin, hideReporterContact);
+router.patch('/contacts/:id/remove-from-directory', requireFounderOrAdmin, hideReporterContact);
+router.delete('/contacts/:id/remove-from-directory', requireFounderOrAdmin, hideReporterContact);
 router.post('/contacts/:id/deactivate', requireFounderOrAdmin, deactivateReporterContact);
-router.post('/contacts/:id/archive', requireFounderOrAdmin, deactivateReporterContact);
+router.post('/contacts/:id/archive', requireFounderOrAdmin, archiveReporterContact);
+router.patch('/contacts/:id/archive', requireFounderOrAdmin, archiveReporterContact);
+router.delete('/contacts/:id/archive', requireFounderOrAdmin, archiveReporterContact);
+router.post('/contacts/:id/restore', requireFounderOrAdmin, restoreReporterContact);
+router.patch('/contacts/:id/restore', requireFounderOrAdmin, restoreReporterContact);
+router.delete('/contacts/:id/permanent', requireFounderOrAdmin, permanentlyDeleteReporterContact);
+router.post('/contacts/:id/permanent-delete', requireFounderOrAdmin, permanentlyDeleteReporterContact);
+router.delete('/contacts/:id/permanent-delete', requireFounderOrAdmin, permanentlyDeleteReporterContact);
+router.delete('/contacts/:id/force-permanent', requireFounderOrAdmin, forcePermanentlyDeleteReporterContact);
+router.post('/contacts/:id/force-permanent-delete', requireFounderOrAdmin, forcePermanentlyDeleteReporterContact);
+router.delete('/contacts/:id/force-permanent-delete', requireFounderOrAdmin, forcePermanentlyDeleteReporterContact);
 router.post('/contacts/:id/reassign-stories', requireFounderOrAdmin, reassignReporterContactStories);
+router.post('/contacts/bulk-remove', requireFounderOrAdmin, bulkDeleteReporterContacts);
+router.post('/contacts/bulk-remove-from-directory', requireFounderOrAdmin, bulkDeleteReporterContacts);
 router.post('/contacts/bulk-delete', requireFounderOrAdmin, bulkDeleteReporterContacts);
 // Community stories: two-stage delete model
 router.delete('/stories/:storyId', requireAdminAuth, deleteCommunityReporterStory); // soft delete

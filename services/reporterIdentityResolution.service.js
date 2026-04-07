@@ -532,7 +532,7 @@ async function resolveOrCreateReporterProfile(input) {
           // Recompute flags using "final" values, so missing-phone/location queues are accurate.
           const emailFinal = patch.primaryEmail || profile.primaryEmail || email;
           const phoneFinal = patch.primaryPhone || profile.primaryPhone || phone;
-          const locFinal = patch.location || profile.location || location;
+          const locFinal = patch.location || profile.location || locationInput;
           const userIdFinal = profile.userId || userId;
           patch.flags = computeIdentityFlags({ userId: userIdFinal, email: emailFinal, phone: phoneFinal, location: locFinal });
 
@@ -552,10 +552,11 @@ async function resolveOrCreateReporterProfile(input) {
 
   // Coverage row
   try {
-    await ensurePrimaryCoverage(profile._id, location);
+    await ensurePrimaryCoverage(profile._id, locationInput);
   } catch (_) {}
 
-  return { ok: true, profile, resolutionMethod, flags };
+  const finalFlags = Array.isArray(profile?.flags) ? profile.flags : flagsInput;
+  return { ok: true, profile, resolutionMethod, flags: finalFlags };
 }
 
 function shouldForceRelinkSubmission(submission) {
