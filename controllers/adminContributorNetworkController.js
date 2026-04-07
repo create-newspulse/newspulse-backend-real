@@ -4,13 +4,19 @@ const ReporterProfile = require('../models/ReporterProfile');
 const ReporterTask = require('../models/ReporterTask');
 const ReporterActivityLog = require('../models/ReporterActivityLog');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const CommunityReport = require('../models/CommunityReport');
 const ReporterMergeQueue = require('../models/ReporterMergeQueue');
 const ReporterStoryLink = require('../models/ReporterStoryLink');
 const ReporterContact = require('../models/ReporterContact');
 const ReporterBeat = require('../models/ReporterBeat');
 const ReporterCoverage = require('../models/ReporterCoverage');
+const News = require('../models/News');
+const Article = require('../models/Article');
 
-const { resolveAndAttachForSubmission } = require('../services/reporterIdentityResolution.service');
+const {
+  resolveAndAttachForSubmission,
+  resolveOrCreateReporterProfile,
+} = require('../services/reporterIdentityResolution.service');
 
 function isDbReady() {
   return !!(mongoose.connection && mongoose.connection.readyState === 1);
@@ -43,6 +49,70 @@ function startOfUtcMonth(d = new Date()) {
 function normalizeStrOrNull(v) {
   const s = v == null ? '' : String(v).trim();
   return s ? s : null;
+}
+
+function normalizeReporterEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeStatusToken(value) {
+  return String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+function normalizeOptionalFilterValue(value) {
+  const token = normalizeStatusToken(value);
+  if (!token) return null;
+  if (['all', 'any', 'default', 'none', 'null', 'undefined', 'select', 'all_states', 'all_districts', 'all_cities', 'all_countries'].includes(token)) {
+    return null;
+  }
+  return token;
+}
+
+function normalizeDirectoryStatus(value) {
+  const token = normalizeOptionalFilterValue(value);
+  if (!token) return null;
+  if (['banned', 'archived', 'deleted', 'removed'].includes(token)) return 'archived';
+  if (['blocked', 'suspended', 'watchlist', 'revoked'].includes(token)) return 'blocked';
+  if (['active', 'verified', 'approved', 'community_default', 'pending', 'new', 'inactive'].includes(token)) return 'active';
+  return null;
+}
+
+function isLocalDiagnosticsRequest(req) {
+  const host = String(req?.headers?.host || req?.get?.('host') || '').toLowerCase();
+  const origin = String(req?.headers?.origin || '').toLowerCase();
+  const forwardedFor = String(req?.headers?.['x-forwarded-for'] || '').toLowerCase();
+  return [host, origin, forwardedFor].some((value) => value.includes('localhost') || value.includes('127.0.0.1'));
+}
+
+function logLocalNetworkDirectoryDiagnostics(req, payload) {
+  if (!isLocalDiagnosticsRequest(req)) return;
+  console.log('[LOCALHOST][contributor-network][directory]', JSON.stringify({
+    routePath: payload?.routePath || null,
+    queryParamsReceived: payload?.queryParamsReceived || {},
+    normalizedPagination: payload?.normalizedPagination || {},
+    filtersReceived: payload?.filtersReceived || {},
+    effectiveFilters: payload?.effectiveFilters || {},
+    usedFirstPageFallback: payload?.usedFirstPageFallback === true,
+    totalRowsReturned: Number(payload?.totalRowsReturned || 0),
+  }));
+}
+
+function hasRealDirectoryFilters(effectiveFilters) {
+  if (!effectiveFilters || typeof effectiveFilters !== 'object') return false;
+  return Object.entries(effectiveFilters).some(([key, value]) => {
+    if (value === null || value === undefined) return false;
+    if (key === 'status') return false;
+    if (key === 'includeArchived') return value === true;
+    return true;
+  });
+}
+
+function firstReporterEmail(...values) {
+  for (const value of values) {
+    const email = normalizeReporterEmail(value);
+    if (email && email.includes('@')) return email;
+  }
+  return null;
 }
 
 function mapVerificationStatus({ profile, reporterContact }) {
@@ -224,17 +294,32 @@ async function getReporterDirectory(req, res) {
 
     const page = Math.max(parseIntSafe(req.query.page, 1), 1);
     const limit = Math.min(Math.max(parseIntSafe(req.query.limit, 50), 1), 200);
-    const skip = (page - 1) * limit;
     const debug = parseBool(req.query.debug);
+    const effectiveFilters = {
+      q: normalizeOptionalFilterValue(req.query.q || req.query.search || ''),
+      status: normalizeDirectoryStatus(req.query.status) || 'active',
+      verification: normalizeOptionalFilterValue(req.query.verification),
+      reporterType: normalizeOptionalFilterValue(req.query.reporterType || req.query.type),
+      state: normalizeOptionalFilterValue(req.query.state),
+      district: normalizeOptionalFilterValue(req.query.district),
+      city: normalizeOptionalFilterValue(req.query.city),
+      country: normalizeOptionalFilterValue(req.query.country),
+      includeArchived: parseBool(req.query.includeArchived) === true,
+      missingPhone: null,
+      missingLocation: null,
+    };
 
     const baseFilter = { mergedIntoProfileId: null };
+    if (effectiveFilters.status === 'archived') {
+      baseFilter.status = { $in: ['archived', 'banned', 'deleted', 'removed'] };
+    } else if (effectiveFilters.status === 'blocked') {
+      baseFilter.status = { $in: ['blocked', 'suspended', 'revoked'] };
+    } else if (!effectiveFilters.includeArchived) {
+      baseFilter.status = { $nin: ['archived', 'banned', 'deleted', 'removed', 'blocked', 'suspended', 'revoked'] };
+    }
 
-    const [profiles, total, summaryArr] = await Promise.all([
-      ReporterProfile.find(baseFilter)
-        .sort({ 'stats.lastStoryAt': -1, createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
+    const skip = (page - 1) * limit;
+    const [total, summaryArr] = await Promise.all([
       ReporterProfile.countDocuments(baseFilter),
       ReporterProfile.aggregate([
         { $match: baseFilter },
@@ -251,6 +336,17 @@ async function getReporterDirectory(req, res) {
         },
       ]),
     ]);
+
+    const hasRealFilters = hasRealDirectoryFilters(effectiveFilters);
+    const shouldFallbackToFirstPage = !hasRealFilters && total > 0 && skip >= total;
+    const effectivePage = shouldFallbackToFirstPage ? 1 : page;
+    const effectiveSkip = shouldFallbackToFirstPage ? 0 : skip;
+
+    const profiles = await ReporterProfile.find(baseFilter)
+      .sort({ 'stats.lastStoryAt': -1, createdAt: -1 })
+      .skip(effectiveSkip)
+      .limit(limit)
+      .lean();
 
     const profileIds = (profiles || []).map((p) => (p && p._id ? String(p._id) : null)).filter(Boolean);
 
@@ -402,7 +498,32 @@ async function getReporterDirectory(req, res) {
       return out;
     });
 
-    return res.status(200).json({ ok: true, items, total, page, limit, summary });
+    logLocalNetworkDirectoryDiagnostics(req, {
+      routePath: req.originalUrl || `${req.baseUrl || ''}${req.path || ''}` || '/api/admin/community-reporter/network/directory',
+      queryParamsReceived: req.query || {},
+      normalizedPagination: {
+        page,
+        limit,
+        effectivePage,
+        effectiveSkip,
+      },
+      filtersReceived: {
+        q: req.query?.q || req.query?.search || null,
+        status: req.query?.status || null,
+        verification: req.query?.verification || null,
+        reporterType: req.query?.reporterType || req.query?.type || null,
+        state: req.query?.state || null,
+        district: req.query?.district || null,
+        city: req.query?.city || null,
+        country: req.query?.country || null,
+        includeArchived: req.query?.includeArchived || null,
+      },
+      effectiveFilters,
+      usedFirstPageFallback: shouldFallbackToFirstPage,
+      totalRowsReturned: total,
+    });
+
+    return res.status(200).json({ ok: true, items, total, page: effectivePage, limit, summary });
   } catch (e) {
     console.error('[contributor-network][directory] failed', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to load reporter directory' });
@@ -583,21 +704,172 @@ async function backfillProfiles(req, res) {
       ? { isDeleted: { $ne: true } }
       : { $or: [{ reporterProfileId: { $exists: false } }, { reporterProfileId: null }] };
 
-    const cursor = CommunitySubmission.find(filter)
-      .sort({ createdAt: 1 })
-      .limit(limit)
-      .cursor();
+    const sourceSummary = {
+      CommunitySubmission: { total: 0, included: 0, skipped: 0, written: 0, skippedReasons: {} },
+      CommunityReport: { total: 0, included: 0, skipped: 0, written: 0, skippedReasons: {} },
+      ReporterContact: { total: 0, included: 0, skipped: 0, written: 0, skippedReasons: {} },
+      News: { total: 0, included: 0, skipped: 0, written: 0, skippedReasons: {} },
+      Article: { total: 0, included: 0, skipped: 0, written: 0, skippedReasons: {} },
+    };
+    const countsPerEmail = new Map();
+
+    const markSkipped = (bucket, reason) => {
+      sourceSummary[bucket].skipped += 1;
+      sourceSummary[bucket].skippedReasons[reason] = Number(sourceSummary[bucket].skippedReasons[reason] || 0) + 1;
+    };
+    const trackEmail = (email, bucket) => {
+      if (!email) return;
+      if (!countsPerEmail.has(email)) countsPerEmail.set(email, { total: 0, perSource: {} });
+      const row = countsPerEmail.get(email);
+      row.total += 1;
+      row.perSource[bucket] = Number(row.perSource[bucket] || 0) + 1;
+    };
+
+    const [submissions, reports, contacts, newsDocs, articleDocs] = await Promise.all([
+      CommunitySubmission.find(filter).sort({ createdAt: 1 }).limit(limit).lean(),
+      CommunityReport.find({}).sort({ createdAt: 1 }).limit(limit).lean(),
+      ReporterContact.find({}).sort({ createdAt: 1 }).limit(limit).lean(),
+      News.find({}).sort({ createdAt: 1 }).limit(limit).lean(),
+      Article.find({}).sort({ createdAt: 1 }).limit(limit).lean(),
+    ]);
+
+    sourceSummary.CommunitySubmission.total = submissions.length;
+    sourceSummary.CommunityReport.total = reports.length;
+    sourceSummary.ReporterContact.total = contacts.length;
+    sourceSummary.News.total = newsDocs.length;
+    sourceSummary.Article.total = articleDocs.length;
 
     let scanned = 0;
     let attached = 0;
-    for await (const sub of cursor) {
+
+    for (const sub of submissions) {
       scanned += 1;
+      const email = firstReporterEmail(
+        sub.reporterEmailNorm,
+        sub.reporterEmail,
+        sub.email,
+        sub.submittedByEmail,
+        sub.contactEmail,
+        sub.authorEmail,
+        sub.contact?.email,
+        sub.reporter?.email,
+        sub.reporterProfile?.email,
+        sub.contributor?.email
+      );
+      if (!email) {
+        markSkipped('CommunitySubmission', 'missing_email');
+        continue;
+      }
+      sourceSummary.CommunitySubmission.included += 1;
+      trackEmail(email, 'CommunitySubmission');
       if (dryRun) continue;
       const out = await resolveAndAttachForSubmission(sub, { req, force, forceIfPlaceholder });
-      if (out && out.ok) attached += 1;
+      if (out?.ok) {
+        attached += 1;
+        sourceSummary.CommunitySubmission.written += 1;
+      } else {
+        markSkipped('CommunitySubmission', out?.reason || 'attach_failed');
+      }
     }
 
-    return res.status(200).json({ ok: true, scanned, attached, limit, dryRun, force, forceIfPlaceholder, mode: scanAll ? 'all' : 'missing' });
+    for (const report of reports) {
+      scanned += 1;
+      const email = firstReporterEmail(report.reporterEmail, report.submittedByEmail, report.contactEmail, report.authorEmail);
+      if (!email) {
+        markSkipped('CommunityReport', 'missing_email');
+        continue;
+      }
+      sourceSummary.CommunityReport.included += 1;
+      trackEmail(email, 'CommunityReport');
+      if (dryRun) continue;
+      const linkedContact = await ReporterContact.findOne({ $or: [{ emailLower: email }, { email }] }).select('_id').lean();
+      const out = await resolveOrCreateReporterProfile({
+        reporterContactId: linkedContact?._id || null,
+        email,
+        phone: report.reporterPhone || null,
+        name: report.reporterName || 'Unknown',
+        location: {
+          city: report.reporterCity || null,
+          state: report.reporterState || null,
+          country: report.reporterCountry || null,
+        },
+        source: 'system',
+      });
+      if (out?.ok) sourceSummary.CommunityReport.written += 1;
+      else markSkipped('CommunityReport', out?.reason || 'profile_create_failed');
+    }
+
+    for (const contact of contacts) {
+      scanned += 1;
+      const email = firstReporterEmail(contact.email, contact.emailLower);
+      if (!email) {
+        markSkipped('ReporterContact', 'missing_email');
+        continue;
+      }
+      sourceSummary.ReporterContact.included += 1;
+      trackEmail(email, 'ReporterContact');
+      if (dryRun) continue;
+      const out = await resolveOrCreateReporterProfile({
+        reporterContactId: contact._id,
+        email,
+        phone: contact.phoneFull || contact.phoneNumber || null,
+        name: contact.fullName || 'Unknown',
+        location: {
+          city: contact.cityTownVillage || null,
+          state: contact.stateName || null,
+          country: contact.country || null,
+          district: contact.districtName || null,
+          area: contact.areaName || contact.talukaName || null,
+        },
+        source: 'system',
+      });
+      if (out?.ok) sourceSummary.ReporterContact.written += 1;
+      else markSkipped('ReporterContact', out?.reason || 'profile_create_failed');
+    }
+
+    for (const doc of newsDocs) {
+      scanned += 1;
+      const email = firstReporterEmail(doc.reporterEmail, doc.submittedByEmail, doc.contactEmail, doc.authorEmail, doc.reporter?.email, doc.reporterProfile?.email, doc.contributor?.email);
+      if (!email) {
+        markSkipped('News', 'missing_email');
+        continue;
+      }
+      sourceSummary.News.included += 1;
+      trackEmail(email, 'News');
+    }
+
+    for (const doc of articleDocs) {
+      scanned += 1;
+      const email = firstReporterEmail(doc.reporterEmail, doc.submittedByEmail, doc.contactEmail, doc.authorEmail, doc.reporter?.email, doc.reporterProfile?.email, doc.contributor?.email);
+      if (!email) {
+        markSkipped('Article', 'missing_email');
+        continue;
+      }
+      sourceSummary.Article.included += 1;
+      trackEmail(email, 'Article');
+    }
+
+    const totalProfiles = await ReporterProfile.countDocuments({ mergedIntoProfileId: null });
+    const topEmails = [...countsPerEmail.entries()]
+      .map(([email, row]) => ({ email, total: row.total, perSource: row.perSource }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 100);
+
+    return res.status(200).json({
+      ok: true,
+      scanned,
+      attached,
+      limit,
+      dryRun,
+      force,
+      forceIfPlaceholder,
+      mode: scanAll ? 'all' : 'missing',
+      collectionsScanned: sourceSummary,
+      totalRawSourceRecordsScanned: Object.values(sourceSummary).reduce((sum, row) => sum + Number(row.total || 0), 0),
+      totalUniqueNormalizedReporterEmailsFound: countsPerEmail.size,
+      totalDirectoryRowsWritten: totalProfiles,
+      countsPerReporterEmail: topEmails,
+    });
   } catch (e) {
     console.error('[contributor-network][backfill] failed', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Backfill failed' });

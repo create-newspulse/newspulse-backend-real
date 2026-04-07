@@ -147,15 +147,45 @@ function _normalizeReporterTypeForDirectory(value) {
 function _normalizeDirectoryStatus(value) {
   const token = _normalizeStatusToken(value);
   if (!token) return null;
-  if (['hidden', 'hide', 'soft_deleted', 'removed_from_view'].includes(token)) return 'archived';
-  if (['banned', 'archived', 'deleted', 'removed'].includes(token)) return 'archived';
+  if (['hidden', 'hide', 'soft_deleted', 'removed_from_view'].includes(token)) return 'removed';
+  if (['banned', 'archived', 'deleted', 'removed'].includes(token)) return 'removed';
   if (['blocked', 'suspended', 'watchlist', 'revoked'].includes(token)) return 'blocked';
   if (['active', 'verified', 'approved', 'community_default', 'pending', 'new'].includes(token)) return 'active';
   return null;
 }
 
 function _isArchivedLikeReporterStatus(value) {
-  return _normalizeDirectoryStatus(value) === 'archived';
+  return _resolveReporterDirectoryStatusValue(value) === 'removed';
+}
+
+function _hasExplicitReporterDirectoryRemoval(source) {
+  if (!source || typeof source !== 'object') return false;
+
+  if (_toDateOrNull(source.archivedAt || null) || _toDateOrNull(source.deletedAt || null)) {
+    return true;
+  }
+
+  if (source.archivedBy !== undefined && source.archivedBy !== null) return true;
+  if (source.deletedBy !== undefined && source.deletedBy !== null) return true;
+
+  return false;
+}
+
+function _resolveReporterDirectoryStatusValue(source) {
+  if (!source || typeof source !== 'object') {
+    return _normalizeDirectoryStatus(source) || 'active';
+  }
+
+  const explicitDirectoryStatus = _normalizeDirectoryStatus(source.directoryStatus);
+  if (explicitDirectoryStatus === 'active' || explicitDirectoryStatus === 'removed') {
+    return explicitDirectoryStatus;
+  }
+
+  if (_hasExplicitReporterDirectoryRemoval(source)) {
+    return 'removed';
+  }
+
+  return 'active';
 }
 
 function _hasPermanentDeleteConfirmation(req) {
@@ -189,16 +219,108 @@ function _buildBulkReporterContactMutationResponse(removedIds, skipped) {
   };
 }
 
+function _buildBulkReporterContactRestoreResponse(restoredIds, skipped) {
+  const normalizedRestoredIds = Array.isArray(restoredIds) ? restoredIds.filter(Boolean).map((id) => String(id)) : [];
+  const normalizedSkipped = Array.isArray(skipped) ? skipped : [];
+
+  return {
+    success: true,
+    message: 'Bulk restore completed',
+    mode: 'restore',
+    restoredCount: normalizedRestoredIds.length,
+    restoredIds: normalizedRestoredIds,
+    skipped: normalizedSkipped,
+  };
+}
+
+function _buildBulkReporterContactPermanentDeleteResponse(deletedIds, skipped) {
+  const normalizedDeletedIds = Array.isArray(deletedIds) ? deletedIds.filter(Boolean).map((id) => String(id)) : [];
+  const normalizedSkipped = Array.isArray(skipped) ? skipped : [];
+
+  return {
+    success: true,
+    message: 'Bulk permanent delete completed',
+    mode: 'hard',
+    deletedCount: normalizedDeletedIds.length,
+    deletedIds: normalizedDeletedIds,
+    skipped: normalizedSkipped,
+  };
+}
+
 function _buildDirectoryVisibilityState(status) {
   const normalizedStatus = _normalizeDirectoryStatus(status) || 'active';
-  const isRemovedFromDirectory = _isArchivedLikeReporterStatus(normalizedStatus);
+  const isRemovedFromDirectory = normalizedStatus === 'removed';
 
   return {
     status: normalizedStatus,
     directoryState: isRemovedFromDirectory ? 'removed' : 'active',
+    directoryStatus: isRemovedFromDirectory ? 'removed' : 'active',
     isRemovedFromDirectory,
     isVisibleInDirectory: !isRemovedFromDirectory,
   };
+}
+
+function _canRemoveReporterContactStatus(value) {
+  return _buildDirectoryVisibilityState(_resolveReporterDirectoryStatusValue(value)).directoryStatus === 'active';
+}
+
+function _canRestoreReporterContactStatus(value) {
+  return _buildDirectoryVisibilityState(_resolveReporterDirectoryStatusValue(value)).directoryStatus === 'removed';
+}
+
+function _normalizeBulkReporterContactIds(input) {
+  const receivedIds = Array.isArray(input)
+    ? input
+        .map((value) => {
+          if (typeof value === 'string') return value;
+          if (value === null || value === undefined) return '';
+          if (typeof value === 'number' || typeof value === 'bigint') return String(value);
+          if (typeof value === 'object') {
+            return _firstNonEmptyString(value.id, value._id, value.reporterContactId, value.contactId);
+          }
+          return String(value || '');
+        })
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+    : [];
+
+  const validIds = [];
+  const invalidIds = [];
+  const seenValid = new Set();
+  const seenInvalid = new Set();
+
+  for (const id of receivedIds) {
+    if (_isValidObjectId(id)) {
+      const normalized = String(id);
+      if (!seenValid.has(normalized)) {
+        seenValid.add(normalized);
+        validIds.push(normalized);
+      }
+      continue;
+    }
+
+    if (!seenInvalid.has(id)) {
+      seenInvalid.add(id);
+      invalidIds.push(id);
+    }
+  }
+
+  return {
+    receivedIds,
+    validIds,
+    invalidIds,
+    receivedCount: receivedIds.length,
+  };
+}
+
+function _logReporterBulkHideDiagnostics(payload) {
+  console.log('[reporter-bulk-hide]', {
+    receivedIds: Array.isArray(payload?.receivedIds) ? payload.receivedIds : [],
+    validIds: Array.isArray(payload?.validIds) ? payload.validIds : [],
+    invalidIds: Array.isArray(payload?.invalidIds) ? payload.invalidIds : [],
+    matchedCount: Number(payload?.matchedCount || 0),
+    updatedCount: Number(payload?.updatedCount || 0),
+  });
 }
 
 function _resolveReporterContactIdFromRequest(req) {
@@ -429,6 +551,47 @@ function _logReporterContactListShapeDiagnostics(req, rows) {
   }
 }
 
+function _shouldLogReporterContactPipeline() {
+  const enabled = String(process.env.REPORTER_CONTACT_PIPELINE_LOG || '').trim() === '1';
+  const env = String(process.env.NODE_ENV || '').toLowerCase();
+  return enabled || (env && env !== 'production');
+}
+
+function _logReporterContactPipeline(payload) {
+  if (!_shouldLogReporterContactPipeline()) return;
+  try {
+    console.log('[reporter-contact-pipeline]', payload);
+  } catch (_) {}
+}
+
+function _logReporterContactsApi(req, payload) {
+  if (!_shouldLogReporterContactPipeline() && !_isLocalDiagnosticsRequest(req)) return;
+  try {
+    console.log('[reporter-contacts-api]', {
+      route: req?.originalUrl || `${req?.baseUrl || ''}${req?.path || ''}` || null,
+      method: req?.method || null,
+      id: payload?.id || null,
+      count: payload?.count ?? null,
+      ok: payload?.ok === true,
+      error: payload?.error || null,
+    });
+  } catch (_) {}
+}
+
+function _buildEmptyReporterContactsListResponse({ page = 1, limit = 50 } = {}) {
+  const summary = _buildReporterDirectorySummaryPayload([]);
+  return {
+    ok: true,
+    success: true,
+    items: [],
+    total: 0,
+    page,
+    limit,
+    summary,
+    stats: _buildReporterDirectoryStatsPayload(summary),
+  };
+}
+
 function _buildFieldPresenceMap(profileContract) {
   return {
     phone: !!_normalizeKnownPhoneValue(profileContract?.phone || profileContract?.maskedPhone || profileContract?.phonePreview || null),
@@ -490,12 +653,44 @@ async function _getReporterDirectorySourceCounts(contactCount, returnedCount) {
   return sourceCounts;
 }
 
-function _buildReporterDirectoryStatsPayload(summary) {
+function _buildReporterDirectoryCountsPayload(rows) {
+  const seen = new Set();
+  const counts = {
+    activeCount: 0,
+    removedCount: 0,
+    totalCount: 0,
+  };
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const identity = _firstNonEmptyString(row?.reporterContactId, row?.contactId, row?.id, row?._id, _normalizeEmail(row?.email || null), _normalizePhoneValue(row?.fullPhone || row?.phone || null));
+    if (identity && seen.has(identity)) continue;
+    if (identity) seen.add(identity);
+    const directoryStatus = _buildDirectoryVisibilityState(_resolveReporterDirectoryStatusValue(row)).directoryStatus;
+    if (directoryStatus === 'removed') counts.removedCount += 1;
+    else counts.activeCount += 1;
+  }
+
+  counts.totalCount = counts.activeCount + counts.removedCount;
+
+  return counts;
+}
+
+function _buildReporterDirectoryStatsPayload(summary, counts) {
+  const activeCount = Number(counts?.activeCount || 0);
+  const removedCount = Number(counts?.removedCount || 0);
+  const totalCount = activeCount + removedCount;
+
   return {
-    totalReporters: Number(summary?.total || 0),
+    totalReporters: totalCount,
+    totalCount,
+    activeCount,
+    removedCount,
     verified: Number(summary?.verified || 0),
+    verifiedCount: Number(summary?.verified || 0),
     missingPhone: Number(summary?.missingPhone || 0),
+    missingPhoneCount: Number(summary?.missingPhone || 0),
     missingLocation: Number(summary?.missingLocation || 0),
+    missingLocationCount: Number(summary?.missingLocation || 0),
     activeThisMonth: Number(summary?.activeThisMonth || 0),
     newThisMonth: Number(summary?.newThisMonth || 0),
     lastSubmission: summary?.lastSubmissionAt || null,
@@ -510,6 +705,34 @@ function _hasRealReporterDirectoryFilters(effectiveFilters) {
     if (key === 'includeArchived') return value === true;
     return true;
   });
+}
+
+function _buildReporterDirectoryCountQuery(req) {
+  return {
+    ...(req?.query || {}),
+    q: undefined,
+    search: undefined,
+    status: undefined,
+    state: undefined,
+    directoryState: undefined,
+    directoryStatus: undefined,
+    lifecycleState: undefined,
+    view: undefined,
+    verification: undefined,
+    reporterType: undefined,
+    type: undefined,
+    district: undefined,
+    city: undefined,
+    country: undefined,
+    locationState: undefined,
+    regionState: undefined,
+    geoState: undefined,
+    missingPhone: undefined,
+    missingLocation: undefined,
+    includeArchived: 'true',
+    includeHidden: 'true',
+    showHidden: 'true',
+  };
 }
 
 function _deriveApprovalState(statusValue) {
@@ -798,11 +1021,19 @@ async function deleteReporterContact(req, res) {
       return _jsonError(res, 404, { code: 'CONTACT_NOT_FOUND', message: 'Reporter contact not found' });
     }
 
+    if (!_canRemoveReporterContactStatus(contact)) {
+      return _jsonError(res, 409, {
+        code: 'CONTACT_ALREADY_REMOVED',
+        message: 'Reporter contact is already removed from the directory.',
+        details: { allowedActions: ['restore', 'permanent_delete'] },
+      });
+    }
+
     await ReporterContact.updateOne(
       { _id: id },
       {
         $set: {
-          status: 'archived',
+          directoryStatus: 'removed',
           archivedAt: new Date(),
           archivedBy: actor,
           deletedAt: null,
@@ -870,13 +1101,20 @@ async function archiveReporterContact(req, res) {
 
     const contact = await ReporterContact.findById(id).lean();
     if (!contact) return _jsonError(res, 404, { code: 'CONTACT_NOT_FOUND', message: 'Reporter contact not found' });
+    if (!_canRemoveReporterContactStatus(contact)) {
+      return _jsonError(res, 409, {
+        code: 'CONTACT_ALREADY_REMOVED',
+        message: 'Reporter contact is already removed from the directory.',
+        details: { allowedActions: ['restore', 'permanent_delete'] },
+      });
+    }
 
     const reason = _firstNonEmptyString(req.body?.reason, req.body?.archiveReason);
     await ReporterContact.updateOne(
       { _id: id },
       {
         $set: {
-          status: 'archived',
+          directoryStatus: 'removed',
           archivedAt: new Date(),
           archivedBy: actor,
           ...(reason ? { archivedReason: reason } : {}),
@@ -885,7 +1123,7 @@ async function archiveReporterContact(req, res) {
     );
 
     await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_ARCHIVE', id, { entity: 'ReporterContact', reason });
-    return res.status(200).json({ success: true, id, status: 'archived' });
+    return res.status(200).json({ success: true, id, status: 'removed', directoryStatus: 'removed' });
   } catch (e) {
     console.error('[ADMIN][reporter-contact][archive] error', { actor, message: e?.message || e });
     return res.status(500).json({ success: false, message: 'Failed to archive reporter contact' });
@@ -895,6 +1133,7 @@ async function archiveReporterContact(req, res) {
 async function hideReporterContact(req, res) {
   const actor = _actorLabel(req);
   try {
+    _logReporterContactsApi(req, { ok: true });
     const { id, source } = _resolveReporterContactIdFromRequest(req);
     if (!_isMongoReady()) return _jsonError(res, 503, { code: 'DB_NOT_READY', message: 'Database not connected' });
     const isValidObjectId = _isValidObjectId(id);
@@ -928,13 +1167,27 @@ async function hideReporterContact(req, res) {
         details: { receivedId: id, idSource: source || null },
       });
     }
+    if (!_canRemoveReporterContactStatus(contact)) {
+      _logHideReporterContactDiagnostics(req, {
+        receivedId: id,
+        idSource: source,
+        isValidObjectId: true,
+        foundContact: true,
+        action: 'hide.already_removed',
+      });
+      return _jsonError(res, 409, {
+        code: 'CONTACT_ALREADY_REMOVED',
+        message: 'Reporter contact is already removed from the directory.',
+        details: { receivedId: id, idSource: source || null, allowedActions: ['restore', 'permanent_delete'] },
+      });
+    }
 
     const reason = _firstNonEmptyString(req.body?.reason, req.body?.hideReason, req.body?.archiveReason);
     await ReporterContact.updateOne(
       { _id: id },
       {
         $set: {
-          status: 'archived',
+          directoryStatus: 'removed',
           archivedAt: new Date(),
           archivedBy: actor,
           ...(reason ? { archivedReason: reason } : {}),
@@ -951,10 +1204,12 @@ async function hideReporterContact(req, res) {
     });
     await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_HIDE', id, { entity: 'ReporterContact', reason });
     const removalRequest = /\/remove(?:-from-directory)?(?:\/|$)/i.test(String(req.originalUrl || req.path || ''));
+    _logReporterContactsApi(req, { ok: true, id, count: 1 });
     return res.status(200).json({
       success: true,
       id,
-      status: 'archived',
+      status: 'removed',
+      directoryStatus: 'removed',
       hidden: true,
       removed: removalRequest,
       message: removalRequest
@@ -963,14 +1218,16 @@ async function hideReporterContact(req, res) {
     });
   } catch (e) {
     console.error('[ADMIN][reporter-contact][hide] error', { actor, message: e?.message || e });
+    _logReporterContactsApi(req, { ok: false, error: e?.message || 'hide_failed' });
     return res.status(500).json({ success: false, message: 'Failed to hide reporter contact' });
   }
 }
 
 async function listHiddenReporterContacts(req, res) {
+  _logReporterContactsApi(req, { ok: true });
   req.query = {
     ...(req.query || {}),
-    status: 'archived',
+    state: 'removed',
     includeArchived: 'true',
   };
   return adminListReporterContacts(req, res);
@@ -985,26 +1242,30 @@ async function restoreReporterContact(req, res) {
 
     const contact = await ReporterContact.findById(id).lean();
     if (!contact) return _jsonError(res, 404, { code: 'CONTACT_NOT_FOUND', message: 'Reporter contact not found' });
+    if (!_canRestoreReporterContactStatus(contact)) {
+      return _jsonError(res, 409, {
+        code: 'CONTACT_NOT_REMOVED',
+        message: 'Restore is only allowed for removed contacts.',
+        details: { allowedActions: ['remove_from_directory'] },
+      });
+    }
 
     await ReporterContact.updateOne(
       { _id: id },
       {
-        $set: { status: 'active', restoredAt: new Date(), restoredBy: actor },
+        $set: { directoryStatus: 'active', restoredAt: new Date(), restoredBy: actor },
         $unset: {
           archivedAt: 1,
           archivedBy: 1,
           archivedReason: 1,
           deletedAt: 1,
           deletedBy: 1,
-          suspendedAt: 1,
-          suspendedBy: 1,
-          suspendedReason: 1,
         },
       }
     );
 
     await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_RESTORE', id, { entity: 'ReporterContact' });
-    return res.status(200).json({ success: true, id, status: 'active' });
+    return res.status(200).json({ success: true, id, status: 'active', directoryStatus: 'active' });
   } catch (e) {
     console.error('[ADMIN][reporter-contact][restore] error', { actor, message: e?.message || e });
     return res.status(500).json({ success: false, message: 'Failed to restore reporter contact' });
@@ -1029,7 +1290,7 @@ async function _executePermanentDeleteReporterContact(req, res, { allowActive = 
       return _jsonError(res, 404, { code: 'CONTACT_NOT_FOUND', message: 'Reporter contact not found' });
     }
 
-    if (!_canPermanentlyDeleteReporterStatus(contact.status, { allowActive })) {
+    if (!_canPermanentlyDeleteReporterStatus(contact, { allowActive })) {
       return _jsonError(res, 409, {
         code: 'CONTACT_NOT_HIDDEN',
         message: allowActive
@@ -1171,23 +1432,36 @@ async function reassignReporterContactStories(req, res) {
 async function bulkDeleteReporterContacts(req, res) {
   const actor = _actorLabel(req);
   try {
+    _logReporterContactsApi(req, { ok: true, count: Array.isArray(req.body?.ids) ? req.body.ids.length : 0 });
     if (!_isMongoReady()) {
-      return res.status(503).json({ success: false, message: 'Database not connected' });
+      return _jsonError(res, 503, { code: 'DB_NOT_READY', message: 'Database not connected' });
     }
 
-    const ids = req.body?.ids;
-    if (!Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({ success: false, message: 'ids array is required' });
+    if (!Array.isArray(req.body?.ids)) {
+      return _jsonError(res, 400, {
+        code: 'INVALID_IDS_PAYLOAD',
+        message: 'ids array is required',
+        details: {
+          expected: '{ ids: ["contactId"] }',
+          receivedType: typeof req.body?.ids,
+        },
+      });
     }
 
-    const receivedCount = ids.length;
-    const validIds = ids
-      .map(x => String(x || '').trim())
-      .filter(Boolean)
-      .filter(mongoose.Types.ObjectId.isValid);
+    const { receivedIds, validIds, invalidIds, receivedCount } = _normalizeBulkReporterContactIds(req.body?.ids);
 
     if (validIds.length === 0) {
-      return res.status(400).json({ success: false, message: 'No valid ids provided', receivedCount });
+      _logReporterBulkHideDiagnostics({ receivedIds, validIds, invalidIds, matchedCount: 0, updatedCount: 0 });
+      return _jsonError(res, 400, {
+        code: 'NO_VALID_REPORTER_CONTACT_IDS',
+        message: 'No valid ReporterContact ids provided',
+        details: {
+          receivedIds,
+          validIds,
+          invalidIds,
+          receivedCount,
+        },
+      });
     }
 
     const hard = _parseBool(req.query?.hard);
@@ -1199,7 +1473,8 @@ async function bulkDeleteReporterContacts(req, res) {
       });
     }
 
-    console.log('Bulk remove contacts ids:', validIds.length);
+    const matchedCount = await ReporterContact.countDocuments({ _id: { $in: validIds } });
+    _logReporterBulkHideDiagnostics({ receivedIds, validIds, invalidIds, matchedCount, updatedCount: 0 });
 
     const deletedIds = [];
     const skipped = [];
@@ -1211,10 +1486,15 @@ async function bulkDeleteReporterContacts(req, res) {
         continue;
       }
 
+      if (!_canRemoveReporterContactStatus(contact)) {
+        skipped.push({ id, code: 'CONTACT_ALREADY_REMOVED', message: 'Reporter contact is already removed from the directory' });
+        continue;
+      }
+
       await ReporterContact.updateOne(
         { _id: id },
         {
-          $set: { status: 'archived', archivedAt: new Date(), archivedBy: actor, deletedAt: null, deletedBy: null },
+          $set: { directoryStatus: 'removed', archivedAt: new Date(), archivedBy: actor, deletedAt: null, deletedBy: null },
         }
       );
 
@@ -1225,14 +1505,233 @@ async function bulkDeleteReporterContacts(req, res) {
       entity: 'ReporterContact',
       receivedCount,
       validCount: validIds.length,
+      invalidCount: invalidIds.length,
       removedCount: deletedIds.length,
       skippedCount: skipped.length,
     });
 
-    return res.status(200).json(_buildBulkReporterContactMutationResponse(deletedIds, skipped));
+    _logReporterBulkHideDiagnostics({
+      receivedIds,
+      validIds,
+      invalidIds,
+      matchedCount,
+      updatedCount: deletedIds.length,
+    });
+    _logReporterContactsApi(req, { ok: true, count: deletedIds.length });
+    return res.status(200).json({
+      ..._buildBulkReporterContactMutationResponse(deletedIds, skipped),
+      receivedCount,
+      validCount: validIds.length,
+      invalidCount: invalidIds.length,
+      invalidIds,
+      matchedCount,
+      updatedCount: deletedIds.length,
+    });
   } catch (e) {
     console.error('[ADMIN_DELETE][reporter-contact][bulk] error', { actor, message: e?.message || e });
+    _logReporterContactsApi(req, { ok: false, error: e?.message || 'bulk_hide_failed' });
     return res.status(500).json({ success: false, message: 'Failed to bulk remove reporter contacts' });
+  }
+}
+
+async function bulkRestoreReporterContacts(req, res) {
+  const actor = _actorLabel(req);
+  try {
+    _logReporterContactsApi(req, { ok: true, count: Array.isArray(req.body?.ids) ? req.body.ids.length : 0 });
+    if (!_isMongoReady()) {
+      return _jsonError(res, 503, { code: 'DB_NOT_READY', message: 'Database not connected' });
+    }
+
+    if (!Array.isArray(req.body?.ids)) {
+      return _jsonError(res, 400, {
+        code: 'INVALID_IDS_PAYLOAD',
+        message: 'ids array is required',
+        details: {
+          expected: '{ ids: ["contactId"] }',
+          receivedType: typeof req.body?.ids,
+        },
+      });
+    }
+
+    const { receivedIds, validIds, invalidIds, receivedCount } = _normalizeBulkReporterContactIds(req.body?.ids);
+
+    if (validIds.length === 0) {
+      return _jsonError(res, 400, {
+        code: 'NO_VALID_REPORTER_CONTACT_IDS',
+        message: 'No valid ReporterContact ids provided',
+        details: {
+          receivedIds,
+          validIds,
+          invalidIds,
+          receivedCount,
+        },
+      });
+    }
+
+    const matchedCount = await ReporterContact.countDocuments({ _id: { $in: validIds } });
+
+    const restoredIds = [];
+    const skipped = [];
+
+    for (const id of validIds) {
+      const contact = await ReporterContact.findById(id).lean();
+      if (!contact) {
+        skipped.push({ id, code: 'CONTACT_NOT_FOUND', message: 'Reporter contact not found' });
+        continue;
+      }
+
+      if (!_canRestoreReporterContactStatus(contact)) {
+        skipped.push({ id, code: 'CONTACT_NOT_REMOVED', message: 'Restore is only allowed for removed contacts' });
+        continue;
+      }
+
+      await ReporterContact.updateOne(
+        { _id: id },
+        {
+          $set: { directoryStatus: 'active', restoredAt: new Date(), restoredBy: actor },
+          $unset: {
+            archivedAt: 1,
+            archivedBy: 1,
+            archivedReason: 1,
+            deletedAt: 1,
+            deletedBy: 1,
+          },
+        }
+      );
+
+      restoredIds.push(id);
+    }
+
+    await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_BULK_RESTORE', null, {
+      entity: 'ReporterContact',
+      receivedCount,
+      validCount: validIds.length,
+      invalidCount: invalidIds.length,
+      restoredCount: restoredIds.length,
+      skippedCount: skipped.length,
+    });
+
+    _logReporterContactsApi(req, { ok: true, count: restoredIds.length });
+    return res.status(200).json({
+      ..._buildBulkReporterContactRestoreResponse(restoredIds, skipped),
+      receivedCount,
+      validCount: validIds.length,
+      invalidCount: invalidIds.length,
+      invalidIds,
+      matchedCount,
+      updatedCount: restoredIds.length,
+    });
+  } catch (e) {
+    console.error('[ADMIN][reporter-contact][bulk-restore] error', { actor, message: e?.message || e });
+    _logReporterContactsApi(req, { ok: false, error: e?.message || 'bulk_restore_failed' });
+    return res.status(500).json({ success: false, message: 'Failed to bulk restore reporter contacts' });
+  }
+}
+
+async function bulkPermanentlyDeleteReporterContacts(req, res) {
+  const actor = _actorLabel(req);
+  try {
+    _logReporterContactsApi(req, { ok: true, count: Array.isArray(req.body?.ids) ? req.body.ids.length : 0 });
+    if (!_isMongoReady()) {
+      return _jsonError(res, 503, { code: 'DB_NOT_READY', message: 'Database not connected' });
+    }
+
+    if (!_hasPermanentDeleteConfirmation(req)) {
+      return _jsonError(res, 400, {
+        code: 'DELETE_CONFIRMATION_REQUIRED',
+        message: 'Permanent delete requires explicit confirmation.',
+        details: { confirmation: 'Set confirm=true or confirmationText=DELETE' },
+      });
+    }
+
+    if (!Array.isArray(req.body?.ids)) {
+      return _jsonError(res, 400, {
+        code: 'INVALID_IDS_PAYLOAD',
+        message: 'ids array is required',
+        details: {
+          expected: '{ ids: ["contactId"] }',
+          receivedType: typeof req.body?.ids,
+        },
+      });
+    }
+
+    const { receivedIds, validIds, invalidIds, receivedCount } = _normalizeBulkReporterContactIds(req.body?.ids);
+
+    if (validIds.length === 0) {
+      return _jsonError(res, 400, {
+        code: 'NO_VALID_REPORTER_CONTACT_IDS',
+        message: 'No valid ReporterContact ids provided',
+        details: {
+          receivedIds,
+          validIds,
+          invalidIds,
+          receivedCount,
+        },
+      });
+    }
+
+    const matchedCount = await ReporterContact.countDocuments({ _id: { $in: validIds } });
+
+    const deletedIds = [];
+    const skipped = [];
+
+    for (const id of validIds) {
+      const contact = await ReporterContact.findById(id);
+      if (!contact) {
+        skipped.push({ id, code: 'CONTACT_NOT_FOUND', message: 'Reporter contact not found' });
+        continue;
+      }
+
+      if (!_canRestoreReporterContactStatus(contact)) {
+        skipped.push({ id, code: 'CONTACT_NOT_REMOVED', message: 'Permanent delete is only allowed for removed contacts' });
+        continue;
+      }
+
+      if (_isProtectedContact(contact)) {
+        skipped.push({ id, code: 'CONTACT_IS_PROTECTED', message: 'This contact is protected and cannot be permanently deleted' });
+        continue;
+      }
+
+      const linkedCount = await _countLinkedSubmissionsForContact(contact);
+      if (linkedCount > 0) {
+        skipped.push({ id, code: 'CONTACT_HAS_LINKED_STORIES', message: 'Contact has linked stories', details: { linkedStories: linkedCount } });
+        continue;
+      }
+
+      const linkedProfiles = await _countLinkedProfilesForContact(contact);
+      if (linkedProfiles > 0) {
+        skipped.push({ id, code: 'CONTACT_HAS_DEPENDENCIES', message: 'Contact has dependent contributor profiles', details: { linkedProfiles } });
+        continue;
+      }
+
+      await ReporterContact.deleteOne({ _id: id });
+      deletedIds.push(id);
+    }
+
+    await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_BULK_PERMANENT_DELETE', null, {
+      entity: 'ReporterContact',
+      receivedCount,
+      validCount: validIds.length,
+      invalidCount: invalidIds.length,
+      deletedCount: deletedIds.length,
+      skippedCount: skipped.length,
+      confirmed: true,
+    });
+
+    _logReporterContactsApi(req, { ok: true, count: deletedIds.length });
+    return res.status(200).json({
+      ..._buildBulkReporterContactPermanentDeleteResponse(deletedIds, skipped),
+      receivedCount,
+      validCount: validIds.length,
+      invalidCount: invalidIds.length,
+      invalidIds,
+      matchedCount,
+      updatedCount: deletedIds.length,
+    });
+  } catch (e) {
+    console.error('[ADMIN_DELETE][reporter-contact][bulk-permanent] error', { actor, message: e?.message || e });
+    _logReporterContactsApi(req, { ok: false, error: e?.message || 'bulk_delete_failed' });
+    return res.status(500).json({ success: false, message: 'Failed to bulk permanently delete reporter contacts' });
   }
 }
 
@@ -1292,7 +1791,8 @@ function _buildCompactDirectoryRow(contact, aggregatedStats) {
   const beat = _normalizeBeatLabel(contact?.primaryBeat || contact?.beat || null);
   const verification = _normalizeVerificationForDirectory(contact?.verificationLevel || null) || 'community_default';
   const reporterType = _normalizeReporterTypeForDirectory(contact?.reporterType || null) || 'community';
-  const status = _normalizeDirectoryStatus(contact?.status || null) || 'active';
+  const directoryStatus = _resolveReporterDirectoryStatusValue(contact);
+  const moderationStatus = _normalizeStatusToken(contact?.status || null) || 'active';
   const flags = _buildDirectoryQualityFlags({
     phoneFull,
     verification,
@@ -1306,8 +1806,8 @@ function _buildCompactDirectoryRow(contact, aggregatedStats) {
   const manualOverride = _summarizeManualOverrideState(contact?.directoryManualOverrides || null);
   const maskedPhone = _maskPhoneForDirectory(phoneFull);
   const type = reporterType;
-  const canArchive = !['archived', 'banned', 'deleted'].includes(_normalizeStatusToken(status));
-  const directoryVisibility = _buildDirectoryVisibilityState(status);
+  const canArchive = directoryStatus !== 'removed';
+  const directoryVisibility = _buildDirectoryVisibilityState(directoryStatus);
 
   return {
     id: reporterContactId,
@@ -1316,9 +1816,10 @@ function _buildCompactDirectoryRow(contact, aggregatedStats) {
     reporterContactId,
     name: _firstNonEmptyString(contact?.fullName, contact?.name),
     email: _normalizeEmail(contact?.email || null),
-    phone: maskedPhone,
+    phone: phoneFull,
     maskedPhone,
     fullPhone: phoneFull,
+    whatsapp: whatsappNumber,
     whatsappNumber,
     alternatePhone,
     city,
@@ -1326,30 +1827,36 @@ function _buildCompactDirectoryRow(contact, aggregatedStats) {
     state,
     country,
     area,
+    areaType: _firstNonEmptyString(contact?.areaType) || null,
+    coverageScope: _firstNonEmptyString(contact?.coverageScope) || null,
+    organisationName: _firstNonEmptyString(contact?.organisationName) || null,
     primaryBeat: beat,
     reporterType,
     type,
     verification,
-    status,
+    status: directoryVisibility.directoryStatus,
+    rawStatus: moderationStatus,
     directoryState: directoryVisibility.directoryState,
+    directoryStatus: directoryVisibility.directoryStatus,
     isRemovedFromDirectory: directoryVisibility.isRemovedFromDirectory,
     isVisibleInDirectory: directoryVisibility.isVisibleInDirectory,
     directory: {
       state: directoryVisibility.directoryState,
-      status,
+      status: directoryVisibility.directoryStatus,
+      rawStatus: moderationStatus,
       isRemovedFromDirectory: directoryVisibility.isRemovedFromDirectory,
       isVisibleInDirectory: directoryVisibility.isVisibleInDirectory,
       removedAt: _toIsoOrNull(contact?.archivedAt || null),
       removedBy: _firstNonEmptyString(contact?.archivedBy),
-      canRemoveFromDirectory: canArchive,
-      canRestore: directoryVisibility.isRemovedFromDirectory,
-      canDeletePermanently: directoryVisibility.isRemovedFromDirectory,
     },
     storiesCount: mergedStats.totalStories,
+    stories: mergedStats.totalStories,
     totalStories: mergedStats.totalStories,
     approvedCount: mergedStats.approvedStories,
+    approved: mergedStats.approvedStories,
     approvedStories: mergedStats.approvedStories,
     pendingCount: mergedStats.pendingStories,
+    pending: mergedStats.pendingStories,
     pendingStories: mergedStats.pendingStories,
     rejectedStories: mergedStats.rejectedStories,
     withdrawnStories: mergedStats.withdrawnStories,
@@ -1357,6 +1864,7 @@ function _buildCompactDirectoryRow(contact, aggregatedStats) {
     firstStoryAt: mergedStats.firstStoryAt,
     lastStoryAt: mergedStats.lastStoryAt,
     lastSubmissionAt: mergedStats.lastSubmissionAt,
+    lastSubmission: mergedStats.lastSubmissionAt,
     lastStoryTitle: mergedStats.lastStoryTitle,
     lastActivityAt,
     missingPhone: flags.missingPhone,
@@ -1368,14 +1876,9 @@ function _buildCompactDirectoryRow(contact, aggregatedStats) {
       viewStories: true,
       profile: true,
       archive: false,
-      removeFromDirectory: canArchive,
-      restore: directoryVisibility.isRemovedFromDirectory,
-      deletePermanently: directoryVisibility.isRemovedFromDirectory,
     },
-    deleteMode: canArchive ? 'archive_only' : 'restore_or_permanent_delete',
-    availableActions: canArchive
-      ? ['email', 'view_stories', 'profile', 'remove_from_directory']
-      : ['email', 'view_stories', 'profile', 'restore', 'delete_permanently'],
+    deleteMode: canArchive ? 'bulk_remove_only' : 'bulk_restore_or_permanent_delete_only',
+    availableActions: ['email', 'view_stories', 'profile'],
     createdAt: _toIsoOrNull(contact?.createdAt || null),
     updatedAt: _toIsoOrNull(contact?.updatedAt || null),
   };
@@ -1409,7 +1912,61 @@ function _buildReporterDirectorySummaryPayload(rows) {
     }
   }
 
+  summary.totalReporters = Number(summary.total || 0);
+  summary.verifiedCount = Number(summary.verified || 0);
+  summary.missingPhoneCount = Number(summary.missingPhone || 0);
+  summary.missingLocationCount = Number(summary.missingLocation || 0);
+  summary.lastSubmission = summary.lastSubmissionAt || null;
+
   return summary;
+}
+
+function _normalizeReporterDirectoryLifecycleState(req) {
+  const normalizeLifecycleToken = (value) => {
+    const token = _normalizeStatusToken(value);
+    if (!token) return null;
+    if (['active', 'current', 'visible'].includes(token)) return 'active';
+    if (['removed', 'archived', 'hidden', 'deleted', 'remove', 'hide'].includes(token)) return 'removed';
+    return null;
+  };
+
+  const candidates = [
+    req?.query?.directoryState,
+    req?.query?.directoryStatus,
+    req?.query?.lifecycleState,
+    req?.query?.view,
+  ];
+
+  const rawState = _normalizeOptionalFilterValue(req?.query?.state || '');
+  const normalizedRawState = normalizeLifecycleToken(rawState);
+  if (normalizedRawState) return normalizedRawState;
+
+  for (const candidate of candidates) {
+    const normalized = normalizeLifecycleToken(_normalizeOptionalFilterValue(candidate || ''));
+    if (normalized) return normalized;
+  }
+
+  return null;
+}
+
+function _resolveReporterDirectoryLocationState(req) {
+  const normalizeLifecycleToken = (value) => {
+    const token = _normalizeStatusToken(value);
+    if (!token) return null;
+    if (['active', 'current', 'visible'].includes(token)) return 'active';
+    if (['removed', 'archived', 'hidden', 'deleted', 'remove', 'hide'].includes(token)) return 'removed';
+    return null;
+  };
+
+  const explicitLocationState = _normalizeOptionalFilterValue(
+    req?.query?.locationState || req?.query?.regionState || req?.query?.geoState || ''
+  );
+  if (explicitLocationState) return explicitLocationState;
+
+  const rawState = _normalizeOptionalFilterValue(req?.query?.state || '');
+  const normalizedRawState = normalizeLifecycleToken(rawState);
+  if (normalizedRawState === 'active' || normalizedRawState === 'removed') return null;
+  return rawState;
 }
 
 function _buildReporterDirectoryFilters(req) {
@@ -1432,13 +1989,34 @@ function _buildReporterDirectoryFilters(req) {
     ];
   }
 
-  const status = _normalizeDirectoryStatus(req.query.status);
-  if (status === 'archived') {
-    filter.status = { $in: ['archived', 'banned', 'deleted'] };
+  const lifecycleState = _normalizeReporterDirectoryLifecycleState(req);
+  const status = _normalizeDirectoryStatus(req.query.status) || (lifecycleState === 'removed' ? 'removed' : lifecycleState);
+  if (status === 'removed') {
+    filter.$or = [
+      { directoryStatus: 'removed' },
+      {
+        directoryStatus: { $exists: false },
+        $or: [
+          { archivedAt: { $exists: true, $ne: null } },
+          { deletedAt: { $exists: true, $ne: null } },
+          { archivedBy: { $exists: true, $ne: null } },
+          { deletedBy: { $exists: true, $ne: null } },
+        ],
+      },
+    ];
   } else if (status === 'blocked') {
     filter.status = { $in: ['blocked', 'suspended', 'revoked'] };
   } else if (status === 'active') {
-    filter.status = { $nin: ['archived', 'banned', 'deleted'] };
+    filter.$or = [
+      { directoryStatus: 'active' },
+      {
+        directoryStatus: { $exists: false },
+        archivedAt: { $in: [null, undefined] },
+        deletedAt: { $in: [null, undefined] },
+        archivedBy: { $in: [null, undefined] },
+        deletedBy: { $in: [null, undefined] },
+      },
+    ];
   }
 
   const verification = _normalizeVerificationForDirectory(req.query.verification);
@@ -1448,8 +2026,18 @@ function _buildReporterDirectoryFilters(req) {
   if (reporterType) filter.reporterType = reporterType;
 
   const includeArchived = _parseBooleanQuery(req.query.includeArchived ?? req.query.includeHidden ?? req.query.showHidden);
-  if (includeArchived !== true && !filter.status) {
-    filter.status = { $nin: ['archived', 'banned', 'deleted'] };
+  const shouldIncludeArchived = includeArchived === true || lifecycleState === 'removed';
+  if (!shouldIncludeArchived && !filter.$or && !filter.status) {
+    filter.$or = [
+      { directoryStatus: 'active' },
+      {
+        directoryStatus: { $exists: false },
+        archivedAt: { $in: [null, undefined] },
+        deletedAt: { $in: [null, undefined] },
+        archivedBy: { $in: [null, undefined] },
+        deletedBy: { $in: [null, undefined] },
+      },
+    ];
   }
 
   return filter;
@@ -1507,6 +2095,13 @@ async function _aggregateReporterDirectorySubmissionSources() {
         _districtRaw: { $ifNull: ['$locationDetail.district', '$district'] },
         _stateRaw: { $ifNull: ['$location.state', { $ifNull: ['$locationDetail.state', '$state'] }] },
         _countryRaw: { $ifNull: ['$location.country', { $ifNull: ['$locationDetail.country', '$country'] }] },
+        _areaRaw: { $ifNull: ['$area', '$location.area'] },
+        _areaTypeRaw: '$areaType',
+        _coverageScopeRaw: '$coverageScope',
+        _beatRaw: { $ifNull: ['$beat', '$primaryBeat'] },
+        _organisationRaw: '$organisationName',
+        _portalAccessEnabledRaw: '$portalAccessEnabled',
+        _portalAuthVersionRaw: '$portalAuthVersion',
         _statusNorm: {
           $cond: [
             { $or: [{ $eq: ['$status', null] }, { $eq: ['$status', ''] }] },
@@ -1547,6 +2142,13 @@ async function _aggregateReporterDirectorySubmissionSources() {
         district: { $last: '$_districtRaw' },
         state: { $last: '$_stateRaw' },
         country: { $last: '$_countryRaw' },
+        area: { $last: '$_areaRaw' },
+        areaType: { $last: '$_areaTypeRaw' },
+        coverageScope: { $last: '$_coverageScopeRaw' },
+        beat: { $last: '$_beatRaw' },
+        organisationName: { $last: '$_organisationRaw' },
+        portalAccessEnabled: { $last: '$_portalAccessEnabledRaw' },
+        portalAuthVersion: { $last: '$_portalAuthVersionRaw' },
         reporterType: { $last: '$sourceType' },
         verificationLevel: { $last: '$reporterVerificationLevel' },
         totalStories: { $sum: 1 },
@@ -1579,9 +2181,17 @@ function _buildInferredDirectoryContact(sourceRow) {
     districtName: _normalizeLocationText(sourceRow?.district || null),
     stateName: _normalizeLocationText(sourceRow?.state || null),
     country: _normalizeLocationText(sourceRow?.country || null),
+    areaName: _normalizeLocationText(sourceRow?.area || null),
+    areaType: _firstNonEmptyString(sourceRow?.areaType) || null,
+    coverageScope: _firstNonEmptyString(sourceRow?.coverageScope) || null,
+    primaryBeat: _normalizeBeatLabel(sourceRow?.beat || null),
+    organisationName: _firstNonEmptyString(sourceRow?.organisationName) || null,
+    portalAccessEnabled: typeof sourceRow?.portalAccessEnabled === 'boolean' ? sourceRow.portalAccessEnabled : true,
+    portalAuthVersion: typeof sourceRow?.portalAuthVersion === 'number' ? sourceRow.portalAuthVersion : 0,
     reporterType,
     verificationLevel: _mapSubmissionVerificationToDirectory(sourceRow?.verificationLevel || null, reporterType),
     status: 'active',
+    directoryStatus: 'active',
     stats: {
       totalStories: Number(sourceRow?.totalStories || 0),
       approvedStories: Number(sourceRow?.approvedStories || 0),
@@ -1602,11 +2212,12 @@ function _buildInferredDirectoryContact(sourceRow) {
 
 function _filterReporterDirectoryRows(rows, req, diagnostics) {
   const q = _normalizeOptionalFilterValue(req.query.q || req.query.search || '');
-  const wantedStatus = _normalizeDirectoryStatus(_normalizeOptionalFilterValue(req.query.status));
+  const lifecycleState = _normalizeReporterDirectoryLifecycleState(req);
+  const wantedStatus = _normalizeDirectoryStatus(_normalizeOptionalFilterValue(req.query.status)) || (lifecycleState === 'removed' ? 'removed' : lifecycleState);
   const wantedVerification = _normalizeVerificationForDirectory(_normalizeOptionalFilterValue(req.query.verification));
   const wantedType = _normalizeReporterTypeForDirectory(_normalizeOptionalFilterValue(req.query.reporterType || req.query.type));
-  const includeArchived = _parseBooleanQuery(req.query.includeArchived ?? req.query.includeHidden ?? req.query.showHidden) === true;
-  const wantedState = _normalizeOptionalFilterValue(req.query.state || '');
+  const includeArchived = _parseBooleanQuery(req.query.includeArchived ?? req.query.includeHidden ?? req.query.showHidden) === true || lifecycleState === 'removed';
+  const wantedState = _resolveReporterDirectoryLocationState(req);
   const wantedDistrict = _normalizeOptionalFilterValue(req.query.district || '');
   const wantedCity = _normalizeOptionalFilterValue(req.query.city || '');
   const wantedCountry = _normalizeOptionalFilterValue(req.query.country || '');
@@ -1617,6 +2228,7 @@ function _filterReporterDirectoryRows(rows, req, diagnostics) {
     diagnostics.effectiveFilters = {
       q,
       status: wantedStatus,
+      lifecycleState,
       verification: wantedVerification,
       reporterType: wantedType,
       state: wantedState,
@@ -1630,17 +2242,18 @@ function _filterReporterDirectoryRows(rows, req, diagnostics) {
   }
 
   return (Array.isArray(rows) ? rows : []).filter((row) => {
-    const rowStatus = _normalizeStatusToken(row.status);
+    const rowStatus = _resolveReporterDirectoryStatusValue(row);
+    const rawStatus = _normalizeStatusToken(row.rawStatus || row.directory?.rawStatus || row.status || '');
     const markSkipped = (reason) => {
       if (!diagnostics) return false;
       diagnostics.skipped.total += 1;
       diagnostics.skipped.reasons[reason] = Number(diagnostics.skipped.reasons[reason] || 0) + 1;
       return false;
     };
-    if (!includeArchived && ['archived', 'banned', 'deleted'].includes(rowStatus)) return markSkipped('archived_hidden_by_default');
-    if (wantedStatus === 'active' && ['archived', 'banned', 'deleted'].includes(rowStatus)) return markSkipped('status_active_excludes_archived');
-    if (wantedStatus === 'archived' && !['archived', 'banned', 'deleted'].includes(rowStatus)) return markSkipped('status_archived_only');
-    if (wantedStatus === 'blocked' && !['blocked', 'suspended', 'revoked'].includes(rowStatus)) return markSkipped('status_blocked_only');
+    if (!includeArchived && rowStatus === 'removed') return markSkipped('archived_hidden_by_default');
+    if (wantedStatus === 'active' && rowStatus !== 'active') return markSkipped('status_active_excludes_archived');
+    if (wantedStatus === 'removed' && rowStatus !== 'removed') return markSkipped('status_archived_only');
+    if (wantedStatus === 'blocked' && !['blocked', 'suspended', 'revoked', 'watchlist'].includes(rawStatus)) return markSkipped('status_blocked_only');
     if (wantedVerification && row.verification !== wantedVerification) return markSkipped('verification_filter');
     if (wantedType && row.type !== wantedType && row.reporterType !== wantedType) return markSkipped('type_filter');
     if (wantedState && _normalizeStatusToken(row.state || '') !== wantedState) return markSkipped('state_filter');
@@ -1672,10 +2285,204 @@ function _sortReporterDirectoryRows(rows) {
   });
 }
 
+function _getReporterDirectoryRowIdentity(row) {
+  return _firstNonEmptyString(
+    row?.reporterContactId,
+    row?.contactId,
+    row?.id,
+    row?._id,
+    _normalizeEmail(row?.email || null),
+    _normalizePhoneValue(row?.fullPhone || row?.phone || null)
+  );
+}
+
+function _getReporterDirectoryContactIdentity(contact) {
+  return _firstNonEmptyString(
+    contact?.emailLower,
+    _normalizeEmail(contact?.email || null),
+    contact?.reporterKey,
+    _normalizePhoneValue(contact?.phoneFull || contact?.phoneNumber || null),
+    contact?._id ? String(contact._id) : null
+  );
+}
+
+function _normalizePersistedReporterDirectoryStatus(contact) {
+  const resolved = _resolveReporterDirectoryStatusValue(contact);
+  return resolved === 'removed' ? 'removed' : 'active';
+}
+
+function _scoreReporterDirectoryRow(row) {
+  let score = 0;
+  if (row?._inferred !== true) score += 10;
+  if (_firstNonEmptyString(row?.reporterContactId, row?.contactId, row?.id, row?._id)) score += 5;
+  if (row?.directoryStatus === 'removed' || row?.directoryStatus === 'active') score += 2;
+  if (row?.updatedAt) score += 1;
+  return score;
+}
+
+function _dedupeReporterDirectoryRows(rows, diagnostics) {
+  const deduped = new Map();
+  let duplicateCount = 0;
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const identity = _getReporterDirectoryRowIdentity(row);
+    if (!identity) continue;
+
+    if (!deduped.has(identity)) {
+      deduped.set(identity, row);
+      continue;
+    }
+
+    duplicateCount += 1;
+    const existing = deduped.get(identity);
+    const existingScore = _scoreReporterDirectoryRow(existing);
+    const nextScore = _scoreReporterDirectoryRow(row);
+    if (nextScore > existingScore) {
+      deduped.set(identity, row);
+      continue;
+    }
+    if (nextScore === existingScore) {
+      const existingUpdatedAt = _toDateOrNull(existing?.updatedAt || existing?.lastActivityAt || null)?.getTime() || 0;
+      const nextUpdatedAt = _toDateOrNull(row?.updatedAt || row?.lastActivityAt || null)?.getTime() || 0;
+      if (nextUpdatedAt > existingUpdatedAt) deduped.set(identity, row);
+    }
+  }
+
+  if (diagnostics && duplicateCount > 0) {
+    diagnostics.duplicateIdentityRows = duplicateCount;
+  }
+
+  return Array.from(deduped.values());
+}
+
+function _buildReporterDirectoryStateIntegrityReport(contacts) {
+  const rows = Array.isArray(contacts) ? contacts : [];
+  const byIdentity = new Map();
+  const invalidContacts = [];
+
+  const report = {
+    scannedCount: rows.length,
+    activeCount: 0,
+    removedCount: 0,
+    totalCount: 0,
+    invalidDirectoryStatusCount: 0,
+    duplicateIdentityCount: 0,
+    duplicateIdentityGroups: [],
+    totalEqualsStateSum: true,
+    valid: true,
+  };
+
+  for (const contact of rows) {
+    const rawDirectoryStatus = _normalizeStatusToken(contact?.directoryStatus || '');
+    if (!['active', 'removed'].includes(rawDirectoryStatus)) {
+      report.invalidDirectoryStatusCount += 1;
+      invalidContacts.push(contact);
+    }
+
+    const normalizedDirectoryStatus = _normalizePersistedReporterDirectoryStatus(contact);
+    if (normalizedDirectoryStatus === 'removed') report.removedCount += 1;
+    else report.activeCount += 1;
+
+    const identity = _getReporterDirectoryContactIdentity(contact);
+    if (!identity) continue;
+    if (!byIdentity.has(identity)) byIdentity.set(identity, []);
+    byIdentity.get(identity).push({
+      id: contact?._id ? String(contact._id) : null,
+      directoryStatus: normalizedDirectoryStatus,
+      rawDirectoryStatus: rawDirectoryStatus || null,
+    });
+  }
+
+  report.totalCount = report.activeCount + report.removedCount;
+  report.totalEqualsStateSum = report.totalCount === report.activeCount + report.removedCount;
+
+  for (const [identity, items] of byIdentity.entries()) {
+    if (items.length <= 1) continue;
+    report.duplicateIdentityCount += items.length - 1;
+    report.duplicateIdentityGroups.push({ identity, items });
+  }
+
+  report.valid = report.invalidDirectoryStatusCount === 0 && report.duplicateIdentityGroups.length === 0 && report.totalEqualsStateSum === true;
+  report.invalidContacts = invalidContacts.slice(0, 25).map((contact) => ({
+    id: contact?._id ? String(contact._id) : null,
+    email: _normalizeEmail(contact?.email || null),
+    directoryStatus: contact?.directoryStatus ?? null,
+    inferredDirectoryStatus: _normalizePersistedReporterDirectoryStatus(contact),
+  }));
+
+  return report;
+}
+
+async function _repairReporterDirectoryStateIntegrity({ dryRun = true } = {}) {
+  const contacts = await ReporterContact.find({}).select({
+    _id: 1,
+    email: 1,
+    emailLower: 1,
+    reporterKey: 1,
+    phoneFull: 1,
+    phoneNumber: 1,
+    status: 1,
+    directoryStatus: 1,
+    archivedAt: 1,
+    deletedAt: 1,
+    restoredAt: 1,
+  }).lean();
+
+  const pendingUpdates = [];
+  for (const contact of contacts) {
+    const normalizedDirectoryStatus = _normalizePersistedReporterDirectoryStatus(contact);
+    const currentDirectoryStatus = _normalizeStatusToken(contact?.directoryStatus || '');
+    if (currentDirectoryStatus !== normalizedDirectoryStatus) {
+      pendingUpdates.push({
+        id: String(contact._id),
+        email: _normalizeEmail(contact?.email || null),
+        from: currentDirectoryStatus || null,
+        to: normalizedDirectoryStatus,
+      });
+    }
+  }
+
+  if (!dryRun && pendingUpdates.length) {
+    await ReporterContact.bulkWrite(
+      pendingUpdates.map((item) => ({
+        updateOne: {
+          filter: { _id: item.id },
+          update: { $set: { directoryStatus: item.to } },
+        },
+      }))
+    );
+  }
+
+  const integrityContacts = !dryRun && pendingUpdates.length
+    ? await ReporterContact.find({}).select({
+      _id: 1,
+      email: 1,
+      emailLower: 1,
+      reporterKey: 1,
+      phoneFull: 1,
+      phoneNumber: 1,
+      status: 1,
+      directoryStatus: 1,
+      archivedAt: 1,
+      deletedAt: 1,
+      restoredAt: 1,
+    }).lean()
+    : contacts;
+
+  return {
+    dryRun,
+    repairedCount: dryRun ? 0 : pendingUpdates.length,
+    pendingRepairCount: pendingUpdates.length,
+    repairedContacts: pendingUpdates.slice(0, 100),
+    integrity: _buildReporterDirectoryStateIntegrityReport(integrityContacts),
+  };
+}
+
 async function _loadReporterDirectoryRows(req) {
   const diagnostics = {
     skipped: { total: 0, reasons: {} },
     effectiveFilters: {},
+    inferredRows: { included: 0, omitted: 0 },
   };
   const contacts = await ReporterContact.find({}).lean();
   const allKeys = contacts.flatMap(_contactKeysForContact).filter(Boolean);
@@ -1714,11 +2521,24 @@ async function _loadReporterDirectoryRows(req) {
     })
     .map((row) => _buildCompactDirectoryRow(_buildInferredDirectoryContact(row), row));
 
-  const mergedRows = _sortReporterDirectoryRows(_filterReporterDirectoryRows([...contactRows, ...inferredRows], req, diagnostics));
+  // The admin directory contract must expose stable ReporterContact ids in both active and removed views.
+  // Do not mix inferred submission-only rows into the default active payload.
+  const includeInferredRows = _parseBooleanQuery(req?.query?.includeInferred) === true;
+  diagnostics.inferredRows.included = includeInferredRows ? inferredRows.length : 0;
+  diagnostics.inferredRows.omitted = includeInferredRows ? 0 : inferredRows.length;
+
+  const reporterContactRows = _dedupeReporterDirectoryRows(contactRows, diagnostics);
+  const sourceRows = includeInferredRows ? _dedupeReporterDirectoryRows([...reporterContactRows, ...inferredRows], diagnostics) : reporterContactRows;
+  const countRows = _sortReporterDirectoryRows(_filterReporterDirectoryRows(reporterContactRows, { ...req, query: _buildReporterDirectoryCountQuery(req) }));
+  const counts = _buildReporterDirectoryCountsPayload(countRows);
+  const summary = _buildReporterDirectorySummaryPayload(countRows);
+  const mergedRows = _sortReporterDirectoryRows(_filterReporterDirectoryRows(sourceRows, req, diagnostics));
+  diagnostics.integrity = _buildReporterDirectoryStateIntegrityReport(contacts);
   return {
     sourceContactCount: contacts.length,
     rows: mergedRows,
-    summary: _buildReporterDirectorySummaryPayload(mergedRows),
+    summary,
+    counts,
     diagnostics,
   };
 }
@@ -1726,22 +2546,37 @@ async function _loadReporterDirectoryRows(req) {
 // GET /api/admin/community-reporter/contacts
 async function adminListReporterContacts(req, res) {
   try {
-    if (!_isMongoReady()) {
-      return res.status(503).json({ success: false, message: 'Database not connected' });
-    }
-
+    _logReporterContactsApi(req, { ok: true });
     const page = _parsePositiveIntQuery(req.query.page, 1, { min: 1 });
     const limit = _parsePositiveIntQuery(req.query.limit, 50, { min: 1, max: 200 });
+    if (!_isMongoReady()) {
+      const payload = _buildEmptyReporterContactsListResponse({ page, limit });
+      _logReporterContactsApi(req, { ok: true, count: 0, error: 'db_not_ready_degraded_empty_list' });
+      return res.status(200).json(payload);
+    }
     const skip = (page - 1) * limit;
 
-    const { rows, summary, diagnostics, sourceContactCount } = await _loadReporterDirectoryRows(req);
+    const { rows, summary, counts, diagnostics, sourceContactCount } = await _loadReporterDirectoryRows(req);
     const total = rows.length;
     const hasRealFilters = _hasRealReporterDirectoryFilters(diagnostics?.effectiveFilters);
     const shouldFallbackToFirstPage = !hasRealFilters && total > 0 && skip >= total;
     const effectivePage = shouldFallbackToFirstPage ? 1 : page;
     const effectiveSkip = shouldFallbackToFirstPage ? 0 : skip;
     const items = rows.slice(effectiveSkip, effectiveSkip + limit);
-    const stats = _buildReporterDirectoryStatsPayload(summary);
+    const stats = _buildReporterDirectoryStatsPayload(summary, counts);
+
+    _logReporterContactPipeline({
+      stage: 'directory.list.payload',
+      total,
+      sample: (items || []).slice(0, 5).map((item) => ({
+        email: item?.email || null,
+        storedPhone: item?.fullPhone || item?.phone || null,
+        storedWhatsapp: item?.whatsappNumber || item?.whatsapp || null,
+        listPayloadPhone: item?.phone || null,
+        listPayloadWhatsapp: item?.whatsapp || item?.whatsappNumber || null,
+        reporterContactId: item?.reporterContactId || item?.id || null,
+      })),
+    });
 
     _logReporterContactListShapeDiagnostics(req, items);
 
@@ -1780,9 +2615,32 @@ async function adminListReporterContacts(req, res) {
       totalRowsReturned: total,
       skippedRows: diagnostics?.skipped,
     });
-    return res.status(200).json({ ok: true, success: true, items, total, page: effectivePage, limit, summary, stats });
+    _logReporterContactsApi(req, { ok: true, count: items.length });
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      items,
+      total,
+      viewCount: total,
+      totalReporters: counts.totalCount,
+      activeCount: counts.activeCount,
+      removedCount: counts.removedCount,
+      totalCount: counts.totalCount,
+      verifiedCount: Number(summary?.verified || 0),
+      missingPhoneCount: Number(summary?.missingPhone || 0),
+      missingLocationCount: Number(summary?.missingLocation || 0),
+      activeThisMonth: Number(summary?.activeThisMonth || 0),
+      newThisMonth: Number(summary?.newThisMonth || 0),
+      lastSubmission: summary?.lastSubmissionAt || null,
+      integrity: diagnostics?.integrity || null,
+      page: effectivePage,
+      limit,
+      summary,
+      stats,
+    });
   } catch (err) {
     console.error('[ADMIN_COMMUNITY_REPORTER][contacts] error', err?.message || err);
+    _logReporterContactsApi(req, { ok: false, error: err?.message || 'contacts_list_failed' });
     return res.status(500).json({ success: false, message: 'Failed to load reporter contacts' });
   }
 }
@@ -1793,12 +2651,67 @@ async function getReporterContactDirectorySummary(req, res) {
       return res.status(503).json({ success: false, message: 'Database not connected' });
     }
 
-    const { summary } = await _loadReporterDirectoryRows(req);
-    const stats = _buildReporterDirectoryStatsPayload(summary);
-    return res.status(200).json({ ok: true, success: true, summary, stats });
+    const { summary, counts, diagnostics } = await _loadReporterDirectoryRows(req);
+    const stats = _buildReporterDirectoryStatsPayload(summary, counts);
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      totalReporters: counts.totalCount,
+      activeCount: counts.activeCount,
+      removedCount: counts.removedCount,
+      totalCount: counts.totalCount,
+      verifiedCount: Number(summary?.verified || 0),
+      missingPhoneCount: Number(summary?.missingPhone || 0),
+      missingLocationCount: Number(summary?.missingLocation || 0),
+      activeThisMonth: Number(summary?.activeThisMonth || 0),
+      newThisMonth: Number(summary?.newThisMonth || 0),
+      lastSubmission: summary?.lastSubmissionAt || null,
+      integrity: diagnostics?.integrity || null,
+      summary,
+      stats,
+    });
   } catch (err) {
     console.error('[ADMIN_COMMUNITY_REPORTER][contacts-summary] error', err?.message || err);
     return res.status(500).json({ success: false, message: 'Failed to load reporter contact summary' });
+  }
+}
+
+async function getReporterContactDirectoryStateIntegrity(req, res) {
+  try {
+    if (!_isMongoReady()) {
+      return _jsonError(res, 503, { code: 'DB_NOT_READY', message: 'Database not connected' });
+    }
+
+    const report = await _repairReporterDirectoryStateIntegrity({ dryRun: true });
+    return res.status(200).json({ ok: true, success: true, ...report });
+  } catch (err) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][contacts-integrity] error', err?.message || err);
+    return res.status(500).json({ success: false, message: 'Failed to inspect reporter contact directory integrity' });
+  }
+}
+
+async function repairReporterContactDirectoryStateIntegrity(req, res) {
+  const actor = _actorLabel(req);
+  try {
+    if (!_isMongoReady()) {
+      return _jsonError(res, 503, { code: 'DB_NOT_READY', message: 'Database not connected' });
+    }
+
+    const dryRun = _parseBool(req?.query?.dryRun) !== false && _parseBool(req?.body?.dryRun) !== false;
+    const report = await _repairReporterDirectoryStateIntegrity({ dryRun });
+
+    await logAudit(req, 'COMMUNITY_REPORTER_CONTACT_DIRECTORY_STATE_INTEGRITY_REPAIR', null, {
+      actor,
+      dryRun,
+      repairedCount: report.repairedCount,
+      pendingRepairCount: report.pendingRepairCount,
+      integrity: report.integrity,
+    });
+
+    return res.status(200).json({ ok: true, success: true, actor, ...report });
+  } catch (err) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][contacts-integrity-repair] error', err?.message || err);
+    return res.status(500).json({ success: false, message: 'Failed to repair reporter contact directory integrity' });
   }
 }
 
@@ -1833,8 +2746,9 @@ function _buildReporterProfileContract(contact, profile, methods, tasks, activit
   const alternatePhone = _normalizePhoneValue(contact?.alternatePhone || null);
   const verification = _normalizeVerificationForDirectory(contact?.verificationLevel || profile?.verificationTier || null) || 'community_default';
   const reporterType = _normalizeReporterTypeForDirectory(contact?.reporterType || null) || 'community';
-  const status = _normalizeDirectoryStatus(contact?.status || profile?.status || null) || 'active';
-  const directoryVisibility = _buildDirectoryVisibilityState(status);
+  const directoryStatus = _resolveReporterDirectoryStatusValue(contact || row || profile || null);
+  const moderationStatus = _normalizeStatusToken(contact?.status || profile?.status || null) || 'active';
+  const directoryVisibility = _buildDirectoryVisibilityState(directoryStatus);
   const flags = _buildDirectoryQualityFlags({
     phoneFull: fullPhone,
     verification,
@@ -1902,7 +2816,7 @@ function _buildReporterProfileContract(contact, profile, methods, tasks, activit
     contact?.updatedAt ||
     null
   );
-  const resolvedCoverageScope = _firstNonEmptyString(profile?.coverageScope, coverageItems.find((area) => area && area.isPrimary)?.scope) || null;
+  const resolvedCoverageScope = _firstNonEmptyString(contact?.coverageScope, profile?.coverageScope, coverageItems.find((area) => area && area.isPrimary)?.scope) || null;
   const primaryCoverage = coverageItems.find((area) => area && area.isPrimary) || {
     scope: resolvedCoverageScope,
     country: location.country,
@@ -1929,8 +2843,10 @@ function _buildReporterProfileContract(contact, profile, methods, tasks, activit
     reporterKey: _firstNonEmptyString(contact?.reporterKey, _normalizeEmail(contact?.email || profile?.primaryEmail || null)),
     reporterType,
     verification,
-    status,
+    status: directoryVisibility.directoryStatus,
+    rawStatus: moderationStatus,
     directoryState: directoryVisibility.directoryState,
+    directoryStatus: directoryVisibility.directoryStatus,
     isRemovedFromDirectory: directoryVisibility.isRemovedFromDirectory,
     isVisibleInDirectory: directoryVisibility.isVisibleInDirectory,
     portalAccessEnabled: portal.accessEnabled,
@@ -2000,6 +2916,10 @@ function _buildReporterProfileContract(contact, profile, methods, tasks, activit
     whatsappNumber,
     alternatePhone,
     contact: contactBlock,
+    city: location.city,
+    district: location.district,
+    state: location.state,
+    country: location.country,
     location,
     area: location.area,
     areaType: _firstNonEmptyString(contact?.areaType) || null,
@@ -2007,23 +2927,20 @@ function _buildReporterProfileContract(contact, profile, methods, tasks, activit
     beats: beatItems,
     reporterType,
     verification,
-    status,
+    status: directoryVisibility.directoryStatus,
+    rawStatus: moderationStatus,
     directoryState: directoryVisibility.directoryState,
+    directoryStatus: directoryVisibility.directoryStatus,
     isRemovedFromDirectory: directoryVisibility.isRemovedFromDirectory,
     isVisibleInDirectory: directoryVisibility.isVisibleInDirectory,
     directory: {
       state: directoryVisibility.directoryState,
-      status,
+      status: directoryVisibility.directoryStatus,
+      rawStatus: moderationStatus,
       isRemovedFromDirectory: directoryVisibility.isRemovedFromDirectory,
       isVisibleInDirectory: directoryVisibility.isVisibleInDirectory,
       removedAt: _toIsoOrNull(contact?.archivedAt || null),
       removedBy: _firstNonEmptyString(contact?.archivedBy),
-      canRemoveFromDirectory: directoryVisibility.isRemovedFromDirectory !== true,
-      canRestore: directoryVisibility.isRemovedFromDirectory,
-      canDeletePermanently: directoryVisibility.isRemovedFromDirectory,
-      softRemoveRoute: contact?._id ? `/api/admin/community-reporter/contacts/${String(contact._id)}/remove-from-directory` : null,
-      restoreRoute: contact?._id ? `/api/admin/community-reporter/contacts/${String(contact._id)}/restore` : null,
-      permanentDeleteRoute: contact?._id ? `/api/admin/community-reporter/contacts/${String(contact._id)}/permanent-delete` : null,
     },
     portal,
     organisationName: _firstNonEmptyString(contact?.organisationName),
@@ -2041,8 +2958,11 @@ function _buildReporterProfileContract(contact, profile, methods, tasks, activit
       needsVerification: flags.needsVerification,
     },
     stats: {
+      stories: Number(row?.totalStories ?? profileStats.totalStories ?? 0),
       totalStories: Number(row?.totalStories ?? profileStats.totalStories ?? 0),
+      approved: Number(row?.approvedStories ?? profileStats.approvedStories ?? 0),
       approvedStories: Number(row?.approvedStories ?? profileStats.approvedStories ?? 0),
+      pending: Number(row?.pendingStories ?? profileStats.pendingStories ?? 0),
       pendingStories: Number(row?.pendingStories ?? profileStats.pendingStories ?? 0),
       rejectedStories: Number(row?.rejectedStories ?? profileStats.rejectedStories ?? 0),
       withdrawnStories: Number(row?.withdrawnStories ?? profileStats.withdrawnStories ?? 0),
@@ -2050,8 +2970,13 @@ function _buildReporterProfileContract(contact, profile, methods, tasks, activit
       firstStoryAt: _toIsoOrNull(contact?.stats?.firstStoryAt || null),
       lastStoryAt: _toIsoOrNull(row?.lastStoryAt || profileStats.lastStoryAt || null),
       lastSubmissionAt: _toIsoOrNull(row?.lastSubmissionAt || contact?.stats?.lastSubmissionAt || profileStats.lastStoryAt || null),
+      lastSubmission: _toIsoOrNull(row?.lastSubmissionAt || contact?.stats?.lastSubmissionAt || profileStats.lastStoryAt || null),
       lastStoryTitle: _firstNonEmptyString(row?.lastStoryTitle, contact?.stats?.lastStoryTitle, profileStats.lastStoryTitle),
     },
+    stories: Number(row?.totalStories ?? profileStats.totalStories ?? 0),
+    approved: Number(row?.approvedStories ?? profileStats.approvedStories ?? 0),
+    pending: Number(row?.pendingStories ?? profileStats.pendingStories ?? 0),
+    lastSubmission: _toIsoOrNull(row?.lastSubmissionAt || contact?.stats?.lastSubmissionAt || profileStats.lastStoryAt || null),
     profile: profile ? {
       id: String(profile._id),
       status: _normalizeStatusToken(profile.status) || 'active',
@@ -2117,6 +3042,7 @@ async function _buildReporterDrawerPayload(contact) {
 
 async function getReporterContactDetail(req, res) {
   try {
+    _logReporterContactsApi(req, { ok: true, id: String(req.params.id || '').trim() });
     if (!_isMongoReady()) {
       return res.status(503).json({ success: false, message: 'Database not connected' });
     }
@@ -2127,6 +3053,16 @@ async function getReporterContactDetail(req, res) {
     }
 
     const payload = await _buildReporterDrawerPayload(contact);
+    _logReporterContactPipeline({
+      stage: 'directory.detail.payload',
+      email: payload?.row?.email || _normalizeEmail(contact?.email || null),
+      storedPhone: _normalizePhoneValue(contact?.phoneFull || contact?.phoneNumber || null),
+      storedWhatsapp: _normalizePhoneValue(contact?.whatsappNumber || null),
+      reporterContactId: payload?.row?.id || String(contact?._id || ''),
+      listPayloadPhone: payload?.row?.phone || null,
+      detailPayloadPhone: payload?.profile?.phone || payload?.profile?.contact?.phone || null,
+      detailPayloadWhatsapp: payload?.profile?.whatsapp || payload?.profile?.contact?.whatsapp || null,
+    });
     const methodPhone = _extractMethodValue(payload?.profile?.contactMethods, 'phone');
     const methodWhatsapp = _extractMethodValue(payload?.profile?.contactMethods, 'whatsapp');
     _logAdminProfilePhoneDiagnostics(req, {
@@ -2176,9 +3112,11 @@ async function getReporterContactDetail(req, res) {
       activityCount: payload?.profile?.tabCounts?.activity || 0,
       fieldPresence: _buildFieldPresenceMap(payload?.profile),
     });
+    _logReporterContactsApi(req, { ok: true, id: payload?.row?.id || String(contact?._id || ''), count: 1 });
     return res.status(200).json({ success: true, item: payload.row, profile: payload.profile });
   } catch (err) {
     console.error('[ADMIN_COMMUNITY_REPORTER][contact-detail] error', err?.message || err);
+    _logReporterContactsApi(req, { ok: false, id: String(req.params.id || '').trim(), error: err?.message || 'contact_detail_failed' });
     return res.status(500).json({ success: false, message: 'Failed to load reporter contact detail' });
   }
 }
@@ -2195,6 +3133,16 @@ async function getReporterContactProfile(req, res) {
     }
 
     const payload = await _buildReporterDrawerPayload(contact);
+    _logReporterContactPipeline({
+      stage: 'directory.profile.payload',
+      email: payload?.row?.email || _normalizeEmail(contact?.email || null),
+      storedPhone: _normalizePhoneValue(contact?.phoneFull || contact?.phoneNumber || null),
+      storedWhatsapp: _normalizePhoneValue(contact?.whatsappNumber || null),
+      reporterContactId: payload?.profile?.id || String(contact?._id || ''),
+      listPayloadPhone: payload?.row?.phone || null,
+      detailPayloadPhone: payload?.profile?.phone || payload?.profile?.contact?.phone || null,
+      detailPayloadWhatsapp: payload?.profile?.whatsapp || payload?.profile?.contact?.whatsapp || null,
+    });
     const methodPhone = _extractMethodValue(payload?.profile?.contactMethods, 'phone');
     const methodWhatsapp = _extractMethodValue(payload?.profile?.contactMethods, 'whatsapp');
     _logAdminProfilePhoneDiagnostics(req, {
@@ -2274,7 +3222,7 @@ function _applyDirectoryManualUpdateToContact(contact, payload, actor) {
     { keys: ['beat', 'primaryBeat'], target: 'primaryBeat', normalize: _normalizeBeatLabel, overrideKey: 'primaryBeat' },
     { keys: ['verification', 'verificationLevel'], target: 'verificationLevel', normalize: _normalizeVerificationInput, overrideKey: 'verificationLevel' },
     { keys: ['reporterType', 'type'], target: 'reporterType', normalize: _normalizeReporterTypeForDirectory, overrideKey: 'reporterType' },
-    { keys: ['status'], target: 'status', normalize: _normalizeDirectoryStatus, overrideKey: 'status' },
+    { keys: ['status', 'directoryStatus'], target: 'directoryStatus', normalize: _normalizeDirectoryStatus, overrideKey: 'directoryStatus' },
     { keys: ['notes'], target: 'notes', normalize: _firstNonEmptyString, overrideKey: 'notes' },
   ];
 
@@ -2358,6 +3306,7 @@ async function updateReporterContactDirectoryProfile(req, res) {
 // GET /api/admin/community-reporter/contacts/:id/stories
 async function adminListReporterContactStories(req, res) {
   try {
+    _logReporterContactsApi(req, { ok: true, id: String(req.params.id || '').trim() });
     if (!_isMongoReady()) {
       return res.status(503).json({ success: false, message: 'Database not connected' });
     }
@@ -2379,6 +3328,7 @@ async function adminListReporterContactStories(req, res) {
 
     const or = _buildSubmissionMatchForContact(contact);
     if (!or.length) {
+      _logReporterContactsApi(req, { ok: true, id, count: 0 });
       return res.status(200).json({ success: true, items: [], total: 0, page, limit });
     }
 
@@ -2413,9 +3363,11 @@ async function adminListReporterContactStories(req, res) {
       reporterName: d.reporterName || d.name || (d.contact && d.contact.name) || null,
     }));
 
+    _logReporterContactsApi(req, { ok: true, id, count: items.length });
     return res.status(200).json({ success: true, items, total, page, limit });
   } catch (err) {
     console.error('[ADMIN_COMMUNITY_REPORTER][contact-stories] error', err?.message || err);
+    _logReporterContactsApi(req, { ok: false, id: String(req.params.id || '').trim(), error: err?.message || 'contact_stories_failed' });
     return res.status(500).json({ success: false, message: 'Failed to load stories' });
   }
 }
@@ -2469,6 +3421,13 @@ async function backfillReporterContactsFromSubmissions(req, res) {
           _districtRaw: { $ifNull: ['$locationDetail.district', '$district'] },
           _stateRaw: { $ifNull: ['$location.state', { $ifNull: ['$locationDetail.state', '$state'] }] },
           _countryRaw: { $ifNull: ['$location.country', { $ifNull: ['$locationDetail.country', '$country'] }] },
+          _areaRaw: '$area',
+          _areaTypeRaw: '$areaType',
+          _coverageScopeRaw: '$coverageScope',
+          _beatRaw: { $ifNull: ['$beat', '$primaryBeat'] },
+          _organisationRaw: '$organisationName',
+          _portalAccessEnabledRaw: '$portalAccessEnabled',
+          _portalAuthVersionRaw: '$portalAuthVersion',
           _statusRaw: { $ifNull: ['$status', ''] },
         },
       },
@@ -2623,6 +3582,69 @@ async function backfillReporterContactsFromSubmissions(req, res) {
                     ],
                   },
                 },
+                areaPick: {
+                  $max: {
+                    $cond: [
+                      { $ne: ['$_areaRaw', null] },
+                      { ts: '$createdAt', v: '$_areaRaw' },
+                      { ts: epoch, v: null },
+                    ],
+                  },
+                },
+                areaTypePick: {
+                  $max: {
+                    $cond: [
+                      { $ne: ['$_areaTypeRaw', null] },
+                      { ts: '$createdAt', v: '$_areaTypeRaw' },
+                      { ts: epoch, v: null },
+                    ],
+                  },
+                },
+                coverageScopePick: {
+                  $max: {
+                    $cond: [
+                      { $ne: ['$_coverageScopeRaw', null] },
+                      { ts: '$createdAt', v: '$_coverageScopeRaw' },
+                      { ts: epoch, v: null },
+                    ],
+                  },
+                },
+                beatPick: {
+                  $max: {
+                    $cond: [
+                      { $ne: ['$_beatRaw', null] },
+                      { ts: '$createdAt', v: '$_beatRaw' },
+                      { ts: epoch, v: null },
+                    ],
+                  },
+                },
+                organisationPick: {
+                  $max: {
+                    $cond: [
+                      { $ne: ['$_organisationRaw', null] },
+                      { ts: '$createdAt', v: '$_organisationRaw' },
+                      { ts: epoch, v: null },
+                    ],
+                  },
+                },
+                portalAccessPick: {
+                  $max: {
+                    $cond: [
+                      { $ne: ['$_portalAccessEnabledRaw', null] },
+                      { ts: '$createdAt', v: '$_portalAccessEnabledRaw' },
+                      { ts: epoch, v: null },
+                    ],
+                  },
+                },
+                portalAuthVersionPick: {
+                  $max: {
+                    $cond: [
+                      { $ne: ['$_portalAuthVersionRaw', null] },
+                      { ts: '$createdAt', v: '$_portalAuthVersionRaw' },
+                      { ts: epoch, v: null },
+                    ],
+                  },
+                },
                 headlinePick: {
                   $max: {
                     $cond: [
@@ -2661,6 +3683,13 @@ async function backfillReporterContactsFromSubmissions(req, res) {
         const district = r.districtPick && r.districtPick.v ? String(r.districtPick.v).trim() : '';
         let state = r.statePick && r.statePick.v ? String(r.statePick.v).trim() : '';
         let country = r.countryPick && r.countryPick.v ? String(r.countryPick.v).trim() : '';
+        const area = r.areaPick && r.areaPick.v ? String(r.areaPick.v).trim() : '';
+        const areaType = r.areaTypePick && r.areaTypePick.v ? String(r.areaTypePick.v).trim() : '';
+        const coverageScope = r.coverageScopePick && r.coverageScopePick.v ? String(r.coverageScopePick.v).trim() : '';
+        const beat = r.beatPick && r.beatPick.v ? String(r.beatPick.v).trim() : '';
+        const organisationName = r.organisationPick && r.organisationPick.v ? String(r.organisationPick.v).trim() : '';
+        const portalAccessEnabled = r.portalAccessPick ? r.portalAccessPick.v : undefined;
+        const portalAuthVersion = r.portalAuthVersionPick ? r.portalAuthVersionPick.v : undefined;
 
         // If older docs stored "City, State" into city, split it.
         let cityOut = city;
@@ -2680,6 +3709,13 @@ async function backfillReporterContactsFromSubmissions(req, res) {
           district: district || null,
           state: state || null,
           country: country || null,
+          area: area || null,
+          areaType: areaType || null,
+          coverageScope: coverageScope || null,
+          beat: beat || null,
+          organisationName: organisationName || null,
+          portalAccessEnabled,
+          portalAuthVersion,
           reporterType: 'community',
           verificationLevel: 'community_default',
           stats: {
@@ -2743,7 +3779,12 @@ async function backfillReporterContactsFromSubmissions(req, res) {
       }
     }
 
-    const summaryDocs = await ReporterContact.find({ status: { $nin: ['archived', 'banned', 'deleted'] } })
+    const summaryDocs = await ReporterContact.find({
+      $or: [
+        { directoryStatus: 'active' },
+        { directoryStatus: { $exists: false }, status: { $nin: ['archived', 'banned', 'deleted'] } },
+      ],
+    })
       .select({
         fullName: 1,
         email: 1,
@@ -2758,6 +3799,7 @@ async function backfillReporterContactsFromSubmissions(req, res) {
         reporterType: 1,
         verificationLevel: 1,
         status: 1,
+        directoryStatus: 1,
         stats: 1,
         createdAt: 1,
         updatedAt: 1,
@@ -3452,25 +4494,69 @@ async function submitCommunityReport(req, res) {
 
     // Auto-upsert into Reporter Contact Directory (email is primary key)
     try {
+      _logReporterContactPipeline({
+        stage: 'controller.submit.incoming',
+        email,
+        incomingPhone: body.phone || body.phoneNumber || body.mobile || body.mobileNumber || body.contactNumber || body.contact?.phone || null,
+        incomingWhatsapp: body.whatsapp || body.whatsappNumber || body.contact?.whatsappNumber || null,
+        incomingCity: locationObj ? (locationObj.city ?? null) : null,
+        incomingDistrict: locationObj ? (locationObj.district ?? null) : (body.district ?? null),
+        incomingState: locationObj ? (locationObj.state ?? null) : null,
+        incomingCountry: locationObj ? (locationObj.country ?? null) : null,
+        incomingBeat: body.beat || body.primaryBeat || null,
+        incomingArea: locationObj ? (locationObj.area ?? null) : (body.area ?? null),
+        incomingAreaType: body.areaType ?? null,
+        incomingCoverageScope: body.coverageScope ?? null,
+        incomingOrganisation: body.organisationName || body.organizationName || body.organization || null,
+        reporterContactId: submission?.reporterId ? String(submission.reporterId) : null,
+      });
       const phone = String(
         body.phone ||
         body.phoneNumber ||
+        body.mobile ||
+        body.mobileNumber ||
+        body.contactNumber ||
         (body.contact && body.contact.phone) ||
-        (reporter && (reporter.phone || reporter.phoneNumber)) ||
+        (body.contact && body.contact.whatsappNumber) ||
+        (reporter && (reporter.phone || reporter.phoneNumber || reporter.mobile || reporter.mobileNumber || reporter.contactNumber)) ||
+        ''
+      ).trim();
+      const whatsapp = String(
+        body.whatsapp ||
+        body.whatsappNumber ||
+        (body.contact && body.contact.whatsappNumber) ||
+        (reporter && (reporter.whatsapp || reporter.whatsappNumber)) ||
         ''
       ).trim();
 
       const city = locationObj ? (locationObj.city ?? null) : null;
+      const district = locationObj ? (locationObj.district ?? null) : (body.district ?? null);
       const state = locationObj ? (locationObj.state ?? null) : null;
       const country = locationObj ? (locationObj.country ?? null) : null;
+      const area = locationObj ? (locationObj.area ?? null) : (body.area ?? null);
+      const areaType = body.areaType ?? null;
+      const coverageScope = body.coverageScope ?? null;
+      const beat = body.beat || body.primaryBeat || null;
+      const organisationName = body.organisationName || body.organizationName || body.organization || null;
+      const portalAccessEnabled = typeof req?.reporterPortal?.portalAccessEnabled === 'boolean' ? req.reporterPortal.portalAccessEnabled : true;
+      const portalAuthVersion = typeof req?.reporterPortal?.portalAuthVersion === 'number' ? req.reporterPortal.portalAuthVersion : 0;
 
       const { contactId } = await upsertReporterContact({
         name,
         email,
         phone: phone || undefined,
+        whatsapp: whatsapp || undefined,
         city: city || undefined,
+        district: district || undefined,
         state: state || undefined,
         country: country || undefined,
+        area: area || undefined,
+        areaType: areaType || undefined,
+        coverageScope: coverageScope || undefined,
+        beat: beat || undefined,
+        organisationName: organisationName || undefined,
+        portalAccessEnabled,
+        portalAuthVersion,
         reporterType: 'community',
         stats: {
           lastStoryAt: submission.createdAt || new Date(),
@@ -3484,6 +4570,25 @@ async function submitCommunityReport(req, res) {
           { $set: { reporterId: contactId } }
         ).catch(() => {});
       }
+
+      _logReporterContactPipeline({
+        stage: 'controller.submit.stored-submission',
+        email: submission.reporterEmailNorm || submission.reporterEmail || submission.email || null,
+        incomingPhone: body.phone || body.phoneNumber || body.mobile || body.mobileNumber || body.contactNumber || body.contact?.phone || null,
+        incomingWhatsapp: body.whatsapp || body.whatsappNumber || body.contact?.whatsappNumber || null,
+        storedPhone: submission.phone || submission.phoneNumber || submission.mobile || submission.mobileNumber || submission.contactNumber || submission.contact?.phone || null,
+        storedWhatsapp: submission.whatsapp || submission.whatsappNumber || submission.contact?.whatsappNumber || null,
+        storedCity: submission.city || submission.location?.city || submission.locationDetail?.city || null,
+        storedDistrict: submission.district || submission.locationDetail?.district || null,
+        storedState: submission.state || submission.location?.state || submission.locationDetail?.state || null,
+        storedCountry: submission.country || submission.location?.country || submission.locationDetail?.country || null,
+        storedArea: submission.area || null,
+        storedAreaType: submission.areaType || null,
+        storedCoverageScope: submission.coverageScope || null,
+        storedBeat: submission.beat || null,
+        storedOrganisation: submission.organisationName || null,
+        reporterContactId: contactId ? String(contactId) : (submission.reporterId ? String(submission.reporterId) : null),
+      });
     } catch (e) {
       console.error('[COMMUNITY_REPORTER][submit] contact upsert failed', e?.message || e);
     }
@@ -3550,6 +4655,7 @@ module.exports = {
   getCommunityReporterQueue,
   adminListReporterContacts,
   getReporterContactDirectorySummary,
+  getReporterContactDirectoryStateIntegrity,
   getReporterContactDetail,
   getReporterContactProfile,
   updateReporterContactDirectoryProfile,
@@ -3565,10 +4671,12 @@ module.exports = {
   listHiddenReporterContacts,
   archiveReporterContact,
   restoreReporterContact,
+  repairReporterContactDirectoryStateIntegrity,
   permanentlyDeleteReporterContact,
-  forcePermanentlyDeleteReporterContact,
   reassignReporterContactStories,
   bulkDeleteReporterContacts,
+  bulkRestoreReporterContacts,
+  bulkPermanentlyDeleteReporterContacts,
   deleteCommunityReporterStory,
   restoreCommunityReporterStory,
   withdrawCommunityReporterStory,
@@ -3577,14 +4685,22 @@ module.exports = {
   __test: {
     _applyDirectoryManualUpdateToContact,
     _buildBulkReporterContactMutationResponse,
+    _buildBulkReporterContactRestoreResponse,
+    _buildBulkReporterContactPermanentDeleteResponse,
     _buildCompactDirectoryRow,
+    _buildReporterDirectoryCountsPayload,
+    _buildReporterDirectoryStateIntegrityReport,
     _buildReporterDirectoryFilters,
     _buildReporterDirectorySummaryPayload,
     _buildReporterProfileContract,
     _filterReporterDirectoryRows,
+    _buildDirectoryVisibilityState,
     _hasPermanentDeleteConfirmation,
     _canPermanentlyDeleteReporterStatus,
+    _canRemoveReporterContactStatus,
+    _canRestoreReporterContactStatus,
     _isArchivedLikeReporterStatus,
     _resolveReporterContactIdFromRequest,
+    _normalizeBulkReporterContactIds,
   },
 };

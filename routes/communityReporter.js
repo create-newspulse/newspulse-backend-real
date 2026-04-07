@@ -26,6 +26,19 @@ const { requireAdminAuth } = require('../middleware/adminAuth');
 const { requireReporterPortalAuth } = require('../middleware/reporterPortalAuth');
 
 const router = express.Router();
+
+function shouldLogReporterContactPipeline() {
+  const enabled = String(process.env.REPORTER_CONTACT_PIPELINE_LOG || '').trim() === '1';
+  const env = String(process.env.NODE_ENV || '').toLowerCase();
+  return enabled || (env && env !== 'production');
+}
+
+function logReporterContactPipeline(payload) {
+  if (!shouldLogReporterContactPipeline()) return;
+  try {
+    console.log('[reporter-contact-pipeline]', payload);
+  } catch (_) {}
+}
 const REPORTER_EMAIL_LOOKUP_FIELDS = [
   'reporterEmailNorm',
   'reporterEmail',
@@ -569,13 +582,36 @@ router.post('/submit', requireCommunityReporterOpen, async (req, res) => {
     const { upsertReporterContactFromPayload, upsertReporterContactFromSubmission } = require('../services/reporterContactService');
     let reporterResult = null;
     try {
+      logReporterContactPipeline({
+        stage: 'community.submit.incoming',
+        email: emailNorm,
+        incomingPhone: req.body && (req.body.phone || req.body.phoneNumber || req.body.mobile || req.body.mobileNumber || req.body.contactNumber || null),
+        incomingWhatsapp: req.body && (req.body.whatsapp || req.body.whatsappNumber || null),
+        incomingCity: locationObj?.city || parsedCity || null,
+        incomingDistrict: (locationObj && locationObj.district) || req.body?.district || null,
+        incomingState: locationObj?.state || parsedState || null,
+        incomingCountry: locationObj?.country || parsedCountry || null,
+        incomingBeat: req.body?.beat || req.body?.primaryBeat || null,
+        incomingArea: req.body?.area || (locationObj && locationObj.area) || null,
+        incomingAreaType: req.body?.areaType || null,
+        incomingCoverageScope: req.body?.coverageScope || null,
+        incomingOrganisation: req.body?.organisationName || req.body?.organizationName || req.body?.organization || null,
+        reporterContactId: null,
+      });
       reporterResult = await upsertReporterContactFromPayload({
         name: nameNorm,
         email: emailNorm,
-        phone: (req.body && (req.body.phone || req.body.whatsapp)) || undefined,
+        phone: (req.body && (req.body.phone || req.body.phoneNumber || req.body.mobile || req.body.mobileNumber || req.body.contactNumber)) || undefined,
+        whatsapp: (req.body && (req.body.whatsapp || req.body.whatsappNumber)) || undefined,
         city: locationObj?.city || parsedCity || undefined,
+        district: (locationObj && locationObj.district) || req.body?.district || undefined,
         state: locationObj?.state || parsedState || undefined,
         country: locationObj?.country || parsedCountry || undefined,
+        beat: req.body?.beat || req.body?.primaryBeat || undefined,
+        area: req.body?.area || (locationObj && locationObj.area) || undefined,
+        areaType: req.body?.areaType || undefined,
+        coverageScope: req.body?.coverageScope || undefined,
+        organisationName: req.body?.organisationName || req.body?.organizationName || req.body?.organization || undefined,
         reporterType: 'community',
         stats: {
           lastStoryAt: new Date(),
@@ -609,16 +645,59 @@ router.post('/submit', requireCommunityReporterOpen, async (req, res) => {
       sourceType: 'community',
       reporterVerificationLevel: 'unverified',
       reporterId: reporterResult ? reporterResult.contactId : undefined,
+      phone: (body.phone || body.phoneNumber || body.mobile || body.mobileNumber || body.contactNumber || '').trim() || undefined,
+      phoneNumber: (body.phone || body.phoneNumber || body.mobile || body.mobileNumber || body.contactNumber || '').trim() || undefined,
+      mobile: (body.mobile || body.mobileNumber || '').trim() || undefined,
+      mobileNumber: (body.mobileNumber || body.mobile || '').trim() || undefined,
+      contactNumber: (body.contactNumber || body.phone || body.phoneNumber || '').trim() || undefined,
+      whatsapp: (body.whatsapp || body.whatsappNumber || '').trim() || undefined,
+      whatsappNumber: (body.whatsapp || body.whatsappNumber || '').trim() || undefined,
+      city: (locationObj?.city || parsedCity || '').trim() || undefined,
+      district: ((locationObj && locationObj.district) || body.district || '').trim() || undefined,
+      state: (locationObj?.state || parsedState || '').trim() || undefined,
+      country: (locationObj?.country || parsedCountry || '').trim() || undefined,
+      area: ((locationObj && locationObj.area) || body.area || '').trim() || undefined,
+      areaType: String(body.areaType || '').trim() || undefined,
+      coverageScope: String(body.coverageScope || '').trim() || undefined,
+      beat: String(body.beat || body.primaryBeat || '').trim() || undefined,
+      organisationName: String(body.organisationName || body.organizationName || body.organization || '').trim() || undefined,
+      organisationType: String(body.organisationType || body.organizationType || '').trim() || undefined,
       contact: {
         name: nameNorm,
         email: emailNorm,
         phone: (body.phone || body.contactPhone || '').trim() || undefined,
+        whatsappNumber: (body.whatsapp || body.whatsappNumber || '').trim() || undefined,
+      },
+      locationDetail: {
+        city: locationObj?.city || parsedCity || null,
+        district: (locationObj && locationObj.district) || body.district || null,
+        state: locationObj?.state || parsedState || null,
+        country: locationObj?.country || parsedCountry || null,
       },
       attachments,
       mediaUrl: (attachments[0] && attachments[0].url) || undefined,
       mediaLink: (attachments[0] && attachments[0].url) || undefined,
       ipAddress: req.ip ? String(req.ip) : undefined,
       userAgent: req.get('user-agent') ? String(req.get('user-agent')) : undefined,
+    });
+
+    logReporterContactPipeline({
+      stage: 'community.submit.stored-submission',
+      email: submission.reporterEmailNorm || submission.reporterEmail || submission.email || null,
+      incomingPhone: req.body && (req.body.phone || req.body.phoneNumber || req.body.mobile || req.body.mobileNumber || req.body.contactNumber || null),
+      incomingWhatsapp: req.body && (req.body.whatsapp || req.body.whatsappNumber || null),
+      storedPhone: submission.phone || submission.phoneNumber || submission.mobile || submission.mobileNumber || submission.contactNumber || submission.contact?.phone || null,
+      storedWhatsapp: submission.whatsapp || submission.whatsappNumber || submission.contact?.whatsappNumber || null,
+      storedCity: submission.city || submission.location?.city || submission.locationDetail?.city || null,
+      storedDistrict: submission.district || submission.locationDetail?.district || null,
+      storedState: submission.state || submission.location?.state || submission.locationDetail?.state || null,
+      storedCountry: submission.country || submission.location?.country || submission.locationDetail?.country || null,
+      storedArea: submission.area || null,
+      storedAreaType: submission.areaType || null,
+      storedCoverageScope: submission.coverageScope || null,
+      storedBeat: submission.beat || null,
+      storedOrganisation: submission.organisationName || null,
+      reporterContactId: reporterResult && reporterResult.contactId ? String(reporterResult.contactId) : null,
     });
 
     // Contributor network linkage (best-effort; never blocks submission)

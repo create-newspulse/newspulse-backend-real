@@ -1,35 +1,61 @@
 const express = require('express');
 // Use middleware from root workspace (one level above nested project)
-const { requireAdminAuth } = require('../../middleware/adminAuth');
+const { requireAdminAuth, requireFounderOrAdmin } = require('../../middleware/adminAuth');
 const {
   safeDecodeURIComponent,
   normalizeEmail,
   findReporterContactByIdentifier,
   deriveReporterStatsFromSubmissionsByEmail,
 } = require('../../services/reporterLookup.service');
+const {
+  adminListReporterContacts,
+  getReporterContactDetail,
+  getReporterContactProfile,
+  adminListReporterContactStories,
+  listHiddenReporterContacts,
+  hideReporterContact,
+  bulkDeleteReporterContacts,
+  bulkRestoreReporterContacts,
+  bulkPermanentlyDeleteReporterContacts,
+} = require('../../controllers/communityReporterController');
 
 // Unified reporter-centric directory (ReporterProfile-based) lives in the root app.
 const { getReporterDirectory } = require('../../controllers/adminContributorNetworkController');
 
 const router = express.Router();
 
-// Admin reporter contacts (stub/minimal) - mirrors root implementation placeholder
-router.get('/reporter-contacts', requireAdminAuth, async (req, res) => {
-  try {
-    // For now return empty list; real aggregation lives in root app.
-    return res.json({
-      ok: true,
-      success: true,
-      items: [],
-      total: 0,
-      page: 1,
-      limit: 20,
-    });
-  } catch (err) {
-    console.error('[nested][reporter-contacts] error', err?.message || err);
-    return res.status(500).json({ ok: false, success: false, message: 'Failed to load community contacts' });
-  }
-});
+// Deprecated compatibility aliases for older admin builds.
+// Canonical family remains /api/admin/community-reporter/contacts/*.
+router.get('/reporter-contacts', requireAdminAuth, adminListReporterContacts);
+router.get('/reporter-contacts/removed', requireAdminAuth, listHiddenReporterContacts);
+router.get('/reporter-contacts/:id', requireAdminAuth, getReporterContactDetail);
+router.get('/reporter-contacts/:id/profile', requireAdminAuth, getReporterContactProfile);
+router.get('/reporter-contacts/:id/stories', requireAdminAuth, adminListReporterContactStories);
+router.post('/reporter-contacts/:id/hide', requireFounderOrAdmin, hideReporterContact);
+router.put('/reporter-contacts/:id/hide', requireFounderOrAdmin, hideReporterContact);
+router.patch('/reporter-contacts/:id/hide', requireFounderOrAdmin, hideReporterContact);
+router.delete('/reporter-contacts/:id/hide', requireFounderOrAdmin, hideReporterContact);
+router.post('/reporter-contacts/:id/remove', requireFounderOrAdmin, hideReporterContact);
+router.put('/reporter-contacts/:id/remove', requireFounderOrAdmin, hideReporterContact);
+router.patch('/reporter-contacts/:id/remove', requireFounderOrAdmin, hideReporterContact);
+router.delete('/reporter-contacts/:id/remove', requireFounderOrAdmin, hideReporterContact);
+router.post('/reporter-contacts/:id/remove-from-directory', requireFounderOrAdmin, hideReporterContact);
+router.put('/reporter-contacts/:id/remove-from-directory', requireFounderOrAdmin, hideReporterContact);
+router.patch('/reporter-contacts/:id/remove-from-directory', requireFounderOrAdmin, hideReporterContact);
+router.delete('/reporter-contacts/:id/remove-from-directory', requireFounderOrAdmin, hideReporterContact);
+router.post('/reporter-contacts/bulk-hide', requireFounderOrAdmin, bulkDeleteReporterContacts);
+router.post('/reporter-contacts/bulk-remove', requireFounderOrAdmin, bulkDeleteReporterContacts);
+router.post('/reporter-contacts/bulk-remove-from-directory', requireFounderOrAdmin, bulkDeleteReporterContacts);
+router.post('/reporter-contacts/bulk-restore', requireFounderOrAdmin, bulkRestoreReporterContacts);
+router.post('/reporter-contacts/bulk-delete', requireFounderOrAdmin, bulkPermanentlyDeleteReporterContacts);
+router.post('/reporter-contacts/bulk-permanent-delete', requireFounderOrAdmin, bulkPermanentlyDeleteReporterContacts);
+
+router.get('/contributors/:id', requireAdminAuth, getReporterContactDetail);
+router.get('/contributors/:id/profile', requireAdminAuth, getReporterContactProfile);
+router.get('/contributors/:id/stories', requireAdminAuth, adminListReporterContactStories);
+router.get('/reporters/:id', requireAdminAuth, getReporterContactDetail);
+router.get('/reporters/:id/profile', requireAdminAuth, getReporterContactProfile);
+router.get('/reporters/:id/stories', requireAdminAuth, adminListReporterContactStories);
 
 // List stories for a single reporter (stub)
 router.get('/reporter-stories', requireAdminAuth, async (req, res) => {

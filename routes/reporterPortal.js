@@ -169,6 +169,19 @@ function firstNonEmpty(...values) {
   return '';
 }
 
+function shouldLogReporterContactPipeline() {
+  const enabled = String(process.env.REPORTER_CONTACT_PIPELINE_LOG || '').trim() === '1';
+  const env = String(process.env.NODE_ENV || '').toLowerCase();
+  return enabled || (env && env !== 'production');
+}
+
+function logReporterContactPipeline(payload) {
+  if (!shouldLogReporterContactPipeline()) return;
+  try {
+    console.log('[reporter-contact-pipeline]', payload);
+  } catch (_) {}
+}
+
 function normalizeToken(value) {
   return String(value || '')
     .trim()
@@ -548,6 +561,9 @@ function applySubmissionPatch(doc, payload = {}, reporter) {
   const phone = typeof payload.phone === 'string'
     ? payload.phone.trim()
     : (typeof payload.contactPhone === 'string' ? payload.contactPhone.trim() : undefined);
+  const whatsapp = typeof payload.whatsapp === 'string'
+    ? payload.whatsapp.trim()
+    : (typeof payload.whatsappNumber === 'string' ? payload.whatsappNumber.trim() : undefined);
   const location = payload.location;
   const locationText = typeof location === 'string' ? location.trim() : '';
   const locationParts = locationText ? locationText.split(',').map((part) => part.trim()).filter(Boolean) : [];
@@ -555,32 +571,87 @@ function applySubmissionPatch(doc, payload = {}, reporter) {
   const city = typeof payload.city === 'string'
     ? payload.city.trim()
     : (locationObj && typeof locationObj.city === 'string' ? locationObj.city.trim() : (locationParts[0] || ''));
+  const district = typeof payload.district === 'string'
+    ? payload.district.trim()
+    : (locationObj && typeof locationObj.district === 'string' ? locationObj.district.trim() : '');
   const state = typeof payload.state === 'string'
     ? payload.state.trim()
     : (locationObj && typeof locationObj.state === 'string' ? locationObj.state.trim() : (locationParts[1] || ''));
   const country = typeof payload.country === 'string'
     ? payload.country.trim()
     : (locationObj && typeof locationObj.country === 'string' ? locationObj.country.trim() : (locationParts[2] || ''));
+  const area = typeof payload.area === 'string'
+    ? payload.area.trim()
+    : (locationObj && typeof locationObj.area === 'string' ? locationObj.area.trim() : '');
+  const areaType = typeof payload.areaType === 'string' ? payload.areaType.trim() : '';
+  const coverageScope = typeof payload.coverageScope === 'string' ? payload.coverageScope.trim() : '';
+  const beat = typeof payload.beat === 'string'
+    ? payload.beat.trim()
+    : (typeof payload.primaryBeat === 'string' ? payload.primaryBeat.trim() : '');
+  const organisationName = typeof payload.organisationName === 'string'
+    ? payload.organisationName.trim()
+    : (typeof payload.organizationName === 'string'
+      ? payload.organizationName.trim()
+      : (typeof payload.organization === 'string' ? payload.organization.trim() : ''));
+  const organisationType = typeof payload.organisationType === 'string'
+    ? payload.organisationType.trim()
+    : (typeof payload.organizationType === 'string' ? payload.organizationType.trim() : '');
+  const reporterName = reporter && (reporter.fullName || reporter.name) ? String(reporter.fullName || reporter.name).trim() : '';
+  const reporterEmail = reporter && reporter.email ? String(reporter.email).trim().toLowerCase() : '';
+  const portalAccessEnabled = typeof reporter?.portalAccessEnabled === 'boolean'
+    ? reporter.portalAccessEnabled
+    : undefined;
+  const portalAuthVersion = typeof reporter?.portalAuthVersion === 'number'
+    ? reporter.portalAuthVersion
+    : undefined;
 
   if (headline !== undefined) doc.headline = headline;
   if (story !== undefined) doc.body = story;
   if (category !== undefined) doc.category = category || null;
-  if (locationText || locationObj || city || state || country) {
+  if (locationText || locationObj || city || district || state || country || area) {
     doc.location = {
       city: city || null,
       state: state || null,
       country: country || null,
     };
+    doc.locationDetail = {
+      city: city || null,
+      district: district || null,
+      state: state || null,
+      country: country || null,
+    };
     doc.city = city || undefined;
+    doc.district = district || undefined;
     doc.state = state || undefined;
     doc.country = country || undefined;
+    doc.area = area || undefined;
     doc.reporterLocation = locationText || city || undefined;
   }
+  if (areaType) doc.areaType = areaType;
+  if (coverageScope) doc.coverageScope = coverageScope;
+  if (beat) doc.beat = beat;
+  if (organisationName) doc.organisationName = organisationName;
+  if (organisationType) doc.organisationType = organisationType;
+  if (phone !== undefined) {
+    doc.phone = phone || undefined;
+    doc.phoneNumber = phone || undefined;
+    doc.contactNumber = phone || undefined;
+  }
+  if (whatsapp !== undefined) {
+    doc.whatsapp = whatsapp || undefined;
+    doc.whatsappNumber = whatsapp || undefined;
+  }
+  if (portalAccessEnabled !== undefined) {
+    doc.portalAccessEnabled = portalAccessEnabled;
+    doc.portalAuthStatus = portalAccessEnabled ? 'authenticated' : 'disabled';
+  }
+  if (portalAuthVersion !== undefined) doc.portalAuthVersion = portalAuthVersion;
 
   doc.contact = doc.contact && typeof doc.contact === 'object' ? doc.contact : {};
-  doc.contact.name = reporter.fullName || doc.contact.name || doc.reporterName || doc.name;
-  doc.contact.email = reporter.email || doc.contact.email || doc.reporterEmail || doc.email;
+  doc.contact.name = reporterName || doc.contact.name || doc.reporterName || doc.name;
+  doc.contact.email = reporterEmail || doc.contact.email || doc.reporterEmail || doc.email;
   if (phone !== undefined) doc.contact.phone = phone || undefined;
+  if (whatsapp !== undefined) doc.contact.whatsappNumber = whatsapp || undefined;
 
   const attachments = extractSubmissionAttachments(payload);
   if (attachments.length) {
@@ -1539,13 +1610,38 @@ router.post('/submissions', requireReporterPortalOpen, requireReporterPortalAuth
     }
 
     const { upsertReporterContactFromPayload } = require('../services/reporterContactService');
+    logReporterContactPipeline({
+      stage: 'portal.submit.incoming',
+      email: req.reporterPortal.email,
+      incomingPhone: req.body && (req.body.phone || req.body.contactPhone || null),
+      incomingWhatsapp: req.body && (req.body.whatsapp || req.body.whatsappNumber || null),
+      incomingCity: req.body && (req.body.city || (req.body.location && req.body.location.city) || reporterDoc.cityTownVillage || null),
+      incomingDistrict: req.body && (req.body.district || (req.body.location && req.body.location.district) || reporterDoc.districtName || null),
+      incomingState: req.body && (req.body.state || (req.body.location && req.body.location.state) || reporterDoc.stateName || null),
+      incomingCountry: req.body && (req.body.country || (req.body.location && req.body.location.country) || reporterDoc.country || null),
+      incomingBeat: req.body && (req.body.beat || req.body.primaryBeat || reporterDoc.primaryBeat || null),
+      incomingArea: req.body && (req.body.area || (req.body.location && req.body.location.area) || reporterDoc.areaName || null),
+      incomingAreaType: req.body && (req.body.areaType || reporterDoc.areaType || null),
+      incomingCoverageScope: req.body && (req.body.coverageScope || reporterDoc.coverageScope || null),
+      incomingOrganisation: req.body && (req.body.organisationName || req.body.organizationName || req.body.organization || reporterDoc.organisationName || null),
+      reporterContactId: reporterDoc && reporterDoc._id ? String(reporterDoc._id) : null,
+    });
     await upsertReporterContactFromPayload({
       name: reporterDoc.fullName,
       email: req.reporterPortal.email,
       phone: req.body && (req.body.phone || req.body.contactPhone),
-      city: req.body && (req.body.city || (req.body.location && req.body.location.city)),
-      state: req.body && (req.body.state || (req.body.location && req.body.location.state)),
-      country: req.body && (req.body.country || (req.body.location && req.body.location.country)),
+      whatsapp: req.body && (req.body.whatsapp || req.body.whatsappNumber),
+      city: req.body && (req.body.city || (req.body.location && req.body.location.city) || reporterDoc.cityTownVillage),
+      district: req.body && (req.body.district || (req.body.location && req.body.location.district) || reporterDoc.districtName),
+      state: req.body && (req.body.state || (req.body.location && req.body.location.state) || reporterDoc.stateName),
+      country: req.body && (req.body.country || (req.body.location && req.body.location.country) || reporterDoc.country),
+      beat: req.body && (req.body.beat || req.body.primaryBeat || reporterDoc.primaryBeat),
+      area: req.body && (req.body.area || (req.body.location && req.body.location.area) || reporterDoc.areaName),
+      areaType: req.body && (req.body.areaType || reporterDoc.areaType),
+      coverageScope: req.body && (req.body.coverageScope || reporterDoc.coverageScope),
+      organisationName: req.body && (req.body.organisationName || req.body.organizationName || req.body.organization || reporterDoc.organisationName),
+      portalAccessEnabled: reporterDoc.portalAccessEnabled !== false,
+      portalAuthVersion: typeof reporterDoc.portalAuthVersion === 'number' ? reporterDoc.portalAuthVersion : 0,
       reporterType: reporterDoc.reporterType || 'community',
     }).catch(() => null);
 
@@ -1568,10 +1664,29 @@ router.post('/submissions', requireReporterPortalOpen, requireReporterPortalAuth
       reporterId: reporterDoc._id,
       sourceType: reporterDoc.reporterType === 'journalist' ? 'journalist' : 'community',
       reporterVerificationLevel: mapVerificationLevelForSubmission(reporterDoc),
+      phone: String(req.body && (req.body.phone || req.body.contactPhone) || '').trim() || undefined,
+      phoneNumber: String(req.body && (req.body.phone || req.body.contactPhone) || '').trim() || undefined,
+      contactNumber: String(req.body && (req.body.phone || req.body.contactPhone) || '').trim() || undefined,
+      whatsapp: String(req.body && (req.body.whatsapp || req.body.whatsappNumber) || '').trim() || undefined,
+      whatsappNumber: String(req.body && (req.body.whatsapp || req.body.whatsappNumber) || '').trim() || undefined,
+      city: String(req.body && (req.body.city || (req.body.location && req.body.location.city) || reporterDoc.cityTownVillage) || '').trim() || undefined,
+      district: String(req.body && (req.body.district || (req.body.location && req.body.location.district) || reporterDoc.districtName) || '').trim() || undefined,
+      state: String(req.body && (req.body.state || (req.body.location && req.body.location.state) || reporterDoc.stateName) || '').trim() || undefined,
+      country: String(req.body && (req.body.country || (req.body.location && req.body.location.country) || reporterDoc.country) || '').trim() || undefined,
+      area: String(req.body && (req.body.area || (req.body.location && req.body.location.area) || reporterDoc.areaName) || '').trim() || undefined,
+      areaType: String(req.body && (req.body.areaType || reporterDoc.areaType) || '').trim() || undefined,
+      coverageScope: String(req.body && (req.body.coverageScope || reporterDoc.coverageScope) || '').trim() || undefined,
+      beat: String(req.body && (req.body.beat || req.body.primaryBeat || reporterDoc.primaryBeat) || '').trim() || undefined,
+      organisationName: String(req.body && (req.body.organisationName || req.body.organizationName || req.body.organization || reporterDoc.organisationName) || '').trim() || undefined,
+      organisationType: String(req.body && (req.body.organisationType || req.body.organizationType || reporterDoc.organisationType) || '').trim() || undefined,
+      portalAccessEnabled: reporterDoc.portalAccessEnabled !== false,
+      portalAuthVersion: typeof reporterDoc.portalAuthVersion === 'number' ? reporterDoc.portalAuthVersion : 0,
+      portalAuthStatus: reporterDoc.portalAccessEnabled === false ? 'disabled' : 'authenticated',
       contact: {
         name: reporterDoc.fullName || 'Reporter',
         email: req.reporterPortal.email,
         phone: String(req.body && (req.body.phone || req.body.contactPhone) || '').trim() || undefined,
+        whatsappNumber: String(req.body && (req.body.whatsapp || req.body.whatsappNumber) || '').trim() || undefined,
       },
       attachments,
       mediaUrl: attachments[0] && attachments[0].url ? attachments[0].url : undefined,
@@ -1580,10 +1695,29 @@ router.post('/submissions', requireReporterPortalOpen, requireReporterPortalAuth
       userAgent: req.get('user-agent') ? String(req.get('user-agent')) : undefined,
     });
 
-    applySubmissionPatch(submission, req.body || {}, req.reporterPortal);
+    applySubmissionPatch(submission, req.body || {}, reporterDoc);
     if (typeof submission.save === 'function') {
       await submission.save();
     }
+
+    logReporterContactPipeline({
+      stage: 'portal.submit.stored-submission',
+      email: submission.reporterEmailNorm || submission.reporterEmail || submission.email || null,
+      incomingPhone: req.body && (req.body.phone || req.body.contactPhone || null),
+      incomingWhatsapp: req.body && (req.body.whatsapp || req.body.whatsappNumber || null),
+      storedPhone: submission.phone || submission.phoneNumber || submission.contactNumber || submission.contact?.phone || null,
+      storedWhatsapp: submission.whatsapp || submission.whatsappNumber || submission.contact?.whatsappNumber || null,
+      storedCity: submission.city || submission.location?.city || submission.locationDetail?.city || null,
+      storedDistrict: submission.district || submission.locationDetail?.district || null,
+      storedState: submission.state || submission.location?.state || submission.locationDetail?.state || null,
+      storedCountry: submission.country || submission.location?.country || submission.locationDetail?.country || null,
+      storedArea: submission.area || null,
+      storedAreaType: submission.areaType || null,
+      storedCoverageScope: submission.coverageScope || null,
+      storedBeat: submission.beat || null,
+      storedOrganisation: submission.organisationName || null,
+      reporterContactId: submission.reporterId ? String(submission.reporterId) : (reporterDoc && reporterDoc._id ? String(reporterDoc._id) : null),
+    });
 
     try {
       const { resolveAndAttachForSubmission } = require('../services/reporterIdentityResolution.service');

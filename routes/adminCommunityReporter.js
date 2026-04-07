@@ -22,6 +22,7 @@ const {
 const {
   adminListReporterContacts,
   getReporterContactDirectorySummary,
+  getReporterContactDirectoryStateIntegrity,
   getReporterContactDetail,
   getReporterContactProfile,
   updateReporterContactDirectoryProfile,
@@ -30,12 +31,15 @@ const {
   deleteReporterContact,
   deactivateReporterContact,
   hideReporterContact,
+  listHiddenReporterContacts,
   archiveReporterContact,
   restoreReporterContact,
+  repairReporterContactDirectoryStateIntegrity,
   permanentlyDeleteReporterContact,
-  forcePermanentlyDeleteReporterContact,
   reassignReporterContactStories,
   bulkDeleteReporterContacts,
+  bulkRestoreReporterContacts,
+  bulkPermanentlyDeleteReporterContacts,
   deleteCommunityReporterStory,
   restoreCommunityReporterStory,
   withdrawCommunityReporterStory,
@@ -47,21 +51,28 @@ const router = express.Router();
 
 // --- Final contract: contacts + stories (ONLY under /api/admin/community-reporter) ---
 router.get('/contacts/summary', requireAdminAuth, getReporterContactDirectorySummary);
+router.get('/contacts/state-integrity', requireAdminAuth, getReporterContactDirectoryStateIntegrity);
 router.get('/contacts', requireAdminAuth, adminListReporterContacts);
+router.get('/contacts/removed', requireAdminAuth, listHiddenReporterContacts);
+router.get('/contacts/removed-from-directory', requireAdminAuth, listHiddenReporterContacts);
 router.get('/contacts/:id', requireAdminAuth, getReporterContactDetail);
 router.get('/contacts/:id/profile', requireAdminAuth, getReporterContactProfile);
 router.patch('/contacts/:id', requireFounderOrAdmin, updateReporterContactDirectoryProfile);
 router.get('/contacts/:id/stories', requireAdminAuth, adminListReporterContactStories);
 router.post('/contacts/backfill', requireFounderOrAdmin, backfillReporterContactsFromSubmissions);
 router.post('/contacts/rebuild', requireFounderOrAdmin, backfillReporterContactsFromSubmissions);
+router.post('/contacts/state-integrity/repair', requireFounderOrAdmin, repairReporterContactDirectoryStateIntegrity);
 router.delete('/contacts/:id', requireFounderOrAdmin, deleteReporterContact);
 router.post('/contacts/:id/hide', requireFounderOrAdmin, hideReporterContact);
+router.put('/contacts/:id/hide', requireFounderOrAdmin, hideReporterContact);
 router.patch('/contacts/:id/hide', requireFounderOrAdmin, hideReporterContact);
 router.delete('/contacts/:id/hide', requireFounderOrAdmin, hideReporterContact);
 router.post('/contacts/:id/remove', requireFounderOrAdmin, hideReporterContact);
+router.put('/contacts/:id/remove', requireFounderOrAdmin, hideReporterContact);
 router.patch('/contacts/:id/remove', requireFounderOrAdmin, hideReporterContact);
 router.delete('/contacts/:id/remove', requireFounderOrAdmin, hideReporterContact);
 router.post('/contacts/:id/remove-from-directory', requireFounderOrAdmin, hideReporterContact);
+router.put('/contacts/:id/remove-from-directory', requireFounderOrAdmin, hideReporterContact);
 router.patch('/contacts/:id/remove-from-directory', requireFounderOrAdmin, hideReporterContact);
 router.delete('/contacts/:id/remove-from-directory', requireFounderOrAdmin, hideReporterContact);
 router.post('/contacts/:id/deactivate', requireFounderOrAdmin, deactivateReporterContact);
@@ -73,13 +84,14 @@ router.patch('/contacts/:id/restore', requireFounderOrAdmin, restoreReporterCont
 router.delete('/contacts/:id/permanent', requireFounderOrAdmin, permanentlyDeleteReporterContact);
 router.post('/contacts/:id/permanent-delete', requireFounderOrAdmin, permanentlyDeleteReporterContact);
 router.delete('/contacts/:id/permanent-delete', requireFounderOrAdmin, permanentlyDeleteReporterContact);
-router.delete('/contacts/:id/force-permanent', requireFounderOrAdmin, forcePermanentlyDeleteReporterContact);
-router.post('/contacts/:id/force-permanent-delete', requireFounderOrAdmin, forcePermanentlyDeleteReporterContact);
-router.delete('/contacts/:id/force-permanent-delete', requireFounderOrAdmin, forcePermanentlyDeleteReporterContact);
 router.post('/contacts/:id/reassign-stories', requireFounderOrAdmin, reassignReporterContactStories);
+router.post('/contacts/bulk-hide', requireFounderOrAdmin, bulkDeleteReporterContacts);
 router.post('/contacts/bulk-remove', requireFounderOrAdmin, bulkDeleteReporterContacts);
 router.post('/contacts/bulk-remove-from-directory', requireFounderOrAdmin, bulkDeleteReporterContacts);
-router.post('/contacts/bulk-delete', requireFounderOrAdmin, bulkDeleteReporterContacts);
+router.post('/contacts/bulk-restore', requireFounderOrAdmin, bulkRestoreReporterContacts);
+router.post('/contacts/bulk-delete', requireFounderOrAdmin, bulkPermanentlyDeleteReporterContacts);
+router.post('/contacts/bulk-permanent-delete', requireFounderOrAdmin, bulkPermanentlyDeleteReporterContacts);
+router.delete('/contacts/bulk-permanent', requireFounderOrAdmin, bulkPermanentlyDeleteReporterContacts);
 // Community stories: two-stage delete model
 router.delete('/stories/:storyId', requireAdminAuth, deleteCommunityReporterStory); // soft delete
 router.post('/stories/:storyId/restore', requireAdminAuth, restoreCommunityReporterStory);

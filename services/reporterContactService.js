@@ -2,6 +2,50 @@ const ReporterContact = require('../models/ReporterContact');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const { normalizeEmail } = require('../lib/normalizeEmail');
 
+const AREA_TYPE_MAP = {
+  metro: 'METRO',
+  metropolitan: 'METRO',
+  corporation: 'CORPORATION',
+  city: 'CORPORATION',
+  district_hq: 'DISTRICT_HQ',
+  district_headquarter: 'DISTRICT_HQ',
+  district_headquarters: 'DISTRICT_HQ',
+  district: 'DISTRICT_HQ',
+  taluka: 'TALUKA',
+  tehsil: 'TALUKA',
+  town: 'TOWN',
+  village: 'VILLAGE',
+  rural: 'VILLAGE',
+  other: 'OTHER',
+};
+
+const COVERAGE_SCOPE_MAP = {
+  local: 'hyperlocal',
+  hyper_local: 'hyperlocal',
+  hyperlocal: 'hyperlocal',
+  city: 'hyperlocal',
+  district: 'regional',
+  regional: 'regional',
+  state: 'regional',
+  national: 'national',
+  country: 'national',
+  international: 'international',
+  global: 'international',
+};
+
+function _shouldLogReporterContactPipeline() {
+  const enabled = String(process.env.REPORTER_CONTACT_PIPELINE_LOG || '').trim() === '1';
+  const env = String(process.env.NODE_ENV || '').toLowerCase();
+  return enabled || (env && env !== 'production');
+}
+
+function _logReporterContactPipeline(payload) {
+  if (!_shouldLogReporterContactPipeline()) return;
+  try {
+    console.log('[reporter-contact-pipeline]', payload);
+  } catch (_) {}
+}
+
 // Helper: safely apply provided value only if not undefined/null
 function applyIfPresent(target, key, value) {
   if (value === undefined || value === null) return;
@@ -20,6 +64,40 @@ function _normalizeText(value) {
   if (value === null) return null;
   const text = String(value).trim();
   return text || null;
+}
+
+function _normalizeBoolean(value) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === 'boolean') return value;
+  const token = String(value).trim().toLowerCase();
+  if (!token) return null;
+  if (['1', 'true', 'yes', 'enabled', 'active', 'authenticated', 'allowed'].includes(token)) return true;
+  if (['0', 'false', 'no', 'disabled', 'blocked', 'inactive', 'unauthenticated'].includes(token)) return false;
+  return undefined;
+}
+
+function _normalizeNumber(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  const normalized = Number(value);
+  return Number.isFinite(normalized) ? normalized : undefined;
+}
+
+function _normalizeAreaType(value) {
+  const normalized = _normalizeText(value);
+  if (normalized === undefined) return undefined;
+  if (normalized === null) return null;
+  const token = normalized.toLowerCase().replace(/[\s-]+/g, '_');
+  return AREA_TYPE_MAP[token] || 'OTHER';
+}
+
+function _normalizeCoverageScope(value) {
+  const normalized = _normalizeText(value);
+  if (normalized === undefined) return undefined;
+  if (normalized === null) return null;
+  const token = normalized.toLowerCase().replace(/[\s-]+/g, '_');
+  return COVERAGE_SCOPE_MAP[token] || null;
 }
 
 function _normalizePhoneValue(value) {
@@ -72,6 +150,22 @@ function _extractSubmissionContactChannels(submission) {
   };
 }
 
+function _extractSubmissionField(source, paths) {
+  for (const path of paths) {
+    const segments = String(path || '').split('.').filter(Boolean);
+    let cursor = source;
+    for (const segment of segments) {
+      if (!cursor || typeof cursor !== 'object') {
+        cursor = undefined;
+        break;
+      }
+      cursor = cursor[segment];
+    }
+    if (cursor !== undefined) return cursor;
+  }
+  return undefined;
+}
+
 function _isManualOverrideEnabled(contact, key) {
   return !!(contact && contact.directoryManualOverrides && contact.directoryManualOverrides[key] && contact.directoryManualOverrides[key].enabled === true);
 }
@@ -88,7 +182,7 @@ function _setSourceStat(set, key, value) {
 }
 
 function _parseLocationParts(input) {
-  if (!input) return { city: null, district: null, state: null, country: null };
+  if (!input) return { city: null, district: null, state: null, country: null, area: null };
 
   // String: "City, State, Country"
   if (typeof input === 'string') {
@@ -101,6 +195,7 @@ function _parseLocationParts(input) {
       district: null,
       state: parts[1] || null,
       country: parts[2] || null,
+      area: null,
     };
   }
 
@@ -110,6 +205,7 @@ function _parseLocationParts(input) {
     const district = input.district ? String(input.district).trim() : '';
     const state = input.state ? String(input.state).trim() : '';
     const country = input.country ? String(input.country).trim() : '';
+    const area = (input.area ?? input.areaName ?? input.areaLocality) ? String(input.area ?? input.areaName ?? input.areaLocality).trim() : '';
 
     // Sometimes we store "Ahmedabad, Gujarat" into city; split if needed.
     if (city && city.includes(',') && !state) {
@@ -119,6 +215,7 @@ function _parseLocationParts(input) {
         district: district || parsed.district,
         state: parsed.state,
         country: country || parsed.country,
+        area: area || parsed.area,
       };
     }
 
@@ -127,10 +224,82 @@ function _parseLocationParts(input) {
       district: district || null,
       state: state || null,
       country: country || null,
+      area: area || null,
     };
   }
 
-  return { city: null, district: null, state: null, country: null };
+  return { city: null, district: null, state: null, country: null, area: null };
+}
+
+function _extractSubmissionReporterSnapshot(submission) {
+  const { sourcePhone, sourceMobile, sourceWhatsapp } = _extractSubmissionContactChannels(submission);
+  const locationInput =
+    submission?.locationDetail ||
+    submission?.location ||
+    submission?.reporterLocation ||
+    {
+      city: submission?.city,
+      district: submission?.district,
+      state: submission?.state,
+      country: submission?.country,
+      area: submission?.area,
+    };
+
+  const location = _parseLocationParts(locationInput);
+  const organisationName = _normalizeText(
+    _extractSubmissionField(submission, [
+      'organisationName',
+      'organizationName',
+      'organization',
+      'organisation',
+      'reporter.organisationName',
+      'reporter.organizationName',
+      'reporter.organization',
+      'reporter.organisation',
+    ])
+  );
+  const portalAccessEnabled = _normalizeBoolean(
+    _extractSubmissionField(submission, [
+      'portalAccessEnabled',
+      'portalAuthStatus',
+      'reporter.portalAccessEnabled',
+      'reporter.portalAuthStatus',
+    ])
+  );
+  const portalAuthVersion = _normalizeNumber(
+    _extractSubmissionField(submission, ['portalAuthVersion', 'reporter.portalAuthVersion'])
+  );
+
+  return {
+    name:
+      (submission?.name && String(submission.name).trim()) ||
+      (submission?.reporterName && String(submission.reporterName).trim()) ||
+      (submission?.userName && String(submission.userName).trim()) ||
+      (submission?.contact?.name && String(submission.contact.name).trim()) ||
+      'Unknown reporter',
+    email: _normalizeEmail(
+      submission?.reporterEmailNorm || submission?.reporterEmail || submission?.email || submission?.contact?.email
+    ),
+    phone: sourcePhone || sourceMobile || '',
+    whatsapp: sourceWhatsapp || '',
+    city: location.city || _normalizeText(submission?.city) || undefined,
+    district: location.district || _normalizeText(submission?.district) || undefined,
+    state: location.state || _normalizeText(submission?.state) || undefined,
+    country: location.country || _normalizeText(submission?.country) || undefined,
+    area: location.area || _normalizeText(submission?.area) || undefined,
+    areaType: _normalizeAreaType(
+      _extractSubmissionField(submission, ['areaType', 'reporter.areaType', 'location.areaType', 'locationDetail.areaType'])
+    ),
+    coverageScope: _normalizeCoverageScope(
+      _extractSubmissionField(submission, ['coverageScope', 'reporter.coverageScope', 'location.coverageScope', 'locationDetail.coverageScope'])
+    ),
+    beat: _normalizeText(
+      _extractSubmissionField(submission, ['beat', 'primaryBeat', 'reporter.beat', 'reporter.primaryBeat'])
+    ),
+    organisationName: organisationName || undefined,
+    portalAccessEnabled,
+    portalAuthVersion,
+  };
 }
 
 function _buildSubmissionEmailMatch(emailNorm) {
@@ -157,30 +326,9 @@ function _buildSubmissionEmailMatch(emailNorm) {
  * Designed to be safe across Phase-1 and legacy submission shapes.
  */
 async function upsertReporterContactFromSubmission(submission) {
-  const emailNorm = _normalizeEmail(
-    submission?.reporterEmailNorm || submission?.reporterEmail || submission?.email || submission?.contact?.email
-  );
+  const snapshot = _extractSubmissionReporterSnapshot(submission);
+  const emailNorm = snapshot.email;
   if (!emailNorm) return null;
-
-  const name =
-    (submission?.name && String(submission.name).trim()) ||
-    (submission?.reporterName && String(submission.reporterName).trim()) ||
-    (submission?.userName && String(submission.userName).trim()) ||
-    (submission?.contact?.name && String(submission.contact.name).trim()) ||
-    'Unknown reporter';
-
-  const { sourcePhone, sourceMobile, sourceWhatsapp } = _extractSubmissionContactChannels(submission);
-  const phone = sourcePhone || sourceMobile || '';
-  const whatsapp = sourceWhatsapp || '';
-
-  const locationInput =
-    submission?.locationDetail ||
-    submission?.location ||
-    submission?.reporterLocation ||
-    submission?.city ||
-    null;
-
-  const { city, district, state, country } = _parseLocationParts(locationInput);
 
   // Compute story stats for this reporter (counts + latest headline).
   const match = _buildSubmissionEmailMatch(emailNorm);
@@ -235,14 +383,21 @@ async function upsertReporterContactFromSubmission(submission) {
   const lastStoryAt = latest?.createdAt || null;
 
   const out = await upsertReporterContact({
-    name,
+    name: snapshot.name,
     email: emailNorm,
-    phone,
-    whatsapp,
-    city: city || undefined,
-    district: district || undefined,
-    state: state || undefined,
-    country: country || undefined,
+    phone: snapshot.phone,
+    whatsapp: snapshot.whatsapp,
+    city: snapshot.city,
+    district: snapshot.district,
+    state: snapshot.state,
+    country: snapshot.country,
+    area: snapshot.area,
+    areaType: snapshot.areaType,
+    coverageScope: snapshot.coverageScope,
+    beat: snapshot.beat,
+    organisationName: snapshot.organisationName,
+    portalAccessEnabled: snapshot.portalAccessEnabled,
+    portalAuthVersion: snapshot.portalAuthVersion,
     reporterType: submission?.sourceType === 'journalist' ? 'journalist' : 'community',
     stats: {
       totalStories: Number(stories || 0),
@@ -260,9 +415,9 @@ async function upsertReporterContactFromSubmission(submission) {
   if (String(process.env.NODE_ENV || '').toLowerCase() !== 'production' || String(process.env.REPORTER_CONTACTS_DEBUG || '').trim() === '1') {
     console.log('[reporter-contact][contact-sync]', {
       email: emailNorm,
-      sourcePhone: sourcePhone || null,
-      sourceMobile: sourceMobile || null,
-      sourceWhatsapp: sourceWhatsapp || null,
+      sourcePhone: snapshot.phone || null,
+      sourceMobile: null,
+      sourceWhatsapp: snapshot.whatsapp || null,
       storedPhone: out?.contact?.phoneFull || out?.contact?.phoneNumber || null,
       storedWhatsapp: out?.contact?.whatsappNumber || null,
       responsePhone: out?.contact?.phoneFull || out?.contact?.phoneNumber || null,
@@ -291,9 +446,14 @@ async function upsertReporterContact(payload) {
     country,
     beat,
     area,
+    areaType,
+    coverageScope,
     notes,
     verificationLevel,
     reporterType,
+    organisationName,
+    portalAccessEnabled,
+    portalAuthVersion,
     // Optional: stats (when calling from backfills)
     stats,
   } = payload || {};
@@ -309,12 +469,43 @@ async function upsertReporterContact(payload) {
     }
   } catch (_) {}
 
+  _logReporterContactPipeline({
+    stage: 'upsert.before',
+    email: emailNorm,
+    incomingPhone: _normalizePhoneValue(phone),
+    incomingWhatsapp: _normalizePhoneValue(whatsapp),
+    incomingCity: _normalizeText(city),
+    incomingDistrict: _normalizeText(district),
+    incomingState: _normalizeText(state),
+    incomingCountry: _normalizeText(country),
+    incomingArea: _normalizeText(area),
+    incomingAreaType: _normalizeAreaType(areaType),
+    incomingCoverageScope: _normalizeCoverageScope(coverageScope),
+    incomingBeat: _normalizeText(beat),
+    incomingOrganisation: _normalizeText(organisationName),
+    incomingPortalAccessEnabled: portalAccessEnabled,
+    incomingPortalAuthVersion: portalAuthVersion,
+    storedPhone: _normalizePhoneValue(existing?.phoneFull || existing?.phoneNumber || null),
+    storedWhatsapp: _normalizePhoneValue(existing?.whatsappNumber || null),
+    storedCity: _normalizeText(existing?.cityTownVillage || null),
+    storedDistrict: _normalizeText(existing?.districtName || null),
+    storedState: _normalizeText(existing?.stateName || null),
+    storedCountry: _normalizeText(existing?.country || null),
+    storedArea: _normalizeText(existing?.areaName || null),
+    storedAreaType: _normalizeText(existing?.areaType || null),
+    storedCoverageScope: _normalizeText(existing?.coverageScope || null),
+    storedBeat: _normalizeText(existing?.primaryBeat || null),
+    storedOrganisation: _normalizeText(existing?.organisationName || null),
+    reporterContactId: existing?._id ? String(existing._id) : null,
+  });
+
   const normalizedVerificationLevel = _normalizeText(verificationLevel);
   const $set = {};
   const $setOnInsert = {
     email: emailNorm,
     reporterType: reporterType === 'journalist' ? 'journalist' : 'community',
     status: 'active',
+    directoryStatus: 'active',
   };
   if (!normalizedVerificationLevel) {
     $setOnInsert.verificationLevel = reporterType === 'journalist' ? 'pending' : 'community_default';
@@ -326,7 +517,9 @@ async function upsertReporterContact(payload) {
   $set.reporterKey = emailNorm;
 
   if (trimmedName) $set.fullName = trimmedName;
-  _setSourceField($set, existing, 'phoneFull', _normalizePhoneValue(phone), 'phone');
+  const normalizedPhone = _normalizePhoneValue(phone);
+  _setSourceField($set, existing, 'phoneFull', normalizedPhone, 'phone');
+  _setSourceField($set, existing, 'phoneNumber', normalizedPhone, 'phone');
   _setSourceField($set, existing, 'whatsappNumber', _normalizePhoneValue(whatsapp), 'whatsapp');
   _setSourceField($set, existing, 'alternatePhone', _normalizePhoneValue(alternatePhone), 'alternatePhone');
   _setSourceField($set, existing, 'cityTownVillage', _normalizeText(city), 'city');
@@ -335,9 +528,18 @@ async function upsertReporterContact(payload) {
   _setSourceField($set, existing, 'country', _normalizeText(country), 'country');
   _setSourceField($set, existing, 'primaryBeat', _normalizeText(beat), 'beat');
   _setSourceField($set, existing, 'areaName', _normalizeText(area), 'area');
+  _setSourceField($set, existing, 'areaType', _normalizeAreaType(areaType), 'area');
+  _setSourceField($set, existing, 'coverageScope', _normalizeCoverageScope(coverageScope), 'area');
+  if (_normalizeText(organisationName)) $set.organisationName = _normalizeText(organisationName);
   _setSourceField($set, existing, 'notes', _normalizeText(notes), 'notes');
   if (!_isManualOverrideEnabled(existing, 'verificationLevel') && normalizedVerificationLevel) {
     $set.verificationLevel = normalizedVerificationLevel;
+  }
+  if (portalAccessEnabled !== undefined && portalAccessEnabled !== null) {
+    $set.portalAccessEnabled = !!portalAccessEnabled;
+  }
+  if (portalAuthVersion !== undefined && portalAuthVersion !== null) {
+    $set.portalAuthVersion = portalAuthVersion;
   }
 
   if (stats && typeof stats === 'object') {
@@ -359,6 +561,25 @@ async function upsertReporterContact(payload) {
     { $set, $setOnInsert },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
+
+  _logReporterContactPipeline({
+    stage: 'upsert.after',
+    email: emailNorm,
+    incomingPhone: _normalizePhoneValue(phone),
+    incomingWhatsapp: _normalizePhoneValue(whatsapp),
+    storedPhone: _normalizePhoneValue(contact?.phoneFull || contact?.phoneNumber || null),
+    storedWhatsapp: _normalizePhoneValue(contact?.whatsappNumber || null),
+    storedCity: _normalizeText(contact?.cityTownVillage || null),
+    storedDistrict: _normalizeText(contact?.districtName || null),
+    storedState: _normalizeText(contact?.stateName || null),
+    storedCountry: _normalizeText(contact?.country || null),
+    storedArea: _normalizeText(contact?.areaName || null),
+    storedAreaType: _normalizeText(contact?.areaType || null),
+    storedCoverageScope: _normalizeText(contact?.coverageScope || null),
+    storedBeat: _normalizeText(contact?.primaryBeat || null),
+    storedOrganisation: _normalizeText(contact?.organisationName || null),
+    reporterContactId: contact?._id ? String(contact._id) : null,
+  });
 
   return { contact, contactId: contact._id };
 }
@@ -383,6 +604,8 @@ async function upsertReporterContactFromPayload(payload) {
     country,
     beat,
     area,
+    areaType,
+    coverageScope,
     notes,
     verificationLevel,
     reporterType,
@@ -397,8 +620,16 @@ async function upsertReporterContactFromPayload(payload) {
     websiteOrPortfolio,
     socialLinks,
     journalistCharterAccepted,
+    organisationName: organisationNameInput,
+    organizationName,
+    organization,
+    organisation,
+    portalAccessEnabled,
+    portalAuthVersion,
     stats,
   } = payload || {};
+
+  const normalizedOrganisationName = organisationNameInput || organizationName || organization || organisation;
 
   const { contact, contactId } = await upsertReporterContact({
     name,
@@ -412,17 +643,33 @@ async function upsertReporterContactFromPayload(payload) {
     country,
     beat,
     area,
+    areaType,
+    coverageScope,
     notes,
     verificationLevel,
     reporterType,
+    organisationName: normalizedOrganisationName,
+    portalAccessEnabled,
+    portalAuthVersion,
     ...(stats ? { stats } : {}),
   });
 
 
   // Journalist-specific extras (only apply if present)
-  applyIfPresent(contact, 'organisationName', organisationName);
+  applyIfPresent(contact, 'organisationName', normalizedOrganisationName);
   applyIfPresent(contact, 'organisationType', organisationType);
   applyIfPresent(contact, 'positionTitle', positionTitle);
+  applyIfPresent(contact, 'coverageScope', _normalizeCoverageScope(coverageScope));
+  applyIfPresent(contact, 'areaType', _normalizeAreaType(areaType));
+  if (_normalizeBoolean(portalAccessEnabled) !== undefined) {
+    contact.portalAccessEnabled = _normalizeBoolean(portalAccessEnabled);
+  }
+  if (_normalizeNumber(portalAuthVersion) !== undefined) {
+    contact.portalAuthVersion = _normalizeNumber(portalAuthVersion);
+  }
+  if (_normalizePhoneValue(phone) && !contact.phoneNumber) {
+    contact.phoneNumber = _normalizePhoneValue(phone);
+  }
   if (Array.isArray(beatsProfessional) && beatsProfessional.length) {
     contact.beatsProfessional = beatsProfessional;
   }

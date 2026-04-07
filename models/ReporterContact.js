@@ -27,12 +27,16 @@ const AREA_TYPE_ENUM = [
   'OTHER',
 ];
 
+const COVERAGE_SCOPE_ENUM = ['hyperlocal', 'regional', 'national', 'international'];
+
 const STATUS_ENUM = [
   'active',
   'watchlist',
   'suspended',
   'banned',
 ];
+
+const DIRECTORY_STATUS_ENUM = ['active', 'removed'];
 
 const StatsSchema = new mongoose.Schema({
   totalStories: { type: Number, default: 0 },
@@ -89,16 +93,23 @@ const ReporterContactSchema = new mongoose.Schema({
   areaName: { type: String, trim: true },
 
   areaType: { type: String, enum: AREA_TYPE_ENUM, default: 'OTHER' },
+  coverageScope: { type: String, enum: COVERAGE_SCOPE_ENUM, default: 'hyperlocal' },
 
   beats: [{ type: String, enum: BEAT_ENUM }],
   primaryBeat: { type: String, trim: true },
 
   status: { type: String, enum: STATUS_ENUM, default: 'active', index: true },
+  directoryStatus: { type: String, enum: DIRECTORY_STATUS_ENUM, default: 'active', index: true },
 
   // Soft-delete / moderation lifecycle (optional)
   suspendedAt: { type: Date },
   suspendedReason: { type: String, trim: true },
   suspendedBy: { type: mongoose.Schema.Types.Mixed, default: null },
+  archivedAt: { type: Date },
+  archivedReason: { type: String, trim: true },
+  archivedBy: { type: mongoose.Schema.Types.Mixed, default: null },
+  restoredAt: { type: Date },
+  restoredBy: { type: mongoose.Schema.Types.Mixed, default: null },
   deletedAt: { type: Date },
   deletedBy: { type: mongoose.Schema.Types.Mixed, default: null },
 
@@ -177,6 +188,7 @@ ReporterContactSchema.index(
 );
 ReporterContactSchema.index({ phoneFull: 1 });
 ReporterContactSchema.index({ whatsappNumber: 1 });
+ReporterContactSchema.index({ directoryStatus: 1, updatedAt: -1 });
 ReporterContactSchema.index({ stateName: 1, districtName: 1, talukaName: 1, areaType: 1 });
 ReporterContactSchema.index({ fullName: 'text', cityTownVillage: 'text', districtName: 'text' });
 // Optimized index for journalist application queries

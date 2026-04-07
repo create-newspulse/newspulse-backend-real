@@ -8,6 +8,12 @@ const {
   findReporterContactByIdentifier,
   deriveReporterStatsFromSubmissionsByEmail,
 } = require('../services/reporterLookup.service');
+const {
+  adminListReporterContacts,
+  getReporterContactDetail,
+  adminListReporterContactStories,
+  listHiddenReporterContacts,
+} = require('../controllers/communityReporterController');
 
 // Unified reporter-centric directory (ReporterProfile-based)
 const { getReporterDirectory } = require('../controllers/adminContributorNetworkController');
@@ -100,6 +106,17 @@ router.get('/reporter-directory/unified', requireAdminAuth, getReporterDirectory
 // Backward-compatible alias used by some admin panel builds.
 // Canonical route remains /api/admin/community/reporter-directory/unified.
 router.get('/contributors', requireAdminAuth, getReporterDirectory);
+
+// Deprecated compatibility aliases for older admin builds.
+// Canonical family remains /api/admin/community-reporter/contacts/*.
+router.get('/reporter-contacts', requireAdminAuth, adminListReporterContacts);
+router.get('/reporter-contacts/removed', requireAdminAuth, listHiddenReporterContacts);
+router.get('/reporter-contacts/:id', requireAdminAuth, getReporterContactDetail);
+router.get('/reporter-contacts/:id/stories', requireAdminAuth, adminListReporterContactStories);
+router.get('/contributors/:id', requireAdminAuth, getReporterContactDetail);
+router.get('/contributors/:id/stories', requireAdminAuth, adminListReporterContactStories);
+router.get('/reporters/:id', requireAdminAuth, getReporterContactDetail);
+router.get('/reporters/:id/stories', requireAdminAuth, adminListReporterContactStories);
 
 // GET /api/admin/community/reporter-directory/lookup?identifier=EMAIL_OR_ID
 // - Accepts email (URL-encoded) or a Mongo ObjectId
