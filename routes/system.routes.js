@@ -1,5 +1,5 @@
 const express = require('express');
-const { getMailerStatus, getTransporter } = require('./../lib/mailer');
+const { classifyAndWrapMailerError, getMailerStatus, getTransporter } = require('./../lib/mailer');
 
 // Router used by NewsPulse Admin Panel to silence AI helper + monitor probes
 const router = express.Router();
@@ -56,13 +56,16 @@ router.get('/email-status', (_req, res) => {
   const status = getMailerStatus();
   let transporterReady = false;
   let transporterError = null;
+  let backendCode = status.configured ? null : 'MAILER_NOT_CONFIGURED';
 
   try {
     const transport = getTransporter();
     transporterReady = !!transport;
   } catch (error) {
+    const classified = classifyAndWrapMailerError(error, { provider: status.provider });
     transporterReady = false;
-    transporterError = error?.message || String(error);
+    transporterError = classified?.message || error?.message || String(error);
+    backendCode = classified?.backendCode || 'PROVIDER_UNAVAILABLE';
   }
 
   return res.status(200).json({
@@ -72,7 +75,9 @@ router.get('/email-status', (_req, res) => {
       productionLike: status.productionLike,
       renderLike: status.renderLike,
       stubMode: status.stubMode,
+      provider: status.provider,
       configured: status.configured,
+      backendCode,
       missing: status.missing,
       resolved: status.resolved,
       transporterReady,

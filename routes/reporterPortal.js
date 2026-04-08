@@ -9,7 +9,7 @@ const CommunitySubmission = require('../models/CommunitySubmission');
 const OtpToken = require('../models/OtpToken');
 const ReporterContact = require('../models/ReporterContact');
 const ActivityLog = require('../models/ActivityLog');
-const { sendMail, getTransporter, getMailerStatus } = require('../lib/mailer');
+const { classifyAndWrapMailerError, sendMail, getTransporter, getMailerStatus } = require('../lib/mailer');
 const { sendEmail: sendEmailStub } = require('../lib/emailStub');
 const { normalizeEmail } = require('../lib/normalizeEmail');
 const {
@@ -862,13 +862,27 @@ function serializeError(error) {
   };
 }
 
-function createEmailServiceUnavailableError(error) {
-  const wrapped = new Error(error?.message || 'Verification email service unavailable');
-  wrapped.code = error?.code || 'REPORTER_EMAIL_UNAVAILABLE';
-  wrapped.responseCode = error?.responseCode;
-  wrapped.command = error?.command;
-  wrapped.errno = error?.errno;
-  wrapped.syscall = error?.syscall;
+function resolveReporterMailerFailure(error, mailerStatus) {
+  const provider = mailerStatus?.provider || error?.provider || null;
+  const classified = classifyAndWrapMailerError(error, { provider });
+  return {
+    provider: classified.provider || provider || 'unknown',
+    backendCode: classified.backendCode || 'PROVIDER_UNAVAILABLE',
+    error: classified,
+  };
+}
+
+function createEmailServiceUnavailableError(error, mailerStatus) {
+  const failure = resolveReporterMailerFailure(error, mailerStatus);
+  const wrapped = new Error(failure.error?.message || error?.message || 'Verification email service unavailable');
+  wrapped.code = failure.error?.code || error?.code || 'REPORTER_EMAIL_UNAVAILABLE';
+  wrapped.backendCode = failure.backendCode;
+  wrapped.provider = failure.provider;
+  wrapped.providerErrorCode = failure.error?.code || error?.code || null;
+  wrapped.responseCode = failure.error?.responseCode || error?.responseCode;
+  wrapped.command = failure.error?.command || error?.command;
+  wrapped.errno = failure.error?.errno || error?.errno;
+  wrapped.syscall = failure.error?.syscall || error?.syscall;
   wrapped.safeClientCode = 'REPORTER_EMAIL_UNAVAILABLE';
   return wrapped;
 }
@@ -1005,30 +1019,37 @@ function getReporterMailerReadiness() {
   const mailerStatus = getMailerStatus();
   let transporterReady = mailerStatus.stubMode === true;
   let transporterError = null;
+  let backendCode = mailerStatus.configured ? null : 'MAILER_NOT_CONFIGURED';
 
   if (mailerStatus.stubMode && isProductionLike()) {
     transporterReady = false;
     transporterError = 'EMAIL_MODE=stub is not allowed in production-like environments';
+    backendCode = 'MAILER_NOT_CONFIGURED';
   } else if (!mailerStatus.stubMode && mailerStatus.configured) {
     try {
       transporterReady = !!getTransporter();
       if (!transporterReady) {
         transporterError = 'Reporter mail transporter returned null';
+        backendCode = 'PROVIDER_UNAVAILABLE';
       }
     } catch (error) {
+      const failure = resolveReporterMailerFailure(error, mailerStatus);
       transporterReady = false;
-      transporterError = error?.message || String(error);
+      transporterError = failure.error?.message || error?.message || String(error);
+      backendCode = failure.backendCode;
     }
   } else if (!mailerStatus.configured) {
     transporterError = mailerStatus.missing.length
       ? `Missing mailer env: ${mailerStatus.missing.join(', ')}`
       : 'Reporter mailer is not configured';
+    backendCode = 'MAILER_NOT_CONFIGURED';
   }
 
   return {
     ...mailerStatus,
     transporterReady,
     transporterError,
+    backendCode,
   };
 }
 
@@ -1363,7 +1384,8 @@ async function sendReporterOtpEmail(email, code) {
     `Your News Pulse Reporter Portal OTP is: ${code}. It is valid for 10 minutes.`,
     baseUrl ? `Requested from: ${baseUrl}` : '',
   ].filter(Boolean).join(' ');
-  const stubMode = (process.env.EMAIL_MODE || '').toLowerCase() === 'stub';
+  const mailerStatus = getReporterMailerReadiness();
+  const stubMode = mailerStatus.stubMode === true;
 
   console.log('[reporter-portal][mail][prepare]', buildOtpLogContext({
     originalUrl: '/api/reporter-auth/request-code',
@@ -1374,13 +1396,16 @@ async function sendReporterOtpEmail(email, code) {
     ip: 'internal',
     socket: null,
   }, email, {
-    mode: stubMode ? 'stub' : 'smtp',
+    mode: stubMode ? 'stub' : mailerStatus.provider,
+    provider: mailerStatus.provider,
+    backendCode: mailerStatus.backendCode,
+    envPresence: mailerStatus.resolved,
     baseUrl,
   }));
 
   if (stubMode) {
     if (isProductionLike()) {
-      throw createEmailServiceUnavailableError({ message: 'EMAIL_MODE=stub is not allowed in production', code: 'EMAIL_STUB_FORBIDDEN' });
+      throw createEmailServiceUnavailableError({ message: 'EMAIL_MODE=stub is not allowed in production', code: 'EMAIL_STUB_FORBIDDEN' }, mailerStatus);
     }
     await sendEmailStub({ to: email, subject, text });
     console.log('[reporter-portal][mail][sent]', { emailMasked: maskEmail(email), mode: 'stub' });
@@ -1392,31 +1417,41 @@ async function sendReporterOtpEmail(email, code) {
     transporter = getTransporter();
     console.log('[reporter-portal][mail][transporter-initialized]', {
       emailMasked: maskEmail(email),
+      provider: mailerStatus.provider,
       hasTransporter: !!transporter,
       productionLike: isProductionLike(),
       baseUrlConfigured: !!baseUrl,
+      envPresence: mailerStatus.resolved,
     });
   } catch (error) {
+    const failure = resolveReporterMailerFailure(error, mailerStatus);
     console.error('[reporter-portal][mail][transporter-failed]', {
       emailMasked: maskEmail(email),
-      error: serializeError(error),
+      provider: failure.provider,
+      backendCode: failure.backendCode,
+      error: serializeError(failure.error),
     });
-    throw createEmailServiceUnavailableError(error);
+    throw createEmailServiceUnavailableError(failure.error, mailerStatus);
   }
-  if (!transporter) throw createEmailServiceUnavailableError({ message: 'Email transporter not configured', code: 'EMAIL_TRANSPORTER_MISSING' });
+  if (!transporter) {
+    throw createEmailServiceUnavailableError({ message: 'Email transporter not configured', code: 'EMAIL_TRANSPORTER_MISSING' }, mailerStatus);
+  }
 
   let info;
   try {
     info = await sendMail({ to: email, subject, text, html: `<p>${text}</p>` });
   } catch (error) {
+    const failure = resolveReporterMailerFailure(error, mailerStatus);
     console.error('[reporter-portal][mail][send-failed]', {
       emailMasked: maskEmail(email),
-      error: serializeError(error),
+      provider: failure.provider,
+      backendCode: failure.backendCode,
+      error: serializeError(failure.error),
     });
     if (isRecipientDeliveryIssue(error)) {
       throw createAcceptedOtpRequestError(error);
     }
-    throw createEmailServiceUnavailableError(error);
+    throw createEmailServiceUnavailableError(failure.error, mailerStatus);
   }
   const accepted = Array.isArray(info && info.accepted) ? info.accepted.map((value) => String(value || '').toLowerCase()) : [];
   if (!accepted.includes(email)) {
@@ -1430,10 +1465,11 @@ async function sendReporterOtpEmail(email, code) {
   }
   console.log('[reporter-portal][mail][sent]', {
     emailMasked: maskEmail(email),
-    mode: 'smtp',
+    mode: mailerStatus.provider,
+    provider: mailerStatus.provider,
     acceptedCount: accepted.length,
   });
-  return { method: 'email' };
+  return { method: info?.provider || mailerStatus.provider || 'email' };
 }
 
 async function resolveReporterFromEmail(email) {
@@ -1578,6 +1614,8 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       route: '/api/reporter-auth/request-code',
       action: 'mailer-status',
       returnedStatusCode: null,
+      provider: mailerStatus.provider,
+      backendCode: mailerStatus.backendCode,
       mailerConfigured: mailerStatus.configured,
       transporterReady: mailerStatus.transporterReady,
       missing: mailerStatus.missing,
@@ -1589,6 +1627,8 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
         route: '/api/reporter-auth/request-code',
         normalizedEmail: email,
         returnedStatusCode: 503,
+        provider: mailerStatus.provider,
+        backendCode: mailerStatus.backendCode || 'MAILER_NOT_CONFIGURED',
         transporterReady: mailerStatus.transporterReady,
         missing: mailerStatus.missing,
         resolved: mailerStatus.resolved,
@@ -1597,6 +1637,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       return res.status(503).json({
         ok: false,
         code: 'REPORTER_EMAIL_UNAVAILABLE',
+        backendCode: mailerStatus.backendCode || 'MAILER_NOT_CONFIGURED',
         message: 'Verification email service is temporarily unavailable.',
       });
     }
@@ -1605,7 +1646,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
     const requestLimit = consumeRateLimit(otpRequestAttempts, rateLimitKey, OTP_REQUEST_RATE_LIMIT);
     if (requestLimit.limited) {
       await logReporterActivity('reporter_portal_otp_request_rate_limited', email, { ip: getClientIp(req) });
-      return res.status(429).json({ ok: false, code: 'OTP_REQUEST_RATE_LIMITED', message: 'Too many OTP requests. Please try again later.' });
+      return res.status(429).json({ ok: false, code: 'OTP_REQUEST_RATE_LIMITED', backendCode: 'COOLDOWN_ACTIVE', message: 'Too many OTP requests. Please try again later.' });
     }
 
     const reporter = await resolveReporterFromEmail(email);
@@ -1659,7 +1700,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       cookie: describeReporterCookieOptions(pendingChallengeCookie.options),
       sessionCookie: describeReporterCookieOptions(req?.session?.cookie),
     });
-    await sendReporterOtpEmail(email, code);
+    const mailResult = await sendReporterOtpEmail(email, code);
     await logReporterActivity('reporter_portal_otp_requested', email, { ip: getClientIp(req), reporterId: reporter && reporter._id ? String(reporter._id) : null });
     logReporterAuth('request-code', {
       route: '/api/reporter-auth/request-code',
@@ -1668,7 +1709,10 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       challengeSessionPresent: hasReporterChallengeSession(req),
       verified: false,
       returnedStatusCode: 200,
+      provider: mailerStatus.provider,
+      backendCode: null,
       transporterReady: mailerStatus.transporterReady,
+      sendMethod: mailResult?.method || null,
       action: 'otp-sent',
     });
 
@@ -1697,6 +1741,8 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       route: '/api/reporter-auth/request-code',
       normalizedEmail: email,
       returnedStatusCode: error && error.safeClientCode === 'REPORTER_EMAIL_UNAVAILABLE' ? 503 : (error && error.safeClientCode === 'OTP_REQUEST_ACCEPTED' ? 200 : 500),
+      provider: error?.provider || null,
+      backendCode: error?.backendCode || null,
       transporterReady: false,
       errorMessage: error?.message || String(error),
       error: serializeError(error),
@@ -1705,6 +1751,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       return res.status(503).json({
         ok: false,
         code: 'REPORTER_EMAIL_UNAVAILABLE',
+        backendCode: error.backendCode || 'PROVIDER_UNAVAILABLE',
         message: 'Verification email service is temporarily unavailable.',
       });
     }

@@ -3,6 +3,8 @@ const assert = require('node:assert');
 
 const trackedKeys = [
   'EMAIL_MODE',
+  'EMAIL_PROVIDER',
+  'MAIL_PROVIDER',
   'NODE_ENV',
   'RENDER_SERVICE_ID',
   'SMTP_HOST',
@@ -18,6 +20,9 @@ const trackedKeys = [
   'ADS_SMTP_USER',
   'ADS_SMTP_PASS',
   'ADS_SMTP_FROM',
+  'RESEND_API_KEY',
+  'RESEND_FROM',
+  'RESEND_REPLY_TO',
 ];
 
 function loadMailer() {
@@ -45,6 +50,29 @@ async function withMockedNodemailer(createTransport, run) {
       require.cache[nodemailerPath] = originalEntry;
     } else {
       delete require.cache[nodemailerPath];
+    }
+  }
+}
+
+async function withMockedAxios(exportsValue, run) {
+  const axiosPath = require.resolve('axios');
+  const originalEntry = require.cache[axiosPath];
+  require.cache[axiosPath] = {
+    id: axiosPath,
+    filename: axiosPath,
+    loaded: true,
+    exports: exportsValue,
+  };
+
+  try {
+    return await run();
+  } finally {
+    const mailerPath = require.resolve('../lib/mailer');
+    delete require.cache[mailerPath];
+    if (originalEntry) {
+      require.cache[axiosPath] = originalEntry;
+    } else {
+      delete require.cache[axiosPath];
     }
   }
 }
@@ -197,6 +225,116 @@ test('sendMail uses SMTP_FROM as envelope override, not visible From header', as
     assert.ok(capturedOptions);
     assert.strictEqual(capturedOptions.from, 'reporter@example.com');
     assert.deepStrictEqual(capturedOptions.envelope, { from: 'noreply@newspulse.co.in' });
+  } finally {
+    for (const key of trackedKeys) {
+      if (previousEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previousEnv[key];
+      }
+    }
+    loadMailer();
+  }
+});
+
+test('getMailerStatus resolves Resend provider when SMTP is absent and RESEND env is configured', () => {
+  const previousEnv = {};
+  for (const key of trackedKeys) previousEnv[key] = process.env[key];
+
+  try {
+    delete process.env.EMAIL_MODE;
+    delete process.env.EMAIL_PROVIDER;
+    delete process.env.MAIL_PROVIDER;
+    delete process.env.SMTP_HOST;
+    delete process.env.SMTP_PORT;
+    delete process.env.SMTP_USER;
+    delete process.env.SMTP_PASS;
+    delete process.env.MAIL_FROM;
+    delete process.env.FROM_EMAIL;
+    delete process.env.EMAIL_FROM;
+    process.env.RESEND_API_KEY = 're_test_key';
+    process.env.RESEND_FROM = 'NewsPulse Reporter <reporter@newspulse.co.in>';
+
+    const { getMailerStatus } = loadMailer();
+    const status = getMailerStatus();
+
+    assert.strictEqual(status.provider, 'resend');
+    assert.strictEqual(status.configured, true);
+    assert.deepStrictEqual(status.missing, []);
+    assert.strictEqual(status.resolved.resendApiKey, true);
+    assert.strictEqual(status.resolved.resendFrom, true);
+  } finally {
+    for (const key of trackedKeys) {
+      if (previousEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previousEnv[key];
+      }
+    }
+    loadMailer();
+  }
+});
+
+test('sendMail uses Resend when configured as the active provider', async () => {
+  const previousEnv = {};
+  for (const key of trackedKeys) previousEnv[key] = process.env[key];
+
+  try {
+    delete process.env.EMAIL_MODE;
+    process.env.EMAIL_PROVIDER = 'resend';
+    delete process.env.MAIL_PROVIDER;
+    delete process.env.SMTP_HOST;
+    delete process.env.SMTP_PORT;
+    delete process.env.SMTP_USER;
+    delete process.env.SMTP_PASS;
+    delete process.env.MAIL_FROM;
+    delete process.env.FROM_EMAIL;
+    delete process.env.EMAIL_FROM;
+    process.env.RESEND_API_KEY = 're_test_key';
+    process.env.RESEND_FROM = 'NewsPulse Reporter <reporter@newspulse.co.in>';
+    process.env.RESEND_REPLY_TO = 'support@newspulse.co.in';
+
+    let capturedRequest = null;
+    await withMockedAxios(
+      {
+        post: async (url, payload, options) => {
+          capturedRequest = { url, payload, options };
+          return {
+            status: 200,
+            statusText: 'OK',
+            data: { id: 're_mock_id' },
+          };
+        },
+      },
+      async () => {
+        const { getMailerStatus, getTransporter, sendMail } = loadMailer();
+        const status = getMailerStatus();
+
+        assert.strictEqual(status.provider, 'resend');
+        assert.strictEqual(status.configured, true);
+
+        const transporter = getTransporter();
+        assert.ok(transporter);
+        assert.strictEqual(transporter.provider, 'resend');
+
+        const info = await sendMail({
+          to: 'recipient@example.com',
+          subject: 'Reporter OTP',
+          text: 'Test message',
+        });
+
+        assert.strictEqual(info.provider, 'resend');
+        assert.deepStrictEqual(info.accepted, ['recipient@example.com']);
+        assert.strictEqual(info.messageId, 're_mock_id');
+      }
+    );
+
+    assert.ok(capturedRequest);
+    assert.strictEqual(capturedRequest.url, 'https://api.resend.com/emails');
+    assert.strictEqual(capturedRequest.payload.from, 'NewsPulse Reporter <reporter@newspulse.co.in>');
+    assert.deepStrictEqual(capturedRequest.payload.to, ['recipient@example.com']);
+    assert.strictEqual(capturedRequest.payload.reply_to, 'support@newspulse.co.in');
+    assert.strictEqual(capturedRequest.options.headers.Authorization, 'Bearer re_test_key');
   } finally {
     for (const key of trackedKeys) {
       if (previousEnv[key] === undefined) {

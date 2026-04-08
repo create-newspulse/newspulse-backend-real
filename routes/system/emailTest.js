@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { sendMail, getTransporter, getMailerStatus } = require('../../lib/mailer');
+const { classifyAndWrapMailerError, sendMail, getTransporter, getMailerStatus } = require('../../lib/mailer');
 
 // GET /system/email-test -> reports configuration status
 router.get('/', (req, res) => {
@@ -8,14 +8,17 @@ router.get('/', (req, res) => {
   // getTransporter may throw if configuration is missing (intentional)
   let transporterReady = false;
   let transporterError = null;
+  let backendCode = status.configured ? null : 'MAILER_NOT_CONFIGURED';
   try {
     const t = getTransporter();
     transporterReady = !!t;
   } catch (err) {
+    const classified = classifyAndWrapMailerError(err, { provider: status.provider });
     transporterReady = false;
-    transporterError = err?.message || String(err);
+    transporterError = classified?.message || err?.message || String(err);
+    backendCode = classified?.backendCode || 'PROVIDER_UNAVAILABLE';
   }
-  res.json({ ok: true, config: status.resolved, missing: status.missing, transporterReady, transporterError });
+  res.json({ ok: true, provider: status.provider, config: status.resolved, missing: status.missing, backendCode, transporterReady, transporterError });
 });
 
 // POST /system/email-test/send { to?, subject?, text?, html? }
@@ -44,7 +47,9 @@ router.post('/send', async (req, res) => {
       },
     });
   } catch (err) {
-    return res.status(500).json({ ok: false, message: 'Send failed', error: err?.message || String(err) });
+    const status = getMailerStatus();
+    const classified = classifyAndWrapMailerError(err, { provider: status.provider });
+    return res.status(500).json({ ok: false, provider: classified.provider || status.provider, backendCode: classified.backendCode || 'PROVIDER_UNAVAILABLE', message: 'Send failed', error: classified?.message || err?.message || String(err) });
   }
 });
 

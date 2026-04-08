@@ -3,9 +3,8 @@
  * Test email sender for NewsPulse backend.
  * Usage:
  *   node scripts/test-email.js --to=user@example.com --subject="Test" --text="Hello" --html="<p>Hello</p>"
- * Env vars required: SMTP_HOST/ADS_SMTP_HOST, SMTP_PORT/ADS_SMTP_PORT,
- * SMTP_USER/ADS_SMTP_USER, SMTP_PASS/ADS_SMTP_PASS,
- * (EMAIL_FROM|MAIL_FROM|FROM_EMAIL|ADS_SMTP_FROM optional, SMTP_FROM envelope-only)
+ * Env vars required: either SMTP_HOST/SMTP_SERVICE + SMTP_USER + SMTP_PASS,
+ * or RESEND_API_KEY (+ RESEND_FROM or a shared FROM alias).
  */
 require('dotenv').config();
 const { sendMail, getTransporter } = require('../lib/mailer');
@@ -43,7 +42,7 @@ async function main() {
   const transporter = getTransporter();
   if (!transporter) {
     console.error('[TEST-EMAIL] Transporter not available. Missing required env vars?');
-    console.error('Required: SMTP_HOST|SMTP_SERVICE (or ADS_SMTP_HOST), SMTP_PORT (or ADS_SMTP_PORT when HOST is used), SMTP_USER (or ADS_SMTP_USER), SMTP_PASS (or ADS_SMTP_PASS)');
+    console.error('Required: SMTP_HOST|SMTP_SERVICE + SMTP_USER + SMTP_PASS, or RESEND_API_KEY + RESEND_FROM (or MAIL_FROM/FROM_EMAIL/EMAIL_FROM)');
     process.exit(3);
   }
   console.log('[TEST-EMAIL] Attempting send...', { to, subject });

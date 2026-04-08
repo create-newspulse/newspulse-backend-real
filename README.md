@@ -574,6 +574,10 @@ To enable OTP and other email sends, set these environment variables (Render das
 | `SMTP_POOL` | `true` | Enable connection pooling |
 | `SMTP_MAX_CONN` | `3` | Pool size |
 | `SMTP_DEBUG` | `false` | Set `true` for verbose Nodemailer logs |
+| `EMAIL_PROVIDER` | `smtp` or `resend` | Optional explicit provider override |
+| `RESEND_API_KEY` | `re_xxx` | Enables Resend when SMTP is absent or provider is forced to `resend` |
+| `RESEND_FROM` | `NewsPulse <noreply@newspulse.co.in>` | Preferred Resend sender |
+| `RESEND_REPLY_TO` | `support@newspulse.co.in` | Optional Resend reply-to |
 
 Gmail Setup:
 1. Enable 2FA on the account.
@@ -594,8 +598,10 @@ If you see `[EMAIL][transporter-ready]` followed by `[EMAIL][sent]` with your ad
 
 Reporter Portal production notes:
 - Production-like environments now reject `EMAIL_MODE=stub`; real SMTP config is required.
+- Reporter OTP now supports either SMTP or Resend. If both exist, SMTP remains the default unless `EMAIL_PROVIDER=resend` is set.
 - `OTP_DEV_ECHO` is ignored in production-like environments, so the OTP is never echoed in live responses.
 - For Render env changes, save the variables in the dashboard and redeploy the service. A restart/redeploy is required for Node to pick up new env values.
+- Mailer failures now log and expose a safe `backendCode` such as `MAILER_NOT_CONFIGURED`, `SMTP_AUTH_FAILED`, `SMTP_CONNECT_FAILED`, `RESEND_AUTH_FAILED`, `PROVIDER_UNAVAILABLE`, or `COOLDOWN_ACTIVE`.
 
 Render Deployment:
 - Add each SMTP/OTP variable in the Render dashboard (do NOT commit real secrets).

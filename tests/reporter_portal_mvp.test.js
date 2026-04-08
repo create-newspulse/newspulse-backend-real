@@ -1450,6 +1450,7 @@ test('reporter portal request-code returns stable unavailable code when transpor
 
     assert.strictEqual(otpRes.statusCode, 503);
     assert.strictEqual(otpRes.body.code, 'REPORTER_EMAIL_UNAVAILABLE');
+    assert.strictEqual(otpRes.body.backendCode, 'MAILER_NOT_CONFIGURED');
   } finally {
     if (originalEmailMode === undefined) delete process.env.EMAIL_MODE;
     else process.env.EMAIL_MODE = originalEmailMode;
