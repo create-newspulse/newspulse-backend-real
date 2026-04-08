@@ -346,3 +346,49 @@ test('sendMail uses Resend when configured as the active provider', async () => 
     loadMailer();
   }
 });
+
+test('sendMail maps Resend timeouts to PROVIDER_TIMEOUT', async () => {
+  const previousEnv = {};
+  for (const key of trackedKeys) previousEnv[key] = process.env[key];
+
+  try {
+    delete process.env.EMAIL_MODE;
+    process.env.EMAIL_PROVIDER = 'resend';
+    delete process.env.MAIL_PROVIDER;
+    delete process.env.SMTP_HOST;
+    delete process.env.SMTP_PORT;
+    delete process.env.SMTP_USER;
+    delete process.env.SMTP_PASS;
+    delete process.env.MAIL_FROM;
+    delete process.env.FROM_EMAIL;
+    delete process.env.EMAIL_FROM;
+    process.env.RESEND_API_KEY = 're_test_key';
+    process.env.RESEND_FROM = 'NewsPulse Reporter <reporter@newspulse.co.in>';
+
+    await withMockedAxios(
+      {
+        post: async () => {
+          const error = new Error('timeout of 10000ms exceeded');
+          error.code = 'ECONNABORTED';
+          throw error;
+        },
+      },
+      async () => {
+        const { sendMail } = loadMailer();
+        await assert.rejects(
+          () => sendMail({ to: 'recipient@example.com', subject: 'Reporter OTP', text: 'Test message' }),
+          (error) => error && error.backendCode === 'PROVIDER_TIMEOUT'
+        );
+      }
+    );
+  } finally {
+    for (const key of trackedKeys) {
+      if (previousEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previousEnv[key];
+      }
+    }
+    loadMailer();
+  }
+});

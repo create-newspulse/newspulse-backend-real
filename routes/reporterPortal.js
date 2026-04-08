@@ -342,6 +342,52 @@ function buildReporterPendingChallenge(challenge, fallback = {}) {
   };
 }
 
+async function restoreReporterPendingChallengePersistence(req, res, challenge, options = {}) {
+  const pending = buildReporterPendingChallenge(challenge);
+  let sessionPersisted = false;
+  let challengeCookie = null;
+
+  try {
+    await saveReporterLoginChallengeSession(req, pending);
+    sessionPersisted = true;
+  } catch (error) {
+    logReporterAuthError('challenge-persist', {
+      route: options.route || '/api/reporter-auth/request-code',
+      normalizedEmail: pending.email,
+      pendingChallengeId: pending.challengeId,
+      persistenceSource: options.source || 'unknown',
+      action: 'session-save-failed',
+      errorMessage: error?.message || String(error),
+    });
+  }
+
+  try {
+    challengeCookie = setReporterPortalLoginChallengeCookie(res, req, pending);
+  } catch (error) {
+    logReporterAuthError('challenge-persist', {
+      route: options.route || '/api/reporter-auth/request-code',
+      normalizedEmail: pending.email,
+      pendingChallengeId: pending.challengeId,
+      persistenceSource: options.source || 'unknown',
+      action: 'cookie-issue-failed',
+      errorMessage: error?.message || String(error),
+    });
+  }
+
+  logReporterAuth('challenge-persist', {
+    route: options.route || '/api/reporter-auth/request-code',
+    normalizedEmail: pending.email,
+    pendingChallengeId: pending.challengeId,
+    persistenceSource: options.source || 'unknown',
+    action: 'persisted',
+    sessionPersisted,
+    cookie: challengeCookie ? describeReporterCookieOptions(challengeCookie.options) : null,
+    sessionCookie: describeReporterCookieOptions(req?.session?.cookie),
+  });
+
+  return { pending, sessionPersisted, cookie: challengeCookie };
+}
+
 async function saveReporterLoginChallengeSession(req, challenge) {
   if (!req || !req.session) return;
   req.session.reporterAuthChallenge = buildReporterPendingChallenge(challenge);
@@ -657,47 +703,92 @@ async function findMatchingOtpChallenge(challenges, otp) {
 async function resolveReporterPendingLoginChallenge(req, email, options = {}) {
   const compatRequired = options.compatRequired === true;
   const lookupSource = String(options.lookupSource || 'pending').trim() || 'pending';
+  const normalizedEmail = normalizeEmail(email);
   let pending = null;
+  let source = null;
 
   try {
     pending = decodeReporterLoginChallengeToken(req);
   } catch (_) {
     pending = null;
   }
+  if (pending?.challengeId && pending?.email) source = 'cookie';
 
   if (!pending && req?.session?.reporterAuthChallenge) {
     pending = buildReporterPendingChallenge(null, req.session.reporterAuthChallenge);
+    if (pending?.challengeId && pending?.email) source = 'session';
   }
 
   logReporterOtp({
-    email,
+    email: normalizedEmail || email,
     action: `${lookupSource}.session-lookup`,
     challengeId: pending?.challengeId || null,
     hasActiveChallenge: false,
-    reason: pending ? 'cookie_or_session_present' : 'missing',
+    reason: pending ? `${source || 'cookie_or_session'}_present` : 'missing',
   });
 
   if (!pending?.challengeId || !pending?.email) {
+    if (normalizedEmail) {
+      const recentChallenges = await loadRecentOtpChallenges(normalizedEmail, REPORTER_PORTAL_OTP_PURPOSE);
+      await expireStaleOtpChallenges(recentChallenges);
+      const latestActiveChallenge = getLatestActiveOtpChallenge(recentChallenges);
+      if (latestActiveChallenge) {
+        const resolvedPending = buildReporterPendingChallenge(latestActiveChallenge);
+        logReporterOtp({
+          email: normalizedEmail,
+          action: `${lookupSource}.db-lookup`,
+          challengeId: resolvedPending.challengeId,
+          hasActiveChallenge: true,
+          reason: 'db-active-found',
+        });
+        return {
+          ok: true,
+          pending: resolvedPending,
+          challenge: latestActiveChallenge,
+          source: 'db-email',
+          restoredFromDb: true,
+        };
+      }
+
+      const latestChallenge = recentChallenges[0] || null;
+      const latestReason = resolveOtpChallengeStatus(latestChallenge) || 'missing';
+      if (latestChallenge && latestReason && latestReason !== 'active') {
+        logReporterOtp({
+          email: normalizedEmail,
+          action: `${lookupSource}.db-inactive`,
+          challengeId: getReporterChallengeSessionId(latestChallenge),
+          hasActiveChallenge: false,
+          reason: latestReason,
+        });
+        return {
+          ok: false,
+          reason: latestReason,
+          pending: buildReporterPendingChallenge(latestChallenge),
+          challenge: latestChallenge,
+          source: 'db-email',
+        };
+      }
+    }
+
     logReporterOtp({
-      email,
+      email: normalizedEmail || email,
       action: `${lookupSource}.session-missing`,
       challengeId: null,
       hasActiveChallenge: false,
       reason: compatRequired ? 'session_missing' : 'missing',
     });
-    return { ok: false, reason: compatRequired ? 'session_missing' : 'missing', pending: null };
+    return { ok: false, reason: compatRequired ? 'session_missing' : 'missing', pending: null, source: null };
   }
 
-  const normalizedEmail = normalizeEmail(email);
   if (normalizedEmail && pending.email !== normalizedEmail) {
     logReporterOtp({
-      email,
+      email: normalizedEmail,
       action: `${lookupSource}.session-email-mismatch`,
       challengeId: pending.challengeId,
       hasActiveChallenge: false,
       reason: 'session_missing',
     });
-    return { ok: false, reason: 'session_missing', pending };
+    return { ok: false, reason: 'session_missing', pending, source };
   }
 
   const challenge = await OtpToken.findOne({
@@ -713,7 +804,7 @@ async function resolveReporterPendingLoginChallenge(req, email, options = {}) {
       hasActiveChallenge: false,
       reason: compatRequired ? 'session_missing' : 'missing',
     });
-    return { ok: false, reason: compatRequired ? 'session_missing' : 'missing', pending };
+    return { ok: false, reason: compatRequired ? 'session_missing' : 'missing', pending, source };
   }
 
   const status = resolveOtpChallengeStatus(challenge);
@@ -725,7 +816,7 @@ async function resolveReporterPendingLoginChallenge(req, email, options = {}) {
       hasActiveChallenge: false,
       reason: status,
     });
-    return { ok: false, reason: status, pending, challenge };
+    return { ok: false, reason: status, pending, challenge, source };
   }
 
   const recentChallenges = await loadRecentOtpChallenges(pending.email, pending.purpose || REPORTER_PORTAL_OTP_PURPOSE);
@@ -739,7 +830,7 @@ async function resolveReporterPendingLoginChallenge(req, email, options = {}) {
       hasActiveChallenge: true,
       reason: 'replaced',
     });
-    return { ok: false, reason: 'replaced', pending, challenge, latestActiveChallenge };
+    return { ok: false, reason: 'replaced', pending, challenge, latestActiveChallenge, source };
   }
 
   const resolvedPending = buildReporterPendingChallenge(challenge, pending);
@@ -755,6 +846,7 @@ async function resolveReporterPendingLoginChallenge(req, email, options = {}) {
     ok: true,
     pending: resolvedPending,
     challenge,
+    source,
   };
 }
 
@@ -885,6 +977,10 @@ function createEmailServiceUnavailableError(error, mailerStatus) {
   wrapped.syscall = failure.error?.syscall || error?.syscall;
   wrapped.safeClientCode = 'REPORTER_EMAIL_UNAVAILABLE';
   return wrapped;
+}
+
+function getReporterMailerHttpStatus(backendCode) {
+  return backendCode === 'PROVIDER_TIMEOUT' ? 504 : 503;
 }
 
 function createAcceptedOtpRequestError(error) {
@@ -1674,8 +1770,11 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
     const challengeIssuedAt = new Date();
     createdOtpRecord = await createReporterOtpChallenge(email, REPORTER_PORTAL_OTP_PURPOSE, code, challengeIssuedAt);
     await replaceActiveOtpChallenges(otpChallenges, createdOtpRecord.challengeId, challengeIssuedAt);
-    await saveReporterLoginChallengeSession(req, createdOtpRecord);
-    const pendingChallengeCookie = setReporterPortalLoginChallengeCookie(res, req, createdOtpRecord);
+    const persistence = await restoreReporterPendingChallengePersistence(req, res, createdOtpRecord, {
+      route: '/api/reporter-auth/request-code',
+      source: 'request-code',
+    });
+    const pendingChallengeCookie = persistence.cookie;
     const expiresAt = createdOtpRecord.expiresAt;
     logReporterAuth('request-code', buildOtpLogContext(req, email, {
       route: '/api/reporter-auth/request-code',
@@ -1740,7 +1839,9 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
     logReporterAuthError('request-code', {
       route: '/api/reporter-auth/request-code',
       normalizedEmail: email,
-      returnedStatusCode: error && error.safeClientCode === 'REPORTER_EMAIL_UNAVAILABLE' ? 503 : (error && error.safeClientCode === 'OTP_REQUEST_ACCEPTED' ? 200 : 500),
+      returnedStatusCode: error && error.safeClientCode === 'REPORTER_EMAIL_UNAVAILABLE'
+        ? getReporterMailerHttpStatus(error?.backendCode)
+        : (error && error.safeClientCode === 'OTP_REQUEST_ACCEPTED' ? 200 : 500),
       provider: error?.provider || null,
       backendCode: error?.backendCode || null,
       transporterReady: false,
@@ -1748,7 +1849,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       error: serializeError(error),
     });
     if (error && error.safeClientCode === 'REPORTER_EMAIL_UNAVAILABLE') {
-      return res.status(503).json({
+      return res.status(getReporterMailerHttpStatus(error.backendCode)).json({
         ok: false,
         code: 'REPORTER_EMAIL_UNAVAILABLE',
         backendCode: error.backendCode || 'PROVIDER_UNAVAILABLE',
@@ -2175,9 +2276,16 @@ router.get('/auth/challenge-session', requireReporterPortalOpen, async (req, res
       action: pendingResult.ok ? 'pending-found' : 'pending-missing',
       pendingChallengeId: pendingResult.pending?.challengeId || null,
       reason: pendingResult.reason || null,
+      persistenceSource: pendingResult.source || null,
     });
 
     if (pendingResult.ok) {
+      if (pendingResult.restoredFromDb || pendingResult.source === 'db-email') {
+        await restoreReporterPendingChallengePersistence(req, res, pendingResult.challenge || pendingResult.pending, {
+          route: '/api/reporter-auth/challenge-session',
+          source: pendingResult.source || 'db-email',
+        });
+      }
       return res.status(200).json({
         ok: true,
         authenticated: false,
@@ -2267,6 +2375,12 @@ router.get('/auth/session', requireReporterPortalOpen, async (req, res) => {
       const requestedEmail = normalizeEmail(req.query?.email || req.body?.email || '');
       const pendingResult = await resolveReporterPendingLoginChallenge(req, requestedEmail || null, { compatRequired: false });
       if (pendingResult.ok) {
+        if (pendingResult.restoredFromDb || pendingResult.source === 'db-email') {
+          await restoreReporterPendingChallengePersistence(req, res, pendingResult.challenge || pendingResult.pending, {
+            route: '/api/reporter-auth/session',
+            source: pendingResult.source || 'db-email',
+          });
+        }
         return res.status(200).json({
           ok: true,
           authenticated: false,

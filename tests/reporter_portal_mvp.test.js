@@ -1094,7 +1094,7 @@ test('reporter-auth compat request-code issues a pending challenge cookie for th
   assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('HttpOnly')));
 });
 
-test('reporter-auth compat verify-code returns clean session-expired error when pre-auth session is missing', async () => {
+test('reporter-auth compat verify-code can recover from DB-backed challenge state when pre-auth cookie/session is missing', async () => {
   reporterDoc.email = 'compat.expired@example.com';
   reporterDoc.emailLower = 'compat.expired@example.com';
 
@@ -1108,8 +1108,9 @@ test('reporter-auth compat verify-code returns clean session-expired error when 
     .post('/api/reporter-auth/verify-code')
     .send({ email: 'compat.expired@example.com', otp: otpRes.body.devCode });
 
-  assert.strictEqual(verifyRes.statusCode, 401);
-  assert.strictEqual(verifyRes.body.code, 'SESSION_EXPIRED');
+  assert.strictEqual(verifyRes.statusCode, 200);
+  assert.strictEqual(verifyRes.body.ok, true);
+  assert.strictEqual(verifyRes.body.reporter.email, 'compat.expired@example.com');
 });
 
 test('reporter-auth compat verify-code succeeds with the latest OTP and active challenge session', async () => {
@@ -1167,6 +1168,51 @@ test('reporter-auth compat challenge and verify flow works with only the persist
   assert.strictEqual(verifyRes.statusCode, 200);
   assert.strictEqual(verifyRes.body.ok, true);
   assert.strictEqual(verifyRes.body.reporter.email, 'compat.cookieonly@example.com');
+});
+
+test('reporter-auth compat challenge-session restores pending state from DB when cookie state is missing but email is provided', async () => {
+  reporterDoc.email = 'compat.dbfallback.challenge@example.com';
+  reporterDoc.emailLower = 'compat.dbfallback.challenge@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-auth/request-code')
+    .send({ email: 'compat.dbfallback.challenge@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+
+  const challengeSessionRes = await request(app)
+    .get('/api/reporter-auth/challenge-session')
+    .query({ email: 'compat.dbfallback.challenge@example.com' });
+
+  assert.strictEqual(challengeSessionRes.statusCode, 200);
+  assert.strictEqual(challengeSessionRes.body.ok, true);
+  assert.strictEqual(challengeSessionRes.body.challenge.email, 'compat.dbfallback.challenge@example.com');
+  assert.strictEqual(challengeSessionRes.body.challenge.status, 'pending');
+  assert.ok(Array.isArray(challengeSessionRes.headers['set-cookie']));
+  assert.ok(challengeSessionRes.headers['set-cookie'].some((value) => value.includes('reporter_portal_login_challenge=')));
+});
+
+test('reporter-auth compat session restores pending state from DB when cookie state is missing but email is provided', async () => {
+  reporterDoc.email = 'compat.dbfallback.session@example.com';
+  reporterDoc.emailLower = 'compat.dbfallback.session@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-auth/request-code')
+    .send({ email: 'compat.dbfallback.session@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+
+  const sessionRes = await request(app)
+    .get('/api/reporter-auth/session')
+    .query({ email: 'compat.dbfallback.session@example.com' });
+
+  assert.strictEqual(sessionRes.statusCode, 200);
+  assert.strictEqual(sessionRes.body.ok, true);
+  assert.strictEqual(sessionRes.body.authenticated, false);
+  assert.strictEqual(sessionRes.body.challenge.email, 'compat.dbfallback.session@example.com');
+  assert.strictEqual(sessionRes.body.challenge.status, 'pending');
+  assert.ok(Array.isArray(sessionRes.headers['set-cookie']));
+  assert.ok(sessionRes.headers['set-cookie'].some((value) => value.includes('reporter_portal_login_challenge=')));
 });
 
 test('reporter-auth compat request-code issues both pending challenge and session cookies for the OTP window', async () => {
