@@ -21,6 +21,7 @@ function forwardToReporterPortal(targetPath) {
 
 router.post('/request-code', forwardToReporterPortal('/auth/request-login-otp'));
 router.post('/verify-code', forwardToReporterPortal('/auth/verify-login-otp'));
+router.get('/challenge-session', forwardToReporterPortal('/auth/challenge-session'));
 router.get('/session', forwardToReporterPortal('/auth/session'));
 router.post('/logout', forwardToReporterPortal('/auth/logout'));
 router.get('/dashboard/summary', forwardToReporterPortal('/dashboard/summary'));

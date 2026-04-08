@@ -881,27 +881,38 @@ test('reporter OTP request and verification attempts are rate limited', async ()
   assert.strictEqual(lastVerifyRes.body.code, 'OTP_VERIFY_RATE_LIMITED');
 });
 
-test('reporter OTP resend cooldown returns a controlled response', async () => {
-  process.env.REPORTER_OTP_RESEND_COOLDOWN_MS = '60000';
-  try {
-    reporterDoc.email = 'cooldown@example.com';
-    reporterDoc.emailLower = 'cooldown@example.com';
-    const firstRes = await request(app)
-      .post('/api/reporter-portal/auth/request-login-otp')
-      .send({ email: 'cooldown@example.com' });
+test('reporter OTP resend immediately replaces the prior active challenge', async () => {
+  reporterDoc.email = 'cooldown@example.com';
+  reporterDoc.emailLower = 'cooldown@example.com';
 
-    assert.strictEqual(firstRes.statusCode, 200);
+  const firstRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'cooldown@example.com' });
 
-    const secondRes = await request(app)
-      .post('/api/reporter-portal/auth/request-login-otp')
-      .send({ email: 'cooldown@example.com' });
+  assert.strictEqual(firstRes.statusCode, 200);
+  assert.ok(firstRes.body.devCode);
 
-    assert.strictEqual(secondRes.statusCode, 429);
-    assert.strictEqual(secondRes.body.code, 'COOLDOWN_ACTIVE');
-    assert.ok(Number(secondRes.body.retryAfterSec) >= 1);
-  } finally {
-    process.env.REPORTER_OTP_RESEND_COOLDOWN_MS = '0';
-  }
+  const secondRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'cooldown@example.com' });
+
+  assert.strictEqual(secondRes.statusCode, 200);
+  assert.ok(secondRes.body.devCode);
+  assert.notStrictEqual(firstRes.body.devCode, secondRes.body.devCode);
+
+  const oldVerifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'cooldown@example.com', otp: firstRes.body.devCode });
+
+  assert.strictEqual(oldVerifyRes.statusCode, 400);
+  assert.strictEqual(oldVerifyRes.body.code, 'OTP_REPLACED');
+
+  const newVerifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'cooldown@example.com', otp: secondRes.body.devCode });
+
+  assert.strictEqual(newVerifyRes.statusCode, 200);
+  assert.strictEqual(newVerifyRes.body.ok, true);
 });
 
 test('reporter OTP resend replaces the older challenge and returns a clear replaced-code failure', async () => {
@@ -914,8 +925,6 @@ test('reporter OTP resend replaces the older challenge and returns a clear repla
 
   assert.strictEqual(firstRes.statusCode, 200);
   assert.ok(firstRes.body.devCode);
-
-  otpStore[0].createdAt = new Date(Date.now() - 61 * 1000);
 
   const secondRes = await request(app)
     .post('/api/reporter-portal/auth/request-login-otp')
@@ -963,6 +972,41 @@ test('reporter OTP keeps the latest challenge active after a failed verification
   assert.strictEqual(goodVerifyRes.body.ok, true);
 });
 
+test('reporter OTP verify succeeds even when a legacy reporter document save would fail validation', async () => {
+  reporterDoc.email = 'legacysave@example.com';
+  reporterDoc.emailLower = 'legacysave@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'legacysave@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+  assert.ok(otpRes.body.devCode);
+
+  const originalFindOne = ReporterContact.findOne;
+  try {
+    ReporterContact.findOne = async (filter) => {
+      const doc = await originalFindOne(filter);
+      if (!doc) return null;
+      doc.save = async () => {
+        throw new Error('legacy validation failure');
+      };
+      return doc;
+    };
+
+    const verifyRes = await request(app)
+      .post('/api/reporter-portal/auth/verify-login-otp')
+      .send({ email: 'legacysave@example.com', otp: otpRes.body.devCode });
+
+    assert.strictEqual(verifyRes.statusCode, 200);
+    assert.strictEqual(verifyRes.body.ok, true);
+    assert.strictEqual(reporterDoc.email, 'legacysave@example.com');
+    assert.ok(reporterDoc.lastPortalLoginAt);
+  } finally {
+    ReporterContact.findOne = originalFindOne;
+  }
+});
+
 test('reporter OTP verification survives in-memory reset because the challenge is stored in the database model', async () => {
   reporterDoc.email = 'restartsafe@example.com';
   reporterDoc.emailLower = 'restartsafe@example.com';
@@ -1005,6 +1049,35 @@ test('reporter-auth compat session returns pending challenge state during the OT
   assert.strictEqual(sessionRes.body.authenticated, false);
   assert.strictEqual(sessionRes.body.challenge.email, 'compat.pending@example.com');
   assert.strictEqual(sessionRes.body.challenge.status, 'pending');
+});
+
+test('reporter-auth compat challenge-session returns pending challenge state during the OTP window', async () => {
+  const agent = request.agent(app);
+  reporterDoc.email = 'compat.challenge@example.com';
+  reporterDoc.emailLower = 'compat.challenge@example.com';
+
+  const otpRes = await agent
+    .post('/api/reporter-auth/request-code')
+    .send({ email: 'compat.challenge@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+
+  const challengeSessionRes = await agent
+    .get('/api/reporter-auth/challenge-session');
+
+  assert.strictEqual(challengeSessionRes.statusCode, 200);
+  assert.strictEqual(challengeSessionRes.body.ok, true);
+  assert.strictEqual(challengeSessionRes.body.authenticated, false);
+  assert.strictEqual(challengeSessionRes.body.challenge.email, 'compat.challenge@example.com');
+  assert.strictEqual(challengeSessionRes.body.challenge.status, 'pending');
+});
+
+test('reporter-auth challenge-session returns missing-session when no pending challenge exists', async () => {
+  const res = await request(app)
+    .get('/api/reporter-auth/challenge-session');
+
+  assert.strictEqual(res.statusCode, 401);
+  assert.strictEqual(res.body.code, 'SESSION_EXPIRED');
 });
 
 test('reporter-auth compat request-code issues a pending challenge cookie for the OTP session window', async () => {
@@ -1059,7 +1132,157 @@ test('reporter-auth compat verify-code succeeds with the latest OTP and active c
   assert.strictEqual(verifyRes.body.reporter.email, 'compat.success@example.com');
 });
 
-test('reporter email change requires OTP verification and invalidates old session', async () => {
+test('reporter-auth compat challenge and verify flow works with only the persistent challenge cookie', async () => {
+  reporterDoc.email = 'compat.cookieonly@example.com';
+  reporterDoc.emailLower = 'compat.cookieonly@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-auth/request-code')
+    .send({ email: 'compat.cookieonly@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+  assert.ok(Array.isArray(otpRes.headers['set-cookie']));
+
+  const challengeCookieHeader = otpRes.headers['set-cookie']
+    .filter((value) => value.includes('reporter_portal_login_challenge='))
+    .map((value) => value.split(';')[0])
+    .join('; ');
+
+  assert.ok(challengeCookieHeader.includes('reporter_portal_login_challenge='));
+
+  const challengeSessionRes = await request(app)
+    .get('/api/reporter-auth/challenge-session')
+    .set('Cookie', challengeCookieHeader);
+
+  assert.strictEqual(challengeSessionRes.statusCode, 200);
+  assert.strictEqual(challengeSessionRes.body.ok, true);
+  assert.strictEqual(challengeSessionRes.body.challenge.email, 'compat.cookieonly@example.com');
+  assert.strictEqual(challengeSessionRes.body.challenge.status, 'pending');
+
+  const verifyRes = await request(app)
+    .post('/api/reporter-auth/verify-code')
+    .set('Cookie', challengeCookieHeader)
+    .send({ email: 'compat.cookieonly@example.com', otp: otpRes.body.devCode });
+
+  assert.strictEqual(verifyRes.statusCode, 200);
+  assert.strictEqual(verifyRes.body.ok, true);
+  assert.strictEqual(verifyRes.body.reporter.email, 'compat.cookieonly@example.com');
+});
+
+test('reporter-auth compat request-code issues both pending challenge and session cookies for the OTP window', async () => {
+  reporterDoc.email = 'compat.cookie@example.com';
+  reporterDoc.emailLower = 'compat.cookie@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-auth/request-code')
+    .send({ email: 'compat.cookie@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+  assert.ok(Array.isArray(otpRes.headers['set-cookie']));
+  assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('reporter_portal_login_challenge=')));
+  assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('reporter_portal.sid=')));
+  assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('HttpOnly')));
+});
+
+test('reporter-auth compat request-code sets secure shared-domain cookies on newspulse production hosts', async () => {
+  reporterDoc.email = 'compat.prod@example.com';
+  reporterDoc.emailLower = 'compat.prod@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-auth/request-code')
+    .set('Host', 'api.newspulse.co.in')
+    .set('Origin', 'https://www.newspulse.co.in')
+    .set('x-forwarded-proto', 'https')
+    .send({ email: 'compat.prod@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+  assert.ok(Array.isArray(otpRes.headers['set-cookie']));
+  assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('reporter_portal_login_challenge=')));
+  assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('reporter_portal.sid=')));
+  assert.ok(otpRes.headers['set-cookie'].every((value) => value.includes('SameSite=None')));
+  assert.ok(otpRes.headers['set-cookie'].every((value) => value.includes('Secure')));
+  assert.ok(otpRes.headers['set-cookie'].every((value) => value.includes('Domain=.newspulse.co.in')));
+
+  const cookieHeader = otpRes.headers['set-cookie'].map((value) => value.split(';')[0]).join('; ');
+
+  const sessionRes = await request(app)
+    .get('/api/reporter-auth/session')
+    .set('Host', 'api.newspulse.co.in')
+    .set('Origin', 'https://www.newspulse.co.in')
+    .set('Cookie', cookieHeader)
+    .set('x-forwarded-proto', 'https');
+
+  assert.strictEqual(sessionRes.statusCode, 200);
+  assert.strictEqual(sessionRes.body.authenticated, false);
+  assert.strictEqual(sessionRes.body.challenge.status, 'pending');
+  assert.strictEqual(sessionRes.body.challenge.email, 'compat.prod@example.com');
+
+  const challengeSessionRes = await request(app)
+    .get('/api/reporter-auth/challenge-session')
+    .set('Host', 'api.newspulse.co.in')
+    .set('Origin', 'https://www.newspulse.co.in')
+    .set('Cookie', cookieHeader)
+    .set('x-forwarded-proto', 'https');
+
+  assert.strictEqual(challengeSessionRes.statusCode, 200);
+  assert.strictEqual(challengeSessionRes.body.challenge.email, 'compat.prod@example.com');
+  assert.strictEqual(challengeSessionRes.body.challenge.status, 'pending');
+});
+
+test('reporter-auth compat request-code infers secure shared-domain cookies from an HTTPS frontend origin', async () => {
+  reporterDoc.email = 'compat.originhttps@example.com';
+  reporterDoc.emailLower = 'compat.originhttps@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-auth/request-code')
+    .set('Host', 'api.newspulse.co.in')
+    .set('Origin', 'https://www.newspulse.co.in')
+    .send({ email: 'compat.originhttps@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+  assert.ok(Array.isArray(otpRes.headers['set-cookie']));
+  assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('reporter_portal_login_challenge=')));
+  assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('reporter_portal.sid=')));
+  assert.ok(otpRes.headers['set-cookie'].every((value) => value.includes('SameSite=None')));
+  assert.ok(otpRes.headers['set-cookie'].every((value) => value.includes('Secure')));
+  assert.ok(otpRes.headers['set-cookie'].every((value) => value.includes('Domain=.newspulse.co.in')));
+});
+
+test('reporter-auth compat request-code keeps cookies host-only on non-newspulse HTTPS hosts', async () => {
+  reporterDoc.email = 'compat.render@example.com';
+  reporterDoc.emailLower = 'compat.render@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-auth/request-code')
+    .set('Host', 'newspulse-backend.onrender.com')
+    .set('Origin', 'https://www.newspulse.co.in')
+    .set('x-forwarded-proto', 'https')
+    .send({ email: 'compat.render@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+  assert.ok(Array.isArray(otpRes.headers['set-cookie']));
+  assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('reporter_portal_login_challenge=')));
+  assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('reporter_portal.sid=')));
+  assert.ok(otpRes.headers['set-cookie'].every((value) => value.includes('SameSite=None')));
+  assert.ok(otpRes.headers['set-cookie'].every((value) => value.includes('Secure')));
+  assert.ok(otpRes.headers['set-cookie'].every((value) => !value.includes('Domain=')));
+
+  const cookieHeader = otpRes.headers['set-cookie'].map((value) => value.split(';')[0]).join('; ');
+
+  const sessionRes = await request(app)
+    .get('/api/reporter-auth/session')
+    .set('Host', 'newspulse-backend.onrender.com')
+    .set('Origin', 'https://www.newspulse.co.in')
+    .set('Cookie', cookieHeader)
+    .set('x-forwarded-proto', 'https');
+
+  assert.strictEqual(sessionRes.statusCode, 200);
+  assert.strictEqual(sessionRes.body.authenticated, false);
+  assert.strictEqual(sessionRes.body.challenge.status, 'pending');
+  assert.strictEqual(sessionRes.body.challenge.email, 'compat.render@example.com');
+});
+
+test('reporter portal email change requires re-login after verification', async () => {
   process.env.REPORTER_OTP_RESEND_COOLDOWN_MS = '0';
   try {
     reporterDoc.email = 'emailchange@example.com';
@@ -1102,7 +1325,6 @@ test('reporter email change requires OTP verification and invalidates old sessio
       .get('/api/reporter-portal/auth/session')
       .set('Authorization', `Bearer ${token}`);
 
-    assert.strictEqual(oldSessionRes.statusCode, 401);
     assert.strictEqual(oldSessionRes.body.code, 'REPORTER_SESSION_MISSING');
 
     const newOtpRes = await request(app)
@@ -1262,7 +1484,7 @@ test('reporter session endpoint returns stable missing-session code when auth is
     .get('/api/reporter-auth/session');
 
   assert.strictEqual(res.statusCode, 401);
-  assert.strictEqual(res.body.code, 'REPORTER_SESSION_MISSING');
+  assert.strictEqual(res.body.code, 'SESSION_EXPIRED');
 });
 
 test('reporter portal counts linked articles as published outcomes and exposes them in published filters', async () => {

@@ -79,6 +79,39 @@ function getConfiguredReporterCookieDomain() {
   return isProductionLike() ? '.newspulse.co.in' : null;
 }
 
+function getRequestHostname(req) {
+  const forwardedHost = String(req?.get('x-forwarded-host') || '').trim();
+  if (forwardedHost) {
+    return forwardedHost.split(',')[0].trim().split(':')[0].trim().toLowerCase();
+  }
+
+  const host = String(req?.get('Host') || '').trim();
+  if (host) {
+    return host.split(':')[0].trim().toLowerCase();
+  }
+
+  try {
+    const origin = String(req?.get('Origin') || '').trim();
+    if (origin) return new URL(origin).hostname.trim().toLowerCase();
+  } catch (_) {}
+
+  return '';
+}
+
+function resolveReporterCookieDomainForRequest(req) {
+  const requestDomain = resolveReporterCookieDomainFromHost(getRequestHostname(req));
+  if (requestDomain) return requestDomain;
+
+  const configuredDomain = getConfiguredReporterCookieDomain();
+  if (!configuredDomain) return null;
+
+  const normalizedConfigured = String(configuredDomain).replace(/^\./, '').toLowerCase();
+  const hostname = getRequestHostname(req);
+  if (!hostname) return configuredDomain;
+  if (hostname === normalizedConfigured || hostname.endsWith(`.${normalizedConfigured}`)) return configuredDomain;
+  return null;
+}
+
 function isLoopbackHostname(hostname) {
   return /^(localhost|127\.0\.0\.1)$/i.test(String(hostname || '').trim());
 }
@@ -105,15 +138,12 @@ function buildLoopbackCanonicalUrl(req) {
 }
 
 function getReporterSessionCookieConfig() {
-  const productionLike = isProductionLike();
-  const domain = getConfiguredReporterCookieDomain();
   return {
     httpOnly: true,
-    sameSite: productionLike ? 'none' : 'lax',
-    secure: productionLike,
+    sameSite: 'lax',
+    secure: false,
     path: '/',
     maxAge: 24 * 60 * 60 * 1000,
-    ...(domain ? { domain } : {}),
   };
 }
 
@@ -130,22 +160,59 @@ function isHttpsRequest(req) {
   return !!(req && (req.secure || String(req.get('x-forwarded-proto') || '').toLowerCase() === 'https'));
 }
 
+function getReporterRequestOriginProtocol(req) {
+  const forwardedProto = String(req?.get('x-forwarded-proto') || '').trim().toLowerCase();
+  if (forwardedProto) return forwardedProto.split(',')[0].trim() || null;
+  if (req?.secure) return 'https';
+
+  for (const header of ['Origin', 'Referer']) {
+    try {
+      const value = String(req?.get(header) || '').trim();
+      if (!value) continue;
+      const url = new URL(value);
+      return String(url.protocol || '').replace(/:$/, '').trim().toLowerCase() || null;
+    } catch (_) {}
+  }
+
+  return null;
+}
+
 function isLocalhostRequest(req) {
-  const origin = String(req.get('Origin') || '').trim();
-  const host = String(req.get('Host') || '').trim();
-  const target = origin || (host ? `http://${host}` : '');
-  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(target);
+  const hostname = getRequestHostname(req);
+  if (isLoopbackHostname(hostname)) return true;
+
+  for (const header of ['Origin', 'Referer']) {
+    try {
+      const value = String(req?.get(header) || '').trim();
+      if (!value) continue;
+      if (isLoopbackHostname(new URL(value).hostname)) return true;
+    } catch (_) {}
+  }
+
+  return false;
+}
+
+function shouldUseSecureReporterCookies(req) {
+  if (isLocalhostRequest(req)) return false;
+  if (isHttpsRequest(req)) return true;
+  return getReporterRequestOriginProtocol(req) === 'https';
+}
+
+function ensureReporterSessionProxyProtocol(req, secure) {
+  if (!secure || !req?.headers) return;
+  const current = String(req.headers['x-forwarded-proto'] || '').trim().toLowerCase();
+  if (current) return;
+  req.headers['x-forwarded-proto'] = 'https';
 }
 
 function getReporterPortalCookieOptions(req, expiresAt) {
   const maxAge = expiresAt ? Math.max(new Date(expiresAt).getTime() - Date.now(), 0) : undefined;
-  const requestDomain = resolveReporterCookieDomainFromHost(String(req.get('Host') || '').split(':')[0]);
-  const domain = requestDomain || getConfiguredReporterCookieDomain();
-  const localRequest = isLocalhostRequest(req) || !isHttpsRequest(req);
+  const domain = resolveReporterCookieDomainForRequest(req);
+  const secure = shouldUseSecureReporterCookies(req);
   return {
     httpOnly: true,
-    sameSite: localRequest ? 'lax' : 'none',
-    secure: localRequest ? false : true,
+    sameSite: secure ? 'none' : 'lax',
+    secure,
     path: '/',
     ...(domain ? { domain } : {}),
     ...(maxAge !== undefined ? { maxAge } : {}),
@@ -153,12 +220,66 @@ function getReporterPortalCookieOptions(req, expiresAt) {
   };
 }
 
+function syncReporterSessionCookieForRequest(req) {
+  if (!req?.session?.cookie) return;
+  const cookie = req.session.cookie;
+  const domain = resolveReporterCookieDomainForRequest(req);
+  const secure = shouldUseSecureReporterCookies(req);
+
+  ensureReporterSessionProxyProtocol(req, secure);
+
+  cookie.httpOnly = true;
+  cookie.sameSite = secure ? 'none' : 'lax';
+  cookie.secure = secure;
+  cookie.path = '/';
+  cookie.maxAge = 24 * 60 * 60 * 1000;
+
+  if (domain) cookie.domain = domain;
+  else delete cookie.domain;
+}
+
+function describeReporterCookieOptions(options) {
+  return {
+    domain: options?.domain || null,
+    path: options?.path || '/',
+    sameSite: options?.sameSite || null,
+    secure: options?.secure === true,
+    httpOnly: options?.httpOnly !== false,
+    maxAge: options?.maxAge ?? null,
+  };
+}
+
 function setReporterPortalSessionCookie(res, req, token, expiresAt) {
-  res.cookie(REPORTER_PORTAL_COOKIE_NAME, token, getReporterPortalCookieOptions(req, expiresAt));
+  const options = getReporterPortalCookieOptions(req, expiresAt);
+  res.cookie(REPORTER_PORTAL_COOKIE_NAME, token, options);
+  return options;
 }
 
 function clearReporterPortalSessionCookie(res, req) {
   res.clearCookie(REPORTER_PORTAL_COOKIE_NAME, getReporterPortalCookieOptions(req));
+}
+
+function getReporterBearerToken(req) {
+  const auth = String(req?.headers?.authorization || '');
+  if (!auth.toLowerCase().startsWith('bearer ')) return null;
+  const token = auth.slice(7).trim();
+  return token || null;
+}
+
+function getReporterPortalCookieToken(req) {
+  const cookieToken = req && req.cookies ? req.cookies[REPORTER_PORTAL_COOKIE_NAME] : null;
+  const token = String(cookieToken || '').trim();
+  return token || null;
+}
+
+function getReporterPortalTokenDetails(req) {
+  const bearerToken = getReporterBearerToken(req);
+  if (bearerToken) return { token: bearerToken, authModel: 'bearer-token' };
+
+  const cookieToken = getReporterPortalCookieToken(req);
+  if (cookieToken) return { token: cookieToken, authModel: 'cookie-token' };
+
+  return { token: null, authModel: 'none' };
 }
 
 function buildReporterLoginChallengeToken(challenge) {
@@ -199,22 +320,31 @@ function decodeReporterLoginChallengeToken(req) {
 
 function setReporterPortalLoginChallengeCookie(res, req, challenge) {
   const token = buildReporterLoginChallengeToken(challenge);
-  res.cookie(REPORTER_PORTAL_LOGIN_CHALLENGE_COOKIE_NAME, token, getReporterPortalCookieOptions(req, challenge?.expiresAt || null));
-  return token;
+  const options = getReporterPortalCookieOptions(req, challenge?.expiresAt || null);
+  res.cookie(REPORTER_PORTAL_LOGIN_CHALLENGE_COOKIE_NAME, token, options);
+  return { token, options };
 }
 
 function clearReporterPortalLoginChallengeCookie(res, req) {
   res.clearCookie(REPORTER_PORTAL_LOGIN_CHALLENGE_COOKIE_NAME, getReporterPortalCookieOptions(req));
 }
 
+function getReporterChallengeSessionId(challenge) {
+  return String(challenge?.challengeId || challenge?._id || '').trim() || null;
+}
+
+function buildReporterPendingChallenge(challenge, fallback = {}) {
+  return {
+    challengeId: getReporterChallengeSessionId(challenge) || String(fallback.challengeId || '').trim() || null,
+    email: normalizeEmail(challenge?.email || fallback.email) || null,
+    purpose: String(challenge?.purpose || fallback.purpose || REPORTER_PORTAL_OTP_PURPOSE).trim() || REPORTER_PORTAL_OTP_PURPOSE,
+    expiresAt: challenge?.expiresAt || fallback.expiresAt || null,
+  };
+}
+
 async function saveReporterLoginChallengeSession(req, challenge) {
   if (!req || !req.session) return;
-  req.session.reporterAuthChallenge = {
-    challengeId: String(challenge?.challengeId || challenge?._id || ''),
-    email: normalizeEmail(challenge?.email) || null,
-    purpose: challenge?.purpose || REPORTER_PORTAL_OTP_PURPOSE,
-    expiresAt: challenge?.expiresAt || null,
-  };
+  req.session.reporterAuthChallenge = buildReporterPendingChallenge(challenge);
   await new Promise((resolve, reject) => {
     req.session.save((error) => {
       if (error) return reject(error);
@@ -258,6 +388,16 @@ async function saveReporterSession(req, reporter) {
   });
 }
 
+async function persistReporterLastPortalLogin(reporter, when = new Date()) {
+  if (!reporter?._id) return when;
+  await ReporterContact.findOneAndUpdate(
+    { _id: reporter._id },
+    { $set: { lastPortalLoginAt: when } }
+  );
+  reporter.lastPortalLoginAt = when;
+  return when;
+}
+
 async function destroyReporterSession(req) {
   if (!req || !req.session) return;
   await new Promise((resolve) => {
@@ -271,6 +411,10 @@ function redirectLoopbackReporterHost(req, res, next) {
 
 router.use(redirectLoopbackReporterHost);
 router.use(reporterSessionMiddleware);
+router.use((req, _res, next) => {
+  syncReporterSessionCookieForRequest(req);
+  return next();
+});
 
 function firstNonEmpty(...values) {
   for (const value of values) {
@@ -512,6 +656,7 @@ async function findMatchingOtpChallenge(challenges, otp) {
 
 async function resolveReporterPendingLoginChallenge(req, email, options = {}) {
   const compatRequired = options.compatRequired === true;
+  const lookupSource = String(options.lookupSource || 'pending').trim() || 'pending';
   let pending = null;
 
   try {
@@ -521,28 +666,37 @@ async function resolveReporterPendingLoginChallenge(req, email, options = {}) {
   }
 
   if (!pending && req?.session?.reporterAuthChallenge) {
-    pending = {
-      challengeId: String(req.session.reporterAuthChallenge.challengeId || '').trim() || null,
-      email: normalizeEmail(req.session.reporterAuthChallenge.email) || null,
-      purpose: String(req.session.reporterAuthChallenge.purpose || REPORTER_PORTAL_OTP_PURPOSE).trim() || REPORTER_PORTAL_OTP_PURPOSE,
-      expiresAt: req.session.reporterAuthChallenge.expiresAt || null,
-    };
+    pending = buildReporterPendingChallenge(null, req.session.reporterAuthChallenge);
   }
 
   logReporterOtp({
     email,
-    action: 'verify.session-lookup',
+    action: `${lookupSource}.session-lookup`,
     challengeId: pending?.challengeId || null,
     hasActiveChallenge: false,
     reason: pending ? 'cookie_or_session_present' : 'missing',
   });
 
   if (!pending?.challengeId || !pending?.email) {
+    logReporterOtp({
+      email,
+      action: `${lookupSource}.session-missing`,
+      challengeId: null,
+      hasActiveChallenge: false,
+      reason: compatRequired ? 'session_missing' : 'missing',
+    });
     return { ok: false, reason: compatRequired ? 'session_missing' : 'missing', pending: null };
   }
 
   const normalizedEmail = normalizeEmail(email);
   if (normalizedEmail && pending.email !== normalizedEmail) {
+    logReporterOtp({
+      email,
+      action: `${lookupSource}.session-email-mismatch`,
+      challengeId: pending.challengeId,
+      hasActiveChallenge: false,
+      reason: 'session_missing',
+    });
     return { ok: false, reason: 'session_missing', pending };
   }
 
@@ -552,29 +706,54 @@ async function resolveReporterPendingLoginChallenge(req, email, options = {}) {
     challengeId: pending.challengeId,
   });
   if (!challenge) {
+    logReporterOtp({
+      email: pending.email,
+      action: `${lookupSource}.challenge-missing`,
+      challengeId: pending.challengeId,
+      hasActiveChallenge: false,
+      reason: compatRequired ? 'session_missing' : 'missing',
+    });
     return { ok: false, reason: compatRequired ? 'session_missing' : 'missing', pending };
   }
 
   const status = resolveOtpChallengeStatus(challenge);
   if (status !== 'active') {
+    logReporterOtp({
+      email: pending.email,
+      action: `${lookupSource}.challenge-inactive`,
+      challengeId: getReporterChallengeSessionId(challenge),
+      hasActiveChallenge: false,
+      reason: status,
+    });
     return { ok: false, reason: status, pending, challenge };
   }
 
   const recentChallenges = await loadRecentOtpChallenges(pending.email, pending.purpose || REPORTER_PORTAL_OTP_PURPOSE);
   await expireStaleOtpChallenges(recentChallenges);
   const latestActiveChallenge = getLatestActiveOtpChallenge(recentChallenges);
-  if (latestActiveChallenge && String(latestActiveChallenge.challengeId || latestActiveChallenge._id || '') !== String(pending.challengeId)) {
+  if (latestActiveChallenge && getReporterChallengeSessionId(latestActiveChallenge) !== String(pending.challengeId)) {
+    logReporterOtp({
+      email: pending.email,
+      action: `${lookupSource}.challenge-replaced`,
+      challengeId: pending.challengeId,
+      hasActiveChallenge: true,
+      reason: 'replaced',
+    });
     return { ok: false, reason: 'replaced', pending, challenge, latestActiveChallenge };
   }
 
+  const resolvedPending = buildReporterPendingChallenge(challenge, pending);
+  logReporterOtp({
+    email: resolvedPending.email,
+    action: `${lookupSource}.challenge-active`,
+    challengeId: resolvedPending.challengeId,
+    hasActiveChallenge: true,
+    reason: 'active',
+  });
+
   return {
     ok: true,
-    pending: {
-      challengeId: pending.challengeId,
-      email: pending.email,
-      purpose: pending.purpose || REPORTER_PORTAL_OTP_PURPOSE,
-      expiresAt: challenge.expiresAt || pending.expiresAt || null,
-    },
+    pending: resolvedPending,
     challenge,
   };
 }
@@ -726,6 +905,18 @@ function buildOtpAcceptedResponse(email, extra = {}) {
   };
 }
 
+function hasReporterVerifiedSession(req) {
+  return !!req?.session?.reporter;
+}
+
+function hasReporterChallengeSession(req) {
+  return !!req?.session?.reporterAuthChallenge;
+}
+
+function hasAnyReporterSession(req) {
+  return hasReporterVerifiedSession(req) || hasReporterChallengeSession(req);
+}
+
 function buildOtpLogContext(req, email, extra = {}) {
   return {
     path: req.originalUrl || req.url,
@@ -739,7 +930,8 @@ function buildOtpLogContext(req, email, extra = {}) {
     renderLike: isRenderLike(),
     baseUrlConfigured: !!getReporterPortalBaseUrl(),
     authModel: extra.authModel || req?.reporterPortalAuthModel || 'none',
-    sessionPresent: extra.sessionPresent !== undefined ? extra.sessionPresent : !!req?.session?.reporter,
+    sessionPresent: extra.sessionPresent !== undefined ? extra.sessionPresent : hasAnyReporterSession(req),
+    challengeSessionPresent: extra.challengeSessionPresent !== undefined ? extra.challengeSessionPresent : hasReporterChallengeSession(req),
     verified: extra.verified !== undefined ? extra.verified : false,
     hasJwtSecret: !!String(process.env.JWT_SECRET || '').trim(),
     jwtExpiresIn: getReporterJwtExpiresIn(),
@@ -779,9 +971,10 @@ function buildReporterDataLogContext(req, extra = {}) {
   const totalRecordsFound = Number(extra.totalRecordsFound || 0);
   return {
     normalizedEmail: normalizeEmail(req?.reporterPortal?.email),
-    authModel: extra.authModel || req?.reporterPortalAuthModel || (req?.session?.reporter ? 'session' : (req?.reporterPortalTokenPayload ? 'token' : 'none')),
-    sessionPresent: extra.sessionPresent !== undefined ? extra.sessionPresent : !!req?.session?.reporter,
-    sessionExists: !!req?.session?.reporter,
+    authModel: extra.authModel || req?.reporterPortalAuthModel || (hasReporterVerifiedSession(req) ? 'session' : (req?.reporterPortalTokenPayload ? 'token' : 'none')),
+    sessionPresent: extra.sessionPresent !== undefined ? extra.sessionPresent : hasAnyReporterSession(req),
+    challengeSessionPresent: extra.challengeSessionPresent !== undefined ? extra.challengeSessionPresent : hasReporterChallengeSession(req),
+    sessionExists: hasAnyReporterSession(req),
     verified: extra.verified !== undefined ? extra.verified : !!req?.reporterPortal,
     collectionsQueried: extra.collectionsQueried || getReporterCollectionsQueried(),
     totalRecordsFound,
@@ -794,12 +987,13 @@ function buildReporterSubmissionLogContext(req, extra = {}) {
   return {
     route: '/api/reporter-portal/submissions',
     normalizedEmail: normalizeEmail(req?.reporterPortal?.email),
-    sessionPresent: extra.sessionPresent !== undefined ? extra.sessionPresent : !!req?.session?.reporter,
-    sessionExists: !!req?.session?.reporter,
+    sessionPresent: extra.sessionPresent !== undefined ? extra.sessionPresent : hasAnyReporterSession(req),
+    challengeSessionPresent: extra.challengeSessionPresent !== undefined ? extra.challengeSessionPresent : hasReporterChallengeSession(req),
+    sessionExists: hasAnyReporterSession(req),
     verified: extra.verified !== undefined ? extra.verified : !!req?.reporterPortal,
     reporterProfileFound: !!req?._reporterPortalDoc,
     resultCount: 0,
-    authModel: req?.reporterPortalAuthModel || (req?.session?.reporter ? 'session' : (req?.reporterPortalTokenPayload ? 'token' : 'none')),
+    authModel: req?.reporterPortalAuthModel || (hasReporterVerifiedSession(req) ? 'session' : (req?.reporterPortalTokenPayload ? 'token' : 'none')),
     collectionsQueried: extra.collectionsQueried || getReporterCollectionsQueried(),
     totalRecordsFound: extra.totalRecordsFound || 0,
     reasonForZero: extra.reasonForZero || null,
@@ -865,10 +1059,6 @@ async function logReporterActivity(type, email, meta = {}) {
 
 function getReporterJwtExpiresIn() {
   return String(process.env.REPORTER_PORTAL_JWT_EXPIRES_IN || '24h').trim() || '24h';
-}
-
-function getOtpResendCooldownMs() {
-  return Math.max(Number(process.env.REPORTER_OTP_RESEND_COOLDOWN_MS || 60 * 1000), 0);
 }
 
 function escapeRegex(value) {
@@ -1438,27 +1628,13 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
     const otpChallenges = await loadRecentOtpChallenges(email, REPORTER_PORTAL_OTP_PURPOSE);
     await expireStaleOtpChallenges(otpChallenges);
     const existingOtp = getLatestActiveOtpChallenge(otpChallenges);
-    if (existingOtp && existingOtp.createdAt && existingOtp.expiresAt && new Date(existingOtp.expiresAt) > new Date()) {
-      const elapsedMs = Date.now() - new Date(existingOtp.createdAt).getTime();
-      const cooldownMs = getOtpResendCooldownMs();
-      if (elapsedMs < cooldownMs) {
-        const retryAfterSec = Math.max(1, Math.ceil((cooldownMs - elapsedMs) / 1000));
-        await logReporterActivity('reporter_portal_otp_request_cooldown_active', email, { ip: getClientIp(req), retryAfterSec });
-        return res.status(429).json({
-          ok: false,
-          code: 'COOLDOWN_ACTIVE',
-          message: 'Please wait before requesting another verification code.',
-          retryAfterSec,
-        });
-      }
-    }
 
     const code = generateOtp();
     const challengeIssuedAt = new Date();
     createdOtpRecord = await createReporterOtpChallenge(email, REPORTER_PORTAL_OTP_PURPOSE, code, challengeIssuedAt);
     await replaceActiveOtpChallenges(otpChallenges, createdOtpRecord.challengeId, challengeIssuedAt);
     await saveReporterLoginChallengeSession(req, createdOtpRecord);
-    setReporterPortalLoginChallengeCookie(res, req, createdOtpRecord);
+    const pendingChallengeCookie = setReporterPortalLoginChallengeCookie(res, req, createdOtpRecord);
     const expiresAt = createdOtpRecord.expiresAt;
     logReporterAuth('request-code', buildOtpLogContext(req, email, {
       route: '/api/reporter-auth/request-code',
@@ -1470,23 +1646,26 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
     logReporterOtp({
       email,
       action: 'request.challenge-created',
-      challengeId: createdOtpRecord.challengeId || String(createdOtpRecord._id || ''),
+      challengeId: getReporterChallengeSessionId(createdOtpRecord),
       hasActiveChallenge: true,
-      reason: 'created',
+      reason: existingOtp ? 'created_and_replaced_previous' : 'created',
     });
     logReporterOtp({
       email,
       action: 'request.session-created',
-      challengeId: createdOtpRecord.challengeId || String(createdOtpRecord._id || ''),
+      challengeId: getReporterChallengeSessionId(createdOtpRecord),
       hasActiveChallenge: true,
       reason: 'cookie_set',
+      cookie: describeReporterCookieOptions(pendingChallengeCookie.options),
+      sessionCookie: describeReporterCookieOptions(req?.session?.cookie),
     });
     await sendReporterOtpEmail(email, code);
     await logReporterActivity('reporter_portal_otp_requested', email, { ip: getClientIp(req), reporterId: reporter && reporter._id ? String(reporter._id) : null });
     logReporterAuth('request-code', {
       route: '/api/reporter-auth/request-code',
       normalizedEmail: email,
-      sessionPresent: !!req?.session?.reporter,
+      sessionPresent: hasAnyReporterSession(req),
+      challengeSessionPresent: hasReporterChallengeSession(req),
       verified: false,
       returnedStatusCode: 200,
       transporterReady: mailerStatus.transporterReady,
@@ -1566,7 +1745,10 @@ router.post('/auth/verify-login-otp', requireReporterPortalOpen, async (req, res
 
     let pendingChallenge = null;
     if (compatPendingRequired) {
-      const pendingResult = await resolveReporterPendingLoginChallenge(req, email, { compatRequired: true });
+      const pendingResult = await resolveReporterPendingLoginChallenge(req, email, {
+        compatRequired: true,
+        lookupSource: 'verify',
+      });
       if (!pendingResult.ok) {
         clearReporterPortalLoginChallengeCookie(res, req);
         await clearReporterLoginChallengeSession(req).catch(() => null);
@@ -1639,22 +1821,44 @@ router.post('/auth/verify-login-otp', requireReporterPortalOpen, async (req, res
       return res.status(403).json({ ok: false, code: 'REPORTER_PORTAL_FORBIDDEN', message: 'Reporter portal access is disabled for this account.' });
     }
 
-    reporter.lastPortalLoginAt = new Date();
-    if (typeof reporter.save === 'function') {
-      await reporter.save();
-    } else {
-      await ReporterContact.findOneAndUpdate({ _id: reporter._id }, { $set: { lastPortalLoginAt: new Date() } });
-    }
+    const loginAt = new Date();
+    await persistReporterLastPortalLogin(reporter, loginAt);
 
-    await backfillReporterOwnership(reporter);
+    await backfillReporterOwnership(reporter).catch((error) => {
+      logReporterAuthError('verify', {
+        route: '/api/reporter-auth/verify-code',
+        normalizedEmail: email,
+        authModel: 'mixed',
+        sessionPresent: false,
+        sessionExists: false,
+        verified: false,
+        returnedStatusCode: null,
+        transporterReady: null,
+        errorMessage: error?.message || String(error),
+        action: 'ownership-backfill-failed',
+      });
+    });
 
     const token = buildReporterToken(reporter);
     const expiresAt = getTokenExpiresAt(token);
     const submissions = await loadOwnedSubmissions({ reporterId: reporter._id, email });
     const { summary } = buildSummary(submissions);
-    await logReporterActivity('reporter_portal_login', email, { ip: getClientIp(req), reporterId: String(reporter._id), expiresAt });
-    await saveReporterSession(req, reporter);
-    setReporterPortalSessionCookie(res, req, token, expiresAt);
+    await logReporterActivity('reporter_portal_login', email, { ip: getClientIp(req), reporterId: String(reporter._id), expiresAt, loginAt });
+    await saveReporterSession(req, reporter).catch((error) => {
+      logReporterAuthError('verify', {
+        route: '/api/reporter-auth/verify-code',
+        normalizedEmail: email,
+        authModel: 'mixed',
+        sessionPresent: false,
+        sessionExists: false,
+        verified: false,
+        returnedStatusCode: null,
+        transporterReady: null,
+        errorMessage: error?.message || String(error),
+        action: 'session-save-failed',
+      });
+    });
+    const reporterSessionCookie = setReporterPortalSessionCookie(res, req, token, expiresAt);
     logReporterAuth('verify', {
       route: '/api/reporter-auth/verify-code',
       normalizedEmail: email,
@@ -1666,6 +1870,7 @@ router.post('/auth/verify-login-otp', requireReporterPortalOpen, async (req, res
       transporterReady: null,
       resultCount: submissions.length,
       action: 'verified',
+      cookie: describeReporterCookieOptions(reporterSessionCookie),
     });
 
     return res.status(200).json({
@@ -1904,6 +2109,70 @@ router.post('/profile/email/confirm-change', requireReporterPortalOpen, requireR
   }
 });
 
+router.get('/auth/challenge-session', requireReporterPortalOpen, async (req, res) => {
+  try {
+    const requestedEmail = normalizeEmail(req.query?.email || req.body?.email || '');
+    const pendingResult = await resolveReporterPendingLoginChallenge(req, requestedEmail || null, {
+      compatRequired: false,
+      lookupSource: 'challenge-session',
+    });
+
+    logReporterAuth('challenge-session', {
+      route: '/api/reporter-auth/challenge-session',
+      normalizedEmail: requestedEmail || pendingResult.pending?.email || null,
+      authModel: req?.reporterPortalAuthModel || 'none',
+      sessionPresent: !!req?.session?.reporter,
+      sessionExists: !!req?.session,
+      verified: false,
+      returnedStatusCode: pendingResult.ok ? 200 : (pendingResult.reason && pendingResult.reason !== 'missing' ? buildReporterOtpFailure(pendingResult.reason).statusCode : 401),
+      action: pendingResult.ok ? 'pending-found' : 'pending-missing',
+      pendingChallengeId: pendingResult.pending?.challengeId || null,
+      reason: pendingResult.reason || null,
+    });
+
+    if (pendingResult.ok) {
+      return res.status(200).json({
+        ok: true,
+        authenticated: false,
+        challenge: {
+          challengeId: pendingResult.pending.challengeId,
+          email: pendingResult.pending.email,
+          emailMasked: maskEmail(pendingResult.pending.email),
+          expiresAt: pendingResult.pending.expiresAt || null,
+          status: 'pending',
+        },
+        session: {
+          expiresAt: pendingResult.pending.expiresAt || null,
+          status: 'pending',
+        },
+        portal: req.reporterPortalState || null,
+      });
+    }
+
+    if (pendingResult.reason && pendingResult.reason !== 'missing') {
+      clearReporterPortalLoginChallengeCookie(res, req);
+      await clearReporterLoginChallengeSession(req).catch(() => null);
+      const failure = buildReporterOtpFailure(pendingResult.reason || 'session_missing');
+      return res.status(failure.statusCode).json(failure.body);
+    }
+
+    const failure = buildReporterOtpFailure('session_missing');
+    return res.status(failure.statusCode).json(failure.body);
+  } catch (error) {
+    logReporterAuthError('challenge-session', {
+      route: '/api/reporter-auth/challenge-session',
+      normalizedEmail: normalizeEmail(req.query?.email || req.body?.email || ''),
+      authModel: req?.reporterPortalAuthModel || 'none',
+      sessionPresent: !!req?.session?.reporter,
+      sessionExists: !!req?.session,
+      verified: false,
+      returnedStatusCode: 500,
+      errorMessage: error?.message || String(error),
+    });
+    return res.status(500).json({ ok: false, code: 'CHALLENGE_SESSION_LOAD_FAILED', message: 'Failed to load reporter challenge session.' });
+  }
+});
+
 router.get('/auth/session', requireReporterPortalOpen, async (req, res) => {
   const handleVerifiedSession = async () => {
     logReporterAuth('session', buildReporterDataLogContext(req, {
@@ -1974,6 +2243,12 @@ router.get('/auth/session', requireReporterPortalOpen, async (req, res) => {
         clearReporterPortalLoginChallengeCookie(res, req);
         await clearReporterLoginChallengeSession(req).catch(() => null);
         const failure = buildReporterOtpFailure(pendingResult.reason || 'session_missing');
+        return res.status(failure.statusCode).json(failure.body);
+      }
+
+      const { token } = getReporterPortalTokenDetails(req);
+      if (!token) {
+        const failure = buildReporterOtpFailure('session_missing');
         return res.status(failure.statusCode).json(failure.body);
       }
     }

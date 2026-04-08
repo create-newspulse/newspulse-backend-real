@@ -320,6 +320,7 @@ async function requireReporterPortalAuth(req, res, next) {
           if (pendingChallenge.reason && pendingChallenge.reason !== 'missing') {
             return respondReporterSessionExpired(req, res, `Pending reporter login challenge ${pendingChallenge.reason}`);
           }
+          return respondReporterSessionExpired(req, res, 'Pending reporter login challenge missing');
         } catch (pendingError) {
           return respondReporterSessionExpired(req, res, pendingError?.message || 'Pending reporter login challenge missing');
         }
