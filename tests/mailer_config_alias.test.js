@@ -392,3 +392,111 @@ test('sendMail maps Resend timeouts to PROVIDER_TIMEOUT', async () => {
     loadMailer();
   }
 });
+
+test('getMailerStatus prefers Resend first in production when both Resend and SMTP are configured', () => {
+  const previousEnv = {};
+  for (const key of trackedKeys) previousEnv[key] = process.env[key];
+
+  try {
+    process.env.NODE_ENV = 'production';
+    delete process.env.EMAIL_MODE;
+    delete process.env.EMAIL_PROVIDER;
+    delete process.env.MAIL_PROVIDER;
+    process.env.SMTP_HOST = 'smtp.example.com';
+    process.env.SMTP_PORT = '587';
+    process.env.SMTP_USER = 'reporter@example.com';
+    process.env.SMTP_PASS = 'app-password';
+    process.env.FROM_EMAIL = 'NewsPulse Reporter <reporter@example.com>';
+    process.env.RESEND_API_KEY = 're_test_key';
+    process.env.RESEND_FROM = 'NewsPulse Reporter <reporter@newspulse.co.in>';
+
+    const { getMailerStatus } = loadMailer();
+    const status = getMailerStatus();
+
+    assert.strictEqual(status.provider, 'resend');
+    assert.deepStrictEqual(status.providerOrder, ['resend', 'smtp']);
+    assert.strictEqual(status.fallbackProvider, 'smtp');
+    assert.strictEqual(status.resolved.secure, false);
+    assert.strictEqual(status.resolved.portNumber, 587);
+  } finally {
+    for (const key of trackedKeys) {
+      if (previousEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previousEnv[key];
+      }
+    }
+    loadMailer();
+  }
+});
+
+test('sendMail falls back to SMTP in production when Resend is primary and times out', async () => {
+  const previousEnv = {};
+  for (const key of trackedKeys) previousEnv[key] = process.env[key];
+
+  try {
+    process.env.NODE_ENV = 'production';
+    delete process.env.EMAIL_MODE;
+    delete process.env.EMAIL_PROVIDER;
+    delete process.env.MAIL_PROVIDER;
+    process.env.SMTP_HOST = 'smtp.example.com';
+    process.env.SMTP_PORT = '587';
+    process.env.SMTP_USER = 'reporter@example.com';
+    process.env.SMTP_PASS = 'app-password';
+    process.env.SMTP_FROM = 'noreply@newspulse.co.in';
+    process.env.FROM_EMAIL = 'NewsPulse Reporter <reporter@example.com>';
+    process.env.RESEND_API_KEY = 're_test_key';
+    process.env.RESEND_FROM = 'NewsPulse Reporter <reporter@newspulse.co.in>';
+
+    let smtpSendCount = 0;
+    await withMockedAxios(
+      {
+        post: async () => {
+          const error = new Error('timeout of 10000ms exceeded');
+          error.code = 'ECONNABORTED';
+          throw error;
+        },
+      },
+      async () => {
+        await withMockedNodemailer(
+          () => ({
+            verify: () => Promise.resolve(),
+            sendMail: async (options) => {
+              smtpSendCount += 1;
+              return {
+                provider: 'smtp',
+                messageId: 'smtp-fallback-id',
+                accepted: [String(options.to || '').toLowerCase()],
+                rejected: [],
+                response: '250 queued',
+                envelope: options.envelope || null,
+              };
+            },
+          }),
+          async () => {
+            const { sendMail } = loadMailer();
+            const info = await sendMail({
+              to: 'recipient@example.com',
+              subject: 'Reporter OTP',
+              text: 'Fallback test',
+            });
+
+            assert.strictEqual(info.provider, 'smtp');
+            assert.strictEqual(info.messageId, 'smtp-fallback-id');
+          }
+        );
+      }
+    );
+
+    assert.strictEqual(smtpSendCount, 1);
+  } finally {
+    for (const key of trackedKeys) {
+      if (previousEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previousEnv[key];
+      }
+    }
+    loadMailer();
+  }
+});
