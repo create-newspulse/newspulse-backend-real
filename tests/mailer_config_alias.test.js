@@ -500,3 +500,71 @@ test('sendMail falls back to SMTP in production when Resend is primary and times
     loadMailer();
   }
 });
+
+test('getMailerStatus forces secure mode on SMTP port 465 even if SMTP_SECURE is false', () => {
+  const previousEnv = {};
+  for (const key of trackedKeys) previousEnv[key] = process.env[key];
+
+  try {
+    delete process.env.EMAIL_MODE;
+    delete process.env.EMAIL_PROVIDER;
+    delete process.env.MAIL_PROVIDER;
+    process.env.SMTP_HOST = 'smtp.example.com';
+    process.env.SMTP_PORT = '465';
+    process.env.SMTP_SECURE = 'false';
+    process.env.SMTP_USER = 'reporter@example.com';
+    process.env.SMTP_PASS = 'app-password';
+    process.env.FROM_EMAIL = 'NewsPulse Reporter <reporter@example.com>';
+
+    const { getMailerStatus } = loadMailer();
+    const status = getMailerStatus();
+
+    assert.strictEqual(status.resolved.portNumber, 465);
+    assert.strictEqual(status.resolved.secure, true);
+    assert.strictEqual(status.resolved.secureAdjusted, true);
+    assert.strictEqual(status.resolved.secureSource, 'port-465');
+  } finally {
+    for (const key of trackedKeys) {
+      if (previousEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previousEnv[key];
+      }
+    }
+    loadMailer();
+  }
+});
+
+test('getMailerStatus forces non-secure start on SMTP port 587 even if SMTP_SECURE is true', () => {
+  const previousEnv = {};
+  for (const key of trackedKeys) previousEnv[key] = process.env[key];
+
+  try {
+    delete process.env.EMAIL_MODE;
+    delete process.env.EMAIL_PROVIDER;
+    delete process.env.MAIL_PROVIDER;
+    process.env.SMTP_HOST = 'smtp.example.com';
+    process.env.SMTP_PORT = '587';
+    process.env.SMTP_SECURE = 'true';
+    process.env.SMTP_USER = 'reporter@example.com';
+    process.env.SMTP_PASS = 'app-password';
+    process.env.FROM_EMAIL = 'NewsPulse Reporter <reporter@example.com>';
+
+    const { getMailerStatus } = loadMailer();
+    const status = getMailerStatus();
+
+    assert.strictEqual(status.resolved.portNumber, 587);
+    assert.strictEqual(status.resolved.secure, false);
+    assert.strictEqual(status.resolved.secureAdjusted, true);
+    assert.strictEqual(status.resolved.secureSource, 'port-587');
+  } finally {
+    for (const key of trackedKeys) {
+      if (previousEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previousEnv[key];
+      }
+    }
+    loadMailer();
+  }
+});
