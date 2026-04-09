@@ -113,9 +113,16 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
   } catch (_) {}
 
   try {
-    const { getMailerStatus, getTransporter, getMailConfig } = require('./lib/mailer');
+    const {
+      getMailerStatus,
+      getTransporter,
+      getMailConfig,
+      REPORTER_OTP_MAIL_SCOPE,
+    } = require('./lib/mailer');
     const mailerStatus = getMailerStatus();
     const mailConfig = getMailConfig();
+    const reporterMailerStatus = getMailerStatus({ scope: REPORTER_OTP_MAIL_SCOPE });
+    const reporterMailConfig = getMailConfig({ scope: REPORTER_OTP_MAIL_SCOPE });
     // eslint-disable-next-line no-console
     console.log('[startup][mailer-status]', {
       productionLike: mailerStatus.productionLike,
@@ -126,12 +133,35 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
       resolved: mailerStatus.resolved,
     });
     // eslint-disable-next-line no-console
+    console.log('[startup][reporter-mailer-status]', {
+      scope: reporterMailerStatus.scope,
+      productionLike: reporterMailerStatus.productionLike,
+      renderLike: reporterMailerStatus.renderLike,
+      stubMode: reporterMailerStatus.stubMode,
+      provider: reporterMailerStatus.provider,
+      providerOrder: reporterMailerStatus.providerOrder,
+      configured: reporterMailerStatus.configured,
+      missing: reporterMailerStatus.missing,
+      resolved: reporterMailerStatus.resolved,
+      transport: reporterMailerStatus.transport,
+    });
+    // eslint-disable-next-line no-console
     console.log('[startup][reporter-auth-readiness]', {
       smtpHost: mailConfig.smtpHost || mailConfig.smtpService || null,
       smtpPort: mailConfig.smtpPort || null,
       smtpUsernamePresent: !!mailConfig.smtpUser,
       smtpPasswordPresent: !!mailConfig.smtpPass,
       fromEmailPresent: !!mailConfig.smtpFrom,
+      reporterMailScope: reporterMailConfig.scope,
+      reporterProvider: reporterMailConfig.provider,
+      reporterProviderOrder: reporterMailConfig.providerOrder,
+      reporterSmtpHost: reporterMailConfig.smtpHost || reporterMailConfig.smtpService || null,
+      reporterSmtpPort: reporterMailConfig.smtpPort || null,
+      reporterSmtpUsernamePresent: !!reporterMailConfig.smtpUser,
+      reporterSmtpPasswordPresent: !!reporterMailConfig.smtpPass,
+      reporterFromEmailPresent: !!reporterMailConfig.smtpFrom,
+      reporterResendApiKeyPresent: !!reporterMailConfig.resendApiKey,
+      reporterResendFromPresent: !!reporterMailConfig.resendFrom,
       reporterAuthSecretPresent: !!String(process.env.JWT_SECRET || '').trim(),
       reporterSessionSecretPresent: !!String(process.env.REPORTER_PORTAL_SESSION_SECRET || process.env.REPORTER_SESSION_SECRET || process.env.JWT_SECRET || '').trim(),
     });
@@ -146,6 +176,27 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
         console.error('[startup][mailer-transporter-failed]', {
           message: error?.message || String(error),
           ...(error?.code ? { code: error.code } : {}),
+          ...(error?.responseCode ? { responseCode: error.responseCode } : {}),
+          ...(error?.command ? { command: error.command } : {}),
+        });
+      }
+    }
+
+    if (reporterMailerStatus.configured && reporterMailerStatus.stubMode !== true) {
+      try {
+        const reporterTransport = getTransporter(undefined, { scope: REPORTER_OTP_MAIL_SCOPE });
+        // eslint-disable-next-line no-console
+        console.log('[startup][reporter-mailer-transporter]', {
+          scope: REPORTER_OTP_MAIL_SCOPE,
+          initialized: !!reporterTransport,
+        });
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error('[startup][reporter-mailer-transporter-failed]', {
+          scope: REPORTER_OTP_MAIL_SCOPE,
+          message: error?.message || String(error),
+          ...(error?.code ? { code: error.code } : {}),
+          ...(error?.backendCode ? { backendCode: error.backendCode } : {}),
           ...(error?.responseCode ? { responseCode: error.responseCode } : {}),
           ...(error?.command ? { command: error.command } : {}),
         });

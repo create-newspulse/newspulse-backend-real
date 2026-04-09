@@ -580,6 +580,11 @@ To enable OTP and other email sends, set these environment variables (Render das
 | `RESEND_REPLY_TO` | `support@newspulse.co.in` | Optional Resend reply-to |
 | `EMAIL_PROVIDER_TIMEOUT_MS` | `10000` | Timeout used for SMTP connect/greeting/socket and Resend API requests |
 
+Reporter OTP production overrides:
+- Prefix any mailer variable with `REPORTER_OTP_` or `REPORTER_` to scope it only to the reporter portal OTP flow.
+- Useful examples on Render: `REPORTER_OTP_EMAIL_PROVIDER=resend`, `REPORTER_OTP_RESEND_API_KEY=...`, `REPORTER_OTP_RESEND_FROM=NewsPulse Reporter <noreply@newspulse.co.in>`.
+- Reporter OTP still falls back to the global/default mailer env when the scoped override is absent, so localhost and existing backend mail flows remain unchanged.
+
 Gmail Setup:
 1. Enable 2FA on the account.
 2. Create an App Password (select Mail + Other). Use that as `SMTP_PASS`.
@@ -600,9 +605,11 @@ If you see `[EMAIL][transporter-ready]` followed by `[EMAIL][sent]` with your ad
 Reporter Portal production notes:
 - Production-like environments now reject `EMAIL_MODE=stub`; real SMTP config is required.
 - Reporter OTP now supports either SMTP or Resend. In production-like environments, Resend is preferred automatically when configured, with SMTP kept as fallback unless `EMAIL_PROVIDER=smtp` is set.
+- Reporter OTP can use a dedicated provider on top of the global mailer by setting scoped env vars such as `REPORTER_OTP_EMAIL_PROVIDER`, `REPORTER_OTP_RESEND_API_KEY`, `REPORTER_OTP_RESEND_FROM`, `REPORTER_OTP_SMTP_HOST`, `REPORTER_OTP_SMTP_PORT`, `REPORTER_OTP_SMTP_USER`, and `REPORTER_OTP_SMTP_PASS`.
 - `OTP_DEV_ECHO` is ignored in production-like environments, so the OTP is never echoed in live responses.
 - For Render env changes, save the variables in the dashboard and redeploy the service. A restart/redeploy is required for Node to pick up new env values.
 - Mailer failures now log and expose a safe `backendCode` such as `MAILER_NOT_CONFIGURED`, `SMTP_AUTH_FAILED`, `SMTP_CONNECT_FAILED`, `PROVIDER_TIMEOUT`, `RESEND_AUTH_FAILED`, `PROVIDER_UNAVAILABLE`, or `COOLDOWN_ACTIVE`.
+- Use `GET /system/email-status` for both scopes, or `GET /system/email-status?scope=reporter-otp` / `GET /system/email-test?scope=reporter-otp`, to verify the reporter portal provider, secure mode, transport state, and backendCode on Render without exposing secrets.
 
 Render Deployment:
 - Add each SMTP/OTP variable in the Render dashboard (do NOT commit real secrets).

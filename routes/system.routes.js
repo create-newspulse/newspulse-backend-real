@@ -1,8 +1,48 @@
 const express = require('express');
-const { classifyAndWrapMailerError, getMailerStatus, getTransporter } = require('./../lib/mailer');
+const {
+  classifyAndWrapMailerError,
+  DEFAULT_MAIL_SCOPE,
+  getMailerStatus,
+  getTransporter,
+  REPORTER_OTP_MAIL_SCOPE,
+} = require('./../lib/mailer');
 
 // Router used by NewsPulse Admin Panel to silence AI helper + monitor probes
 const router = express.Router();
+
+function buildMailerDiagnostics(scope) {
+  const status = getMailerStatus({ scope });
+  let transporterReady = false;
+  let transporterError = null;
+  let backendCode = status.configured ? null : 'MAILER_NOT_CONFIGURED';
+
+  try {
+    const transport = getTransporter(undefined, { scope });
+    transporterReady = !!transport;
+  } catch (error) {
+    const classified = classifyAndWrapMailerError(error, { provider: status.provider, scope });
+    transporterReady = false;
+    transporterError = classified?.message || error?.message || String(error);
+    backendCode = classified?.backendCode || 'PROVIDER_UNAVAILABLE';
+  }
+
+  return {
+    scope: status.scope,
+    productionLike: status.productionLike,
+    renderLike: status.renderLike,
+    stubMode: status.stubMode,
+    provider: status.provider,
+    providerOrder: status.providerOrder,
+    fallbackProvider: status.fallbackProvider,
+    configured: status.configured,
+    backendCode,
+    missing: status.missing,
+    resolved: status.resolved,
+    transport: status.transport,
+    transporterReady,
+    transporterError,
+  };
+}
 
 // GET /health → will be mounted under /api/system and /system and /api/admin/system
 router.get('/health', (req, res) => {
@@ -52,37 +92,21 @@ router.get('/monitor-hub', (req, res) => {
 });
 
 // GET /email-status -> safe mailer diagnostics for direct backend verification
-router.get('/email-status', (_req, res) => {
-  const status = getMailerStatus();
-  let transporterReady = false;
-  let transporterError = null;
-  let backendCode = status.configured ? null : 'MAILER_NOT_CONFIGURED';
-
-  try {
-    const transport = getTransporter();
-    transporterReady = !!transport;
-  } catch (error) {
-    const classified = classifyAndWrapMailerError(error, { provider: status.provider });
-    transporterReady = false;
-    transporterError = classified?.message || error?.message || String(error);
-    backendCode = classified?.backendCode || 'PROVIDER_UNAVAILABLE';
+router.get('/email-status', (req, res) => {
+  const requestedScope = String(req.query?.scope || '').trim().toLowerCase();
+  if (requestedScope === REPORTER_OTP_MAIL_SCOPE || requestedScope === DEFAULT_MAIL_SCOPE) {
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      mailer: buildMailerDiagnostics(requestedScope),
+    });
   }
 
   return res.status(200).json({
     ok: true,
     success: true,
-    mailer: {
-      productionLike: status.productionLike,
-      renderLike: status.renderLike,
-      stubMode: status.stubMode,
-      provider: status.provider,
-      configured: status.configured,
-      backendCode,
-      missing: status.missing,
-      resolved: status.resolved,
-      transporterReady,
-      transporterError,
-    },
+    mailer: buildMailerDiagnostics(DEFAULT_MAIL_SCOPE),
+    reporterMailer: buildMailerDiagnostics(REPORTER_OTP_MAIL_SCOPE),
   });
 });
 

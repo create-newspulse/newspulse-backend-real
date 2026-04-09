@@ -23,6 +23,19 @@ const trackedKeys = [
   'RESEND_API_KEY',
   'RESEND_FROM',
   'RESEND_REPLY_TO',
+  'REPORTER_OTP_EMAIL_PROVIDER',
+  'REPORTER_OTP_MAIL_PROVIDER',
+  'REPORTER_OTP_SMTP_HOST',
+  'REPORTER_OTP_SMTP_PORT',
+  'REPORTER_OTP_SMTP_USER',
+  'REPORTER_OTP_SMTP_PASS',
+  'REPORTER_OTP_FROM_EMAIL',
+  'REPORTER_OTP_EMAIL_FROM',
+  'REPORTER_OTP_MAIL_FROM',
+  'REPORTER_OTP_SMTP_FROM',
+  'REPORTER_OTP_RESEND_API_KEY',
+  'REPORTER_OTP_RESEND_FROM',
+  'REPORTER_OTP_RESEND_REPLY_TO',
 ];
 
 function loadMailer() {
@@ -557,6 +570,129 @@ test('getMailerStatus forces non-secure start on SMTP port 587 even if SMTP_SECU
     assert.strictEqual(status.resolved.secure, false);
     assert.strictEqual(status.resolved.secureAdjusted, true);
     assert.strictEqual(status.resolved.secureSource, 'port-587');
+  } finally {
+    for (const key of trackedKeys) {
+      if (previousEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previousEnv[key];
+      }
+    }
+    loadMailer();
+  }
+});
+
+test('reporter OTP scope can prefer Resend without changing the default SMTP mailer', () => {
+  const previousEnv = {};
+  for (const key of trackedKeys) previousEnv[key] = process.env[key];
+
+  try {
+    process.env.NODE_ENV = 'production';
+    process.env.EMAIL_PROVIDER = 'smtp';
+    process.env.SMTP_HOST = 'smtp.example.com';
+    process.env.SMTP_PORT = '465';
+    process.env.SMTP_USER = 'default@example.com';
+    process.env.SMTP_PASS = 'default-pass';
+    process.env.FROM_EMAIL = 'NewsPulse Default <default@example.com>';
+    process.env.REPORTER_OTP_EMAIL_PROVIDER = 'resend';
+    process.env.REPORTER_OTP_RESEND_API_KEY = 're_reporter_scope';
+    process.env.REPORTER_OTP_RESEND_FROM = 'NewsPulse Reporter <reporter@newspulse.co.in>';
+
+    const {
+      getMailerStatus,
+      REPORTER_OTP_MAIL_SCOPE,
+    } = loadMailer();
+
+    const defaultStatus = getMailerStatus();
+    const reporterStatus = getMailerStatus({ scope: REPORTER_OTP_MAIL_SCOPE });
+
+    assert.strictEqual(defaultStatus.provider, 'smtp');
+    assert.deepStrictEqual(defaultStatus.providerOrder, ['smtp']);
+    assert.strictEqual(reporterStatus.provider, 'resend');
+    assert.deepStrictEqual(reporterStatus.providerOrder, ['resend', 'smtp']);
+    assert.strictEqual(reporterStatus.fallbackProvider, 'smtp');
+    assert.strictEqual(reporterStatus.resolved.resendApiKey, true);
+  } finally {
+    for (const key of trackedKeys) {
+      if (previousEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previousEnv[key];
+      }
+    }
+    loadMailer();
+  }
+});
+
+test('sendMail uses reporter OTP scoped Resend transport when configured', async () => {
+  const previousEnv = {};
+  for (const key of trackedKeys) previousEnv[key] = process.env[key];
+
+  try {
+    process.env.NODE_ENV = 'production';
+    process.env.EMAIL_PROVIDER = 'smtp';
+    process.env.SMTP_HOST = 'smtp.example.com';
+    process.env.SMTP_PORT = '465';
+    process.env.SMTP_USER = 'default@example.com';
+    process.env.SMTP_PASS = 'default-pass';
+    process.env.FROM_EMAIL = 'NewsPulse Default <default@example.com>';
+    process.env.REPORTER_OTP_EMAIL_PROVIDER = 'resend';
+    process.env.REPORTER_OTP_RESEND_API_KEY = 're_reporter_scope';
+    process.env.REPORTER_OTP_RESEND_FROM = 'NewsPulse Reporter <reporter@newspulse.co.in>';
+    process.env.REPORTER_OTP_RESEND_REPLY_TO = 'support@newspulse.co.in';
+
+    let resendCalls = 0;
+    let smtpCalls = 0;
+
+    await withMockedAxios(
+      {
+        post: async (url, payload, options) => {
+          resendCalls += 1;
+          return {
+            status: 200,
+            statusText: 'OK',
+            data: { id: 'reporter_resend_id', url, payload, options },
+          };
+        },
+      },
+      async () => {
+        await withMockedNodemailer(
+          () => ({
+            verify: () => Promise.resolve(),
+            sendMail: async () => {
+              smtpCalls += 1;
+              return {
+                provider: 'smtp',
+                messageId: 'smtp-id',
+                accepted: ['recipient@example.com'],
+                rejected: [],
+                response: '250 queued',
+              };
+            },
+          }),
+          async () => {
+            const {
+              REPORTER_OTP_MAIL_SCOPE,
+              sendMail,
+            } = loadMailer();
+
+            const info = await sendMail({
+              to: 'recipient@example.com',
+              subject: 'Reporter OTP',
+              text: 'Scoped provider test',
+            }, {
+              scope: REPORTER_OTP_MAIL_SCOPE,
+            });
+
+            assert.strictEqual(info.provider, 'resend');
+            assert.strictEqual(info.messageId, 'reporter_resend_id');
+          }
+        );
+      }
+    );
+
+    assert.strictEqual(resendCalls, 1);
+    assert.strictEqual(smtpCalls, 0);
   } finally {
     for (const key of trackedKeys) {
       if (previousEnv[key] === undefined) {

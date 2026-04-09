@@ -9,7 +9,13 @@ const CommunitySubmission = require('../models/CommunitySubmission');
 const OtpToken = require('../models/OtpToken');
 const ReporterContact = require('../models/ReporterContact');
 const ActivityLog = require('../models/ActivityLog');
-const { classifyAndWrapMailerError, sendMail, getTransporter, getMailerStatus } = require('../lib/mailer');
+const {
+  classifyAndWrapMailerError,
+  REPORTER_OTP_MAIL_SCOPE,
+  sendMail,
+  getTransporter,
+  getMailerStatus,
+} = require('../lib/mailer');
 const { sendEmail: sendEmailStub } = require('../lib/emailStub');
 const { normalizeEmail } = require('../lib/normalizeEmail');
 const {
@@ -29,6 +35,7 @@ const router = express.Router();
 
 const REPORTER_PORTAL_OTP_PURPOSE = 'reporter_portal_login';
 const REPORTER_PORTAL_EMAIL_CHANGE_OTP_PURPOSE = 'reporter_portal_email_change';
+const REPORTER_PORTAL_MAIL_SCOPE = REPORTER_OTP_MAIL_SCOPE;
 const OTP_EXPIRY_MS = 10 * 60 * 1000;
 const OTP_CHALLENGE_LOOKBACK_LIMIT = 10;
 const OTP_REQUEST_RATE_LIMIT = { windowMs: 15 * 60 * 1000, maxAttempts: 8 };
@@ -1112,7 +1119,7 @@ function buildReporterSubmissionLogContext(req, extra = {}) {
 }
 
 function getReporterMailerReadiness() {
-  const mailerStatus = getMailerStatus();
+  const mailerStatus = getMailerStatus({ scope: REPORTER_PORTAL_MAIL_SCOPE });
   let transporterReady = mailerStatus.stubMode === true;
   let transporterError = null;
   let backendCode = mailerStatus.configured ? null : 'MAILER_NOT_CONFIGURED';
@@ -1123,7 +1130,7 @@ function getReporterMailerReadiness() {
     backendCode = 'MAILER_NOT_CONFIGURED';
   } else if (!mailerStatus.stubMode && mailerStatus.configured) {
     try {
-      transporterReady = !!getTransporter();
+      transporterReady = !!getTransporter(undefined, { scope: REPORTER_PORTAL_MAIL_SCOPE });
       if (!transporterReady) {
         transporterError = 'Reporter mail transporter returned null';
         backendCode = 'PROVIDER_UNAVAILABLE';
@@ -1145,6 +1152,29 @@ function getReporterMailerReadiness() {
     ...mailerStatus,
     transporterReady,
     transporterError,
+    backendCode,
+  };
+}
+
+function summarizeReporterMailerStatus(mailerStatus) {
+  const activeTransport = mailerStatus?.transport && mailerStatus.provider
+    ? mailerStatus.transport[mailerStatus.provider] || null
+    : null;
+  const backendCode = activeTransport?.backendCode || mailerStatus?.backendCode || null;
+
+  return {
+    provider: mailerStatus?.provider || null,
+    providerOrder: Array.isArray(mailerStatus?.providerOrder) ? [...mailerStatus.providerOrder] : [],
+    scope: mailerStatus?.scope || REPORTER_PORTAL_MAIL_SCOPE,
+    secureMode: mailerStatus?.resolved?.secure,
+    transportState: activeTransport?.state || null,
+    transportInitResult: mailerStatus?.transporterReady ? 'ok' : 'failed',
+    connectResult: backendCode === 'SMTP_CONNECT_FAILED' || backendCode === 'PROVIDER_TIMEOUT'
+      ? 'failed'
+      : (activeTransport?.state === 'ready' ? 'ok' : 'unknown'),
+    authResult: backendCode === 'SMTP_AUTH_FAILED' || backendCode === 'RESEND_AUTH_FAILED'
+      ? 'failed'
+      : (activeTransport?.state === 'ready' ? 'ok' : 'unknown'),
     backendCode,
   };
 }
@@ -1482,6 +1512,7 @@ async function sendReporterOtpEmail(email, code) {
   ].filter(Boolean).join(' ');
   const mailerStatus = getReporterMailerReadiness();
   const stubMode = mailerStatus.stubMode === true;
+  const mailerSummary = summarizeReporterMailerStatus(mailerStatus);
 
   console.log('[reporter-portal][mail][prepare]', buildOtpLogContext({
     originalUrl: '/api/reporter-auth/request-code',
@@ -1492,9 +1523,15 @@ async function sendReporterOtpEmail(email, code) {
     ip: 'internal',
     socket: null,
   }, email, {
+    scope: REPORTER_PORTAL_MAIL_SCOPE,
     mode: stubMode ? 'stub' : mailerStatus.provider,
     provider: mailerStatus.provider,
+    providerOrder: mailerSummary.providerOrder,
     backendCode: mailerStatus.backendCode,
+    secureMode: mailerSummary.secureMode,
+    transportInitResult: mailerSummary.transportInitResult,
+    connectResult: mailerSummary.connectResult,
+    authResult: mailerSummary.authResult,
     envPresence: mailerStatus.resolved,
     baseUrl,
   }));
@@ -1510,11 +1547,17 @@ async function sendReporterOtpEmail(email, code) {
 
   let transporter = null;
   try {
-    transporter = getTransporter();
+    transporter = getTransporter(undefined, { scope: REPORTER_PORTAL_MAIL_SCOPE });
     console.log('[reporter-portal][mail][transporter-initialized]', {
       emailMasked: maskEmail(email),
+      scope: REPORTER_PORTAL_MAIL_SCOPE,
       provider: mailerStatus.provider,
+      providerOrder: mailerSummary.providerOrder,
       hasTransporter: !!transporter,
+      secureMode: mailerSummary.secureMode,
+      transportInitResult: !!transporter ? 'ok' : 'failed',
+      connectResult: mailerSummary.connectResult,
+      authResult: mailerSummary.authResult,
       productionLike: isProductionLike(),
       baseUrlConfigured: !!baseUrl,
       envPresence: mailerStatus.resolved,
@@ -1535,13 +1578,15 @@ async function sendReporterOtpEmail(email, code) {
 
   let info;
   try {
-    info = await sendMail({ to: email, subject, text, html: `<p>${text}</p>` });
+    info = await sendMail({ to: email, subject, text, html: `<p>${text}</p>` }, { scope: REPORTER_PORTAL_MAIL_SCOPE });
   } catch (error) {
     const failure = resolveReporterMailerFailure(error, mailerStatus);
     console.error('[reporter-portal][mail][send-failed]', {
       emailMasked: maskEmail(email),
+      scope: REPORTER_PORTAL_MAIL_SCOPE,
       provider: failure.provider,
       backendCode: failure.backendCode,
+      responseStatus: getReporterMailerHttpStatus(failure.backendCode),
       error: serializeError(failure.error),
     });
     if (isRecipientDeliveryIssue(error)) {
@@ -1561,8 +1606,10 @@ async function sendReporterOtpEmail(email, code) {
   }
   console.log('[reporter-portal][mail][sent]', {
     emailMasked: maskEmail(email),
+    scope: REPORTER_PORTAL_MAIL_SCOPE,
     mode: mailerStatus.provider,
     provider: mailerStatus.provider,
+    providerOrder: mailerSummary.providerOrder,
     acceptedCount: accepted.length,
   });
   return { method: info?.provider || mailerStatus.provider || 'email' };
@@ -1710,10 +1757,14 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       route: '/api/reporter-auth/request-code',
       action: 'mailer-status',
       returnedStatusCode: null,
+      scope: REPORTER_PORTAL_MAIL_SCOPE,
       provider: mailerStatus.provider,
+      providerOrder: mailerStatus.providerOrder,
       backendCode: mailerStatus.backendCode,
       mailerConfigured: mailerStatus.configured,
       transporterReady: mailerStatus.transporterReady,
+      secureMode: mailerStatus.resolved?.secure,
+      transport: mailerStatus.transport,
       missing: mailerStatus.missing,
       resolved: mailerStatus.resolved,
       errorMessage: mailerStatus.transporterError,
@@ -1723,9 +1774,11 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
         route: '/api/reporter-auth/request-code',
         normalizedEmail: email,
         returnedStatusCode: 503,
+        scope: REPORTER_PORTAL_MAIL_SCOPE,
         provider: mailerStatus.provider,
         backendCode: mailerStatus.backendCode || 'MAILER_NOT_CONFIGURED',
         transporterReady: mailerStatus.transporterReady,
+        transport: mailerStatus.transport,
         missing: mailerStatus.missing,
         resolved: mailerStatus.resolved,
         errorMessage: mailerStatus.transporterError,
@@ -1808,6 +1861,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       challengeSessionPresent: hasReporterChallengeSession(req),
       verified: false,
       returnedStatusCode: 200,
+      scope: REPORTER_PORTAL_MAIL_SCOPE,
       provider: mailerStatus.provider,
       backendCode: null,
       transporterReady: mailerStatus.transporterReady,
@@ -1842,6 +1896,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       returnedStatusCode: error && error.safeClientCode === 'REPORTER_EMAIL_UNAVAILABLE'
         ? getReporterMailerHttpStatus(error?.backendCode)
         : (error && error.safeClientCode === 'OTP_REQUEST_ACCEPTED' ? 200 : 500),
+      scope: REPORTER_PORTAL_MAIL_SCOPE,
       provider: error?.provider || null,
       backendCode: error?.backendCode || null,
       transporterReady: false,
