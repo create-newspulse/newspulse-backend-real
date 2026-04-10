@@ -1880,7 +1880,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
     const status = String(reporter.status || 'active').toLowerCase();
     if (status === 'suspended' || status === 'banned' || reporter.portalAccessEnabled === false) {
       await logReporterActivity('reporter_portal_otp_request_blocked', email, { ip: getClientIp(req), status, portalAccessEnabled: reporter.portalAccessEnabled !== false });
-      return res.status(200).json(buildOtpAcceptedResponse());
+      return res.status(200).json(buildOtpAcceptedResponse(undefined, { traceId }));
     }
 
     const otpChallenges = await loadRecentOtpChallenges(email, REPORTER_PORTAL_OTP_PURPOSE);
@@ -1935,7 +1935,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
     }));
 
     return res.status(200).json({
-      ...buildOtpAcceptedResponse(email),
+      ...buildOtpAcceptedResponse(email, { traceId }),
       ...(shouldExposeDevOtp() ? { devCode: code } : {}),
     });
   } catch (error) {
@@ -1985,7 +1985,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       });
     }
     if (error && error.safeClientCode === 'OTP_REQUEST_ACCEPTED') {
-      return res.status(200).json(buildOtpAcceptedResponse(email));
+      return res.status(200).json(buildOtpAcceptedResponse(email, { traceId }));
     }
     return res.status(returnedStatusCode).json({ ok: false, code: 'OTP_REQUEST_FAILED', backendCode: error?.backendCode || 'OTP_REQUEST_FAILED', traceId, message: 'Failed to request login OTP.' });
   }

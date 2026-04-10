@@ -1224,6 +1224,8 @@ test('reporter-auth compat request-code issues both pending challenge and sessio
     .send({ email: 'compat.cookie@example.com' });
 
   assert.strictEqual(otpRes.statusCode, 200);
+  assert.ok(otpRes.body.traceId);
+  assert.strictEqual(otpRes.headers['x-reporter-auth-trace'], otpRes.body.traceId);
   assert.ok(Array.isArray(otpRes.headers['set-cookie']));
   assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('reporter_portal_login_challenge=')));
   assert.ok(otpRes.headers['set-cookie'].some((value) => value.includes('reporter_portal.sid=')));
@@ -1522,6 +1524,21 @@ test('reporter-auth compat request-code returns traceable validation failures on
   assert.strictEqual(res.body.backendCode, 'EMAIL_REQUIRED');
   assert.ok(res.body.traceId);
   assert.strictEqual(res.headers['x-reporter-auth-trace'], res.body.traceId);
+});
+
+test('reporter portal request-code success returns traceId without regressing localhost flow', async () => {
+  reporterDoc.email = 'trace-success@example.com';
+  reporterDoc.emailLower = 'trace-success@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'trace-success@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+  assert.strictEqual(otpRes.body.ok, true);
+  assert.ok(otpRes.body.traceId);
+  assert.strictEqual(otpRes.headers['x-reporter-auth-trace'], otpRes.body.traceId);
+  assert.ok(otpRes.body.devCode);
 });
 
 test('reporter portal request-code creates a reporter profile when email is valid but no prior profile exists', async () => {
