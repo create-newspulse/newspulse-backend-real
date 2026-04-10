@@ -40,8 +40,10 @@ const OTP_EXPIRY_MS = 10 * 60 * 1000;
 const OTP_CHALLENGE_LOOKBACK_LIMIT = 10;
 const OTP_REQUEST_RATE_LIMIT = { windowMs: 15 * 60 * 1000, maxAttempts: 8 };
 const OTP_VERIFY_RATE_LIMIT = { windowMs: 10 * 60 * 1000, maxAttempts: 10 };
+const REPORTER_AUTH_REQUEST_BURST_WINDOW_MS = 5 * 1000;
 const otpRequestAttempts = new Map();
 const otpVerifyAttempts = new Map();
+const reporterAuthRequestBursts = new Map();
 const REPORTER_EMAIL_LOOKUP_FIELDS = [
   'reporterEmailNorm',
   'reporterEmail',
@@ -533,6 +535,53 @@ function ensureReporterAuthTrace(req, res) {
     res.setHeader('x-reporter-auth-trace', req.reporterAuthTraceId);
   }
   return req.reporterAuthTraceId;
+}
+
+function pruneReporterAuthRequestBursts(now = Date.now()) {
+  for (const [key, entries] of reporterAuthRequestBursts.entries()) {
+    const freshEntries = (Array.isArray(entries) ? entries : []).filter((entry) => now - Number(entry?.seenAt || 0) < REPORTER_AUTH_REQUEST_BURST_WINDOW_MS);
+    if (freshEntries.length) {
+      reporterAuthRequestBursts.set(key, freshEntries);
+    } else {
+      reporterAuthRequestBursts.delete(key);
+    }
+  }
+}
+
+function buildReporterAuthRequestBurstKey(req, email) {
+  const normalizedEmail = normalizeEmail(email) || 'unknown-email';
+  const requestHost = getRequestHostname(req) || 'unknown-host';
+  const origin = String(req?.get('Origin') || '').trim().toLowerCase() || 'unknown-origin';
+  const requestType = isReporterAuthCompatRequest(req) ? 'compat' : 'portal';
+  return [requestType, normalizedEmail, getClientIp(req), requestHost, origin].join('|');
+}
+
+function trackReporterAuthRequestBurst(req, email) {
+  const now = Date.now();
+  pruneReporterAuthRequestBursts(now);
+
+  const burstKey = buildReporterAuthRequestBurstKey(req, email);
+  const entries = Array.isArray(reporterAuthRequestBursts.get(burstKey)) ? reporterAuthRequestBursts.get(burstKey) : [];
+  const nextEntries = entries.concat({
+    seenAt: now,
+    traceId: req?.reporterAuthTraceId || null,
+  });
+
+  reporterAuthRequestBursts.set(burstKey, nextEntries);
+
+  const firstSeenAt = nextEntries[0]?.seenAt || now;
+  const lastSeenAt = nextEntries[nextEntries.length - 1]?.seenAt || now;
+  const diagnostics = {
+    requestBurstKey: burstKey,
+    requestBurstCount: nextEntries.length,
+    requestBurstDuplicate: nextEntries.length > 1,
+    requestBurstWindowMs: REPORTER_AUTH_REQUEST_BURST_WINDOW_MS,
+    requestBurstFirstSeenAt: new Date(firstSeenAt).toISOString(),
+    requestBurstLastSeenAt: new Date(lastSeenAt).toISOString(),
+  };
+
+  if (req) req.reporterAuthRequestBurstDiagnostics = diagnostics;
+  return diagnostics;
 }
 
 function isReporterAuthCompatRequest(req) {
@@ -1055,6 +1104,7 @@ function buildOtpLogContext(req, email, extra = {}) {
   const forwardedProto = String(req?.get('x-forwarded-proto') || '').trim();
   const forwardedFor = String(req?.get('x-forwarded-for') || '').trim();
   const vercelId = String(req?.get('x-vercel-id') || '').trim();
+  const requestBurstDiagnostics = req?.reporterAuthRequestBurstDiagnostics || null;
   return {
     path: req.originalUrl || req.url,
     method: req.method,
@@ -1082,6 +1132,7 @@ function buildOtpLogContext(req, email, extra = {}) {
     verified: extra.verified !== undefined ? extra.verified : false,
     hasJwtSecret: !!String(process.env.JWT_SECRET || '').trim(),
     jwtExpiresIn: getReporterJwtExpiresIn(),
+    ...(requestBurstDiagnostics || {}),
     ...extra,
   };
 }
@@ -1788,12 +1839,21 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       traceId,
     }));
     email = normalizeEmail(req.body && req.body.email);
+    const requestBurstDiagnostics = trackReporterAuthRequestBurst(req, email);
     logReporterAuth('request-code', buildOtpLogContext(req, email, {
       route: '/api/reporter-auth/request-code',
       action: 'normalized-email',
       returnedStatusCode: null,
       traceId,
     }));
+    if (requestBurstDiagnostics.requestBurstDuplicate) {
+      logReporterAuth('request-code', buildOtpLogContext(req, email, {
+        route: '/api/reporter-auth/request-code',
+        action: 'duplicate-window-detected',
+        returnedStatusCode: null,
+        traceId,
+      }));
+    }
     if (!email) {
       logReporterAuthError('request-code', buildOtpLogContext(req, undefined, {
         route: '/api/reporter-auth/request-code',
@@ -2910,6 +2970,7 @@ router.patch('/submissions/:id', requireReporterPortalOpen, requireReporterPorta
 router.resetRateLimitsForTests = function resetRateLimitsForTests() {
   otpRequestAttempts.clear();
   otpVerifyAttempts.clear();
+  reporterAuthRequestBursts.clear();
 };
 
 module.exports = router;

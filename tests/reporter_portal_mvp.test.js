@@ -1541,6 +1541,51 @@ test('reporter portal request-code success returns traceId without regressing lo
   assert.ok(otpRes.body.devCode);
 });
 
+test('reporter-auth request-code logs duplicate arrivals without changing stable success response', async () => {
+  reporterDoc.email = 'duplicate-window@example.com';
+  reporterDoc.emailLower = 'duplicate-window@example.com';
+
+  const originalConsoleLog = console.log;
+  const requestCodeLogs = [];
+
+  console.log = (...args) => {
+    if (args[0] === '[reporter-auth][request-code]' && args[1] && typeof args[1] === 'object') {
+      requestCodeLogs.push(args[1]);
+    }
+  };
+
+  try {
+    const firstRes = await request(app)
+      .post('/api/reporter-auth/request-code')
+      .set('Host', 'newspulse-backend.onrender.com')
+      .set('Origin', 'https://www.newspulse.co.in')
+      .set('x-forwarded-host', 'www.newspulse.co.in')
+      .set('x-forwarded-proto', 'https')
+      .send({ email: 'duplicate-window@example.com' });
+
+    const secondRes = await request(app)
+      .post('/api/reporter-auth/request-code')
+      .set('Host', 'newspulse-backend.onrender.com')
+      .set('Origin', 'https://www.newspulse.co.in')
+      .set('x-forwarded-host', 'www.newspulse.co.in')
+      .set('x-forwarded-proto', 'https')
+      .send({ email: 'duplicate-window@example.com' });
+
+    assert.strictEqual(firstRes.statusCode, 200);
+    assert.strictEqual(secondRes.statusCode, 200);
+    assert.ok(firstRes.body.traceId);
+    assert.ok(secondRes.body.traceId);
+
+    const duplicateLog = requestCodeLogs.find((entry) => entry.action === 'duplicate-window-detected');
+    assert.ok(duplicateLog);
+    assert.strictEqual(duplicateLog.requestBurstDuplicate, true);
+    assert.strictEqual(duplicateLog.requestBurstCount, 2);
+    assert.strictEqual(duplicateLog.returnedStatusCode, null);
+  } finally {
+    console.log = originalConsoleLog;
+  }
+});
+
 test('reporter portal request-code creates a reporter profile when email is valid but no prior profile exists', async () => {
   reporterDoc = null;
   submissionStore = [];
