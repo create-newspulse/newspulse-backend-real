@@ -859,7 +859,7 @@ test('reporter OTP request and verification attempts are rate limited', async ()
   }
 
   assert.strictEqual(lastRequestRes.statusCode, 429);
-  assert.strictEqual(lastRequestRes.body.code, 'OTP_REQUEST_RATE_LIMITED');
+  assert.strictEqual(lastRequestRes.body.code, 'RATE_LIMITED');
 
   reporterDoc.email = 'verifylimit@example.com';
   reporterDoc.emailLower = 'verifylimit@example.com';
@@ -1497,8 +1497,9 @@ test('reporter portal request-code returns stable unavailable code when transpor
       .send({ email: 'unavailable@example.com' });
 
     assert.strictEqual(otpRes.statusCode, 503);
-    assert.strictEqual(otpRes.body.code, 'REPORTER_EMAIL_UNAVAILABLE');
+    assert.strictEqual(otpRes.body.code, 'SMTP_UNAVAILABLE');
     assert.strictEqual(otpRes.body.backendCode, 'MAILER_NOT_CONFIGURED');
+    assert.strictEqual(otpRes.body.message, 'Verification email is temporarily unavailable. Please try again shortly.');
     assert.ok(otpRes.body.traceId);
     assert.strictEqual(otpRes.headers['x-reporter-auth-trace'], otpRes.body.traceId);
   } finally {
@@ -1520,8 +1521,8 @@ test('reporter-auth compat request-code returns traceable validation failures on
     .send({ email: '' });
 
   assert.strictEqual(res.statusCode, 400);
-  assert.strictEqual(res.body.code, 'EMAIL_REQUIRED');
-  assert.strictEqual(res.body.backendCode, 'EMAIL_REQUIRED');
+  assert.strictEqual(res.body.code, 'INVALID_EMAIL');
+  assert.strictEqual(res.body.message, 'A valid email address is required.');
   assert.ok(res.body.traceId);
   assert.strictEqual(res.headers['x-reporter-auth-trace'], res.body.traceId);
 });
@@ -1530,27 +1531,55 @@ test('reporter portal request-code success returns traceId without regressing lo
   reporterDoc.email = 'trace-success@example.com';
   reporterDoc.emailLower = 'trace-success@example.com';
 
-  const otpRes = await request(app)
-    .post('/api/reporter-portal/auth/request-login-otp')
-    .send({ email: 'trace-success@example.com' });
+  const originalConsoleLog = console.log;
+  const finalLogs = [];
 
-  assert.strictEqual(otpRes.statusCode, 200);
-  assert.strictEqual(otpRes.body.ok, true);
-  assert.ok(otpRes.body.traceId);
-  assert.strictEqual(otpRes.headers['x-reporter-auth-trace'], otpRes.body.traceId);
-  assert.ok(otpRes.body.devCode);
+  console.log = (...args) => {
+    if (args[0] === '[reporter-auth][request-code][final]' && args[1] && typeof args[1] === 'object') {
+      finalLogs.push(args[1]);
+    }
+  };
+
+  try {
+    const otpRes = await request(app)
+      .post('/api/reporter-portal/auth/request-login-otp')
+      .send({ email: 'trace-success@example.com' });
+
+    assert.strictEqual(otpRes.statusCode, 200);
+    assert.strictEqual(otpRes.body.ok, true);
+    assert.strictEqual(otpRes.body.code, 'OTP_SENT');
+    assert.strictEqual(otpRes.body.message, 'Verification code sent. Please check your email.');
+    assert.ok(otpRes.body.traceId);
+    assert.strictEqual(otpRes.headers['x-reporter-auth-trace'], otpRes.body.traceId);
+    assert.ok(otpRes.body.devCode);
+
+    const finalLog = finalLogs[0];
+    assert.ok(finalLog);
+    assert.strictEqual(finalLog.code, 'OTP_SENT');
+    assert.strictEqual(finalLog.phase, 'send-email');
+    assert.strictEqual(finalLog.returnedStatusCode, 200);
+    assert.ok(finalLog.traceId);
+    assert.strictEqual(finalLog.emailMasked, 'tr***@example.com');
+  } finally {
+    console.log = originalConsoleLog;
+  }
 });
 
-test('reporter-auth request-code logs duplicate arrivals without changing stable success response', async () => {
+test('reporter-auth request-code rate limits duplicate arrivals with a final result log', async () => {
   reporterDoc.email = 'duplicate-window@example.com';
   reporterDoc.emailLower = 'duplicate-window@example.com';
 
   const originalConsoleLog = console.log;
   const requestCodeLogs = [];
+  const finalLogs = [];
 
   console.log = (...args) => {
     if (args[0] === '[reporter-auth][request-code]' && args[1] && typeof args[1] === 'object') {
       requestCodeLogs.push(args[1]);
+      return;
+    }
+    if (args[0] === '[reporter-auth][request-code][final]' && args[1] && typeof args[1] === 'object') {
+      finalLogs.push(args[1]);
     }
   };
 
@@ -1572,7 +1601,10 @@ test('reporter-auth request-code logs duplicate arrivals without changing stable
       .send({ email: 'duplicate-window@example.com' });
 
     assert.strictEqual(firstRes.statusCode, 200);
-    assert.strictEqual(secondRes.statusCode, 200);
+    assert.strictEqual(firstRes.body.code, 'OTP_SENT');
+    assert.strictEqual(secondRes.statusCode, 429);
+    assert.strictEqual(secondRes.body.code, 'RATE_LIMITED');
+    assert.strictEqual(secondRes.body.message, 'Duplicate verification request detected. Please wait a few seconds before trying again.');
     assert.ok(firstRes.body.traceId);
     assert.ok(secondRes.body.traceId);
 
@@ -1580,9 +1612,65 @@ test('reporter-auth request-code logs duplicate arrivals without changing stable
     assert.ok(duplicateLog);
     assert.strictEqual(duplicateLog.requestBurstDuplicate, true);
     assert.strictEqual(duplicateLog.requestBurstCount, 2);
-    assert.strictEqual(duplicateLog.returnedStatusCode, null);
+
+    const finalDuplicateLog = finalLogs.find((entry) => entry.code === 'RATE_LIMITED');
+    assert.ok(finalDuplicateLog);
+    assert.strictEqual(finalDuplicateLog.phase, 'duplicate-protection');
+    assert.strictEqual(finalDuplicateLog.returnedStatusCode, 429);
   } finally {
     console.log = originalConsoleLog;
+  }
+});
+
+test('reporter portal request-code returns OTP_STORE_FAILED when OTP persistence fails', async () => {
+  const hookSet = reporterPortalRouter.setRequestCodeTestHook('nextOtpStoreFailure', new Error('forced otp store failure'));
+  assert.strictEqual(hookSet, true);
+
+  const res = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'reporter@example.com' });
+
+  assert.strictEqual(res.statusCode, 500);
+  assert.strictEqual(res.body.code, 'OTP_STORE_FAILED');
+  assert.strictEqual(res.body.message, 'Failed to store verification challenge.');
+  assert.ok(res.body.traceId);
+});
+
+test('reporter portal request-code returns CHALLENGE_SESSION_FAILED when session persistence fails', async () => {
+  const hookSet = reporterPortalRouter.setRequestCodeTestHook('nextChallengeSessionFailure', new Error('forced challenge session failure'));
+  assert.strictEqual(hookSet, true);
+
+  const res = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'reporter@example.com' });
+
+  assert.strictEqual(res.statusCode, 500);
+  assert.strictEqual(res.body.code, 'CHALLENGE_SESSION_FAILED');
+  assert.strictEqual(res.body.message, 'Failed to create verification challenge session.');
+  assert.ok(res.body.traceId);
+});
+
+test('reporter portal request-code returns REQUEST_CODE_FAILED for non-SMTP reporter resolution failures', async () => {
+  const originalUpsertReporterContact = reporterContactService.upsertReporterContact;
+
+  reporterDoc = null;
+  submissionStore = [];
+  reporterContactService.upsertReporterContact = async () => {
+    throw new Error('forced reporter resolution failure');
+  };
+
+  try {
+    const res = await request(app)
+      .post('/api/reporter-portal/auth/request-login-otp')
+      .send({ email: 'new.reporter@example.com' });
+
+    assert.strictEqual(res.statusCode, 500);
+    assert.strictEqual(res.body.code, 'REQUEST_CODE_FAILED');
+    assert.strictEqual(res.body.message, 'Failed to request verification code.');
+    assert.strictEqual(res.body.backendCode, 'REPORTER_RESOLUTION_FAILED');
+    assert.ok(res.body.traceId);
+  } finally {
+    reporterContactService.upsertReporterContact = originalUpsertReporterContact;
   }
 });
 
