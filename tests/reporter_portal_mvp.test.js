@@ -1497,12 +1497,31 @@ test('reporter portal request-code returns stable unavailable code when transpor
     assert.strictEqual(otpRes.statusCode, 503);
     assert.strictEqual(otpRes.body.code, 'REPORTER_EMAIL_UNAVAILABLE');
     assert.strictEqual(otpRes.body.backendCode, 'MAILER_NOT_CONFIGURED');
+    assert.ok(otpRes.body.traceId);
+    assert.strictEqual(otpRes.headers['x-reporter-auth-trace'], otpRes.body.traceId);
   } finally {
     if (originalEmailMode === undefined) delete process.env.EMAIL_MODE;
     else process.env.EMAIL_MODE = originalEmailMode;
     if (originalRender === undefined) delete process.env.RENDER;
     else process.env.RENDER = originalRender;
   }
+});
+
+test('reporter-auth compat request-code returns traceable validation failures on proxy-shaped requests', async () => {
+  const res = await request(app)
+    .post('/api/reporter-auth/request-code')
+    .set('Host', 'newspulse-backend.onrender.com')
+    .set('Origin', 'https://www.newspulse.co.in')
+    .set('x-forwarded-host', 'www.newspulse.co.in')
+    .set('x-forwarded-proto', 'https')
+    .set('x-vercel-id', 'iad1::debug-trace-123')
+    .send({ email: '' });
+
+  assert.strictEqual(res.statusCode, 400);
+  assert.strictEqual(res.body.code, 'EMAIL_REQUIRED');
+  assert.strictEqual(res.body.backendCode, 'EMAIL_REQUIRED');
+  assert.ok(res.body.traceId);
+  assert.strictEqual(res.headers['x-reporter-auth-trace'], res.body.traceId);
 });
 
 test('reporter portal request-code creates a reporter profile when email is valid but no prior profile exists', async () => {
