@@ -1530,15 +1530,35 @@ test('reporter portal request-code success returns traceId without regressing lo
   reporterDoc.email = 'trace-success@example.com';
   reporterDoc.emailLower = 'trace-success@example.com';
 
-  const otpRes = await request(app)
-    .post('/api/reporter-portal/auth/request-login-otp')
-    .send({ email: 'trace-success@example.com' });
+  const originalConsoleLog = console.log;
+  const finalLogs = [];
 
-  assert.strictEqual(otpRes.statusCode, 200);
-  assert.strictEqual(otpRes.body.ok, true);
-  assert.ok(otpRes.body.traceId);
-  assert.strictEqual(otpRes.headers['x-reporter-auth-trace'], otpRes.body.traceId);
-  assert.ok(otpRes.body.devCode);
+  console.log = (...args) => {
+    if (args[0] === '[reporter-auth][request-code][final]' && args[1] && typeof args[1] === 'object') {
+      finalLogs.push(args[1]);
+    }
+  };
+
+  try {
+    const otpRes = await request(app)
+      .post('/api/reporter-portal/auth/request-login-otp')
+      .send({ email: 'trace-success@example.com' });
+
+    assert.strictEqual(otpRes.statusCode, 200);
+    assert.strictEqual(otpRes.body.ok, true);
+    assert.ok(otpRes.body.traceId);
+    assert.strictEqual(otpRes.headers['x-reporter-auth-trace'], otpRes.body.traceId);
+    assert.ok(otpRes.body.devCode);
+
+    const finalLog = finalLogs[0];
+    assert.ok(finalLog);
+    assert.strictEqual(finalLog.returnedStatusCode, 200);
+    assert.strictEqual(finalLog.code, 'OTP_REQUEST_ACCEPTED');
+    assert.strictEqual(finalLog.phase, 'send-email');
+    assert.strictEqual(finalLog.sendMethod, 'stub');
+  } finally {
+    console.log = originalConsoleLog;
+  }
 });
 
 test('reporter-auth request-code logs duplicate arrivals without changing stable success response', async () => {

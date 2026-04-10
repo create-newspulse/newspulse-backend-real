@@ -1161,6 +1161,16 @@ function logReporterDashboardError(stage, payload) {
   console.error(`[reporter-dashboard][${stage}]`, payload);
 }
 
+function logReporterRequestCodeFinal(req, email, statusCode, code, phase, provider = null, extra = {}) {
+  console.log('[reporter-auth][request-code][final]', buildOtpLogContext(req, email, {
+    returnedStatusCode: statusCode,
+    code,
+    phase,
+    provider,
+    ...extra,
+  }));
+}
+
 function getReporterCollectionsQueried() {
   return ['CommunitySubmission'];
 }
@@ -1863,6 +1873,7 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
         backendCode: 'EMAIL_REQUIRED',
         errorMessage: 'Email is required.',
       }));
+      logReporterRequestCodeFinal(req, undefined, 400, 'EMAIL_REQUIRED', 'validate-email');
       return res.status(400).json({ ok: false, code: 'EMAIL_REQUIRED', backendCode: 'EMAIL_REQUIRED', traceId, message: 'Email is required.' });
     }
 
@@ -1899,6 +1910,9 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
         resolved: mailerStatus.resolved,
         errorMessage: mailerStatus.transporterError,
       }));
+      logReporterRequestCodeFinal(req, email, 503, 'REPORTER_EMAIL_UNAVAILABLE', 'mailer-readiness', mailerStatus.provider, {
+        backendCode: mailerStatus.backendCode || 'MAILER_NOT_CONFIGURED',
+      });
       return res.status(503).json({
         ok: false,
         code: 'REPORTER_EMAIL_UNAVAILABLE',
@@ -1920,6 +1934,9 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
         backendCode: 'COOLDOWN_ACTIVE',
         errorMessage: 'Too many OTP requests. Please try again later.',
       }));
+      logReporterRequestCodeFinal(req, email, 429, 'OTP_REQUEST_RATE_LIMITED', 'rate-limit', mailerStatus.provider, {
+        backendCode: 'COOLDOWN_ACTIVE',
+      });
       return res.status(429).json({ ok: false, code: 'OTP_REQUEST_RATE_LIMITED', backendCode: 'COOLDOWN_ACTIVE', traceId, message: 'Too many OTP requests. Please try again later.' });
     }
 
@@ -1934,12 +1951,16 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
         transporterReady: mailerStatus.transporterReady,
         errorMessage: 'Reporter identity could not be created or resolved',
       }));
+      logReporterRequestCodeFinal(req, email, 500, 'OTP_REQUEST_FAILED', 'resolve-reporter', mailerStatus.provider, {
+        backendCode: 'REPORTER_RESOLUTION_FAILED',
+      });
       return res.status(500).json({ ok: false, code: 'OTP_REQUEST_FAILED', backendCode: 'REPORTER_RESOLUTION_FAILED', traceId, message: 'Failed to request login OTP.' });
     }
 
     const status = String(reporter.status || 'active').toLowerCase();
     if (status === 'suspended' || status === 'banned' || reporter.portalAccessEnabled === false) {
       await logReporterActivity('reporter_portal_otp_request_blocked', email, { ip: getClientIp(req), status, portalAccessEnabled: reporter.portalAccessEnabled !== false });
+      logReporterRequestCodeFinal(req, email, 200, 'OTP_REQUEST_ACCEPTED', 'access-blocked', mailerStatus.provider);
       return res.status(200).json(buildOtpAcceptedResponse(undefined, { traceId }));
     }
 
@@ -1993,6 +2014,9 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       sendMethod: mailResult?.method || null,
       action: 'otp-sent',
     }));
+    logReporterRequestCodeFinal(req, email, 200, 'OTP_REQUEST_ACCEPTED', 'send-email', mailerStatus.provider, {
+      sendMethod: mailResult?.method || null,
+    });
 
     return res.status(200).json({
       ...buildOtpAcceptedResponse(email, { traceId }),
@@ -2036,6 +2060,9 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       error: serializeError(error),
     }));
     if (error && error.safeClientCode === 'REPORTER_EMAIL_UNAVAILABLE') {
+      logReporterRequestCodeFinal(req, email, getReporterMailerHttpStatus(error.backendCode), 'REPORTER_EMAIL_UNAVAILABLE', 'send-email', error?.provider || null, {
+        backendCode: error.backendCode || 'PROVIDER_UNAVAILABLE',
+      });
       return res.status(getReporterMailerHttpStatus(error.backendCode)).json({
         ok: false,
         code: 'REPORTER_EMAIL_UNAVAILABLE',
@@ -2045,8 +2072,12 @@ router.post('/auth/request-login-otp', requireReporterPortalOpen, async (req, re
       });
     }
     if (error && error.safeClientCode === 'OTP_REQUEST_ACCEPTED') {
+      logReporterRequestCodeFinal(req, email, 200, 'OTP_REQUEST_ACCEPTED', 'send-email', error?.provider || null);
       return res.status(200).json(buildOtpAcceptedResponse(email, { traceId }));
     }
+    logReporterRequestCodeFinal(req, email, returnedStatusCode, 'OTP_REQUEST_FAILED', 'request-code', error?.provider || null, {
+      backendCode: error?.backendCode || 'OTP_REQUEST_FAILED',
+    });
     return res.status(returnedStatusCode).json({ ok: false, code: 'OTP_REQUEST_FAILED', backendCode: error?.backendCode || 'OTP_REQUEST_FAILED', traceId, message: 'Failed to request login OTP.' });
   }
 });
