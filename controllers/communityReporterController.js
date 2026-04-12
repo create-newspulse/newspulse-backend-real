@@ -189,11 +189,59 @@ function _resolveReporterDirectoryStatusValue(source) {
 }
 
 function _hasPermanentDeleteConfirmation(req) {
+  if (_parseBool(req?.query?.confirmPermanentDelete) === true) return true;
+  if (_parseBool(req?.body?.confirmPermanentDelete) === true) return true;
   if (_parseBool(req?.query?.confirm) === true) return true;
   if (_parseBool(req?.body?.confirm) === true) return true;
   if (_parseBool(req?.body?.confirmed) === true) return true;
   const confirmationText = _firstNonEmptyString(req?.body?.confirmation, req?.body?.confirmationText, req?.body?.confirmText);
   return String(confirmationText || '').trim().toUpperCase() === 'DELETE';
+}
+
+function _buildReporterContactPermanentDeleteContract() {
+  return {
+    endpoint: '/api/admin/community-reporter/contacts/bulk-delete',
+    method: 'POST',
+    requiredPayload: {
+      ids: ['contactId'],
+      confirmPermanentDelete: true,
+    },
+    confirmationField: 'confirmPermanentDelete',
+    confirmationType: 'boolean',
+    confirmationValue: true,
+    legacyConfirmationFallbacks: ['confirm=true', 'confirmed=true', 'confirmationText=DELETE'],
+    allowedState: 'removed',
+  };
+}
+
+function _summarizeBulkReporterContactFailures(skipped) {
+  const normalizedSkipped = Array.isArray(skipped)
+    ? skipped
+        .filter((entry) => entry && typeof entry === 'object')
+        .map((entry) => ({
+          ...entry,
+          ...(entry.id !== undefined && entry.id !== null ? { id: String(entry.id) } : {}),
+        }))
+    : [];
+
+  const failedEntries = normalizedSkipped.filter((entry) => !!entry.id);
+  const missingEntries = failedEntries.filter((entry) => entry.code === 'CONTACT_NOT_FOUND');
+  const invalidStateEntries = failedEntries.filter((entry) => entry.code === 'CONTACT_NOT_REMOVED');
+  const blockedEntries = failedEntries.filter(
+    (entry) => entry.code !== 'CONTACT_NOT_FOUND' && entry.code !== 'CONTACT_NOT_REMOVED'
+  );
+
+  return {
+    skipped: normalizedSkipped,
+    failedEntries,
+    failedIds: failedEntries.map((entry) => entry.id),
+    missingEntries,
+    missingIds: missingEntries.map((entry) => entry.id),
+    invalidStateEntries,
+    invalidStateIds: invalidStateEntries.map((entry) => entry.id),
+    blockedEntries,
+    blockedIds: blockedEntries.map((entry) => entry.id),
+  };
 }
 
 function _canPermanentlyDeleteReporterStatus(value, { allowActive = false } = {}) {
@@ -221,29 +269,49 @@ function _buildBulkReporterContactMutationResponse(removedIds, skipped) {
 
 function _buildBulkReporterContactRestoreResponse(restoredIds, skipped) {
   const normalizedRestoredIds = Array.isArray(restoredIds) ? restoredIds.filter(Boolean).map((id) => String(id)) : [];
-  const normalizedSkipped = Array.isArray(skipped) ? skipped : [];
+  const failureSummary = _summarizeBulkReporterContactFailures(skipped);
 
   return {
     success: true,
     message: 'Bulk restore completed',
     mode: 'restore',
+    successCount: normalizedRestoredIds.length,
     restoredCount: normalizedRestoredIds.length,
     restoredIds: normalizedRestoredIds,
-    skipped: normalizedSkipped,
+    failedCount: failureSummary.failedIds.length,
+    failedIds: failureSummary.failedIds,
+    missingCount: failureSummary.missingIds.length,
+    missingIds: failureSummary.missingIds,
+    invalidStateCount: failureSummary.invalidStateIds.length,
+    invalidStateIds: failureSummary.invalidStateIds,
+    blockedCount: failureSummary.blockedIds.length,
+    blockedIds: failureSummary.blockedIds,
+    failures: failureSummary.failedEntries,
+    skipped: failureSummary.skipped,
   };
 }
 
 function _buildBulkReporterContactPermanentDeleteResponse(deletedIds, skipped) {
   const normalizedDeletedIds = Array.isArray(deletedIds) ? deletedIds.filter(Boolean).map((id) => String(id)) : [];
-  const normalizedSkipped = Array.isArray(skipped) ? skipped : [];
+  const failureSummary = _summarizeBulkReporterContactFailures(skipped);
 
   return {
     success: true,
     message: 'Bulk permanent delete completed',
     mode: 'hard',
+    successCount: normalizedDeletedIds.length,
     deletedCount: normalizedDeletedIds.length,
     deletedIds: normalizedDeletedIds,
-    skipped: normalizedSkipped,
+    failedCount: failureSummary.failedIds.length,
+    failedIds: failureSummary.failedIds,
+    missingCount: failureSummary.missingIds.length,
+    missingIds: failureSummary.missingIds,
+    invalidStateCount: failureSummary.invalidStateIds.length,
+    invalidStateIds: failureSummary.invalidStateIds,
+    blockedCount: failureSummary.blockedIds.length,
+    blockedIds: failureSummary.blockedIds,
+    failures: failureSummary.failedEntries,
+    skipped: failureSummary.skipped,
   };
 }
 
@@ -787,18 +855,70 @@ async function _countLinkedProfilesForContact(contact) {
   }
 }
 
+async function _detachReporterContactDependencies(contact) {
+  const contactId = contact && contact._id ? String(contact._id) : null;
+  if (!contactId || !_isValidObjectId(contactId)) {
+    return {
+      detachedSubmissionReporterIds: 0,
+      detachedSubmissionEmailLinks: 0,
+      detachedProfiles: 0,
+    };
+  }
+
+  const normalizedEmail = _normalizeEmail(contact.email);
+
+  const directSubmissionResult = await CommunitySubmission.updateMany(
+    { reporterId: contactId },
+    { $set: { reporterId: null } }
+  );
+
+  let emailLinkedSubmissionResult = { modifiedCount: 0 };
+  if (normalizedEmail) {
+    emailLinkedSubmissionResult = await CommunitySubmission.updateMany(
+      {
+        reporterId: { $in: [contactId, null, undefined] },
+        $or: [
+          { reporterEmailNorm: normalizedEmail },
+          { reporterEmail: normalizedEmail },
+          { email: normalizedEmail },
+          { 'contact.email': normalizedEmail },
+        ],
+      },
+      { $set: { reporterId: null } }
+    );
+  }
+
+  const profileDetachResult = await ReporterProfile.updateMany(
+    { reporterContactId: contactId },
+    { $set: { reporterContactId: null } }
+  );
+
+  return {
+    detachedSubmissionReporterIds: typeof directSubmissionResult?.modifiedCount === 'number'
+      ? directSubmissionResult.modifiedCount
+      : (directSubmissionResult?.nModified || 0),
+    detachedSubmissionEmailLinks: typeof emailLinkedSubmissionResult?.modifiedCount === 'number'
+      ? emailLinkedSubmissionResult.modifiedCount
+      : (emailLinkedSubmissionResult?.nModified || 0),
+    detachedProfiles: typeof profileDetachResult?.modifiedCount === 'number'
+      ? profileDetachResult.modifiedCount
+      : (profileDetachResult?.nModified || 0),
+  };
+}
+
 function _isProtectedContact(contact) {
   const verification = String(contact?.verificationLevel || '').trim().toLowerCase();
   // Treat verified directory entries as protected from hard delete.
   return verification === 'verified';
 }
 
-function _jsonError(res, status, { code, message, details }) {
+function _jsonError(res, status, { code, message, details, ...extra }) {
   return res.status(status).json({
     success: false,
     ok: false,
     code,
     message,
+    ...extra,
     details: details || undefined,
   });
 }
@@ -1303,8 +1423,9 @@ async function _executePermanentDeleteReporterContact(req, res, { allowActive = 
     if (!_hasPermanentDeleteConfirmation(req)) {
       return _jsonError(res, 400, {
         code: 'DELETE_CONFIRMATION_REQUIRED',
-        message: 'Permanent delete requires explicit confirmation.',
-        details: { confirmation: 'Set confirm=true or confirmationText=DELETE' },
+        invalidConfirmation: true,
+        message: 'Permanent delete requires explicit confirmation via { ids: [...], confirmPermanentDelete: true }.',
+        details: _buildReporterContactPermanentDeleteContract(),
       });
     }
 
@@ -1316,28 +1437,18 @@ async function _executePermanentDeleteReporterContact(req, res, { allowActive = 
       });
     }
 
-    const linkedCount = await _countLinkedSubmissionsForContact(contact);
-    if (linkedCount > 0) {
-      return _jsonError(res, 409, {
-        code: 'CONTACT_HAS_LINKED_STORIES',
-        message: 'Cannot permanently delete reporter contact while linked stories exist.',
-        details: { linkedStories: linkedCount, allowedActions: ['restore', 'reassign_stories'] },
-      });
-    }
-
-    const linkedProfiles = await _countLinkedProfilesForContact(contact);
-    if (linkedProfiles > 0) {
-      return _jsonError(res, 409, {
-        code: 'CONTACT_HAS_DEPENDENCIES',
-        message: 'Cannot permanently delete reporter contact while contributor profiles depend on it.',
-        details: { linkedProfiles, allowedActions: ['restore'] },
-      });
-    }
+    const detached = await _detachReporterContactDependencies(contact);
 
     await ReporterContact.deleteOne({ _id: id });
 
     console.log('[ADMIN_DELETE][reporter-contact] permanently deleted', { actor, deletedId: id, hard: true, allowActive });
-    await logAudit(req, allowActive ? 'COMMUNITY_REPORTER_CONTACT_FORCE_PERMANENT_DELETE' : 'COMMUNITY_REPORTER_CONTACT_PERMANENT_DELETE', id, { entity: 'ReporterContact', hard: true, confirmed: true, allowActive });
+    await logAudit(req, allowActive ? 'COMMUNITY_REPORTER_CONTACT_FORCE_PERMANENT_DELETE' : 'COMMUNITY_REPORTER_CONTACT_PERMANENT_DELETE', id, {
+      entity: 'ReporterContact',
+      hard: true,
+      confirmed: true,
+      allowActive,
+      detached,
+    });
 
     return res.status(200).json({
       success: true,
@@ -1345,6 +1456,7 @@ async function _executePermanentDeleteReporterContact(req, res, { allowActive = 
       mode: 'hard',
       bypassedHiddenRequirement: allowActive === true,
       deletedId: id,
+      detached,
     });
   } catch (e) {
     console.error('[ADMIN_DELETE][reporter-contact][permanent] error', { actor, message: e?.message || e });
@@ -1639,8 +1751,9 @@ async function bulkPermanentlyDeleteReporterContacts(req, res) {
     if (!_hasPermanentDeleteConfirmation(req)) {
       return _jsonError(res, 400, {
         code: 'DELETE_CONFIRMATION_REQUIRED',
-        message: 'Permanent delete requires explicit confirmation.',
-        details: { confirmation: 'Set confirm=true or confirmationText=DELETE' },
+        invalidConfirmation: true,
+        message: 'Permanent delete requires explicit confirmation via { ids: [...], confirmPermanentDelete: true }.',
+        details: _buildReporterContactPermanentDeleteContract(),
       });
     }
 
@@ -1692,17 +1805,7 @@ async function bulkPermanentlyDeleteReporterContacts(req, res) {
         continue;
       }
 
-      const linkedCount = await _countLinkedSubmissionsForContact(contact);
-      if (linkedCount > 0) {
-        skipped.push({ id, code: 'CONTACT_HAS_LINKED_STORIES', message: 'Contact has linked stories', details: { linkedStories: linkedCount } });
-        continue;
-      }
-
-      const linkedProfiles = await _countLinkedProfilesForContact(contact);
-      if (linkedProfiles > 0) {
-        skipped.push({ id, code: 'CONTACT_HAS_DEPENDENCIES', message: 'Contact has dependent contributor profiles', details: { linkedProfiles } });
-        continue;
-      }
+      const detached = await _detachReporterContactDependencies(contact);
 
       await ReporterContact.deleteOne({ _id: id });
       deletedIds.push(id);
@@ -1721,6 +1824,7 @@ async function bulkPermanentlyDeleteReporterContacts(req, res) {
     _logReporterContactsApi(req, { ok: true, count: deletedIds.length });
     return res.status(200).json({
       ..._buildBulkReporterContactPermanentDeleteResponse(deletedIds, skipped),
+      requestContract: _buildReporterContactPermanentDeleteContract(),
       receivedCount,
       validCount: validIds.length,
       invalidCount: invalidIds.length,
@@ -4702,5 +4806,6 @@ module.exports = {
     _isArchivedLikeReporterStatus,
     _resolveReporterContactIdFromRequest,
     _normalizeBulkReporterContactIds,
+    _buildReporterContactPermanentDeleteContract,
   },
 };

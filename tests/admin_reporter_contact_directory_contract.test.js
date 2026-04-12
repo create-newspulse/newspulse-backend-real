@@ -4,6 +4,8 @@ const mongoose = require('mongoose');
 
 const controller = require('../controllers/communityReporterController');
 const ReporterContact = require('../models/ReporterContact');
+const ReporterProfile = require('../models/ReporterProfile');
+const CommunitySubmission = require('../models/CommunitySubmission');
 const AuditLog = require('../models/AuditLog');
 
 const {
@@ -21,6 +23,7 @@ const {
   _filterReporterDirectoryRows,
   _canRemoveReporterContactStatus,
   _canRestoreReporterContactStatus,
+  _buildReporterContactPermanentDeleteContract,
   _canPermanentlyDeleteReporterStatus,
   _hasPermanentDeleteConfirmation,
   _isArchivedLikeReporterStatus,
@@ -471,13 +474,31 @@ test('bulk restore and bulk permanent delete responses expose distinct mutation 
   );
 
   assert.strictEqual(restoreResponse.mode, 'restore');
+  assert.strictEqual(restoreResponse.successCount, 1);
   assert.strictEqual(restoreResponse.restoredCount, 1);
   assert.deepStrictEqual(restoreResponse.restoredIds, ['507f1f77bcf86cd799439041']);
+  assert.strictEqual(restoreResponse.failedCount, 1);
+  assert.deepStrictEqual(restoreResponse.failedIds, ['507f1f77bcf86cd799439042']);
+  assert.strictEqual(restoreResponse.missingCount, 0);
+  assert.deepStrictEqual(restoreResponse.missingIds, []);
+  assert.strictEqual(restoreResponse.invalidStateCount, 1);
+  assert.deepStrictEqual(restoreResponse.invalidStateIds, ['507f1f77bcf86cd799439042']);
+  assert.deepStrictEqual(restoreResponse.failures, [{ id: '507f1f77bcf86cd799439042', code: 'CONTACT_NOT_REMOVED' }]);
   assert.deepStrictEqual(restoreResponse.skipped, [{ id: '507f1f77bcf86cd799439042', code: 'CONTACT_NOT_REMOVED' }]);
 
   assert.strictEqual(permanentDeleteResponse.mode, 'hard');
+  assert.strictEqual(permanentDeleteResponse.successCount, 1);
   assert.strictEqual(permanentDeleteResponse.deletedCount, 1);
   assert.deepStrictEqual(permanentDeleteResponse.deletedIds, ['507f1f77bcf86cd799439043']);
+  assert.strictEqual(permanentDeleteResponse.failedCount, 1);
+  assert.deepStrictEqual(permanentDeleteResponse.failedIds, ['507f1f77bcf86cd799439044']);
+  assert.strictEqual(permanentDeleteResponse.missingCount, 0);
+  assert.deepStrictEqual(permanentDeleteResponse.missingIds, []);
+  assert.strictEqual(permanentDeleteResponse.invalidStateCount, 0);
+  assert.deepStrictEqual(permanentDeleteResponse.invalidStateIds, []);
+  assert.strictEqual(permanentDeleteResponse.blockedCount, 1);
+  assert.deepStrictEqual(permanentDeleteResponse.blockedIds, ['507f1f77bcf86cd799439044']);
+  assert.deepStrictEqual(permanentDeleteResponse.failures, [{ id: '507f1f77bcf86cd799439044', code: 'CONTACT_HAS_LINKED_STORIES' }]);
   assert.deepStrictEqual(permanentDeleteResponse.skipped, [{ id: '507f1f77bcf86cd799439044', code: 'CONTACT_HAS_LINKED_STORIES' }]);
 });
 
@@ -577,6 +598,7 @@ test('permanent delete requires explicit confirmation and archived status semant
   assert.strictEqual(_canPermanentlyDeleteReporterStatus({ directoryStatus: 'removed', status: 'suspended' }), true);
   assert.strictEqual(_canPermanentlyDeleteReporterStatus('active', { allowActive: true }), true);
 
+  assert.strictEqual(_hasPermanentDeleteConfirmation({ query: {}, body: { confirmPermanentDelete: true } }), true);
   assert.strictEqual(_hasPermanentDeleteConfirmation({ query: { confirm: 'true' }, body: {} }), true);
   assert.strictEqual(_hasPermanentDeleteConfirmation({ query: {}, body: { confirmed: true } }), true);
   assert.strictEqual(_hasPermanentDeleteConfirmation({ query: {}, body: { confirmationText: 'DELETE' } }), true);
@@ -709,6 +731,220 @@ test('restore only flips removed contact back to active and clears removal metad
 
   ReporterContact.findById = originalFindById;
   ReporterContact.updateOne = originalUpdateOne;
+});
+
+test('bulk restore returns precise success, missing, and invalid-state ids for selected removed contacts', async () => {
+  const originalCountDocuments = ReporterContact.countDocuments;
+  const originalFindById = ReporterContact.findById;
+  const originalUpdateOne = ReporterContact.updateOne;
+
+  const removedId = '507f1f77bcf86cd799439101';
+  const activeId = '507f1f77bcf86cd799439102';
+  const missingId = '507f1f77bcf86cd799439103';
+  const contactStateById = {
+    [removedId]: { _id: removedId, directoryStatus: 'removed', archivedAt: new Date('2026-04-07T08:00:00.000Z') },
+    [activeId]: { _id: activeId, directoryStatus: 'active' },
+  };
+  const updates = [];
+
+  await withMongoReady(async () => {
+    ReporterContact.countDocuments = async () => 2;
+    ReporterContact.findById = (id) => ({
+      lean: async () => contactStateById[id] || null,
+    });
+    ReporterContact.updateOne = async (filter, update) => {
+      updates.push({ filter, update });
+      return { acknowledged: true, modifiedCount: 1 };
+    };
+
+    const req = {
+      body: { ids: [removedId, activeId, missingId] },
+      query: {},
+      method: 'POST',
+      headers: {},
+      admin: { id: 'admin-restore-bulk', email: 'restore-bulk@example.com', role: 'founder' },
+    };
+    const res = makeJsonResponse();
+
+    await controller.bulkRestoreReporterContacts(req, res);
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.body.success, true);
+    assert.strictEqual(res.body.successCount, 1);
+    assert.strictEqual(res.body.restoredCount, 1);
+    assert.deepStrictEqual(res.body.restoredIds, [removedId]);
+    assert.strictEqual(res.body.failedCount, 2);
+    assert.deepStrictEqual(res.body.failedIds, [activeId, missingId]);
+    assert.strictEqual(res.body.missingCount, 1);
+    assert.deepStrictEqual(res.body.missingIds, [missingId]);
+    assert.strictEqual(res.body.invalidStateCount, 1);
+    assert.deepStrictEqual(res.body.invalidStateIds, [activeId]);
+    assert.strictEqual(res.body.blockedCount, 0);
+    assert.deepStrictEqual(res.body.blockedIds, []);
+    assert.deepStrictEqual(res.body.failures, [
+      { id: activeId, code: 'CONTACT_NOT_REMOVED', message: 'Restore is only allowed for removed contacts' },
+      { id: missingId, code: 'CONTACT_NOT_FOUND', message: 'Reporter contact not found' },
+    ]);
+    assert.strictEqual(updates.length, 1);
+    assert.deepStrictEqual(updates[0].filter, { _id: removedId });
+    assert.strictEqual(updates[0].update.$set.directoryStatus, 'active');
+  });
+
+  ReporterContact.countDocuments = originalCountDocuments;
+  ReporterContact.findById = originalFindById;
+  ReporterContact.updateOne = originalUpdateOne;
+});
+
+test('bulk permanent delete requires explicit confirmation and only deletes selected removed contacts', async () => {
+  const originalCountDocuments = ReporterContact.countDocuments;
+  const originalFindById = ReporterContact.findById;
+  const originalDeleteOne = ReporterContact.deleteOne;
+  const originalSubmissionCountDocuments = CommunitySubmission.countDocuments;
+  const originalSubmissionUpdateMany = CommunitySubmission.updateMany;
+  const originalProfileCountDocuments = ReporterProfile.countDocuments;
+  const originalProfileUpdateMany = ReporterProfile.updateMany;
+
+  const removedId = '507f1f77bcf86cd799439111';
+  const activeId = '507f1f77bcf86cd799439112';
+  const missingId = '507f1f77bcf86cd799439113';
+  const contactsById = {
+    [removedId]: { _id: removedId, email: 'removed@example.com', directoryStatus: 'removed' },
+    [activeId]: { _id: activeId, email: 'active@example.com', directoryStatus: 'active' },
+  };
+  const deletedFilters = [];
+
+  await withMongoReady(async () => {
+    ReporterContact.countDocuments = async () => 2;
+    ReporterContact.findById = async (id) => contactsById[id] || null;
+    ReporterContact.deleteOne = async (filter) => {
+      deletedFilters.push(filter);
+      return { acknowledged: true, deletedCount: 1 };
+    };
+    CommunitySubmission.countDocuments = async () => 0;
+    CommunitySubmission.updateMany = async () => ({ acknowledged: true, modifiedCount: 0 });
+    ReporterProfile.countDocuments = async () => 0;
+    ReporterProfile.updateMany = async () => ({ acknowledged: true, modifiedCount: 0 });
+
+    const missingConfirmationReq = {
+      body: { ids: [removedId] },
+      query: {},
+      method: 'POST',
+      headers: {},
+      admin: { id: 'admin-delete-bulk', email: 'delete-bulk@example.com', role: 'founder' },
+    };
+    const missingConfirmationRes = makeJsonResponse();
+
+    await controller.bulkPermanentlyDeleteReporterContacts(missingConfirmationReq, missingConfirmationRes);
+
+    assert.strictEqual(missingConfirmationRes.statusCode, 400);
+    assert.strictEqual(missingConfirmationRes.body.code, 'DELETE_CONFIRMATION_REQUIRED');
+    assert.strictEqual(missingConfirmationRes.body.invalidConfirmation, true);
+    assert.deepStrictEqual(missingConfirmationRes.body.details, _buildReporterContactPermanentDeleteContract());
+
+    const req = {
+      body: { ids: [removedId, activeId, missingId], confirmPermanentDelete: true },
+      query: {},
+      method: 'POST',
+      headers: {},
+      admin: { id: 'admin-delete-bulk', email: 'delete-bulk@example.com', role: 'founder' },
+    };
+    const res = makeJsonResponse();
+
+    await controller.bulkPermanentlyDeleteReporterContacts(req, res);
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.body.success, true);
+    assert.strictEqual(res.body.successCount, 1);
+    assert.strictEqual(res.body.deletedCount, 1);
+    assert.deepStrictEqual(res.body.deletedIds, [removedId]);
+    assert.strictEqual(res.body.failedCount, 2);
+    assert.deepStrictEqual(res.body.failedIds, [activeId, missingId]);
+    assert.strictEqual(res.body.missingCount, 1);
+    assert.deepStrictEqual(res.body.missingIds, [missingId]);
+    assert.strictEqual(res.body.invalidStateCount, 1);
+    assert.deepStrictEqual(res.body.invalidStateIds, [activeId]);
+    assert.strictEqual(res.body.blockedCount, 0);
+    assert.deepStrictEqual(res.body.blockedIds, []);
+    assert.deepStrictEqual(res.body.requestContract, _buildReporterContactPermanentDeleteContract());
+    assert.deepStrictEqual(res.body.failures, [
+      { id: activeId, code: 'CONTACT_NOT_REMOVED', message: 'Permanent delete is only allowed for removed contacts' },
+      { id: missingId, code: 'CONTACT_NOT_FOUND', message: 'Reporter contact not found' },
+    ]);
+    assert.deepStrictEqual(deletedFilters, [{ _id: removedId }]);
+  });
+
+  ReporterContact.countDocuments = originalCountDocuments;
+  ReporterContact.findById = originalFindById;
+  ReporterContact.deleteOne = originalDeleteOne;
+  CommunitySubmission.countDocuments = originalSubmissionCountDocuments;
+  CommunitySubmission.updateMany = originalSubmissionUpdateMany;
+  ReporterProfile.countDocuments = originalProfileCountDocuments;
+  ReporterProfile.updateMany = originalProfileUpdateMany;
+});
+
+test('bulk permanent delete detaches linked stories and contributor profiles before deleting removed contacts', async () => {
+  const originalCountDocuments = ReporterContact.countDocuments;
+  const originalFindById = ReporterContact.findById;
+  const originalDeleteOne = ReporterContact.deleteOne;
+  const originalSubmissionUpdateMany = CommunitySubmission.updateMany;
+  const originalProfileUpdateMany = ReporterProfile.updateMany;
+
+  const removedId = '507f1f77bcf86cd799439114';
+  const contactsById = {
+    [removedId]: { _id: removedId, email: 'detached@example.com', directoryStatus: 'removed' },
+  };
+  const submissionUpdates = [];
+  const profileUpdates = [];
+  const deletedFilters = [];
+
+  await withMongoReady(async () => {
+    ReporterContact.countDocuments = async () => 1;
+    ReporterContact.findById = async (id) => contactsById[id] || null;
+    ReporterContact.deleteOne = async (filter) => {
+      deletedFilters.push(filter);
+      return { acknowledged: true, deletedCount: 1 };
+    };
+    CommunitySubmission.updateMany = async (filter, update) => {
+      submissionUpdates.push({ filter, update });
+      return { acknowledged: true, modifiedCount: submissionUpdates.length };
+    };
+    ReporterProfile.updateMany = async (filter, update) => {
+      profileUpdates.push({ filter, update });
+      return { acknowledged: true, modifiedCount: 1 };
+    };
+
+    const req = {
+      body: { ids: [removedId], confirmPermanentDelete: true },
+      query: {},
+      method: 'POST',
+      headers: {},
+      admin: { id: 'admin-delete-bulk', email: 'delete-bulk@example.com', role: 'founder' },
+    };
+    const res = makeJsonResponse();
+
+    await controller.bulkPermanentlyDeleteReporterContacts(req, res);
+
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.body.deletedCount, 1);
+    assert.deepStrictEqual(deletedFilters, [{ _id: removedId }]);
+    assert.strictEqual(submissionUpdates.length, 2);
+    assert.deepStrictEqual(submissionUpdates[0], {
+      filter: { reporterId: removedId },
+      update: { $set: { reporterId: null } },
+    });
+    assert.deepStrictEqual(profileUpdates, [
+      {
+        filter: { reporterContactId: removedId },
+        update: { $set: { reporterContactId: null } },
+      },
+    ]);
+  });
+
+  ReporterContact.countDocuments = originalCountDocuments;
+  ReporterContact.findById = originalFindById;
+  ReporterContact.deleteOne = originalDeleteOne;
+  CommunitySubmission.updateMany = originalSubmissionUpdateMany;
+  ReporterProfile.updateMany = originalProfileUpdateMany;
 });
 
 test('hide/remove resolves ReporterContact id from params first, then explicit payload fallback', () => {
