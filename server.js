@@ -296,6 +296,7 @@ const communityReporterSettingsRouter = require(`${BASE}/routes/adminSettings/co
 // Dashboard stats router lives in root-level routes, not nested BASE dir
 const dashboardStatsRouter = require('./routes/dashboardStats');
 const adminDashboardRoutes = require('./routes/adminDashboard.routes');
+const { buildAdminDashboardStatsPayload } = require('./controllers/adminDashboardStatsController');
 const adminCommunityReporterQueueRouter = require('./routes/admin/communityReporterQueue');
 const adminContributorNetworkRouter = require('./routes/adminContributorNetwork.routes');
 const { getReporterDirectory } = require('./controllers/adminContributorNetworkController');
@@ -2752,19 +2753,10 @@ app.get('/admin/me', requireAdminJwt, _adminMeResponse);
 // Aliases expected by some UIs
 app.get('/admin/stats', async (req, res) => {
   try {
-    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
-      return res.status(503).json({
-        ok: false,
-        success: false,
-        status: 503,
-        message: 'DB unavailable',
-        data: null,
-        path: req.originalUrl,
-      });
-    }
-
-    const totalArticles = await News.countDocuments({});
-    return res.json({ ok: true, success: true, status: 200, stats: { totalArticles, timestamp: new Date().toISOString() } });
+    const payload = await buildAdminDashboardStatsPayload({
+      dbConnected: Boolean(mongoose.connection && mongoose.connection.readyState === 1),
+    });
+    return res.json({ ...payload, success: true, status: 200, path: req.originalUrl });
   } catch (e) {
     console.error('[ADMIN][stats][alias:/admin/stats] failed', { message: e?.message || String(e) });
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load admin stats', path: req.originalUrl });
@@ -2772,19 +2764,10 @@ app.get('/admin/stats', async (req, res) => {
 });
 app.get('/api/admin/stats', async (req, res) => {
   try {
-    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
-      return res.status(503).json({
-        ok: false,
-        success: false,
-        status: 503,
-        message: 'DB unavailable',
-        data: null,
-        path: req.originalUrl,
-      });
-    }
-
-    const totalArticles = await News.countDocuments({});
-    return res.json({ ok: true, success: true, status: 200, stats: { totalArticles, timestamp: new Date().toISOString() } });
+    const payload = await buildAdminDashboardStatsPayload({
+      dbConnected: Boolean(mongoose.connection && mongoose.connection.readyState === 1),
+    });
+    return res.json({ ...payload, success: true, status: 200, path: req.originalUrl });
   } catch (e) {
     console.error('[ADMIN][stats][alias:/api/admin/stats] failed', { message: e?.message || String(e) });
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load admin stats', path: req.originalUrl });
