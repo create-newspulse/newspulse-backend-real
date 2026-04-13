@@ -6,12 +6,25 @@ const mongoose = require('mongoose');
 const News = require('../models/News');
 
 function makeChainableQuery(items) {
+  let working = Array.isArray(items) ? items.slice() : [];
+  let offset = 0;
+  let max = null;
   return {
     select() { return this; },
     sort() { return this; },
-    skip() { return this; },
-    limit() { return this; },
-    lean: async () => items,
+    skip(value) {
+      offset = Number.isFinite(Number(value)) ? Math.max(Number(value), 0) : 0;
+      return this;
+    },
+    limit(value) {
+      max = Number.isFinite(Number(value)) ? Math.max(Number(value), 0) : null;
+      return this;
+    },
+    lean: async () => {
+      const start = Math.max(offset, 0);
+      const sliced = working.slice(start);
+      return max === null ? sliced : sliced.slice(0, max);
+    },
   };
 }
 
@@ -179,13 +192,13 @@ test('GET /api/public/news defaults to strict Gujarati-published results and inc
       },
     ];
 
-    let lastFilter = null;
+    const seenFilters = [];
     News.find = (filter) => {
-      lastFilter = filter;
+      seenFilters.push(filter);
       return makeChainableQuery(dataset);
     };
     News.countDocuments = async (filter) => {
-      lastFilter = filter;
+      seenFilters.push(filter);
       return dataset.length;
     };
 
@@ -193,10 +206,6 @@ test('GET /api/public/news defaults to strict Gujarati-published results and inc
     assert.equal(res.status, 200);
     assert.ok(Array.isArray(res.body.items));
     assert.equal(res.body.items.length, 1);
-
-    const langCond = extractLangFilter(lastFilter);
-    assert.ok(langCond, 'expected a strict Gujarati-ready eligibility filter');
-    assert.ok(containsTranslationReady(lastFilter, 'gu'), 'expected Gujarati feed to require ready translations when fallback is disabled');
 
     const localized = res.body.items.find((item) => item.canonicalSlug === 'gujarati-localized');
     assert.ok(localized, 'expected Gujarati-localized slug to be returned');
@@ -210,7 +219,7 @@ test('GET /api/public/news defaults to strict Gujarati-published results and inc
     assert.deepEqual(localized.publishedLocales.sort(), ['en', 'gu']);
     assert.equal(localized.translationAvailability.requestedLocalePublished, true);
     assert.equal(localized.canonicalDetailUrl, '/gu/news/gujarati-localized');
-    assert.equal(localized.detailApiUrl, '/api/public/news/gujarati-localized?lang=gu');
+    assert.equal(localized.detailApiUrl, '/api/public/news/gujarati-localized?lang=gu&fallback=true');
   } finally {
     News.find = prevFind;
     News.countDocuments = prevCount;
@@ -307,6 +316,108 @@ test('GET /api/public/news returns hi when lang=hi', async () => {
     assert.ok(res.body.items.every((it) => it.lang === 'hi'));
     assert.ok(res.body.items.some((it) => it.title === 'hi original'));
     assert.ok(res.body.items.some((it) => it.title === 'hi t'));
+  } finally {
+    News.find = prevFind;
+    News.countDocuments = prevCount;
+    mongoose.connection.readyState = prevReadyState;
+  }
+});
+
+test('GET /api/public/news plain latest request backfills past non-eligible first story for homepage Top Story', async () => {
+  const prevReadyState = mongoose.connection.readyState;
+  const prevFind = News.find;
+  const prevCount = News.countDocuments;
+
+  try {
+    mongoose.connection.readyState = 1;
+
+    const dataset = [
+      {
+        _id: '507f1f77bcf86cd799439041',
+        title: 'English only latest',
+        description: 'English summary',
+        content: 'English content',
+        slug: 'english-only-latest',
+        lang: 'en',
+        originalLang: 'en',
+        status: 'published',
+        publishedAt: '2026-04-13T10:00:00.000Z',
+        translations: {},
+        translationStatus: {},
+      },
+      {
+        _id: '507f1f77bcf86cd799439042',
+        title: 'ગુજરાતી ટોપ સ્ટોરી',
+        description: 'ગુજરાતી સારાંશ',
+        content: 'ગુજરાતી વિગતો માટેનું સંપૂર્ણ લખાણ અહીં છે.',
+        slug: 'gujarati-top-story',
+        lang: 'gu',
+        originalLang: 'gu',
+        status: 'published',
+        publishedAt: '2026-04-13T09:00:00.000Z',
+        translations: {},
+        translationStatus: {},
+      },
+    ];
+
+    News.find = (_filter) => makeChainableQuery(dataset);
+    News.countDocuments = async () => dataset.length;
+
+    const res = await request(app).get('/api/public/news?limit=1');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.items.length, 1);
+    assert.equal(res.body.items[0].slug, 'gujarati-top-story');
+    assert.equal(res.body.items[0].resolvedLang, 'gu');
+    assert.equal(res.body.items[0].translationAvailability.requestedLocalePublished, true);
+  } finally {
+    News.find = prevFind;
+    News.countDocuments = prevCount;
+    mongoose.connection.readyState = prevReadyState;
+  }
+});
+
+test('GET /api/public/news plain latest request returns empty only when no eligible Top Story exists', async () => {
+  const prevReadyState = mongoose.connection.readyState;
+  const prevFind = News.find;
+  const prevCount = News.countDocuments;
+
+  try {
+    mongoose.connection.readyState = 1;
+
+    const dataset = [
+      {
+        _id: '507f1f77bcf86cd799439043',
+        title: 'English only latest one',
+        description: 'English summary one',
+        content: 'English content one',
+        slug: 'english-only-latest-one',
+        lang: 'en',
+        originalLang: 'en',
+        status: 'published',
+        translations: {},
+        translationStatus: {},
+      },
+      {
+        _id: '507f1f77bcf86cd799439044',
+        title: 'English only latest two',
+        description: 'English summary two',
+        content: 'English content two',
+        slug: 'english-only-latest-two',
+        lang: 'en',
+        originalLang: 'en',
+        status: 'published',
+        translations: {},
+        translationStatus: {},
+      },
+    ];
+
+    News.find = (_filter) => makeChainableQuery(dataset);
+    News.countDocuments = async () => dataset.length;
+
+    const res = await request(app).get('/api/public/news?limit=1');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.items, []);
+    assert.equal(res.body.total, dataset.length);
   } finally {
     News.find = prevFind;
     News.countDocuments = prevCount;

@@ -1058,6 +1058,71 @@ function _localizePublicNewsDocInPlace(doc, requestedLang, { fallbackToBase = fa
   };
 }
 
+function _preparePublicNewsFeedItems(itemsRaw, requestedLang, { fallbackToBase = false } = {}) {
+  const desired = normalizeLang(requestedLang);
+
+  const items = (itemsRaw || []).map(withCoverImageUrl);
+
+  const localizedItems = items
+    .map((it) => {
+      const out = { ...it };
+      const localized = _localizePublicNewsDocInPlace(out, desired, { fallbackToBase });
+
+      if (_matchesDebugStory(out)) {
+        _debugPublicNewsStory('list_candidate', {
+          requestedLang: desired,
+          matchedArticleGroup: String(out.translationGroupId || out.translationKey || ''),
+          availableLocales: _getPublishedLocales(out),
+          publishedLocales: localized.publishedLocales,
+          resolverUsed: 'list',
+          excludedReason: localized.ok ? null : localized.excludedReason,
+        });
+      }
+
+      if (!localized.ok) return null;
+
+      attachLocalizationFields(out, desired);
+      _attachPublicRouteData(out, desired, { fallbackEnabled: fallbackToBase });
+      return out;
+    })
+    .filter(Boolean);
+
+  for (const it of localizedItems) {
+    try { delete it.translations; } catch (_) {}
+    try { delete it.translationStatus; } catch (_) {}
+    try { delete it.translationError; } catch (_) {}
+    try { delete it.translationNextRetryAt; } catch (_) {}
+  }
+
+  return localizedItems;
+}
+
+async function _collectPlainLatestPublicNewsItems({ filter, desired, fallbackEnabled, sort, limit, count }) {
+  const totalRaw = Math.max(Number(count || 0), 0);
+  if (!totalRaw || limit <= 0) return [];
+
+  const batchSize = Math.max(limit * 3, 12);
+  const accepted = [];
+  let rawSkip = 0;
+
+  while (accepted.length < limit && rawSkip < totalRaw) {
+    const batchRaw = await News.find(filter)
+      .select(PUBLIC_FEED_SELECT)
+      .sort(sort)
+      .skip(rawSkip)
+      .limit(batchSize)
+      .lean();
+
+    if (!Array.isArray(batchRaw) || !batchRaw.length) break;
+
+    const localizedBatch = _preparePublicNewsFeedItems(batchRaw, desired, { fallbackToBase: fallbackEnabled });
+    if (localizedBatch.length) accepted.push(...localizedBatch);
+    rawSkip += batchRaw.length;
+  }
+
+  return accepted.slice(0, limit);
+}
+
 async function tryAcquireNewsTranslationLock({ id, lang, now = new Date() }) {
   const desired = normalizeLang(lang);
   if (!desired || !id) return false;
@@ -1141,6 +1206,14 @@ async function listPublicNews(req, res) {
     if (state) filter.$and.push({ 'location.state': new RegExp(`^${escapeRegExp(state)}$`, 'i') });
 
     const isGroupedCategoryListing = Boolean(category);
+    const isPlainLatestRequest = !isGroupedCategoryListing
+      && !track
+      && !topic
+      && !state
+      && !q
+      && !founderOnly
+      && !type
+      && page === 1;
 
     // Feed rules:
     // - By default, locale feeds only expose docs published in that locale.
@@ -1190,38 +1263,18 @@ async function listPublicNews(req, res) {
         News.countDocuments(filter),
       ]);
 
-      items = (itemsRaw || []).map(withCoverImageUrl);
-
-      items = items
-        .map((it) => {
-          const out = { ...it };
-          const localized = _localizePublicNewsDocInPlace(out, desired, { fallbackToBase: fallbackEnabled });
-
-          if (_matchesDebugStory(out)) {
-            _debugPublicNewsStory('list_candidate', {
-              requestedLang: desired,
-              matchedArticleGroup: String(out.translationGroupId || out.translationKey || ''),
-              availableLocales: _getPublishedLocales(out),
-              publishedLocales: localized.publishedLocales,
-              resolverUsed: 'list',
-              excludedReason: localized.ok ? null : localized.excludedReason,
-            });
-          }
-
-          if (!localized.ok) return null;
-
-          attachLocalizationFields(out, desired);
-          _attachPublicRouteData(out, desired, { fallbackEnabled });
-          return out;
-        })
-        .filter(Boolean);
-
-      for (const it of items) {
-        try { delete it.translations; } catch (_) {}
-        try { delete it.translationStatus; } catch (_) {}
-        try { delete it.translationError; } catch (_) {}
-        try { delete it.translationNextRetryAt; } catch (_) {}
+      items = _preparePublicNewsFeedItems(itemsRaw || [], desired, { fallbackToBase: fallbackEnabled });
+      if (!items.length && isPlainLatestRequest && Number(count || 0) > limit) {
+        items = await _collectPlainLatestPublicNewsItems({
+          filter,
+          desired,
+          fallbackEnabled,
+          sort,
+          limit,
+          count,
+        });
       }
+
       total = count;
       totalPages = Math.max(Math.ceil(total / limit), 1);
     }
