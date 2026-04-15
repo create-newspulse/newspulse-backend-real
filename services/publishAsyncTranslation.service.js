@@ -157,6 +157,18 @@ function buildPublishTranslationState({ baseLang, title, summary, content, exist
   const base = normalizeLang(baseLang) || 'en';
   const at = now instanceof Date ? now : new Date();
 
+  const nextBaseTitle = _safeText(title);
+  const nextBaseSummary = _safeText(summary);
+  const nextBaseContent = _safeText(content);
+  const prevBaseTitle = _safeText(existing?.title || existing?.translations?.[base]?.title);
+  const prevBaseSummary = _safeText(existing?.description || existing?.summary || existing?.translations?.[base]?.summary);
+  const prevBaseContent = _safeText(existing?.content || existing?.translations?.[base]?.content);
+  const sourceChanged = (
+    prevBaseTitle !== nextBaseTitle
+    || prevBaseSummary !== nextBaseSummary
+    || prevBaseContent !== nextBaseContent
+  );
+
   const translations = { ...(existing?.translations && typeof existing.translations === 'object' ? existing.translations : {}) };
   const translationStatus = { ...(existing?.translationStatus && typeof existing.translationStatus === 'object' ? existing.translationStatus : {}) };
   const translationError = { ...(existing?.translationError && typeof existing.translationError === 'object' ? existing.translationError : {}) };
@@ -173,9 +185,9 @@ function buildPublishTranslationState({ baseLang, title, summary, content, exist
 
     if (lang === base) {
       translations[lang] = {
-        title: _safeText(title),
-        summary: _safeText(summary),
-        content: _safeText(content),
+        title: nextBaseTitle,
+        summary: nextBaseSummary,
+        content: nextBaseContent,
         provider: 'manual',
         generatedAt: at,
       };
@@ -207,6 +219,15 @@ function buildPublishTranslationState({ baseLang, title, summary, content, exist
         translationNextRetryAt[lang] = null;
         translationUpdatedAt[lang] = existingUpdatedAt && !Number.isNaN(existingUpdatedAt.getTime()) ? existingUpdatedAt : at;
       }
+      continue;
+    }
+
+    if (sourceChanged) {
+      translations[lang] = { title: '', summary: '', content: '', provider: 'google', generatedAt: null };
+      translationStatus[lang] = 'pending';
+      translationError[lang] = null;
+      translationNextRetryAt[lang] = null;
+      translationUpdatedAt[lang] = at;
       continue;
     }
 
@@ -697,8 +718,6 @@ async function enqueueTranslateAndSave(newsId, options = {}) {
   const idRaw = String(newsId || '').trim();
   if (!idRaw) return;
 
-  if (!isGoogleTranslateConfigured()) return;
-
   if (!mongoose.isValidObjectId(idRaw)) {
     // Be forgiving in tests; job creation is best-effort.
     try { logger.warn?.('[i18n][queue] invalid newsId; skipping enqueue', { id: idRaw }); } catch (_) {}
@@ -718,10 +737,10 @@ async function enqueueTranslateAndSave(newsId, options = {}) {
           lockedAt: null,
           lockedBy: null,
           finishedAt: null,
+          lastError: null,
         },
         $setOnInsert: {
           attempts: 0,
-          lastError: null,
         },
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }

@@ -13,7 +13,6 @@ const CATEGORY_VALUES = [
   'lifestyle',
   'glamour',
   'web-stories',
-  'viral-videos',
   'editorial',
   'youth-pulse',
   'inspiration-hub',

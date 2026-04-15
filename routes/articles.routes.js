@@ -899,6 +899,28 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
         note: 'Created',
       }],
     };
+
+    if (initialStatus === 'published') {
+      const pending = buildPublishTranslationState({
+        baseLang: langNorm,
+        title,
+        summary: normalizedDescription,
+        content: content ?? body ?? '',
+        existing: createDoc,
+        now,
+      });
+
+      createDoc.deletedAt = null;
+      createDoc.publishedAt = now;
+      createDoc.publishAt = null;
+      createDoc.scheduledAt = null;
+      createDoc.translations = pending.translations;
+      createDoc.translationStatus = pending.translationStatus;
+      createDoc.translationError = pending.translationError;
+      createDoc.translationNextRetryAt = pending.translationNextRetryAt;
+      createDoc.translationUpdatedAt = pending.translationUpdatedAt;
+    }
+
     _stripUndefinedKeysInPlace(createDoc);
 
     const doc = await News.create(createDoc);

@@ -208,7 +208,7 @@ Unknown routes return:
 #### GET /api/articles
 Query params:
 - `status` (default `published`) — `published` or `draft` (draft requires admin auth)
-- `category` — one of: `breaking`, `regional`, `national`, `international`, `business`, `tech`, `sports`, `lifestyle`, `glamour`, `web-stories`, `viral-videos`, `editorial`, `youth-pulse`, `inspiration-hub`
+- `category` — one of: `breaking`, `regional`, `national`, `international`, `business`, `tech`, `sports`, `lifestyle`, `glamour`, `web-stories`, `editorial`, `youth-pulse`, `inspiration-hub`
 - `isBreaking` — `true|false`
 - `lang` — `en|hi|gu`
 - `state`, `district`, `city`
