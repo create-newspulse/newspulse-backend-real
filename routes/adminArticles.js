@@ -147,7 +147,7 @@ router.get('/articles/:id/translation-status', requireAdminAuth, async (req, res
     }
 
     const doc = await News.findById(id)
-      .select('title slug lang language originalLang translationStatus translationError translationUpdatedAt translationNextRetryAt translationKey translationGroupId')
+      .select('title slug lang language originalLang translationStatus translationError translationUpdatedAt translationNextRetryAt translationKey translationGroupId spotlightEnabled spotlightPinned spotlightPriority spotlightExpiresAt')
       .lean();
     if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
 
@@ -211,7 +211,7 @@ router.post('/articles/:id/retry-translation', requireAdminAuth, async (req, res
     }
 
     const before = await News.findById(id)
-      .select('lang language originalLang translationStatus translationError translationUpdatedAt translationNextRetryAt')
+      .select('lang language originalLang translationStatus translationError translationUpdatedAt translationNextRetryAt spotlightEnabled spotlightPinned spotlightPriority spotlightExpiresAt')
       .lean();
     if (!before) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
 
@@ -263,6 +263,10 @@ router.post('/articles', requireAdminAuth, async (req, res) => {
       scheduledAt,
       imageURL,
       coverImageUrl,
+      spotlightEnabled,
+      spotlightPinned,
+      spotlightPriority,
+      spotlightExpiresAt,
     } = body;
 
     if (!title) {
@@ -290,6 +294,10 @@ router.post('/articles', requireAdminAuth, async (req, res) => {
       scheduledAt,
       imageURL: imageURL ?? resolvedCoverImageUrl,
       coverImageUrl: resolvedCoverImageUrl,
+      ...(spotlightEnabled !== undefined ? { spotlightEnabled: Boolean(spotlightEnabled) } : {}),
+      ...(spotlightPinned !== undefined ? { spotlightPinned: Boolean(spotlightPinned) } : {}),
+      ...(spotlightPriority !== undefined ? { spotlightPriority: Number.isFinite(Number(spotlightPriority)) ? Number(spotlightPriority) : 0 } : {}),
+      ...(spotlightExpiresAt !== undefined ? { spotlightExpiresAt: spotlightExpiresAt ? new Date(spotlightExpiresAt) : null } : {}),
     });
 
     await article.save();
@@ -390,6 +398,15 @@ router.put('/articles/:id', requireAdminAuth, async (req, res) => {
       update.publishAt = isNaN(dt) ? undefined : dt;
     }
     if (body.slug !== undefined) update.slug = body.slug;
+    if (body.spotlightEnabled !== undefined) update.spotlightEnabled = Boolean(body.spotlightEnabled);
+    if (body.spotlightPinned !== undefined) update.spotlightPinned = Boolean(body.spotlightPinned);
+    if (body.spotlightPriority !== undefined) {
+      const parsedPriority = Number(body.spotlightPriority);
+      update.spotlightPriority = Number.isFinite(parsedPriority) ? parsedPriority : 0;
+    }
+    if (body.spotlightExpiresAt !== undefined) {
+      update.spotlightExpiresAt = body.spotlightExpiresAt ? new Date(body.spotlightExpiresAt) : null;
+    }
 
     const resolvedCoverImageUrl = body.coverImageUrl ?? body.imageURL;
     if (resolvedCoverImageUrl !== undefined) update.coverImageUrl = resolvedCoverImageUrl;

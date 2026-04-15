@@ -178,6 +178,11 @@ const articleSchema = new mongoose.Schema(
     publishedAt: { type: Date, default: null, index: true },
     deletedAt: { type: Date, default: null, index: true },
 
+    spotlightEnabled: { type: Boolean, default: false },
+    spotlightPinned: { type: Boolean, default: false },
+    spotlightPriority: { type: Number, default: 0 },
+    spotlightExpiresAt: { type: Date, default: null },
+
     isBreaking: { type: Boolean, default: false, index: true },
 
     coverImage: {

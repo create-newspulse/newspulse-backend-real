@@ -672,6 +672,37 @@ function _normalizeSourceArticleId(value) {
   return mongoose.Types.ObjectId.isValid(raw) ? raw : undefined;
 }
 
+function _normalizeOptionalBoolean(value) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (value === 1) return true;
+    if (value === 0) return false;
+    return undefined;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'n', 'off'].includes(normalized)) return false;
+  return undefined;
+}
+
+function _normalizeOptionalNumber(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function _normalizeOptionalDateInput(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+}
+
 function _isSourceTranslationDoc(docLike, fallbackId) {
   const ownId = String(docLike?._id || fallbackId || '').trim();
   const sourceId = String(docLike?.sourceArticleId || '').trim();
@@ -686,6 +717,10 @@ function _buildSharedSyncFieldsFromBody(body) {
   const sourceArticleId = _normalizeSourceArticleId(body?.sourceArticleId);
   const trackRaw = body?.track;
   const normalizedTrack = trackRaw === undefined ? undefined : normalizeTrackValue(trackRaw);
+  const spotlightEnabled = _normalizeOptionalBoolean(body?.spotlightEnabled);
+  const spotlightPinned = _normalizeOptionalBoolean(body?.spotlightPinned);
+  const spotlightPriority = _normalizeOptionalNumber(body?.spotlightPriority);
+  const spotlightExpiresAt = _normalizeOptionalDateInput(body?.spotlightExpiresAt);
 
   return {
     ...(externalUrls !== undefined ? { externalUrls } : {}),
@@ -694,6 +729,10 @@ function _buildSharedSyncFieldsFromBody(body) {
     ...(seo !== undefined ? { seo } : {}),
     ...(sourceArticleId !== undefined ? { sourceArticleId } : {}),
     ...(normalizedTrack !== undefined ? { track: normalizedTrack } : {}),
+    ...(spotlightEnabled !== undefined ? { spotlightEnabled: Boolean(spotlightEnabled) } : {}),
+    ...(spotlightPinned !== undefined ? { spotlightPinned: Boolean(spotlightPinned) } : {}),
+    ...(spotlightPriority !== undefined ? { spotlightPriority: spotlightPriority === null ? 0 : spotlightPriority } : {}),
+    ...(spotlightExpiresAt !== undefined ? { spotlightExpiresAt } : {}),
   };
 }
 
@@ -1517,7 +1556,7 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
 
     const [itemsRaw, total] = await Promise.all([
       PublicArticle.find(filter)
-        .select('title summary content slug slugs language originalLang translations translationStatus coverImage publishedAt createdAt updatedAt geo tags category translationKey translationGroupId')
+        .select('title summary content slug slugs language originalLang translations translationStatus coverImage publishedAt createdAt updatedAt geo tags category translationKey translationGroupId spotlightEnabled spotlightPinned spotlightPriority spotlightExpiresAt')
         .sort({ publishedAt: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)

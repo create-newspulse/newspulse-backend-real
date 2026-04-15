@@ -51,6 +51,53 @@ test('syncPublicArticleFromNews clears stale deletedAt when source news is publi
     assert.equal(lastUpdate.$set.deletedAt, null);
     assert.equal(lastUpdate.$set.track, 'student-voices');
     assert.deepEqual(lastUpdate.$set.tags, ['desk:youth-pulse', 'track:student-voices']);
+    assert.equal(lastUpdate.$set.spotlightEnabled, false);
+    assert.equal(lastUpdate.$set.spotlightPinned, false);
+    assert.equal(lastUpdate.$set.spotlightPriority, 0);
+    assert.equal(lastUpdate.$set.spotlightExpiresAt, null);
+  } finally {
+    PublicArticle.findOneAndUpdate = originalFindOneAndUpdate;
+  }
+});
+
+test('syncPublicArticleFromNews copies Spotlight fields to the public article', async () => {
+  const originalFindOneAndUpdate = PublicArticle.findOneAndUpdate;
+
+  try {
+    let lastUpdate = null;
+
+    PublicArticle.findOneAndUpdate = (_query, update) => {
+      lastUpdate = update;
+      return {
+        lean: async () => ({ _id: 'public-spotlight-1' }),
+      };
+    };
+
+    const expiresAt = new Date('2026-05-01T12:00:00.000Z');
+
+    await syncPublicArticleFromNews({
+      _id: '69c8273fa5f8e74cf2bf7820',
+      title: 'Spotlight story',
+      description: 'Summary',
+      content: '<p>Body</p>',
+      slug: 'spotlight-story',
+      category: 'national',
+      status: 'published',
+      lang: 'en',
+      language: 'en',
+      originalLang: 'en',
+      spotlightEnabled: true,
+      spotlightPinned: true,
+      spotlightPriority: 9,
+      spotlightExpiresAt: expiresAt,
+      publishedAt: new Date('2026-03-31T19:04:23.859Z'),
+    });
+
+    assert.ok(lastUpdate);
+    assert.equal(lastUpdate.$set.spotlightEnabled, true);
+    assert.equal(lastUpdate.$set.spotlightPinned, true);
+    assert.equal(lastUpdate.$set.spotlightPriority, 9);
+    assert.equal(lastUpdate.$set.spotlightExpiresAt, expiresAt);
   } finally {
     PublicArticle.findOneAndUpdate = originalFindOneAndUpdate;
   }

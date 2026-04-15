@@ -391,6 +391,10 @@ const newsSchema = new mongoose.Schema({
   publishAt: { type: Date, default: null },
   publishedAt: { type: Date, default: null },
   deletedAt: { type: Date, default: null },
+  spotlightEnabled: { type: Boolean, default: false },
+  spotlightPinned: { type: Boolean, default: false },
+  spotlightPriority: { type: Number, default: 0 },
+  spotlightExpiresAt: { type: Date, default: null },
   // Provenance (optional)
   source: { type: String, index: true }, // e.g. 'community', 'editor'
   communityReportId: { type: mongoose.Schema.Types.ObjectId, ref: 'CommunitySubmission', index: true },
