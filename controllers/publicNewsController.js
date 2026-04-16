@@ -477,6 +477,14 @@ const PUBLIC_SELECT = [
   'spotlightPinned',
   'spotlightPriority',
   'spotlightExpiresAt',
+  'isSponsored',
+  'sponsorName',
+  'sponsorLabel',
+  'sponsorDisclosure',
+  'sponsorCtaText',
+  'sponsorCtaUrl',
+  'sponsorFeatureEligible',
+  'sponsorFeatureLinkedId',
   // Image fields (legacy + new)
   'imageUrl',
   'imageURL',
@@ -517,6 +525,14 @@ const PUBLIC_ARTICLE_DETAIL_SELECT = [
   'spotlightPinned',
   'spotlightPriority',
   'spotlightExpiresAt',
+  'isSponsored',
+  'sponsorName',
+  'sponsorLabel',
+  'sponsorDisclosure',
+  'sponsorCtaText',
+  'sponsorCtaUrl',
+  'sponsorFeatureEligible',
+  'sponsorFeatureLinkedId',
   'translations',
   'translationStatus',
   'translationError',
@@ -540,6 +556,7 @@ function _mapPublicArticleToNewsLikeShape(articleDoc) {
   out.summary = out.summary || out.description || '';
   out.lang = out.lang || out.language || out.originalLang || 'en';
   out.language = out.language || out.lang || 'en';
+  if (out.isSponsored === true && !out.sponsorLabel) out.sponsorLabel = 'Sponsored';
   return out;
 }
 

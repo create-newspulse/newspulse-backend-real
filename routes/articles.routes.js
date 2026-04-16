@@ -254,6 +254,14 @@ function _normalizeOptionalString(v) {
   return typeof v === 'string' ? v : s;
 }
 
+function _normalizeOptionalObjectId(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  return mongoose.Types.ObjectId.isValid(raw) ? raw : undefined;
+}
+
 function _parseIntOrDefault(v, fallback) {
   const n = parseInt(String(v ?? ''), 10);
   return Number.isFinite(n) ? n : fallback;
@@ -736,6 +744,54 @@ function _buildSharedSyncFieldsFromBody(body) {
   };
 }
 
+function _buildSponsoredArticleFieldsFromBody(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const isSponsored = _normalizeOptionalBoolean(b.isSponsored);
+  const sponsorFeatureEligible = _normalizeOptionalBoolean(b.sponsorFeatureEligible);
+  const sponsorName = _normalizeOptionalString(b.sponsorName);
+  const sponsorLabel = _normalizeOptionalString(b.sponsorLabel);
+  const sponsorDisclosure = _normalizeOptionalString(b.sponsorDisclosure);
+  const sponsorCtaText = _normalizeOptionalString(b.sponsorCtaText);
+  const sponsorCtaUrl = _normalizeOptionalString(b.sponsorCtaUrl);
+  const sponsorFeatureLinkedId = _normalizeOptionalObjectId(b.sponsorFeatureLinkedId);
+
+  if (b.sponsorFeatureLinkedId !== undefined && sponsorFeatureLinkedId === undefined) {
+    return { ok: false, status: 400, message: 'sponsorFeatureLinkedId must be a valid id' };
+  }
+
+  if (sponsorCtaUrl !== undefined && sponsorCtaUrl !== null) {
+    const valid = sponsorCtaUrl.startsWith('http://') || sponsorCtaUrl.startsWith('https://') || sponsorCtaUrl.startsWith('/');
+    if (!valid) {
+      return { ok: false, status: 400, message: 'sponsorCtaUrl must start with https://, http://, or /' };
+    }
+  }
+
+  const hasSponsoredPayload = [
+    'isSponsored',
+    'sponsorName',
+    'sponsorLabel',
+    'sponsorDisclosure',
+    'sponsorCtaText',
+    'sponsorCtaUrl',
+    'sponsorFeatureEligible',
+    'sponsorFeatureLinkedId',
+  ].some((key) => Object.prototype.hasOwnProperty.call(b, key));
+
+  return {
+    ok: true,
+    value: {
+      ...(isSponsored !== undefined ? { isSponsored: Boolean(isSponsored) } : {}),
+      ...(sponsorName !== undefined ? { sponsorName } : {}),
+      ...((sponsorLabel !== undefined || hasSponsoredPayload) ? { sponsorLabel: sponsorLabel || 'Sponsored' } : {}),
+      ...(sponsorDisclosure !== undefined ? { sponsorDisclosure } : {}),
+      ...(sponsorCtaText !== undefined ? { sponsorCtaText } : {}),
+      ...(sponsorCtaUrl !== undefined ? { sponsorCtaUrl } : {}),
+      ...(sponsorFeatureEligible !== undefined ? { sponsorFeatureEligible: Boolean(sponsorFeatureEligible) } : {}),
+      ...(sponsorFeatureLinkedId !== undefined ? { sponsorFeatureLinkedId } : {}),
+    },
+  };
+}
+
 async function syncMasterArticleGroup(doc, options = {}) {
   if (!doc || !_isSourceTranslationDoc(doc)) return null;
   try {
@@ -777,8 +833,12 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       coverImage,
     } = body0;
     const sharedSyncFields = _buildSharedSyncFieldsFromBody(body0);
+    const sponsoredArticleFields = _buildSponsoredArticleFieldsFromBody(body0);
     if (trackRaw !== undefined && sharedSyncFields.track === null) {
       return res.status(400).json({ ok: false, success: false, message: 'Invalid Youth Pulse track' });
+    }
+    if (!sponsoredArticleFields.ok) {
+      return res.status(sponsoredArticleFields.status).json({ ok: false, success: false, message: sponsoredArticleFields.message });
     }
 
     const tagsArr = ensureTrackTag(parseTags(tags), sharedSyncFields.track);
@@ -910,6 +970,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       } : {}),
       translationGroupId: translationGroupId || new mongoose.Types.ObjectId().toString(),
       ...sharedSyncFields,
+      ...sponsoredArticleFields.value,
       tags: tagsArr,
       geo,
       status: initialStatus || 'draft',
@@ -2088,8 +2149,12 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       coverImage,
     } = requestBody;
     const sharedSyncFields = _buildSharedSyncFieldsFromBody(requestBody);
+    const sponsoredArticleFields = _buildSponsoredArticleFieldsFromBody(requestBody);
     if (trackRaw !== undefined && sharedSyncFields.track === null) {
       return res.status(400).json({ ok: false, success: false, message: 'Invalid Youth Pulse track' });
+    }
+    if (!sponsoredArticleFields.ok) {
+      return res.status(sponsoredArticleFields.status).json({ ok: false, success: false, message: sponsoredArticleFields.message });
     }
 
     // Guard against accidental "undefined"/"null" string inputs from form-data payloads.
@@ -2233,6 +2298,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       } : {}),
       ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
       ...sharedSyncFields,
+      ...sponsoredArticleFields.value,
     };
 
     // Defensive: remove any accidental undefined keys before updates.
@@ -2462,6 +2528,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
           ? { status: String(status).toLowerCase() }
           : {}),
         ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
+        ...sponsoredArticleFields.value,
       };
 
       if (shouldRetagArticle) {

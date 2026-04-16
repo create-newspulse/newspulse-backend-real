@@ -182,6 +182,14 @@ const articleSchema = new mongoose.Schema(
     spotlightPinned: { type: Boolean, default: false },
     spotlightPriority: { type: Number, default: 0 },
     spotlightExpiresAt: { type: Date, default: null },
+    isSponsored: { type: Boolean, default: false, index: true },
+    sponsorName: { type: String, default: null },
+    sponsorLabel: { type: String, default: 'Sponsored' },
+    sponsorDisclosure: { type: String, default: null },
+    sponsorCtaText: { type: String, default: null },
+    sponsorCtaUrl: { type: String, default: null },
+    sponsorFeatureEligible: { type: Boolean, default: false },
+    sponsorFeatureLinkedId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
 
     isBreaking: { type: Boolean, default: false, index: true },
 

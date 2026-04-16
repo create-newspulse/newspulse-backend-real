@@ -334,6 +334,7 @@ const ownerAiModelsRouter = require('./routes/ownerAiModels.routes');
 let adminMetaRoutes = null;
 try { adminMetaRoutes = require('./routes/adminMeta.routes'); } catch (_) { console.warn('[init] optional routes/adminMeta.routes not found; skipping'); }
 const publicAdsRouter = require('./routes/publicAds.routes');
+const publicSponsoredFeaturesRouter = require('./routes/publicSponsoredFeatures.routes');
 const adminAdsRouter = require('./routes/adminAds.routes');
 const adminAdsInquiriesRouter = require('./routes/adminAdsInquiries.routes');
 const publicAdsInquiryRouter = require('./routes/publicAds');
@@ -341,6 +342,7 @@ const adminAdsInquiriesCompatRouter = require('./routes/adminAds');
 const adsRoutes = require('./routes/ads.routes');
 const publicAdSettingsRouter = require('./routes/publicAdSettings.routes');
 const adminAdSettingsRouter = require('./routes/adminAdSettings.routes');
+const adminSponsoredFeaturesRouter = require('./routes/adminSponsoredFeatures.routes');
 const publicRoutes = require('./routes/public.routes');
 const siteSettingsRoutes = require('./routes/siteSettings.routes');
 const publicSettingsRouter = require('./routes/publicSettings.routes');
@@ -1601,6 +1603,7 @@ if (publicFeatureTogglesRouter) {
 
 // Public sponsor ads
 app.use('/api/public', publicAdsRouter);
+app.use('/api/public', publicSponsoredFeaturesRouter);
 // Public inquiry endpoint expected by the admin panel/frontends
 app.use('/api/public/ads', publicAdsInquiryRouter);
 
@@ -1694,9 +1697,12 @@ try {
 }
 // Global ad slot settings (mounted early so it cannot be shadowed by /api/admin)
 app.use('/api/admin', adminAdSettingsRouter);
+app.use('/api/admin', adminSponsoredFeaturesRouter);
 // Alias support
 app.use('/admin-api/admin', adminAdSettingsRouter);
+app.use('/admin-api/admin', adminSponsoredFeaturesRouter);
 app.use('/admin-api/api/admin', adminAdSettingsRouter);
+app.use('/admin-api/api/admin', adminSponsoredFeaturesRouter);
 
 // Admin routes for legacy and new admin UI paths
 app.use('/api/admin', adminRoutes); // used by admin UI
