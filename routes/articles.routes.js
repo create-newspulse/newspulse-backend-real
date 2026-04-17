@@ -46,6 +46,7 @@ const {
   markPublishTranslationPending,
   enqueueTranslateAndSave,
 } = require('../services/publishAsyncTranslation.service');
+const { invalidateArticleCaches } = require('../lib/cache');
 
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
@@ -1040,6 +1041,8 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       await syncArticleFromNews(doc);
       enqueueTranslateAndSave(doc._id, { logger: console });
     }
+
+    invalidateArticleCaches().catch(() => {});
 
     return res.status(201).json({
       ok: true,
@@ -2395,6 +2398,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       enqueueTranslateAndSave(doc._id, { logger: console });
 
       const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+      invalidateArticleCaches().catch(() => {});
       return res.json({
         ok: true,
         success: true,
@@ -2588,6 +2592,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       }
 
       const obj2 = articleDoc.toObject ? articleDoc.toObject({ virtuals: true }) : articleDoc;
+      invalidateArticleCaches().catch(() => {});
       return res.json({
         ok: true,
         success: true,
@@ -2608,6 +2613,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         invalidate: ['published', 'scheduled', 'archived', 'deleted'].includes(String(doc?.status || '').toLowerCase()),
       });
       const obj0 = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+      invalidateArticleCaches().catch(() => {});
       return res.json({
         ok: true,
         success: true,
@@ -2655,6 +2661,8 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+
+    invalidateArticleCaches().catch(() => {});
 
     return res.json({
       ok: true,
@@ -2804,6 +2812,7 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+    invalidateArticleCaches().catch(() => {});
     return res.json({
       ok: true,
       success: true,
@@ -3006,6 +3015,7 @@ router.post('/articles/:id/unpublish', requireAdminAuth, async (req, res) => {
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+    invalidateArticleCaches().catch(() => {});
     return res.json({ ok: true, success: true, status: 200, message: 'Article unpublished', data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj) });
   } catch (e) {
     console.error('[articles.unpublish] error:', e?.message || e);
@@ -3083,6 +3093,7 @@ router.post('/articles/:id/schedule', requireAdminAuth, async (req, res) => {
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+    invalidateArticleCaches().catch(() => {});
     return res.json({ ok: true, success: true, status: 200, message: 'Article scheduled', data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj) });
   } catch (e) {
     if (e?.status === 409) return res.status(409).json({ ok: false, success: false, status: 409, message: e.message || 'Slug already exists' });
@@ -3158,6 +3169,7 @@ router.post('/articles/:id/archive', requireAdminAuth, async (req, res) => {
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+    invalidateArticleCaches().catch(() => {});
     return res.json({ ok: true, success: true, status: 200, message: 'Article archived', data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj) });
   } catch (e) {
     console.error('[articles.archive] error:', e?.message || e);
@@ -3233,6 +3245,7 @@ router.delete('/articles/:id', requireAdminAuth, async (req, res) => {
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+    invalidateArticleCaches().catch(() => {});
     return res.status(200).json({
       ok: true,
       success: true,

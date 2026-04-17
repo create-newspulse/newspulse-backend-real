@@ -6,6 +6,7 @@ const BroadcastSettings = require('../models/BroadcastSettings');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const noCache = require('../middleware/noCache');
 const { emitBroadcastUpdated } = require('../services/broadcastSse.service');
+const { invalidateBroadcastCaches } = require('../lib/cache');
 const {
 	normalizeChannel,
 	getOrCreateSettings: getOrCreateSettingsV2,
@@ -253,6 +254,7 @@ router.put('/settings', blockLegacyBroadcastEndpointsInProd, requireAdminAuthIfA
 
 	await s.save();
 	emitBroadcastUpdated({ reason: 'admin_put_settings_legacy' }).catch(() => {});
+	invalidateBroadcastCaches().catch(() => {});
 	return res.json(pickSettingsResponse(s));
 });
 
@@ -310,6 +312,7 @@ router.post('/items', blockLegacyBroadcastEndpointsInProd, requireAdminAuthIfAdm
 		expiresAt,
 	});
 	emitBroadcastUpdated({ reason: 'admin_post_item_legacy' }).catch(() => {});
+	invalidateBroadcastCaches().catch(() => {});
 
 	return res.status(201).json(item);
 });
@@ -339,6 +342,7 @@ router.patch('/items/:id', blockLegacyBroadcastEndpointsInProd, requireAdminAuth
 
 	await item.save();
 	emitBroadcastUpdated({ reason: 'admin_patch_item_legacy' }).catch(() => {});
+	invalidateBroadcastCaches().catch(() => {});
 	return res.json(item);
 });
 
@@ -355,6 +359,7 @@ router.delete('/items/:id', blockLegacyBroadcastEndpointsInProd, requireAdminAut
 	}
 	if (!deleted) return res.status(404).json({ message: 'Not found' });
 	emitBroadcastUpdated({ reason: 'admin_delete_item_legacy' }).catch(() => {});
+	invalidateBroadcastCaches().catch(() => {});
 	return res.json({ ok: true });
 });
 

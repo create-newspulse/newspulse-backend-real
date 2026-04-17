@@ -1,12 +1,13 @@
 const express = require('express');
+const { createJsonCacheMiddleware, buildBroadcastCacheKey } = require('../lib/cache');
 
 const {
-  computePublicPayload,
   listItemsLast24hByChannel,
   normalizeChannel,
   getOrCreateSettings,
   adminSettingsResponse,
   computePublicEnabled,
+  computePublicPayload,
 } = require('../services/broadcastCenter.service');
 
 const { getBroadcastVersion } = require('../services/broadcastVersion.service');
@@ -61,6 +62,13 @@ function _resolvePublicItemText(doc, lang) {
 
 const router = express.Router();
 
+function buildBroadcastCacheKeyFromRequest(req) {
+  const requestedLang = _requestedLangFromReq(req);
+  if (!requestedLang) return null;
+  if (_wantsDetailed(req)) return null;
+  return buildBroadcastCacheKey(requestedLang);
+}
+
 function sendError(res, status, code, message, details) {
   const payload = {
     ok: false,
@@ -99,7 +107,14 @@ function _mapPublicItem(doc, options = {}) {
 // GET /api/public/broadcast
 // Default: stable payload used by the website.
 // Optional: detailed payload (query ?detailed=1) with item objects + id mapping.
-router.get('/', async (req, res) => {
+router.get('/', createJsonCacheMiddleware({
+  ttlSeconds: 20,
+  buildKey: buildBroadcastCacheKeyFromRequest,
+  shouldCache: ({ statusCode, body }) => statusCode === 200 && body && typeof body === 'object',
+  setHeaders: (res) => {
+    _noStore(res);
+  },
+}), async (req, res) => {
   const requestedLang = _requestedLangFromReq(req);
 
   const version = await getBroadcastVersion().catch(() => 0);

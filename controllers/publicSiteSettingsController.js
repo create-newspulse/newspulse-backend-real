@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const PublicSiteSettings = require('../models/PublicSiteSettings');
+const { invalidatePublicSettingsCaches } = require('../lib/cache');
 const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.service');
 
 const INSPIRATION_HUB_BOOLEAN_FIELDS = [
@@ -442,6 +443,7 @@ async function updateDraftSettings(req, res) {
     const merged = deepMerge(baseDraft, draftData);
     settings.draft = ensureCategoryStripEnabled(merged);
     await settings.save();
+    invalidatePublicSettingsCaches().catch(() => {});
 
     return res.status(200).json({
       ok: true,
@@ -488,6 +490,7 @@ async function publishSettings(req, res) {
     await settings.save();
 
     bumpPublicConfigVersion().catch(() => {});
+    invalidatePublicSettingsCaches().catch(() => {});
 
     return res.status(200).json({
       ok: true,
@@ -571,6 +574,7 @@ async function savePublicSettings(req, res) {
     }
 
     await settings.save();
+    invalidatePublicSettingsCaches().catch(() => {});
 
     return res.status(200).json({
       ok: true,

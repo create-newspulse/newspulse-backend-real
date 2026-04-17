@@ -1,9 +1,20 @@
 const express = require('express');
 const router = express.Router();
 const News = require('../models/News');
+const { createJsonCacheMiddleware, buildHomeCacheKey, normalizeCacheLang } = require('../lib/cache');
 
 // GET /api/feed/for-you
-router.get('/for-you', async (req, res) => {
+router.get('/for-you', createJsonCacheMiddleware({
+  ttlSeconds: 90,
+  buildKey: (req) => {
+    const rawLimit = parseInt(req.query.limit || '15', 10);
+    const limit = Math.min(Math.max(rawLimit, 1), 50);
+    const region = String(req.query.region || '').trim();
+    if (limit !== 15 || region) return null;
+    return buildHomeCacheKey(normalizeCacheLang(req.query.language || req.headers['x-lang'] || req.lang || 'en'));
+  },
+  shouldCache: ({ statusCode, body }) => statusCode === 200 && body && body.ok === true && Array.isArray(body.items),
+}), async (req, res) => {
   try {
     const rawLimit = parseInt(req.query.limit || '15', 10);
     const limit = Math.min(Math.max(rawLimit, 1), 50);

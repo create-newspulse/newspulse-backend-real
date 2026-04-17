@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 
 const noCache = require('../middleware/noCache');
+const { createJsonCacheMiddleware, buildAdsCacheKey } = require('../lib/cache');
 
 const {
   getActiveAd,
@@ -31,10 +32,25 @@ function _isValidEmail(v) {
 }
 
 // GET /api/public/ads?slot=HOME_728x90
-router.get('/ads', getActiveAd);
+router.get('/ads', createJsonCacheMiddleware({
+  ttlSeconds: 60,
+  buildKey: (req) => {
+    if (!isDbReady()) return null;
+    const slot = req.query && req.query.slot ? String(req.query.slot) : '';
+    return slot ? buildAdsCacheKey(slot) : null;
+  },
+  shouldCache: ({ statusCode, body }) => statusCode === 200 && body && Object.prototype.hasOwnProperty.call(body, 'ad'),
+}), getActiveAd);
 
 // GET /api/public/ads/slot/:slot
-router.get('/ads/slot/:slot', (req, res, next) => {
+router.get('/ads/slot/:slot', createJsonCacheMiddleware({
+  ttlSeconds: 60,
+  buildKey: (req) => {
+    if (!isDbReady()) return null;
+    return req.params && req.params.slot ? buildAdsCacheKey(req.params.slot) : null;
+  },
+  shouldCache: ({ statusCode, body }) => statusCode === 200 && body && Object.prototype.hasOwnProperty.call(body, 'ad'),
+}), (req, res, next) => {
   req.query = req.query || {};
   req.query.slot = req.params.slot;
   return getActiveAd(req, res, next);

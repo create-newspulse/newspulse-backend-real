@@ -10,6 +10,7 @@ const { shouldAcceptTranslation } = require('../services/translate/i18nQuality')
 
 const { getIstDateKey, isValidIstDateKey } = require('../src/utils/istDate');
 const { emitBroadcastUpdated } = require('../services/broadcastSse.service');
+const { invalidateBroadcastCaches } = require('../lib/cache');
 const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.service');
 
 const router = express.Router();
@@ -233,6 +234,7 @@ router.post('/', requireAdminAuth, async (req, res) => {
 
   emitBroadcastUpdated({ reason: 'admin_ticker_create' }).catch(() => {});
   bumpPublicConfigVersion().catch(() => {});
+  invalidateBroadcastCaches().catch(() => {});
 
   return res.status(201).json({ ok: true, success: true, item: mapItem(created) });
 });
@@ -346,6 +348,7 @@ router.patch('/:id', requireAdminAuth, async (req, res) => {
 
   emitBroadcastUpdated({ reason: 'admin_ticker_patch' }).catch(() => {});
   bumpPublicConfigVersion().catch(() => {});
+  invalidateBroadcastCaches().catch(() => {});
 
   return ok(res, mapItem(saved));
 });
@@ -369,6 +372,7 @@ router.delete('/:id', requireAdminAuth, async (req, res) => {
 
   emitBroadcastUpdated({ reason: 'admin_ticker_delete' }).catch(() => {});
   bumpPublicConfigVersion().catch(() => {});
+  invalidateBroadcastCaches().catch(() => {});
 
   return res.status(200).json({ ok: true, success: true });
 });

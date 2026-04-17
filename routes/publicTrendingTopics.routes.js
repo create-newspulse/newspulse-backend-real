@@ -1,6 +1,7 @@
 
 const express = require('express');
 const mongoose = require('mongoose');
+const { createJsonCacheMiddleware, buildTrendingCacheKey, normalizeCacheLang } = require('../lib/cache');
 
 const TrendingTopic = require('../models/TrendingTopic');
 const { DEFAULT_TRENDING_TOPICS, ensureTrendingTopicsSeeded } = require('../lib/trendingTopics');
@@ -23,7 +24,14 @@ function getDefaultItems() {
 }
 
 // GET /api/public/trending-topics
-router.get('/', async (_req, res) => {
+router.get('/', createJsonCacheMiddleware({
+  ttlSeconds: 45,
+  buildKey: (req) => {
+    if (!isDbReady()) return null;
+    return buildTrendingCacheKey(normalizeCacheLang(req.query.lang || req.headers['x-lang'] || req.lang || 'en'));
+  },
+  shouldCache: ({ statusCode, body }) => statusCode === 200 && body && body.success === true && body.data && Array.isArray(body.data.items),
+}), async (_req, res) => {
   try {
     res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
 

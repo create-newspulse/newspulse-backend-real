@@ -22,6 +22,7 @@ const {
   parseOptionalDate,
   parseOptionalNumber,
 } = require('../../lib/ads');
+const { invalidateAdsCaches } = require('../../lib/cache');
 const { bumpPublicConfigVersion } = require('../../services/publicConfigVersion.service');
 
 function isDbReady() {
@@ -241,6 +242,7 @@ async function createAd(req, res) {
   });
 
   bumpPublicConfigVersion().catch(() => {});
+  invalidateAdsCaches(created.slot).catch(() => {});
 
   return res.status(201).json({ ok: true, ad: toAdminAdDto(created) });
 }
@@ -273,6 +275,7 @@ async function updateAd(req, res) {
   if (!updated) return res.status(404).json({ ok: false, message: 'Not found' });
 
   bumpPublicConfigVersion().catch(() => {});
+  invalidateAdsCaches(updated.slot || existing.slot).catch(() => {});
 
   return res.status(200).json({ ok: true, ad: toAdminAdDto(updated) });
 }
@@ -349,6 +352,7 @@ async function toggleAd(req, res) {
   await doc.save();
 
   bumpPublicConfigVersion().catch(() => {});
+  invalidateAdsCaches(doc.slot).catch(() => {});
 
   return res.status(200).json({ ok: true, ad: toAdminAdDto(doc) });
 }
@@ -363,6 +367,7 @@ async function deleteAd(req, res) {
   if (!deleted) return res.status(404).json({ ok: false, message: 'Not found' });
 
   bumpPublicConfigVersion().catch(() => {});
+  invalidateAdsCaches(deleted.slot).catch(() => {});
 
   return res.status(200).json({ ok: true });
 }
