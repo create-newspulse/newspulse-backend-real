@@ -270,11 +270,11 @@ const adminRoutes = require('./routes/admin');
 const adminAuthRoutes = require(`${BASE}/routes/adminAuth`);
 const aiTrainingInfoRoutes = require(`${BASE}/routes/system/aiTrainingInfo`);
 const systemRoutes = require('./routes/system.routes');
-const communityRoutes = require(`${BASE}/routes/community`);
+const communityRoutes = require('./routes/community');
 const communityStoriesRouter = require('./routes/communityStories');
 const reporterPortalRouter = require('./routes/reporterPortal');
 const reporterAuthCompatRouter = require('./routes/reporterAuthCompat');
-const adminCommunityRoutes = require(`${BASE}/routes/adminCommunity`);
+const adminCommunityRoutes = require('./routes/adminCommunity');
 const communityAdminContactsRoutes = require(`${BASE}/routes/communityAdminContacts`);
 // Use root-level communityReporter routes to match tests
 const communityReporterRoutes = require('./routes/communityReporter');
@@ -1844,6 +1844,8 @@ app.use('/admin-api/api/admin', adminSystemRoutes);
 // health routes handled directly above by healthHandler
 // System monitor hub handled by systemRoutes (mounted above)
 app.use('/api/admin/community', adminCommunityRoutes);
+app.use('/admin-api/admin/community', adminCommunityRoutes);
+app.use('/admin-api/api/admin/community', adminCommunityRoutes);
 // Admin Settings router (GET /api/admin/settings)
 // Mounted router returns { success: true, data: {...} }
 // Admin Settings (includes /api/admin/settings/community-reporter)

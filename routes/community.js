@@ -3,6 +3,11 @@ const mongoose = require('mongoose');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const { runCommunityAiReview } = require('../services/communityAiReview');
 const {
+  buildYouthPulseSubmissionCreate,
+  toYouthPulseAdminDto,
+  validateYouthPulsePublicPayload,
+} = require('../services/youthPulseSubmission.service');
+const {
   COMMUNITY_REPORTER_CATEGORIES,
   extractSubmissionAttachments,
   inferSubmissionDeskMetadata,
@@ -10,6 +15,39 @@ const {
   normalizeWorkflowStatus,
 } = require('../services/communitySubmissionWorkflow');
 const router = express.Router();
+
+async function createYouthPulseSubmission(req, res) {
+  try {
+    const parsed = validateYouthPulsePublicPayload(req.body || {});
+    if (parsed.errors.length) {
+      return res.status(400).json({
+        success: false,
+        ok: false,
+        message: 'Validation failed',
+        errors: parsed.errors,
+      });
+    }
+
+    const submission = await CommunitySubmission.create(buildYouthPulseSubmissionCreate(parsed.value, req));
+
+    return res.status(201).json({
+      success: true,
+      ok: true,
+      message: 'Youth Pulse submission received for editorial review',
+      submissionId: String(submission._id),
+      item: toYouthPulseAdminDto(submission.toObject ? submission.toObject() : submission),
+    });
+  } catch (err) {
+    console.error('[YOUTH_PULSE][create] error', err);
+    if (err && err.name === 'ValidationError') {
+      return res.status(400).json({ success: false, ok: false, message: 'Validation error', details: err.errors });
+    }
+    return res.status(500).json({ success: false, ok: false, message: 'Failed to submit Youth Pulse story' });
+  }
+}
+
+router.post('/youth-pulse/submissions', createYouthPulseSubmission);
+router.post('/submissions/youth-pulse', createYouthPulseSubmission);
 
 // Phase-1 public submission endpoint (POST /api/community/submissions)
 router.post('/submissions', async (req, res) => {
