@@ -356,6 +356,7 @@ const PublicSiteSettings = require('./models/PublicSiteSettings');
 const { ensureCategoryStripEnabled } = require('./controllers/publicSiteSettingsController');
 const User = require('./models/User');
 const publicNewsRouter = require('./routes/publicNews.routes');
+const breakingRouter = require('./routes/breaking.routes');
 const adminNewsTranslationsRouter = require('./routes/adminNewsTranslations.routes');
 const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');
 const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
@@ -1005,6 +1006,119 @@ mongoose.connection.on('connected', () => {
   });
 });
 
+const _mongooseReadyStateLabels = Object.freeze({
+  0: 'disconnected',
+  1: 'connected',
+  2: 'connecting',
+  3: 'disconnecting',
+});
+
+const _localFounderStartupCheckState = {
+  inFlight: false,
+  completed: false,
+  lastSkipKey: null,
+};
+
+function _describeMongooseConnection(connection) {
+  const readyState = typeof connection?.readyState === 'number' ? connection.readyState : -1;
+  const readyStateLabel = _mongooseReadyStateLabels[readyState] || 'unknown';
+  const dbName = connection && connection.name ? String(connection.name) : null;
+  return { readyState, readyStateLabel, dbName };
+}
+
+function _getLocalFounderDbProbeContext() {
+  const defaultConnection = mongoose.connection || null;
+  const userConnection = User && User.db ? User.db : null;
+  const defaultState = _describeMongooseConnection(defaultConnection);
+  const userState = _describeMongooseConnection(userConnection);
+
+  return {
+    defaultConnection,
+    userConnection,
+    defaultState,
+    userState,
+    configuredDbName: _resolvedMongoDbName(),
+    sameConnection: !!(defaultConnection && userConnection && defaultConnection === userConnection),
+    collectionName: User?.collection?.collectionName || 'users',
+  };
+}
+
+async function _runLocalFounderStartupCheck({ db } = {}) {
+  if (!isLocalDevLike()) return;
+  if (_localFounderStartupCheckState.completed || _localFounderStartupCheckState.inFlight) return;
+
+  const probe = _getLocalFounderDbProbeContext();
+  const diagnostics = getLocalFounderSafeDiagnostics();
+  const logDb = db || probe.userState.dbName || probe.defaultState.dbName || probe.configuredDbName || undefined;
+
+  if (!probe.sameConnection || probe.defaultState.readyState !== 1 || probe.userState.readyState !== 1 || !probe.userConnection?.db) {
+    const skipKey = [
+      probe.defaultState.readyState,
+      probe.userState.readyState,
+      probe.sameConnection ? 'same' : 'different',
+      probe.defaultState.dbName || '',
+      probe.userState.dbName || '',
+    ].join('|');
+
+    if (_localFounderStartupCheckState.lastSkipKey !== skipKey) {
+      console.log('[startup][local-founder-db] skipped', {
+        reason: 'user-model-connection-not-ready',
+        db: logDb,
+        configuredDbName: probe.configuredDbName || undefined,
+        defaultConnectionReadyState: probe.defaultState.readyState,
+        defaultConnectionState: probe.defaultState.readyStateLabel,
+        defaultConnectionDb: probe.defaultState.dbName || undefined,
+        userModelReadyState: probe.userState.readyState,
+        userModelState: probe.userState.readyStateLabel,
+        userModelDb: probe.userState.dbName || undefined,
+        userModelUsesDefaultConnection: probe.sameConnection,
+        collectionName: probe.collectionName,
+      });
+      _localFounderStartupCheckState.lastSkipKey = skipKey;
+    }
+    return;
+  }
+
+  _localFounderStartupCheckState.inFlight = true;
+  try {
+    const founderDoc = await probe.userConnection.db
+      .collection(probe.collectionName)
+      .findOne({ role: 'founder' }, { projection: { _id: 1 } });
+
+    _localFounderStartupCheckState.completed = true;
+    console.log('[startup][local-founder-db]', {
+      db: logDb,
+      configuredDbName: probe.configuredDbName || undefined,
+      founderExists: !!founderDoc,
+      defaultConnectionReadyState: probe.defaultState.readyState,
+      defaultConnectionState: probe.defaultState.readyStateLabel,
+      defaultConnectionDb: probe.defaultState.dbName || undefined,
+      userModelReadyState: probe.userState.readyState,
+      userModelState: probe.userState.readyStateLabel,
+      userModelDb: probe.userState.dbName || undefined,
+      userModelUsesDefaultConnection: probe.sameConnection,
+      collectionName: probe.collectionName,
+      ...diagnostics,
+    });
+  } catch (e) {
+    console.warn('[startup][local-founder-db] check failed', {
+      message: e?.message || String(e),
+      db: logDb,
+      configuredDbName: probe.configuredDbName || undefined,
+      defaultConnectionReadyState: probe.defaultState.readyState,
+      defaultConnectionState: probe.defaultState.readyStateLabel,
+      defaultConnectionDb: probe.defaultState.dbName || undefined,
+      userModelReadyState: probe.userState.readyState,
+      userModelState: probe.userState.readyStateLabel,
+      userModelDb: probe.userState.dbName || undefined,
+      userModelUsesDefaultConnection: probe.sameConnection,
+      collectionName: probe.collectionName,
+    });
+  } finally {
+    _localFounderStartupCheckState.inFlight = false;
+  }
+}
+
 if (process.env.NODE_ENV === 'test' || _isImported) {
   console.warn('[init] Test/import mode: skipping MongoDB connection');
 } else if (!MONGO_URI || MONGO_URI === 'YOUR_MONGO_URI_HERE') {
@@ -1022,18 +1136,7 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
     const dbFromUri = _resolvedMongoDbName();
     const db = dbFromUri || mongoose.connection.name || undefined;
     console.log('[startup] MongoDB connected', { db });
-    if (isLocalDevLike()) {
-      try {
-        const founderExists = !!(await User.exists({ role: 'founder' }));
-        console.log('[startup][local-founder-db]', {
-          db,
-          founderExists,
-          ...getLocalFounderSafeDiagnostics(),
-        });
-      } catch (e) {
-        console.warn('[startup][local-founder-db] check failed', e?.message || e);
-      }
-    }
+    await _runLocalFounderStartupCheck({ db });
     // Ensure TTL index for Broadcast Center is present.
     try {
       const BroadcastItem = require('./models/BroadcastItem');
@@ -1493,6 +1596,7 @@ app.use('/api/site-settings', siteSettingsRoutes);
 // Mount early to avoid being shadowed by other /api routers.
 app.use('/api/public/trending-topics', publicTrendingTopicsRouter);
 app.use('/api/public/news', publicNewsRouter);
+app.use('/api/breaking', breakingRouter);
 app.use('/api/public/weather', publicWeatherRouter);
 // Admin panel proxy basePath support for public news
 app.use('/admin-api/public/news', publicNewsRouter);

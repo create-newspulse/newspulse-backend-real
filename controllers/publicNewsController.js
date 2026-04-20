@@ -643,6 +643,38 @@ function withCoverImageUrl(obj) {
   return out;
 }
 
+function estimateReadMinutesFromContent(value) {
+  const plainText = String(value || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!plainText) return 1;
+  const words = plainText.split(' ').filter(Boolean).length;
+  return Math.max(1, Math.ceil(words / 220));
+}
+
+function attachMobileResponseFields(obj, { includeBody = false } = {}) {
+  const out = { ...(obj || {}) };
+  const rawId = out.id || out.articleId || out._id || null;
+  out.id = rawId ? String(rawId) : null;
+  out.slug = out.slug || out.canonicalSlug || out.localizedSlug || null;
+  out.summary = out.summary || out.description || '';
+  out.description = out.description || out.summary || '';
+  out.excerpt = out.excerpt || out.summary || out.description || '';
+  out.language = out.language || out.lang || 'gu';
+  out.lang = out.lang || out.language || 'gu';
+  out.readMinutes = Number.isFinite(Number(out.readMinutes))
+    ? Math.max(1, Number(out.readMinutes))
+    : estimateReadMinutesFromContent(out.content || out.summary || out.description || '');
+
+  if (includeBody) {
+    out.body = typeof out.body === 'string' && out.body.trim() ? out.body : (out.content || '');
+  }
+
+  return out;
+}
+
 function pickCanonicalSlug(doc, lang) {
   const target = normalizeLang(lang) || normalizeLang(doc?.lang || doc?.language) || 'en';
   const slugs = doc && doc.slugs && typeof doc.slugs === 'object' ? doc.slugs : null;
@@ -873,9 +905,11 @@ async function _resolveGroupedCategoryNewsItems({
       try { delete out.translationError; } catch (_) {}
       try { delete out.translationNextRetryAt; } catch (_) {}
 
-      out.__sortPublishedAt = new Date(out.publishedAt || 0).getTime() || 0;
-      out.__sortCreatedAt = new Date(out.createdAt || 0).getTime() || 0;
-      return out;
+      const mobileReady = attachMobileResponseFields(out);
+
+      mobileReady.__sortPublishedAt = new Date(mobileReady.publishedAt || 0).getTime() || 0;
+      mobileReady.__sortCreatedAt = new Date(mobileReady.createdAt || 0).getTime() || 0;
+      return mobileReady;
     })
     .filter(Boolean)
     .sort((left, right) => {
@@ -1108,7 +1142,7 @@ function _preparePublicNewsFeedItems(itemsRaw, requestedLang, { fallbackToBase =
 
       attachLocalizationFields(out, desired);
       _attachPublicRouteData(out, desired, { fallbackEnabled: fallbackToBase });
-      return out;
+      return attachMobileResponseFields(out);
     })
     .filter(Boolean);
 
@@ -1310,6 +1344,15 @@ async function listPublicNews(req, res) {
   }
 }
 
+async function listPublicBreakingNews(req, res) {
+  req.query = {
+    ...(req.query || {}),
+    category: 'breaking',
+  };
+
+  return listPublicNews(req, res);
+}
+
 // GET /api/public/news/translation?translationKey=...&lang=...
 async function getPublicNewsByTranslationKey(req, res) {
   try {
@@ -1340,7 +1383,7 @@ async function getPublicNewsByTranslationKey(req, res) {
     if (!doc) return res.status(404).json({ message: 'Not found' });
 
     const out = withCoverImageUrl(doc);
-    return res.status(200).json(out);
+    return res.status(200).json(attachMobileResponseFields(out));
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
   }
@@ -1366,7 +1409,7 @@ async function listPublicNewsTranslations(req, res) {
       .sort({ language: 1, publishedAt: -1, createdAt: -1 })
       .lean();
 
-    const items = (itemsRaw || []).map(withCoverImageUrl);
+    const items = (itemsRaw || []).map((doc) => attachMobileResponseFields(withCoverImageUrl(doc)));
     return res.status(200).json(items);
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
@@ -1515,7 +1558,7 @@ async function getPublicNewsBySlugOrId(req, res) {
       try { delete out.translations; } catch (_) {}
       try { delete out.translationStatus; } catch (_) {}
       attachLocalizationFields(out, out.resolvedLang);
-      return res.status(200).json(out);
+      return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
     }
 
     // 1) Prefer cached translation for requested language.
@@ -1595,7 +1638,7 @@ async function getPublicNewsBySlugOrId(req, res) {
     try { delete out.translationNextRetryAt; } catch (_) {}
     attachLocalizationFields(out, desired);
     _attachPublicRouteData(out, desired, { fallbackEnabled });
-    return res.status(200).json(out);
+    return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
   }
@@ -1672,7 +1715,7 @@ async function getPublicNewsBySlug(req, res) {
       try { delete out.translations; } catch (_) {}
       try { delete out.translationStatus; } catch (_) {}
       attachLocalizationFields(out, desired);
-      return res.status(200).json(out);
+      return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
     }
 
     const baseLang = _resolveBaseLang(out);
@@ -1735,13 +1778,14 @@ async function getPublicNewsBySlug(req, res) {
     try { delete out.translationNextRetryAt; } catch (_) {}
     attachLocalizationFields(out, desired);
     _attachPublicRouteData(out, desired, { fallbackEnabled });
-    return res.status(200).json(out);
+    return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
   }
 }
 
 module.exports = {
+  listPublicBreakingNews,
   listPublicNews,
   listPublicNewsTranslations,
   getPublicNewsByTranslationKey,

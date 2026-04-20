@@ -4,6 +4,7 @@ const { createJsonCacheMiddleware, buildLatestCacheKey, buildCategoryCacheKey, n
 const noCache = require('../middleware/noCache');
 
 const {
+  listPublicBreakingNews,
   listPublicNews,
   listPublicNewsTranslations,
   getPublicNewsByTranslationKey,
@@ -61,6 +62,9 @@ router.get(
   }),
   listPublicNews,
 );
+
+// GET /api/public/news/breaking
+router.get('/breaking', noCache, listPublicBreakingNews);
 
 // GET /api/public/news/translations/:translationGroupId
 router.get('/translations/:translationGroupId', listPublicNewsTranslations);
