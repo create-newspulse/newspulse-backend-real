@@ -1,14 +1,15 @@
 const sanitizeHtml = require('sanitize-html');
 const mongoose = require('mongoose');
-const CommunitySubmission = require('../models/CommunitySubmission');
+const YouthPulseSubmission = require('../models/YouthPulseSubmission');
 const News = require('../models/News');
 const { YOUTH_PULSE_TRACK_DEFINITIONS, normalizeTrackValue } = require('./communitySubmissionWorkflow');
-const { syncPublicArticleFromNews } = require('./syncPublicArticleFromNews.service');
+const { syncYouthPulseContributorStats } = require('./youthPulseContributor.service');
 
 const YOUTH_PULSE_DESK = 'youth-pulse';
-const YOUTH_PULSE_ORIGIN = 'youth_submission';
-const YOUTH_PULSE_PUBLIC_LABEL = 'Youth Pulse';
-const YOUTH_PULSE_STATUSES = Object.freeze(['new', 'under_review', 'approved', 'rejected', 'published']);
+const YOUTH_PULSE_ORIGIN = 'youth_pulse_submission';
+const YOUTH_PULSE_PUBLIC_LABEL = 'Youth Pulse Community';
+const YOUTH_PULSE_DRAFT_LABEL = 'Youth Pulse';
+const YOUTH_PULSE_STATUSES = Object.freeze(['new', 'under_review', 'approved', 'rejected', 'draft_created', 'published']);
 const YOUTH_PULSE_LANGUAGE_VALUES = Object.freeze(['en', 'hi', 'gu']);
 
 function sanitizeText(value, { maxLength = 0, allowNewlines = true } = {}) {
@@ -37,7 +38,7 @@ function sanitizeUrl(value) {
 }
 
 function sanitizeUrlArray(value, limit = 12) {
-  const list = Array.isArray(value) ? value : (value ? [value] : []);
+  const list = Array.isArray(value) ? value : value ? [value] : [];
   const out = [];
   for (const entry of list) {
     const url = sanitizeUrl(entry);
@@ -53,6 +54,45 @@ function sanitizeBoolean(value) {
   return token === 'true' || token === '1' || token === 'yes' || token === 'on';
 }
 
+function firstProvided(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'string' && !value.trim()) continue;
+    if (Array.isArray(value) && !value.length) continue;
+    return value;
+  }
+  return undefined;
+}
+
+function getConsentValue(body = {}, ...keys) {
+  const groups = [body, body.consents || {}, body.consent || {}, body.requiredConsents || {}];
+  for (const group of groups) {
+    if (!group || typeof group !== 'object') continue;
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(group, key)) {
+        return sanitizeBoolean(group[key]);
+      }
+    }
+  }
+  return false;
+}
+
+function normalizeKnowledgeSource(value) {
+  const token = sanitizeText(value, { maxLength: 80, allowNewlines: false })
+    .toLowerCase()
+    .replace(/[_\s]+/g, '-')
+    .replace(/-+/g, '-');
+
+  if (!token) return null;
+  if (['first-hand', 'firsthand', 'direct', 'direct-source', 'direct-witness', 'self', 'own-experience'].includes(token)) {
+    return 'first_hand';
+  }
+  if (['second-hand', 'secondhand', 'indirect', 'third-party', 'reported', 'other'].includes(token)) {
+    return 'reported';
+  }
+  return token;
+}
+
 function normalizeYouthPulseStatus(value, fallback = 'new') {
   const token = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
   if (!token) return fallback;
@@ -66,6 +106,11 @@ function normalizeYouthPulseStatus(value, fallback = 'new') {
     case 'approved':
     case 'approve':
       return 'approved';
+    case 'draft_created':
+    case 'draft':
+    case 'sent_to_draft':
+    case 'sent_to_draft_desk':
+      return 'draft_created';
     case 'rejected':
     case 'reject':
       return 'rejected';
@@ -95,6 +140,8 @@ function formatDisplayStatus(value) {
       return 'Under Review';
     case 'approved':
       return 'Approved';
+    case 'draft_created':
+      return 'Draft Created';
     case 'rejected':
       return 'Rejected';
     case 'published':
@@ -106,19 +153,11 @@ function formatDisplayStatus(value) {
 }
 
 function contributorDisplayName(doc = {}) {
-  return doc.fullName || doc.reporterDisplayName || doc.reporterName || doc.name || null;
+  return doc.fullName || null;
 }
 
 function isYouthPulseSubmission(doc = {}) {
-  const originType = String(doc.originType || '').trim().toLowerCase();
-  const desk = String(doc.desk || '').trim().toLowerCase();
-  const intakeSource = String(doc.intakeSource || '').trim().toLowerCase();
-  const submissionType = String(doc.submissionType || '').trim().toLowerCase();
-  return originType === YOUTH_PULSE_ORIGIN
-    || desk === YOUTH_PULSE_DESK
-    || intakeSource === YOUTH_PULSE_DESK
-    || !!normalizeTrackValue(doc.selectedPublicTrack || doc.track)
-    || submissionType === YOUTH_PULSE_DESK;
+  return String(doc.sourceType || '').trim().toLowerCase() === 'youth_pulse';
 }
 
 function validateYouthPulsePublicPayload(body = {}) {
@@ -128,38 +167,66 @@ function validateYouthPulsePublicPayload(body = {}) {
   const college = sanitizeText(body.college, { maxLength: 160, allowNewlines: false }) || null;
   const city = sanitizeText(body.city || body.location?.city, { maxLength: 80, allowNewlines: false });
   const state = sanitizeText(body.state || body.location?.state, { maxLength: 80, allowNewlines: false });
-
   const track = normalizeTrackValue(body.track || body.selectedPublicTrack);
-  const submissionType = sanitizeText(body.submissionType, { maxLength: 80, allowNewlines: false });
+  const submissionType = sanitizeText(firstProvided(body.submissionType, body.storyType, body.contentType), { maxLength: 80, allowNewlines: false });
+  const knowledgeSource = normalizeKnowledgeSource(firstProvided(
+    body.knowledgeSource,
+    body.knowledgeSourceType,
+    body.sourceKnowledge,
+    body.firstHandClaim,
+    body.firstHand,
+    body.isFirstHand
+  ));
   const headline = sanitizeText(body.headline, { maxLength: 200, allowNewlines: false });
   const storyBody = sanitizeText(body.storyBody || body.body || body.story || body.content, { maxLength: 50000, allowNewlines: true });
   const originalLanguage = sanitizeText(body.originalLanguage || body.language || body.lang || 'en', { maxLength: 8, allowNewlines: false }).toLowerCase();
-  const firstHandClaim = sanitizeBoolean(body.firstHandClaim);
-  const optionalSourceLinks = sanitizeUrlArray(body.optionalSourceLinks || body.sourceLinks, 12);
-  const optionalAttachmentUrls = sanitizeUrlArray(body.optionalAttachmentUrls || body.attachmentUrls || body.mediaUrls, 12);
+  const optionalSourceLinks = sanitizeUrlArray(firstProvided(
+    body.optionalSourceLinks,
+    body.sourceLinks,
+    body.referenceLinks,
+    body.referenceLink,
+    body.referenceUrl,
+    body.referenceUrls
+  ), 12);
+  const optionalAttachmentUrls = sanitizeUrlArray(firstProvided(
+    body.optionalAttachmentUrls,
+    body.attachmentUrls,
+    body.mediaUrls,
+    body.proofFileLinks,
+    body.proofFileLink,
+    body.proofFileUrl,
+    body.proofUrl
+  ), 12);
 
-  const confirmTruthful = sanitizeBoolean(body.confirmTruthful);
-  const confirmRightsToShare = sanitizeBoolean(body.confirmRightsToShare);
-  const confirmEditorialReviewAllowed = sanitizeBoolean(body.confirmEditorialReviewAllowed);
-  const confirmNoUnsafeFalseAbusiveContent = sanitizeBoolean(body.confirmNoUnsafeFalseAbusiveContent);
+  const confirmTruthful = getConsentValue(body, 'confirmTruthful', 'consentTruthful', 'truthful');
+  const confirmRightsToShare = getConsentValue(body, 'confirmRightsToShare', 'consentRightsToShare', 'rightsToShare', 'rights');
+  const confirmEditorialReviewAllowed = getConsentValue(body, 'confirmEditorialReviewAllowed', 'consentEditorialReviewAllowed', 'editorialReviewAllowed', 'editorialReview');
+  const confirmNoUnsafeFalseAbusiveContent = getConsentValue(body, 'confirmNoUnsafeFalseAbusiveContent', 'consentNoUnsafeFalseAbusiveContent', 'noUnsafeFalseAbusiveContent', 'safeContent');
 
   const errors = [];
-  if (!fullName) errors.push('fullName is required');
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errors.push('email must be valid');
-  if (!mobile || mobile.replace(/\D/g, '').length < 7) errors.push('mobile is required');
-  if (!city) errors.push('city is required');
-  if (!state) errors.push('state is required');
-  if (!track) errors.push('track must be one of the supported Youth Pulse tracks');
-  if (!submissionType) errors.push('submissionType is required');
-  if (!headline) errors.push('headline is required');
-  if (!storyBody) errors.push('storyBody is required');
-  if (!YOUTH_PULSE_LANGUAGE_VALUES.includes(originalLanguage)) errors.push('originalLanguage must be one of en, hi, gu');
+  const fieldErrors = {};
+  const addFieldError = (field, message) => {
+    errors.push(message);
+    if (!fieldErrors[field]) fieldErrors[field] = message;
+  };
+
+  if (!fullName) addFieldError('fullName', 'fullName is required');
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) addFieldError('email', 'email must be valid');
+  if (!mobile || mobile.replace(/\D/g, '').length < 7) addFieldError('mobile', 'mobile is required');
+  if (!city) addFieldError('city', 'city is required');
+  if (!state) addFieldError('state', 'state is required');
+  if (!track) addFieldError('track', 'track must be one of the supported Youth Pulse tracks');
+  if (!submissionType) addFieldError('submissionType', 'submissionType is required');
+  if (!headline) addFieldError('headline', 'headline is required');
+  if (!storyBody) addFieldError('storyBody', 'storyBody is required');
+  if (!YOUTH_PULSE_LANGUAGE_VALUES.includes(originalLanguage)) addFieldError('originalLanguage', 'originalLanguage must be one of en, hi, gu');
   if (!confirmTruthful || !confirmRightsToShare || !confirmEditorialReviewAllowed || !confirmNoUnsafeFalseAbusiveContent) {
-    errors.push('all consent fields must be accepted');
+    addFieldError('consents', 'all consent fields must be accepted');
   }
 
   return {
     errors,
+    fieldErrors,
     value: {
       fullName,
       email,
@@ -169,28 +236,21 @@ function validateYouthPulsePublicPayload(body = {}) {
       state,
       track,
       submissionType,
+      knowledgeSource,
       headline,
       storyBody,
       originalLanguage,
-      firstHandClaim,
       optionalSourceLinks,
       optionalAttachmentUrls,
-      confirmTruthful,
-      confirmRightsToShare,
-      confirmEditorialReviewAllowed,
-      confirmNoUnsafeFalseAbusiveContent,
     },
   };
 }
 
-function buildYouthPulseSubmissionCreate(payload, req) {
+function buildYouthPulseSubmissionCreate(payload, req, contributorId = null) {
   const ipAddress = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || req.connection?.remoteAddress || '';
   const userAgent = req.get('user-agent') || '';
   return {
     fullName: payload.fullName,
-    reporterName: payload.fullName,
-    name: payload.fullName,
-    reporterEmail: payload.email,
     email: payload.email,
     mobile: payload.mobile,
     college: payload.college,
@@ -198,56 +258,25 @@ function buildYouthPulseSubmissionCreate(payload, req) {
     state: payload.state,
     track: payload.track,
     submissionType: payload.submissionType,
+    knowledgeSource: payload.knowledgeSource,
     headline: payload.headline,
     storyBody: payload.storyBody,
-    body: payload.storyBody,
     originalLanguage: payload.originalLanguage,
-    firstHandClaim: payload.firstHandClaim,
     optionalSourceLinks: payload.optionalSourceLinks,
     optionalAttachmentUrls: payload.optionalAttachmentUrls,
-    confirmTruthful: payload.confirmTruthful,
-    confirmRightsToShare: payload.confirmRightsToShare,
-    confirmEditorialReviewAllowed: payload.confirmEditorialReviewAllowed,
-    confirmNoUnsafeFalseAbusiveContent: payload.confirmNoUnsafeFalseAbusiveContent,
-    attachments: payload.optionalAttachmentUrls.map((url) => ({ url })),
-    mediaUrl: payload.optionalAttachmentUrls[0] || null,
-    mediaLink: payload.optionalAttachmentUrls[0] || null,
-    location: { city: payload.city, state: payload.state, country: null },
-    locationDetail: { city: payload.city, state: payload.state },
-    reporterLocation: payload.city,
-    desk: YOUTH_PULSE_DESK,
-    intakeSource: YOUTH_PULSE_DESK,
     status: 'new',
     moderationFlags: [],
     riskLevel: 'low',
-    selectedPublicTrack: payload.track,
-    originType: YOUTH_PULSE_ORIGIN,
-    publicLabel: YOUTH_PULSE_PUBLIC_LABEL,
-    sourceType: 'community',
-    reporterVerificationLevel: 'unverified',
+    contributorId,
+    sourceType: 'youth_pulse',
+    sourceLabel: YOUTH_PULSE_PUBLIC_LABEL,
     ipAddress,
     userAgent,
-    contact: {
-      name: payload.fullName,
-      email: payload.email,
-      phone: payload.mobile,
-      preferredContact: 'no_preference',
-      canContactForThisStory: true,
-      canContactForFutureStories: false,
-    },
   };
 }
 
 function buildYouthPulseBaseFilter() {
-  return {
-    $or: [
-      { originType: YOUTH_PULSE_ORIGIN },
-      { desk: YOUTH_PULSE_DESK },
-      { intakeSource: YOUTH_PULSE_DESK },
-      { track: { $in: YOUTH_PULSE_TRACK_DEFINITIONS.map((entry) => entry.slug) } },
-      { selectedPublicTrack: { $in: YOUTH_PULSE_TRACK_DEFINITIONS.map((entry) => entry.slug) } },
-    ],
-  };
+  return { sourceType: 'youth_pulse' };
 }
 
 function buildYouthPulseAdminFilter(query = {}) {
@@ -256,13 +285,16 @@ function buildYouthPulseAdminFilter(query = {}) {
   const track = normalizeTrackValue(query.track);
   const reviewedBy = sanitizeText(query.reviewedBy, { maxLength: 120, allowNewlines: false });
   const riskLevel = sanitizeText(query.riskLevel, { maxLength: 24, allowNewlines: false }).toLowerCase();
+  const draftLinked = String(query.draftLinked || '').trim().toLowerCase();
   const articleLinked = String(query.articleLinked || '').trim().toLowerCase();
   const search = sanitizeText(query.q || query.search, { maxLength: 120, allowNewlines: false });
 
   if (status) and.push({ status });
-  if (track) and.push({ $or: [{ track }, { selectedPublicTrack: track }] });
+  if (track) and.push({ track });
   if (reviewedBy) and.push({ reviewedBy });
   if (riskLevel) and.push({ riskLevel });
+  if (draftLinked === 'true') and.push({ linkedDraftId: { $exists: true, $ne: null } });
+  if (draftLinked === 'false') and.push({ $or: [{ linkedDraftId: null }, { linkedDraftId: { $exists: false } }] });
   if (articleLinked === 'true') and.push({ linkedArticleId: { $exists: true, $ne: null } });
   if (articleLinked === 'false') and.push({ $or: [{ linkedArticleId: null }, { linkedArticleId: { $exists: false } }] });
   if (search) {
@@ -283,48 +315,42 @@ function buildYouthPulseAdminFilter(query = {}) {
 }
 
 function toYouthPulseAdminDto(doc = {}) {
-  const activeTrack = doc.selectedPublicTrack || doc.track || null;
+  const linkedDraftId = doc.linkedDraftId ? String(doc.linkedDraftId) : null;
   const linkedArticleId = doc.linkedArticleId ? String(doc.linkedArticleId) : null;
   return {
     id: doc._id ? String(doc._id) : null,
-    fullName: doc.fullName || doc.reporterName || doc.name || null,
-    email: doc.email || doc.reporterEmail || null,
-    mobile: doc.mobile || doc.phone || doc.phoneNumber || null,
+    fullName: doc.fullName || null,
+    email: doc.email || null,
+    mobile: doc.mobile || null,
     college: doc.college || null,
-    city: doc.city || doc.location?.city || null,
-    state: doc.state || doc.location?.state || null,
+    city: doc.city || null,
+    state: doc.state || null,
     track: doc.track || null,
     submissionType: doc.submissionType || null,
+    knowledgeSource: doc.knowledgeSource || null,
     headline: doc.headline || null,
-    storyBody: doc.storyBody || doc.body || null,
-    originalLanguage: doc.originalLanguage || doc.language || doc.lang || 'en',
-    firstHandClaim: Boolean(doc.firstHandClaim),
+    storyBody: doc.storyBody || null,
+    originalLanguage: doc.originalLanguage || 'en',
     optionalSourceLinks: Array.isArray(doc.optionalSourceLinks) ? doc.optionalSourceLinks : [],
     optionalAttachmentUrls: Array.isArray(doc.optionalAttachmentUrls) ? doc.optionalAttachmentUrls : [],
-    confirmTruthful: Boolean(doc.confirmTruthful),
-    confirmRightsToShare: Boolean(doc.confirmRightsToShare),
-    confirmEditorialReviewAllowed: Boolean(doc.confirmEditorialReviewAllowed),
-    confirmNoUnsafeFalseAbusiveContent: Boolean(doc.confirmNoUnsafeFalseAbusiveContent),
     status: normalizeYouthPulseStatus(doc.status, 'new'),
     moderationFlags: Array.isArray(doc.moderationFlags) ? doc.moderationFlags : [],
     riskLevel: doc.riskLevel || 'low',
     verificationNotes: doc.verificationNotes || null,
     editorialNotes: doc.editorialNotes || null,
-    rejectionReason: doc.rejectionReason || doc.rejectReason || null,
-    cleanedHeadline: doc.cleanedHeadline || null,
-    cleanedSummary: doc.cleanedSummary || null,
-    cleanedBody: doc.cleanedBody || null,
-    selectedPublicTrack: doc.selectedPublicTrack || null,
+    rejectionReason: doc.rejectionReason || null,
     reviewedBy: doc.reviewedBy || null,
     approvedBy: doc.approvedBy || null,
+    linkedDraftId,
     linkedArticleId,
-    linkedArticleSlug: doc.linkedArticleSlug || doc.articleSlug || null,
+    contributorId: doc.contributorId ? String(doc.contributorId) : null,
     publishedAt: doc.publishedAt || null,
-    originType: doc.originType || YOUTH_PULSE_ORIGIN,
-    publicLabel: doc.publicLabel || YOUTH_PULSE_PUBLIC_LABEL,
-    displayTrack: getTrackLabel(activeTrack) || doc.publicLabel || YOUTH_PULSE_PUBLIC_LABEL,
+    sourceType: doc.sourceType || 'youth_pulse',
+    sourceLabel: doc.sourceLabel || YOUTH_PULSE_PUBLIC_LABEL,
+    displayTrack: getTrackLabel(doc.track) || doc.sourceLabel || YOUTH_PULSE_PUBLIC_LABEL,
     displayStatus: formatDisplayStatus(doc.status),
     contributorDisplayName: contributorDisplayName(doc),
+    draftLinked: Boolean(linkedDraftId),
     articleLinked: Boolean(linkedArticleId),
     createdAt: doc.createdAt || null,
     updatedAt: doc.updatedAt || null,
@@ -336,20 +362,47 @@ function deriveSummary(text) {
   return summary || null;
 }
 
-function buildPublishPayload(submission) {
-  const title = submission.cleanedHeadline || submission.headline || 'Youth Pulse Story';
-  const content = submission.cleanedBody || submission.storyBody || submission.body || '';
-  const description = submission.cleanedSummary || deriveSummary(content || title) || title;
-  const track = normalizeTrackValue(submission.selectedPublicTrack || submission.track) || 'youth-pulse';
-  const tags = [
-    'youth-pulse',
-    `track:${track}`,
-    `origin:${YOUTH_PULSE_ORIGIN}`,
-  ];
+function normalizeReadableLocationPart(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') {
+    return sanitizeText(value, { maxLength: 120, allowNewlines: false }) || null;
+  }
+  if (typeof value === 'object') {
+    const candidate = firstProvided(
+      value.label,
+      value.name,
+      value.city,
+      value.state,
+      value.country,
+      value.title,
+      value.value
+    );
+    return candidate === undefined ? null : normalizeReadableLocationPart(candidate);
+  }
+  return sanitizeText(String(value), { maxLength: 120, allowNewlines: false }) || null;
+}
+
+function buildNormalizedDraftLocation(submission = {}) {
+  const rawLocation = submission.location && typeof submission.location === 'object' ? submission.location : null;
+  return {
+    city: normalizeReadableLocationPart(firstProvided(submission.city, rawLocation && rawLocation.city)),
+    state: normalizeReadableLocationPart(firstProvided(submission.state, rawLocation && rawLocation.state)),
+    country: normalizeReadableLocationPart(firstProvided(submission.country, rawLocation && rawLocation.country)),
+  };
+}
+
+function buildDraftPayload(submission, existingArticle = null) {
+  const title = submission.headline || 'Youth Pulse Story';
+  const content = submission.storyBody || '';
+  const description = deriveSummary(content || title) || title;
+  const track = normalizeTrackValue(submission.track) || 'youth-pulse';
+  const location = buildNormalizedDraftLocation(submission);
+  const tags = ['youth-pulse', 'source:youth_pulse', `track:${track}`, `origin:${YOUTH_PULSE_ORIGIN}`];
   for (const link of Array.isArray(submission.optionalSourceLinks) ? submission.optionalSourceLinks : []) {
     if (tags.length >= 16) break;
     if (!tags.includes(link)) tags.push(link);
   }
+  const status = existingArticle && existingArticle.status === 'published' ? 'published' : 'draft';
   return {
     title,
     description,
@@ -360,35 +413,47 @@ function buildPublishPayload(submission) {
     language: submission.originalLanguage || 'en',
     lang: submission.originalLanguage || 'en',
     originalLang: submission.originalLanguage || 'en',
-    status: 'published',
-    publishAt: new Date(),
-    publishedAt: new Date(),
+    status,
+    publishAt: status === 'published' ? existingArticle.publishAt || new Date() : null,
+    publishedAt: status === 'published' ? existingArticle.publishedAt || new Date() : null,
     source: 'community',
-    communityReportId: submission._id,
-    location: {
-      city: submission.city || null,
-      state: submission.state || null,
-      country: submission.location?.country || null,
-    },
+    sourceType: 'youth_pulse',
+    sourceLabel: YOUTH_PULSE_DRAFT_LABEL,
+    submissionSource: 'youth_pulse',
+    sourceTrack: track,
+    originType: YOUTH_PULSE_ORIGIN,
+    youthPulseSubmissionId: submission._id,
+    youthPulseContributorId: submission.contributorId || null,
+    location,
   };
 }
 
-async function publishYouthPulseSubmission(submission, { admin } = {}) {
+async function createYouthPulseDraft(submission, { admin } = {}) {
   if (!submission) {
     const error = new Error('Submission not found');
     error.statusCode = 404;
     throw error;
   }
 
-  const payload = buildPublishPayload(submission);
+  const normalizedStatus = normalizeYouthPulseStatus(submission.status, 'new');
+  if (!['approved', 'draft_created', 'published'].includes(normalizedStatus)) {
+    const error = new Error('Submission must be approved before creating a draft');
+    error.statusCode = 409;
+    throw error;
+  }
+
   let article = null;
-  if (submission.linkedArticleId && mongoose.isValidObjectId(String(submission.linkedArticleId))) {
+  if (submission.linkedDraftId && mongoose.isValidObjectId(String(submission.linkedDraftId))) {
+    article = await News.findById(submission.linkedDraftId);
+  }
+  if (!article && submission.linkedArticleId && mongoose.isValidObjectId(String(submission.linkedArticleId))) {
     article = await News.findById(submission.linkedArticleId);
   }
   if (!article) {
-    article = await News.findOne({ communityReportId: submission._id });
+    article = await News.findOne({ youthPulseSubmissionId: submission._id });
   }
 
+  const payload = buildDraftPayload(submission, article);
   if (article) {
     Object.assign(article, payload);
   } else {
@@ -396,26 +461,29 @@ async function publishYouthPulseSubmission(submission, { admin } = {}) {
   }
 
   await article.save();
-  await syncPublicArticleFromNews(article, { logger: console }).catch(() => null);
 
-  submission.linkedArticleId = article._id;
-  submission.linkedArticleSlug = article.slug || null;
-  submission.articleSlug = article.slug || null;
-  submission.publishedAt = payload.publishedAt;
-  submission.status = 'published';
+  submission.linkedDraftId = article._id;
+  if (article.status === 'published') {
+    submission.linkedArticleId = article._id;
+    submission.publishedAt = article.publishedAt || new Date();
+    submission.status = 'published';
+  } else {
+    submission.status = 'draft_created';
+  }
   submission.approvedBy = submission.approvedBy || admin || null;
   submission.reviewedBy = admin || submission.reviewedBy || null;
-  submission.selectedPublicTrack = payload.track;
-  submission.originType = submission.originType || YOUTH_PULSE_ORIGIN;
-  submission.publicLabel = submission.publicLabel || YOUTH_PULSE_PUBLIC_LABEL;
   await submission.save();
+
+  if (submission.contributorId) {
+    await syncYouthPulseContributorStats(submission.contributorId).catch(() => null);
+  }
 
   return { submission, article };
 }
 
 async function getYouthPulseSubmissionById(id) {
   if (!id || !mongoose.isValidObjectId(String(id))) return null;
-  const submission = await CommunitySubmission.findById(id);
+  const submission = await YouthPulseSubmission.findById(id);
   if (!submission || !isYouthPulseSubmission(submission)) return null;
   return submission;
 }
@@ -427,12 +495,12 @@ module.exports = {
   YOUTH_PULSE_STATUSES,
   buildYouthPulseAdminFilter,
   buildYouthPulseSubmissionCreate,
+  createYouthPulseDraft,
   formatDisplayStatus,
   getTrackLabel,
   getYouthPulseSubmissionById,
   isYouthPulseSubmission,
   normalizeYouthPulseStatus,
-  publishYouthPulseSubmission,
   sanitizeText,
   toYouthPulseAdminDto,
   validateYouthPulsePublicPayload,

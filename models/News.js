@@ -405,6 +405,22 @@ const newsSchema = new mongoose.Schema({
   sponsorFeatureLinkedId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
   // Provenance (optional)
   source: { type: String, index: true }, // e.g. 'community', 'editor'
+  sourceType: { type: String, default: null, index: true },
+  sourceLabel: { type: String, default: null },
+  submissionSource: { type: String, default: null, index: true },
+  sourceTrack: {
+    type: String,
+    enum: [...YOUTH_PULSE_TRACKS, null],
+    default: null,
+    index: true,
+    set: (v) => {
+      if (v === null || v === undefined || String(v).trim() === '') return null;
+      return normalizeTrackValue(v);
+    },
+  },
+  originType: { type: String, default: null, index: true },
+  youthPulseSubmissionId: { type: mongoose.Schema.Types.ObjectId, ref: 'YouthPulseSubmission', default: null, index: true },
+  youthPulseContributorId: { type: mongoose.Schema.Types.ObjectId, ref: 'YouthPulseContributor', default: null, index: true },
   communityReportId: { type: mongoose.Schema.Types.ObjectId, ref: 'CommunitySubmission', index: true },
 }, { timestamps: true });
 
@@ -500,6 +516,33 @@ newsSchema.virtual('body')
 
 newsSchema.set('toJSON', { virtuals: true });
 newsSchema.set('toObject', { virtuals: true });
+
+newsSchema.post('save', async function syncYouthPulseSubmission(doc) {
+  try {
+    if (!doc || String(doc.sourceType || '').trim().toLowerCase() !== 'youth_pulse') return;
+    if (!doc.youthPulseSubmissionId || !mongoose.isValidObjectId(String(doc.youthPulseSubmissionId))) return;
+
+    const YouthPulseSubmission = require('./YouthPulseSubmission');
+    const { syncYouthPulseContributorStats } = require('../services/youthPulseContributor.service');
+    const submission = await YouthPulseSubmission.findById(doc.youthPulseSubmissionId);
+    if (!submission) return;
+
+    submission.linkedDraftId = doc._id;
+    if (doc.status === 'published') {
+      submission.linkedArticleId = doc._id;
+      submission.publishedAt = doc.publishedAt || new Date();
+      submission.status = 'published';
+    } else if (submission.status !== 'published') {
+      submission.status = 'draft_created';
+    }
+
+    await submission.save();
+
+    if (submission.contributorId) {
+      await syncYouthPulseContributorStats(submission.contributorId).catch(() => null);
+    }
+  } catch (_) {}
+});
 
 // Indexes for workflow board
 newsSchema.index({ workflowStage: 1, workflowUpdatedAt: -1 });

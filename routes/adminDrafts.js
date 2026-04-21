@@ -38,8 +38,16 @@ router.get('/drafts', requireAdminAuth, async (req, res) => {
       createdAt: i.createdAt,
       status: i.status,
       source: i.source || null,
+      sourceType: i.sourceType || null,
+      sourceLabel: i.sourceLabel || null,
+      submissionSource: i.submissionSource || null,
+      sourceTrack: i.sourceTrack || null,
+      location: [i.location?.city, i.location?.state].filter(Boolean).join(', ') || null,
+      locationCity: i.location?.city || null,
+      locationState: i.location?.state || null,
       draftType: i.source || 'editor',
       submissionId: i.communityReportId || null,
+      youthPulseSubmissionId: i.youthPulseSubmissionId || null,
     }));
 
     return res.json({ ok: true, success: true, data, total, page, limit });
