@@ -6,7 +6,9 @@ const Article = require('../../models/Article');
 const { bumpPublicConfigVersion } = require('../../services/publicConfigVersion.service');
 const {
   SPONSORED_FEATURE_PLACEMENT_KEYS,
+  SPONSORED_FEATURE_TYPE,
   normalizePlacementKey,
+  placementKeyToPlacement,
   normalizeOptionalString,
   normalizeOptionalBoolean,
   parseOptionalDate,
@@ -17,7 +19,13 @@ const {
 const {
   findLinkedArticleByAnyId,
   buildLinkedArticleDto,
+  isSponsoredArticleDoc,
+  deriveEffectiveDestination,
+  getActiveSponsoredFeatureByPlacement,
 } = require('../../services/sponsoredFeatures.service');
+const { buildPubliclyVisiblePublicArticleFilter } = require('../../services/publicArticleVisibility.service');
+
+const DEFAULT_SPONSORED_FEATURE_PLACEMENT_KEY = SPONSORED_FEATURE_PLACEMENT_KEYS[0];
 
 function isDbReady() {
   const env = String(process.env.NODE_ENV || '').toLowerCase();
@@ -54,14 +62,120 @@ async function syncLinkedArticleFeatureReference({ featureId, prevLinkedArticleI
   }
 }
 
+function buildPlacementScopedFilter(placementKey, extra = {}) {
+  const normalizedPlacementKey = normalizePlacementKey(placementKey);
+  const placement = normalizedPlacementKey ? placementKeyToPlacement(normalizedPlacementKey) : null;
+  const filter = { ...extra };
+
+  if (!normalizedPlacementKey) return filter;
+
+  filter.$or = [
+    { placementKey: normalizedPlacementKey },
+    ...(placement ? [{ placement }] : []),
+  ];
+
+  return filter;
+}
+
+async function deactivateOtherActiveSponsoredFeatures({ placementKey, keepId }) {
+  const normalizedPlacementKey = normalizePlacementKey(placementKey);
+  if (!normalizedPlacementKey) return;
+
+  const filter = buildPlacementScopedFilter(normalizedPlacementKey, { isActive: true });
+  if (keepId) {
+    filter._id = { $ne: keepId };
+  }
+
+  await SponsoredFeature.updateMany(filter, { $set: { isActive: false } });
+}
+
+function toAdminLiveTargetDto(featureDoc, linkedArticle) {
+  if (!featureDoc) return null;
+  const linkedArticleDto = linkedArticle ? buildLinkedArticleDto(linkedArticle) : null;
+  const targetUrl = deriveEffectiveDestination(featureDoc, linkedArticleDto);
+
+  return {
+    featureId: String(featureDoc._id),
+    sponsorName: featureDoc.sponsorName || null,
+    headline: featureDoc.headline || null,
+    targetType: linkedArticleDto && linkedArticleDto.path ? 'linked_article' : (targetUrl ? 'external_url' : null),
+    targetUrl,
+    linkedArticle: linkedArticleDto
+      ? {
+          id: linkedArticleDto.id || null,
+          slug: linkedArticleDto.slug || null,
+          path: linkedArticleDto.path || null,
+        }
+      : null,
+  };
+}
+
+function buildEligibleSponsoredArticleFilter({ now = new Date() } = {}) {
+  const filter = buildPubliclyVisiblePublicArticleFilter({ now });
+  filter.$and = (filter.$and || []).concat([
+    {
+      $or: [
+        { isSponsoredArticle: true },
+        { isSponsored: true },
+      ],
+    },
+  ]);
+  return filter;
+}
+
+function toEligibleSponsoredArticleDto(doc) {
+  const linkedArticle = buildLinkedArticleDto(doc);
+  return {
+    id: linkedArticle && linkedArticle.id ? linkedArticle.id : null,
+    title: doc && doc.title ? doc.title : null,
+    slug: linkedArticle && linkedArticle.slug ? linkedArticle.slug : null,
+    path: linkedArticle && linkedArticle.path ? linkedArticle.path : null,
+    sponsorName: doc && doc.sponsorName ? doc.sponsorName : null,
+    sponsorFeatureEligible: doc && doc.sponsorFeatureEligible === true,
+    sponsorFeatureLinkedId: doc && doc.sponsorFeatureLinkedId ? String(doc.sponsorFeatureLinkedId) : null,
+    publishedAt: doc && doc.publishedAt ? doc.publishedAt : null,
+    updatedAt: doc && doc.updatedAt ? doc.updatedAt : null,
+    coverImage: doc && doc.coverImage ? doc.coverImage : null,
+  };
+}
+
+async function listEligibleSponsoredArticlesInternal({ now = new Date(), limit = 100 } = {}) {
+  const docs = await Article.find(buildEligibleSponsoredArticleFilter({ now }))
+    .select([
+      'title',
+      'summary',
+      'slug',
+      'slugs',
+      'language',
+      'originalLang',
+      'publishedAt',
+      'updatedAt',
+      'coverImage',
+      'isSponsored',
+      'isSponsoredArticle',
+      'sponsorName',
+      'sponsorFeatureEligible',
+      'sponsorFeatureLinkedId',
+    ].join(' '))
+    .sort({ sponsorFeatureEligible: -1, publishedAt: -1, updatedAt: -1 })
+    .limit(limit)
+    .lean();
+
+  return (docs || []).map(toEligibleSponsoredArticleDto).filter((item) => item.id);
+}
+
 function toAdminSponsoredFeatureDto(doc, linkedArticle) {
   if (!doc) return null;
   return {
     id: String(doc._id),
+    type: SPONSORED_FEATURE_TYPE,
+    placement: placementKeyToPlacement(doc.placementKey) || doc.placement || null,
     sponsorName: doc.sponsorName || null,
     internalTitle: doc.internalTitle || null,
+    internalCampaignName: doc.internalTitle || null,
     headline: doc.headline || null,
     summary: doc.summary || null,
+    shortSummary: doc.summary || null,
     ctaText: doc.ctaText || null,
     destinationUrl: doc.destinationUrl || null,
     coverImage: doc.coverImage || null,
@@ -71,6 +185,7 @@ function toAdminSponsoredFeatureDto(doc, linkedArticle) {
     placementKey: doc.placementKey || null,
     labelText: doc.labelText || 'Sponsored Feature',
     linkedArticleId: doc.linkedArticleId ? String(doc.linkedArticleId) : null,
+    linkedSponsoredArticleId: doc.linkedArticleId ? String(doc.linkedArticleId) : null,
     linkedArticleUrl: doc.linkedArticleUrl || null,
     priority: typeof doc.priority === 'number' ? doc.priority : 0,
     createdAt: doc.createdAt || null,
@@ -81,26 +196,27 @@ function toAdminSponsoredFeatureDto(doc, linkedArticle) {
 
 async function buildPayload(body, { partial = false } = {}) {
   const b = body && typeof body === 'object' ? body : {};
-  const placementKey = b.placementKey === undefined ? undefined : normalizePlacementKey(b.placementKey);
+  const placementInput = b.placementKey !== undefined ? b.placementKey : b.placement;
+  const placementKey = placementInput === undefined ? undefined : normalizePlacementKey(placementInput);
   const sponsorName = normalizeOptionalString(b.sponsorName);
-  const internalTitle = normalizeOptionalString(b.internalTitle);
+  const internalTitle = normalizeOptionalString(b.internalTitle !== undefined ? b.internalTitle : b.internalCampaignName);
   const headline = normalizeOptionalString(b.headline);
-  const summary = normalizeOptionalString(b.summary);
+  const summary = normalizeOptionalString(b.summary !== undefined ? b.summary : b.shortSummary);
   const ctaText = normalizeOptionalString(b.ctaText);
   const isActive = normalizeOptionalBoolean(b.isActive);
   const labelText = normalizeOptionalString(b.labelText);
-  const linkedArticleIdRaw = normalizeOptionalString(b.linkedArticleId);
+  const linkedArticleIdRaw = normalizeOptionalString(b.linkedArticleId !== undefined ? b.linkedArticleId : b.linkedSponsoredArticleId);
   const linkedArticleId = linkedArticleIdRaw && mongoose.Types.ObjectId.isValid(linkedArticleIdRaw)
     ? linkedArticleIdRaw
-    : (linkedArticleIdRaw ? undefined : (b.linkedArticleId === undefined ? undefined : null));
+    : (linkedArticleIdRaw ? undefined : (b.linkedArticleId === undefined && b.linkedSponsoredArticleId === undefined ? undefined : null));
 
-  if (b.placementKey !== undefined && !placementKey) {
+  if (placementInput !== undefined && !placementKey) {
     return { ok: false, status: 400, message: `placementKey must be one of: ${SPONSORED_FEATURE_PLACEMENT_KEYS.join(', ')}` };
   }
   if (b.isActive !== undefined && isActive === undefined) {
     return { ok: false, status: 400, message: 'isActive must be a boolean' };
   }
-  if (b.linkedArticleId !== undefined && linkedArticleId === undefined) {
+  if ((b.linkedArticleId !== undefined || b.linkedSponsoredArticleId !== undefined) && linkedArticleId === undefined) {
     return { ok: false, status: 400, message: 'linkedArticleId must be a valid id' };
   }
 
@@ -143,12 +259,17 @@ async function buildPayload(body, { partial = false } = {}) {
     if (!linkedArticle) {
       return { ok: false, status: 400, message: 'linkedArticleId must reference a published public article' };
     }
+    if (!isSponsoredArticleDoc(linkedArticle)) {
+      return { ok: false, status: 400, message: 'linkedArticleId must reference a published sponsored article' };
+    }
   }
 
   return {
     ok: true,
     value: {
       ...(placementKey !== undefined ? { placementKey } : {}),
+      ...(placementKey !== undefined ? { placement: placementKeyToPlacement(placementKey) } : {}),
+      type: SPONSORED_FEATURE_TYPE,
       ...(sponsorName !== undefined ? { sponsorName } : {}),
       ...(internalTitle !== undefined ? { internalTitle } : {}),
       ...(headline !== undefined ? { headline } : {}),
@@ -171,15 +292,14 @@ async function buildPayload(body, { partial = false } = {}) {
 async function listSponsoredFeatures(req, res) {
   if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database unavailable' });
 
-  const placementRaw = req.query && req.query.placementKey ? String(req.query.placementKey) : '';
+  const placementRaw = req.query && (req.query.placementKey || req.query.placement) ? String(req.query.placementKey || req.query.placement) : '';
   const placementKey = placementRaw ? normalizePlacementKey(placementRaw) : null;
   if (placementRaw && !placementKey) {
     return res.status(400).json({ ok: false, message: `Invalid placementKey. Expected one of: ${SPONSORED_FEATURE_PLACEMENT_KEYS.join(', ')}` });
   }
 
   const activeOnly = String(req.query && req.query.activeOnly || '').trim().toLowerCase();
-  const filter = {};
-  if (placementKey) filter.placementKey = placementKey;
+  const filter = placementKey ? buildPlacementScopedFilter(placementKey) : {};
   if (activeOnly === '1' || activeOnly === 'true') filter.isActive = true;
 
   const docs = await SponsoredFeature.find(filter).sort({ updatedAt: -1 }).lean();
@@ -191,6 +311,58 @@ async function listSponsoredFeatures(req, res) {
   return res.status(200).json({ ok: true, items });
 }
 
+async function listEligibleSponsoredArticles(req, res) {
+  if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database unavailable' });
+
+  const limit = Math.min(Math.max(parseInt(String(req.query && req.query.limit || '100'), 10) || 100, 1), 250);
+  const items = await listEligibleSponsoredArticlesInternal({ now: new Date(), limit });
+  return res.status(200).json({ ok: true, items });
+}
+
+async function getSponsoredFeaturesDashboard(req, res) {
+  if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database unavailable' });
+
+  const placementRaw = req.query && (req.query.placementKey || req.query.placement)
+    ? String(req.query.placementKey || req.query.placement)
+    : DEFAULT_SPONSORED_FEATURE_PLACEMENT_KEY;
+  const placementKey = normalizePlacementKey(placementRaw);
+  if (!placementKey) {
+    return res.status(400).json({ ok: false, message: `Invalid placementKey. Expected one of: ${SPONSORED_FEATURE_PLACEMENT_KEYS.join(', ')}` });
+  }
+
+  const filter = buildPlacementScopedFilter(placementKey);
+  const docs = await SponsoredFeature.find(filter).sort({ updatedAt: -1 }).lean();
+  const items = await Promise.all((docs || []).map(async (doc) => {
+    const linkedArticle = doc.linkedArticleId ? await findLinkedArticleByAnyId(doc.linkedArticleId, { publicOnly: false }) : null;
+    return toAdminSponsoredFeatureDto(doc, linkedArticle);
+  }));
+
+  const active = await getActiveSponsoredFeatureByPlacement(placementKey, { now: new Date() });
+  const eligibleSponsoredArticles = await listEligibleSponsoredArticlesInternal({ now: new Date(), limit: 100 });
+
+  return res.status(200).json({
+    ok: true,
+    placementKey,
+    placement: placementKeyToPlacement(placementKey),
+    items,
+    activeCount: (docs || []).filter((doc) => doc && doc.isActive === true).length,
+    liveTarget: active ? toAdminLiveTargetDto(active.feature, active.linkedArticle) : null,
+    eligibleSponsoredArticles,
+  });
+}
+
+async function getSponsoredFeature(req, res) {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(String(id || '').trim())) return res.status(400).json({ ok: false, message: 'Invalid id' });
+  if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database unavailable' });
+
+  const doc = await SponsoredFeature.findById(id).lean();
+  if (!doc) return res.status(404).json({ ok: false, message: 'Not found' });
+
+  const linkedArticle = doc.linkedArticleId ? await findLinkedArticleByAnyId(doc.linkedArticleId, { publicOnly: false }) : null;
+  return res.status(200).json({ ok: true, feature: toAdminSponsoredFeatureDto(doc, linkedArticle) });
+}
+
 async function createSponsoredFeature(req, res) {
   if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database unavailable' });
 
@@ -198,6 +370,9 @@ async function createSponsoredFeature(req, res) {
   if (!payload.ok) return res.status(payload.status).json({ ok: false, message: payload.message });
 
   const created = await SponsoredFeature.create(payload.value);
+  if (created && created.isActive === true) {
+    await deactivateOtherActiveSponsoredFeatures({ placementKey: created.placementKey || created.placement, keepId: created._id });
+  }
   await syncLinkedArticleFeatureReference({ featureId: created._id, prevLinkedArticleId: null, nextLinkedArticleId: created.linkedArticleId });
   bumpPublicConfigVersion().catch(() => {});
 
@@ -217,6 +392,10 @@ async function updateSponsoredFeature(req, res) {
 
   const updated = await SponsoredFeature.findByIdAndUpdate(id, { $set: payload.value }, { new: true, runValidators: true });
   if (!updated) return res.status(404).json({ ok: false, message: 'Not found' });
+
+  if (updated.isActive === true) {
+    await deactivateOtherActiveSponsoredFeatures({ placementKey: updated.placementKey || updated.placement, keepId: updated._id });
+  }
 
   await syncLinkedArticleFeatureReference({
     featureId: updated._id,
@@ -244,6 +423,9 @@ async function toggleSponsoredFeature(req, res) {
 
   doc.isActive = explicit === null || explicit === undefined ? !doc.isActive : explicit;
   await doc.save();
+  if (doc.isActive === true) {
+    await deactivateOtherActiveSponsoredFeatures({ placementKey: doc.placementKey || doc.placement, keepId: doc._id });
+  }
   bumpPublicConfigVersion().catch(() => {});
 
   const linkedArticle = doc.linkedArticleId ? await findLinkedArticleByAnyId(doc.linkedArticleId, { publicOnly: false }) : null;
@@ -266,6 +448,9 @@ async function deleteSponsoredFeature(req, res) {
 
 module.exports = {
   listSponsoredFeatures,
+  listEligibleSponsoredArticles,
+  getSponsoredFeaturesDashboard,
+  getSponsoredFeature,
   createSponsoredFeature,
   updateSponsoredFeature,
   toggleSponsoredFeature,

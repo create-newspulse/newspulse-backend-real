@@ -3360,11 +3360,13 @@ if (require.main === module) {
     } catch (_) {}
   }
 
-  // On Windows, Node may bind IPv6-only by default when no host is provided.
-  // That breaks callers/proxies that target 127.0.0.1. Prefer dual-stack there.
+  // Render/Linux should bind an explicit IPv4 host so platform port detection
+  // sees the web process reliably. Keep Windows dual-stack for local callers.
+  const bindHost = String(process.env.BIND_HOST || '').trim()
+    || (process.platform === 'win32' ? '::' : '0.0.0.0');
   const listenArg = process.platform === 'win32'
-    ? ({ port: PORT, host: '::', ipv6Only: false })
-    : PORT;
+    ? ({ port: PORT, host: bindHost, ipv6Only: false })
+    : ({ port: PORT, host: bindHost });
 
   const server = app.listen(listenArg, () => {
     const backendUrl = `http://127.0.0.1:${PORT}`;
@@ -3372,7 +3374,7 @@ if (require.main === module) {
     const apiBaseUrl = `${backendUrl}/api`;
 
     console.log(`✅ Server running on port ${PORT}`);
-    console.log('[startup] backend', { port: PORT });
+    console.log('[startup] backend', { port: PORT, host: bindHost });
     console.log('[startup][urls]', { backendUrl, healthUrl, apiBaseUrl });
     console.log('[startup][ads-routes]', { mountPath: '/api/ads', mutationEndpoints: ADS_INQUIRY_MUTATION_ENDPOINTS });
     _logStartupDbStatus('listening');
@@ -3397,7 +3399,7 @@ if (require.main === module) {
   });
 
   server.on('error', (err) => {
-    console.error('[startup] failed to listen', { port: PORT, code: err?.code, message: err?.message });
+    console.error('[startup] failed to listen', { port: PORT, host: bindHost, code: err?.code, message: err?.message });
     if (err && err.code === 'EADDRINUSE') {
       console.error(`[startup] Port ${PORT} is already in use. Stop the other process or set PORT to a free port.`);
     }

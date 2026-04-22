@@ -63,7 +63,7 @@ test('PUT /api/articles/:id applies sponsored article fields on admin updates', 
       .put(`/api/articles/${id}`)
       .set('Authorization', `Bearer ${token}`)
       .send({
-        isSponsored: true,
+        isSponsoredArticle: true,
         sponsorName: 'Acme Corp',
         sponsorDisclosure: 'Presented by Acme Corp',
         sponsorCtaText: 'Learn More',
@@ -79,6 +79,7 @@ test('PUT /api/articles/:id applies sponsored article fields on admin updates', 
     const firstOp = capturedUpdates[0];
     assert.ok(firstOp && firstOp.$set && typeof firstOp.$set === 'object', 'expected first update op to use $set');
     assert.equal(firstOp.$set.isSponsored, true);
+    assert.equal(firstOp.$set.isSponsoredArticle, true);
     assert.equal(firstOp.$set.sponsorName, 'Acme Corp');
     assert.equal(firstOp.$set.sponsorLabel, 'Sponsored');
     assert.equal(firstOp.$set.sponsorDisclosure, 'Presented by Acme Corp');

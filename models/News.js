@@ -396,6 +396,7 @@ const newsSchema = new mongoose.Schema({
   spotlightPriority: { type: Number, default: 0 },
   spotlightExpiresAt: { type: Date, default: null },
   isSponsored: { type: Boolean, default: false, index: true },
+  isSponsoredArticle: { type: Boolean, default: false, index: true },
   sponsorName: { type: String, default: null },
   sponsorLabel: { type: String, default: 'Sponsored' },
   sponsorDisclosure: { type: String, default: null },

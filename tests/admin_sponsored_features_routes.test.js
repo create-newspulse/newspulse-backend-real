@@ -23,14 +23,101 @@ function makeFindOneResult(doc) {
   };
 }
 
+function makeFindResult(items) {
+  let rows = Array.isArray(items) ? [...items] : [];
+  return {
+    select() { return this; },
+    sort(order) {
+      if (order && typeof order === 'object') {
+        rows.sort((left, right) => {
+          for (const [field, dir] of Object.entries(order)) {
+            const leftValue = left && left[field] ? new Date(left[field]).getTime() || left[field] : left && left[field];
+            const rightValue = right && right[field] ? new Date(right[field]).getTime() || right[field] : right && right[field];
+            if (leftValue === rightValue) continue;
+            return dir < 0 ? (rightValue - leftValue) : (leftValue - rightValue);
+          }
+          return 0;
+        });
+      }
+      return this;
+    },
+    limit() { return this; },
+    lean: async () => rows,
+  };
+}
+
+test('GET /api/admin/sponsored-features/:id returns a dedicated sponsored feature record', async () => {
+  const featureId = '507f1f77bcf86cd799439122';
+  const linkedArticleId = '507f1f77bcf86cd799439121';
+
+  const prevFindById = SponsoredFeature.findById;
+  const prevArticleFindOne = Article.findOne;
+
+  try {
+    SponsoredFeature.findById = () => ({
+      lean: async () => ({
+        _id: featureId,
+        type: 'sponsored_feature',
+        placement: 'homepage_sponsored_feature',
+        placementKey: 'HOMEPAGE_SPONSORED_FEATURE',
+        sponsorName: 'Acme Corp',
+        internalTitle: 'Homepage combo for Acme',
+        headline: 'Acme launches something new',
+        summary: 'Premium placement summary',
+        ctaText: 'Read Sponsored Story',
+        destinationUrl: 'https://example.com/landing',
+        coverImage: { url: 'https://img.example/feature.jpg', alt: 'Feature card', publicId: null },
+        linkedArticleId,
+        isActive: true,
+        startAt: new Date('2026-04-16T10:00:00.000Z'),
+        endAt: new Date('2026-05-16T10:00:00.000Z'),
+        createdAt: new Date('2026-04-16T10:00:00.000Z'),
+        updatedAt: new Date('2026-04-16T10:00:00.000Z'),
+      }),
+    });
+    Article.findOne = () => makeFindOneResult({
+      _id: linkedArticleId,
+      title: 'Sponsored Article',
+      summary: 'Article summary',
+      slug: 'sponsored-article',
+      language: 'en',
+      coverImage: { url: 'https://img.example/article.jpg', alt: 'Article', publicId: null },
+      isSponsored: true,
+      isSponsoredArticle: true,
+      sponsorName: 'Acme Corp',
+      sponsorLabel: 'Sponsored',
+      sponsorDisclosure: 'Presented by Acme Corp',
+      sponsorCtaText: 'Read More',
+      sponsorCtaUrl: 'https://example.com/article',
+      sponsorFeatureEligible: true,
+    });
+
+    const res = await request(app)
+      .get(`/api/admin/sponsored-features/${featureId}`)
+      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`);
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.feature.id, featureId);
+    assert.equal(res.body.feature.type, 'sponsored_feature');
+    assert.equal(res.body.feature.placement, 'homepage_sponsored_feature');
+    assert.equal(res.body.feature.linkedSponsoredArticleId, linkedArticleId);
+  } finally {
+    SponsoredFeature.findById = prevFindById;
+    Article.findOne = prevArticleFindOne;
+  }
+});
+
 test('POST /api/admin/sponsored-features creates a combo feature linked to a published article', async () => {
   const linkedArticleId = '507f1f77bcf86cd799439121';
   const featureId = '507f1f77bcf86cd799439122';
 
   const prevCreate = SponsoredFeature.create;
+  const prevUpdateMany = SponsoredFeature.updateMany;
   const prevArticleFindOne = Article.findOne;
   const prevArticleUpdateMany = Article.updateMany;
   const prevNewsUpdateMany = News.updateMany;
+  const deactivateCalls = [];
 
   try {
     Article.findOne = () => makeFindOneResult({
@@ -42,6 +129,7 @@ test('POST /api/admin/sponsored-features creates a combo feature linked to a pub
       language: 'en',
       coverImage: { url: 'https://img.example/article.jpg', alt: 'Article', publicId: null },
       isSponsored: true,
+      isSponsoredArticle: true,
       sponsorName: 'Acme Corp',
       sponsorLabel: 'Sponsored',
       sponsorDisclosure: 'Presented by Acme Corp',
@@ -51,6 +139,10 @@ test('POST /api/admin/sponsored-features creates a combo feature linked to a pub
     });
     Article.updateMany = async () => ({ acknowledged: true });
     News.updateMany = async () => ({ acknowledged: true });
+    SponsoredFeature.updateMany = async (filter, update) => {
+      deactivateCalls.push({ filter, update });
+      return { acknowledged: true };
+    };
 
     SponsoredFeature.create = async (payload) => ({
       _id: featureId,
@@ -64,13 +156,13 @@ test('POST /api/admin/sponsored-features creates a combo feature linked to a pub
       .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
       .send({
         sponsorName: 'Acme Corp',
-        internalTitle: 'Homepage combo for Acme',
+        internalCampaignName: 'Homepage combo for Acme',
         headline: 'Acme launches something new',
-        summary: 'Premium placement summary',
+        shortSummary: 'Premium placement summary',
         ctaText: 'Read Sponsored Story',
-        placementKey: 'HOMEPAGE_SPONSORED_FEATURE',
+        placement: 'homepage',
         coverImage: { url: 'https://img.example/feature.jpg', alt: 'Feature card' },
-        linkedArticleId,
+        linkedSponsoredArticleId: linkedArticleId,
         isActive: true,
         priority: 10,
       });
@@ -78,14 +170,206 @@ test('POST /api/admin/sponsored-features creates a combo feature linked to a pub
     assert.equal(res.status, 201);
     assert.equal(res.body.ok, true);
     assert.equal(res.body.feature.id, featureId);
+    assert.equal(res.body.feature.type, 'sponsored_feature');
+    assert.equal(res.body.feature.placement, 'homepage_sponsored_feature');
     assert.equal(res.body.feature.placementKey, 'HOMEPAGE_SPONSORED_FEATURE');
     assert.equal(res.body.feature.linkedArticleId, linkedArticleId);
+    assert.equal(res.body.feature.linkedSponsoredArticleId, linkedArticleId);
+    assert.equal(res.body.feature.internalCampaignName, 'Homepage combo for Acme');
+    assert.equal(res.body.feature.shortSummary, 'Premium placement summary');
     assert.equal(res.body.feature.linkedArticle.slug, 'sponsored-article');
     assert.equal(res.body.feature.linkedArticle.apiUrl, '/api/public/news/sponsored-article');
+    assert.equal(deactivateCalls.length, 1);
+    assert.deepEqual(deactivateCalls[0].filter, {
+      isActive: true,
+      _id: { $ne: featureId },
+      $or: [
+        { placementKey: 'HOMEPAGE_SPONSORED_FEATURE' },
+        { placement: 'homepage_sponsored_feature' },
+      ],
+    });
+    assert.deepEqual(deactivateCalls[0].update, { $set: { isActive: false } });
   } finally {
     SponsoredFeature.create = prevCreate;
+    SponsoredFeature.updateMany = prevUpdateMany;
     Article.findOne = prevArticleFindOne;
     Article.updateMany = prevArticleUpdateMany;
     News.updateMany = prevNewsUpdateMany;
+  }
+});
+
+test('POST /api/admin/sponsored-features rejects invalid linkedSponsoredArticleId alias', async () => {
+  const res = await request(app)
+    .post('/api/admin/sponsored-features')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .send({
+      sponsorName: 'Acme Corp',
+      internalCampaignName: 'Homepage combo for Acme',
+      headline: 'Acme launches something new',
+      shortSummary: 'Premium placement summary',
+      ctaText: 'Read Sponsored Story',
+      placement: 'homepage',
+      coverImage: { url: 'https://img.example/feature.jpg', alt: 'Feature card' },
+      destinationUrl: 'https://example.com/landing',
+      linkedSponsoredArticleId: 'not-a-real-id',
+      isActive: true,
+    });
+
+  assert.equal(res.status, 400);
+  assert.equal(res.body.ok, false);
+  assert.equal(res.body.message, 'linkedArticleId must be a valid id');
+});
+
+test('POST /api/admin/sponsored-features rejects linking a non-sponsored article', async () => {
+  const linkedArticleId = '507f1f77bcf86cd799439121';
+  const prevArticleFindOne = Article.findOne;
+
+  try {
+    Article.findOne = () => makeFindOneResult({
+      _id: linkedArticleId,
+      title: 'Regular Article',
+      summary: 'Editorial summary',
+      slug: 'regular-article',
+      language: 'en',
+      isSponsored: false,
+      isSponsoredArticle: false,
+    });
+
+    const res = await request(app)
+      .post('/api/admin/sponsored-features')
+      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+      .send({
+        sponsorName: 'Acme Corp',
+        internalCampaignName: 'Homepage combo for Acme',
+        headline: 'Acme launches something new',
+        shortSummary: 'Premium placement summary',
+        ctaText: 'Read Sponsored Story',
+        placement: 'homepage',
+        coverImage: { url: 'https://img.example/feature.jpg', alt: 'Feature card' },
+        linkedSponsoredArticleId: linkedArticleId,
+        isActive: true,
+      });
+
+    assert.equal(res.status, 400);
+    assert.equal(res.body.ok, false);
+    assert.equal(res.body.message, 'linkedArticleId must reference a published sponsored article');
+  } finally {
+    Article.findOne = prevArticleFindOne;
+  }
+});
+
+test('GET /api/admin/sponsored-features/dashboard returns list, active count, live target, and eligible sponsored articles', async () => {
+  const featureId = '507f1f77bcf86cd799439191';
+  const linkedArticleId = '507f1f77bcf86cd799439192';
+  const prevSponsoredFind = SponsoredFeature.find;
+  const prevArticleFind = Article.find;
+  const prevArticleFindOne = Article.findOne;
+
+  try {
+    SponsoredFeature.find = () => makeFindResult([
+      {
+        _id: featureId,
+        placementKey: 'HOMEPAGE_SPONSORED_FEATURE',
+        placement: 'homepage_sponsored_feature',
+        sponsorName: 'Acme Corp',
+        internalTitle: 'Homepage combo for Acme',
+        headline: 'Acme launches something new',
+        summary: 'Premium placement summary',
+        ctaText: 'Read Sponsored Story',
+        destinationUrl: 'https://example.com/landing',
+        coverImage: { url: 'https://img.example/feature.jpg', alt: 'Feature card', publicId: null },
+        linkedArticleId,
+        isActive: true,
+        priority: 10,
+        updatedAt: new Date('2026-04-16T10:00:00.000Z'),
+      },
+    ]);
+    Article.findOne = () => makeFindOneResult({
+      _id: linkedArticleId,
+      title: 'Sponsored Article',
+      summary: 'Article summary',
+      slug: 'sponsored-article',
+      language: 'en',
+      coverImage: { url: 'https://img.example/article.jpg', alt: 'Article', publicId: null },
+      isSponsored: true,
+      isSponsoredArticle: true,
+      sponsorName: 'Acme Corp',
+      sponsorFeatureEligible: true,
+      publishedAt: new Date('2026-04-15T10:00:00.000Z'),
+      updatedAt: new Date('2026-04-16T10:00:00.000Z'),
+    });
+    Article.find = () => makeFindResult([
+      {
+        _id: linkedArticleId,
+        title: 'Sponsored Article',
+        summary: 'Article summary',
+        slug: 'sponsored-article',
+        language: 'en',
+        coverImage: { url: 'https://img.example/article.jpg', alt: 'Article', publicId: null },
+        isSponsored: true,
+        isSponsoredArticle: true,
+        sponsorName: 'Acme Corp',
+        sponsorFeatureEligible: true,
+        sponsorFeatureLinkedId: featureId,
+        publishedAt: new Date('2026-04-15T10:00:00.000Z'),
+        updatedAt: new Date('2026-04-16T10:00:00.000Z'),
+      },
+    ]);
+
+    const res = await request(app)
+      .get('/api/admin/sponsored-features/dashboard')
+      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`);
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.activeCount, 1);
+    assert.equal(Array.isArray(res.body.items), true);
+    assert.equal(Array.isArray(res.body.eligibleSponsoredArticles), true);
+    assert.equal(res.body.items[0].id, featureId);
+    assert.equal(res.body.liveTarget.featureId, featureId);
+    assert.equal(res.body.liveTarget.targetType, 'linked_article');
+    assert.equal(res.body.liveTarget.targetUrl, '/news/sponsored-article');
+    assert.equal(res.body.eligibleSponsoredArticles[0].id, linkedArticleId);
+    assert.equal(res.body.eligibleSponsoredArticles[0].path, '/news/sponsored-article');
+  } finally {
+    SponsoredFeature.find = prevSponsoredFind;
+    Article.find = prevArticleFind;
+    Article.findOne = prevArticleFindOne;
+  }
+});
+
+test('GET /api/admin/sponsored-features/eligible-articles lists published sponsored articles', async () => {
+  const linkedArticleId = '507f1f77bcf86cd799439193';
+  const prevArticleFind = Article.find;
+
+  try {
+    Article.find = () => makeFindResult([
+      {
+        _id: linkedArticleId,
+        title: 'Eligible Sponsored Article',
+        slug: 'eligible-sponsored-article',
+        language: 'en',
+        isSponsored: true,
+        isSponsoredArticle: true,
+        sponsorName: 'Acme Corp',
+        sponsorFeatureEligible: false,
+        publishedAt: new Date('2026-04-15T10:00:00.000Z'),
+        updatedAt: new Date('2026-04-16T10:00:00.000Z'),
+        coverImage: { url: 'https://img.example/article-2.jpg', alt: 'Article', publicId: null },
+      },
+    ]);
+
+    const res = await request(app)
+      .get('/api/admin/sponsored-features/eligible-articles')
+      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`);
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(Array.isArray(res.body.items), true);
+    assert.equal(res.body.items[0].id, linkedArticleId);
+    assert.equal(res.body.items[0].slug, 'eligible-sponsored-article');
+    assert.equal(res.body.items[0].path, '/news/eligible-sponsored-article');
+  } finally {
+    Article.find = prevArticleFind;
   }
 });

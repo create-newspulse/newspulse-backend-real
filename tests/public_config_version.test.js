@@ -9,6 +9,8 @@ const PublicConfigVersion = require('../models/PublicConfigVersion');
 const AdSettings = require('../models/AdSettings');
 const Ad = require('../models/Ad');
 const BroadcastItem = require('../models/BroadcastItem');
+const PublicSiteSettings = require('../models/PublicSiteSettings');
+const SponsoredFeature = require('../models/SponsoredFeature');
 const SystemSetting = require('../models/SystemSetting');
 const app = require('../server');
 
@@ -270,4 +272,129 @@ test('PUT /api/admin/public-settings bumps public config version', async (t) => 
   const versionRes = await waitForVersionAbove(125);
   assert.equal(versionRes.status, 200);
   assert.ok(versionRes.body.version > 125);
+});
+
+test('POST /api/admin/settings/public/publish bumps public config version', async (t) => {
+  mockPublicConfigVersionStore(t, 150);
+  const prevGetOrCreate = PublicSiteSettings.getOrCreate;
+
+  const settingsDoc = {
+    scope: 'production',
+    version: 4,
+    draft: {
+      homepage: {
+        modules: {
+          spotlight: { enabled: true, order: 2 },
+        },
+      },
+    },
+    published: {
+      homepage: {
+        modules: {
+          spotlight: { enabled: false, order: 1 },
+        },
+      },
+    },
+    publishedUpdatedAt: null,
+    updatedAt: new Date('2026-03-18T09:00:00.000Z'),
+    async save() {
+      this.updatedAt = new Date('2026-03-18T11:00:00.000Z');
+      return this;
+    },
+  };
+
+  PublicSiteSettings.getOrCreate = async () => settingsDoc;
+
+  t.after(() => {
+    PublicSiteSettings.getOrCreate = prevGetOrCreate;
+  });
+
+  const res = await request(app)
+    .post('/api/admin/settings/public/publish')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .send({});
+
+  assert.equal(res.status, 200);
+  await flushAsyncWork();
+
+  const versionRes = await waitForVersionAbove(150);
+  assert.equal(versionRes.status, 200);
+  assert.ok(versionRes.body.version > 150);
+});
+
+test('PATCH /api/admin/sponsored-features/:id/toggle bumps public config version', async (t) => {
+  mockPublicConfigVersionStore(t, 175);
+  const prevFindById = SponsoredFeature.findById;
+
+  const featureDoc = {
+    _id: new mongoose.Types.ObjectId(),
+    title: 'Homepage Sponsor',
+    placementKey: 'homepage',
+    placement: 'homepage',
+    isActive: true,
+    linkedArticleId: null,
+    async save() {
+      return this;
+    },
+  };
+
+  SponsoredFeature.findById = async (id) => {
+    if (String(id) !== String(featureDoc._id)) return null;
+    return featureDoc;
+  };
+
+  t.after(() => {
+    SponsoredFeature.findById = prevFindById;
+  });
+
+  const res = await request(app)
+    .patch(`/api/admin/sponsored-features/${featureDoc._id.toString()}/toggle`)
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .send({ isActive: false });
+
+  assert.equal(res.status, 200);
+  await flushAsyncWork();
+
+  const versionRes = await waitForVersionAbove(175);
+  assert.equal(versionRes.status, 200);
+  assert.ok(versionRes.body.version > 175);
+});
+
+test('PATCH /api/admin/ticker/:id bumps public config version', async (t) => {
+  mockPublicConfigVersionStore(t, 200);
+  const prevFindById = BroadcastItem.findById;
+
+  const tickerDoc = {
+    _id: new mongoose.Types.ObjectId(),
+    text: 'Original ticker text',
+    sourceLang: 'en',
+    language: 'en',
+    set(key, value) {
+      this[key] = value;
+    },
+    async save() {
+      return this;
+    },
+  };
+
+  BroadcastItem.findById = async (id) => {
+    if (String(id) !== String(tickerDoc._id)) return null;
+    return tickerDoc;
+  };
+
+  t.after(() => {
+    BroadcastItem.findById = prevFindById;
+  });
+
+  const res = await request(app)
+    .patch(`/api/admin/ticker/${tickerDoc._id.toString()}`)
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .send({ isActive: false });
+
+  assert.equal(res.status, 200);
+  await flushAsyncWork();
+
+  const versionRes = await waitForVersionAbove(200);
+  assert.equal(versionRes.status, 200);
+  assert.ok(versionRes.body.version > 200);
 });

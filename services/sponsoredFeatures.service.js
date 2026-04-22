@@ -6,6 +6,8 @@ const { buildPubliclyVisiblePublicArticleFilter } = require('./publicArticleVisi
 const {
   normalizePlacementKey,
   isItemInSchedule,
+  SPONSORED_FEATURE_TYPE,
+  placementKeyToPlacement,
 } = require('../lib/sponsoredFeatures');
 
 const LINKED_ARTICLE_SELECT = [
@@ -21,6 +23,7 @@ const LINKED_ARTICLE_SELECT = [
   'updatedAt',
   'coverImage',
   'isSponsored',
+  'isSponsoredArticle',
   'sponsorName',
   'sponsorLabel',
   'sponsorDisclosure',
@@ -50,18 +53,22 @@ function buildLinkedArticleDto(doc) {
   if (!doc) return null;
   const slug = _articleSlug(doc);
   const articleId = String(doc._id || '');
+  const isSponsoredArticle = doc.isSponsoredArticle === true || doc.isSponsored === true;
+  const path = slug ? `/news/${encodeURIComponent(slug)}` : null;
   return {
     id: articleId || null,
     sourceNewsId: doc.sourceNewsId ? String(doc.sourceNewsId) : null,
     slug: slug || null,
+    path,
     title: doc.title || null,
     summary: doc.summary || null,
     category: doc.category || null,
     language: doc.language || doc.originalLang || 'en',
     imageUrl: _coverImageUrl(doc),
-    isSponsored: doc.isSponsored === true,
+    isSponsored: doc.isSponsored === true || isSponsoredArticle,
+    isSponsoredArticle,
     sponsorName: doc.sponsorName || null,
-    sponsorLabel: doc.sponsorLabel || (doc.isSponsored ? 'Sponsored' : null),
+    sponsorLabel: doc.sponsorLabel || (isSponsoredArticle ? 'Sponsored' : null),
     sponsorDisclosure: doc.sponsorDisclosure || null,
     sponsorCtaText: doc.sponsorCtaText || null,
     sponsorCtaUrl: doc.sponsorCtaUrl || null,
@@ -83,56 +90,68 @@ async function findLinkedArticleByAnyId(id, { publicOnly = true, now = new Date(
   return Article.findOne(filter).select(LINKED_ARTICLE_SELECT).lean();
 }
 
+function isSponsoredArticleDoc(doc) {
+  return !!(doc && (doc.isSponsoredArticle === true || doc.isSponsored === true));
+}
+
 function deriveEffectiveDestination(featureDoc, linkedArticle) {
-  if (featureDoc && featureDoc.linkedArticleUrl) return String(featureDoc.linkedArticleUrl);
+  if (linkedArticle && linkedArticle.path) return linkedArticle.path;
   if (featureDoc && featureDoc.destinationUrl) return String(featureDoc.destinationUrl);
-  return linkedArticle && linkedArticle.apiUrl ? linkedArticle.apiUrl : null;
+  if (featureDoc && featureDoc.linkedArticleUrl) return String(featureDoc.linkedArticleUrl);
+  return null;
+}
+
+function buildActiveSponsoredFeatureFilter(placementKey) {
+  const normalizedPlacementKey = normalizePlacementKey(placementKey);
+  const placement = normalizedPlacementKey ? placementKeyToPlacement(normalizedPlacementKey) : null;
+  if (!normalizedPlacementKey) return null;
+
+  return {
+    isActive: true,
+    $or: [
+      { placementKey: normalizedPlacementKey },
+      ...(placement ? [{ placement }] : []),
+    ],
+  };
 }
 
 function toPublicSponsoredFeatureDto(featureDoc, linkedArticle) {
   if (!featureDoc) return null;
   const linkedArticleDto = linkedArticle ? buildLinkedArticleDto(linkedArticle) : null;
+  const targetUrl = deriveEffectiveDestination(featureDoc, linkedArticleDto);
   return {
-    id: String(featureDoc._id),
+    label: featureDoc.labelText || 'Sponsored Feature',
     sponsorName: featureDoc.sponsorName || null,
-    internalTitle: featureDoc.internalTitle || null,
     headline: featureDoc.headline || null,
     summary: featureDoc.summary || null,
     ctaText: featureDoc.ctaText || null,
-    destinationUrl: featureDoc.destinationUrl || null,
-    effectiveDestinationUrl: deriveEffectiveDestination(featureDoc, linkedArticleDto),
     coverImage: featureDoc.coverImage || null,
-    imageUrl: _coverImageUrl(featureDoc),
-    isActive: featureDoc.isActive === true,
-    startAt: featureDoc.startAt || null,
-    endAt: featureDoc.endAt || null,
-    placementKey: normalizePlacementKey(featureDoc.placementKey) || featureDoc.placementKey,
-    labelText: featureDoc.labelText || 'Sponsored Feature',
-    linkedArticleId: featureDoc.linkedArticleId ? String(featureDoc.linkedArticleId) : null,
-    linkedArticleUrl: featureDoc.linkedArticleUrl || null,
-    priority: typeof featureDoc.priority === 'number' ? featureDoc.priority : 0,
-    updatedAt: featureDoc.updatedAt || null,
-    linkedArticle: linkedArticleDto,
+    targetType: linkedArticleDto && linkedArticleDto.path ? 'linked_article' : (targetUrl ? 'external_url' : null),
+    targetUrl,
+    linkedArticle: linkedArticleDto
+      ? {
+          slug: linkedArticleDto.slug || null,
+          path: linkedArticleDto.path || null,
+        }
+      : null,
   };
 }
 
 async function getActiveSponsoredFeatureByPlacement(placementKey, { now = new Date() } = {}) {
-  const normalizedPlacementKey = normalizePlacementKey(placementKey);
-  if (!normalizedPlacementKey) return null;
+  const filter = buildActiveSponsoredFeatureFilter(placementKey);
+  if (!filter) return null;
 
-  const candidates = await SponsoredFeature.find({
-    placementKey: normalizedPlacementKey,
-    isActive: true,
-  })
+  const candidates = await SponsoredFeature.find(filter)
     .sort({ priority: -1, updatedAt: -1 })
     .limit(50)
     .lean();
 
   for (const candidate of candidates || []) {
     if (!isItemInSchedule(candidate, now)) continue;
-    const linkedArticle = candidate.linkedArticleId
+    const linkedArticleDoc = candidate.linkedArticleId
       ? await findLinkedArticleByAnyId(candidate.linkedArticleId, { publicOnly: true, now })
       : null;
+    const linkedArticle = isSponsoredArticleDoc(linkedArticleDoc) ? linkedArticleDoc : null;
     return {
       feature: candidate,
       linkedArticle,
@@ -145,7 +164,9 @@ async function getActiveSponsoredFeatureByPlacement(placementKey, { now = new Da
 module.exports = {
   LINKED_ARTICLE_SELECT,
   buildLinkedArticleDto,
+  buildActiveSponsoredFeatureFilter,
   findLinkedArticleByAnyId,
+  isSponsoredArticleDoc,
   deriveEffectiveDestination,
   toPublicSponsoredFeatureDto,
   getActiveSponsoredFeatureByPlacement,

@@ -3,6 +3,9 @@ const express = require('express');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const {
   listSponsoredFeatures,
+  listEligibleSponsoredArticles,
+  getSponsoredFeaturesDashboard,
+  getSponsoredFeature,
   createSponsoredFeature,
   updateSponsoredFeature,
   toggleSponsoredFeature,
@@ -13,7 +16,10 @@ const router = express.Router();
 
 router.use('/sponsored-features', requireAdminAuth);
 
+router.get('/sponsored-features/dashboard', getSponsoredFeaturesDashboard);
+router.get('/sponsored-features/eligible-articles', listEligibleSponsoredArticles);
 router.get('/sponsored-features', listSponsoredFeatures);
+router.get('/sponsored-features/:id', getSponsoredFeature);
 router.post('/sponsored-features', createSponsoredFeature);
 router.put('/sponsored-features/:id', updateSponsoredFeature);
 router.patch('/sponsored-features/:id/toggle', toggleSponsoredFeature);

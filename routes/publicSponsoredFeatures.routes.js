@@ -10,6 +10,7 @@ const router = express.Router();
 
 router.use(noCache);
 
+router.get('/sponsored-feature', getActiveSponsoredFeature);
 router.get('/sponsored-features', getActiveSponsoredFeature);
 router.get('/sponsored-features/slot/:placementKey', getActiveSponsoredFeature);
 router.get('/homepage/center-slot', getHomepageCenterSlot);
