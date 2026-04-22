@@ -8,6 +8,7 @@ const FounderFeatureTogglesSchema = new mongoose.Schema(
     // ON = closed / hidden, OFF = open / visible
     communityReporterClosed: { type: Boolean, default: false },
     reporterPortalClosed: { type: Boolean, default: false },
+    youthPulseSubmissionsClosed: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

@@ -48,8 +48,10 @@ async function getDefaultFounderFeatureToggles() {
   return {
     communityReporterClosed: effective.communityReporterClosed,
     reporterPortalClosed: effective.reporterPortalClosed,
+    youthPulseSubmissionsClosed: effective.youthPulseSubmissionsClosed,
     communityReporterEnabled: effective.communityReporterEnabled,
     reporterPortalEnabled: effective.reporterPortalEnabled,
+    youthPulseSubmissionsEnabled: effective.youthPulseSubmissionsEnabled,
     updatedAt: effective.updatedAt || null,
   };
 }
@@ -87,6 +89,9 @@ function extractFeatureTogglePatch(payload) {
   }
   if (typeof source.reporterPortalClosed === 'boolean') {
     patch.reporterPortalClosed = source.reporterPortalClosed;
+  }
+  if (typeof source.youthPulseSubmissionsClosed === 'boolean') {
+    patch.youthPulseSubmissionsClosed = source.youthPulseSubmissionsClosed;
   }
   return patch;
 }

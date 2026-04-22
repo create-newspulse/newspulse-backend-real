@@ -79,3 +79,48 @@ test('POST /api/community/youth-pulse/submissions stores moderated Youth Pulse s
     CommunitySubmission.create = originalCreate;
   }
 });
+
+test('POST /api/community/youth-pulse/submissions accepts current public form aliases', async () => {
+  const originalCreate = CommunitySubmission.create;
+
+  try {
+    CommunitySubmission.create = async (payload) => ({
+      _id: '507f1f77bcf86cd799439012',
+      ...payload,
+      createdAt: new Date('2026-04-19T12:30:00.000Z'),
+      updatedAt: new Date('2026-04-19T12:30:00.000Z'),
+    });
+
+    const res = await request(app)
+      .post('/api/community/youth-pulse/submissions')
+      .send({
+        fullName: 'Riya Shah',
+        email: 'riya@example.com',
+        mobile: '+91 8888888888',
+        college: 'St Xavier College',
+        city: 'Vadodara',
+        state: 'Gujarat',
+        track: 'student-voices',
+        submissionType: 'reported_story',
+        headline: 'Student union raises transport issue',
+        story: 'Students said the late bus schedule is affecting attendance.',
+        knowledgeSource: 'first-hand',
+        consents: {
+          truthful: true,
+          rightsToShare: true,
+          editorialReviewAllowed: true,
+          noUnsafeFalseAbusiveContent: true,
+        },
+      });
+
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.submissionId, '507f1f77bcf86cd799439012');
+    assert.equal(res.body.item.status, 'new');
+    assert.equal(res.body.item.track, 'student-voices');
+    assert.equal(res.body.item.originType, 'youth_submission');
+    assert.equal(res.body.item.headline, 'Student union raises transport issue');
+  } finally {
+    CommunitySubmission.create = originalCreate;
+  }
+});

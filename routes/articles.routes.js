@@ -747,7 +747,9 @@ function _buildSharedSyncFieldsFromBody(body) {
 
 function _buildSponsoredArticleFieldsFromBody(body) {
   const b = body && typeof body === 'object' ? body : {};
-  const isSponsored = _normalizeOptionalBoolean(b.isSponsored);
+  const isSponsoredArticle = _normalizeOptionalBoolean(
+    b.isSponsoredArticle !== undefined ? b.isSponsoredArticle : b.isSponsored
+  );
   const sponsorFeatureEligible = _normalizeOptionalBoolean(b.sponsorFeatureEligible);
   const sponsorName = _normalizeOptionalString(b.sponsorName);
   const sponsorLabel = _normalizeOptionalString(b.sponsorLabel);
@@ -769,6 +771,7 @@ function _buildSponsoredArticleFieldsFromBody(body) {
 
   const hasSponsoredPayload = [
     'isSponsored',
+    'isSponsoredArticle',
     'sponsorName',
     'sponsorLabel',
     'sponsorDisclosure',
@@ -781,7 +784,10 @@ function _buildSponsoredArticleFieldsFromBody(body) {
   return {
     ok: true,
     value: {
-      ...(isSponsored !== undefined ? { isSponsored: Boolean(isSponsored) } : {}),
+      ...(isSponsoredArticle !== undefined ? {
+        isSponsored: Boolean(isSponsoredArticle),
+        isSponsoredArticle: Boolean(isSponsoredArticle),
+      } : {}),
       ...(sponsorName !== undefined ? { sponsorName } : {}),
       ...((sponsorLabel !== undefined || hasSponsoredPayload) ? { sponsorLabel: sponsorLabel || 'Sponsored' } : {}),
       ...(sponsorDisclosure !== undefined ? { sponsorDisclosure } : {}),

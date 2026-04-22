@@ -14,8 +14,10 @@ function formatFeatureToggleResponse(data) {
 	const payload = {
 		communityReporterClosed: !!data?.communityReporterClosed,
 		reporterPortalClosed: !!data?.reporterPortalClosed,
+		youthPulseSubmissionsClosed: !!data?.youthPulseSubmissionsClosed,
 		communityReporterEnabled: data?.communityReporterEnabled !== false,
 		reporterPortalEnabled: data?.reporterPortalEnabled !== false,
+		youthPulseSubmissionsEnabled: data?.youthPulseSubmissionsEnabled !== false,
 		updatedAt: data?.updatedAt || null,
 	};
 	return {
@@ -38,8 +40,10 @@ async function saveFeatureToggles(req, res) {
 		return res.json(formatFeatureToggleResponse({
 			communityReporterClosed: !!doc?.communityReporterClosed,
 			reporterPortalClosed: !!doc?.reporterPortalClosed,
+			youthPulseSubmissionsClosed: !!doc?.youthPulseSubmissionsClosed,
 			communityReporterEnabled: effective.communityReporterEnabled,
 			reporterPortalEnabled: effective.reporterPortalEnabled,
+			youthPulseSubmissionsEnabled: effective.youthPulseSubmissionsEnabled,
 			updatedAt: effective.updatedAt,
 		}));
 	} catch (err) {
@@ -64,8 +68,10 @@ router.get('/feature-toggles', requireFounderAuth, async (req, res) => {
 		res.json(formatFeatureToggleResponse({
 			communityReporterClosed: !!doc?.communityReporterClosed,
 			reporterPortalClosed: !!doc?.reporterPortalClosed,
+			youthPulseSubmissionsClosed: !!doc?.youthPulseSubmissionsClosed,
 			communityReporterEnabled: effective.communityReporterEnabled,
 			reporterPortalEnabled: effective.reporterPortalEnabled,
+			youthPulseSubmissionsEnabled: effective.youthPulseSubmissionsEnabled,
 			updatedAt: effective.updatedAt,
 		}));
 	} catch (err) {

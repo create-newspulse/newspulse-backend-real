@@ -10,6 +10,7 @@ const FOUNDER_TOGGLE_KEY = 'community_feature_toggles';
 const DEFAULT_FOUNDER_TOGGLES = {
   communityReporterClosed: false,
   reporterPortalClosed: false,
+  youthPulseSubmissionsClosed: false,
 };
 
 function toPlain(doc) {
@@ -86,6 +87,10 @@ function getLegacyClosedToggles({ featureToggles, communityFeatureSettings, comm
         : undefined,
       DEFAULT_FOUNDER_TOGGLES.reporterPortalClosed
     ),
+    youthPulseSubmissionsClosed: pickBoolean(
+      featureToggles && featureToggles.youthPulseSubmissionsClosed,
+      DEFAULT_FOUNDER_TOGGLES.youthPulseSubmissionsClosed
+    ),
   };
 }
 
@@ -134,6 +139,9 @@ async function updateFounderToggles(patch = {}) {
   if (typeof patch.reporterPortalClosed === 'boolean') {
     cleanPatch.reporterPortalClosed = patch.reporterPortalClosed;
   }
+  if (typeof patch.youthPulseSubmissionsClosed === 'boolean') {
+    cleanPatch.youthPulseSubmissionsClosed = patch.youthPulseSubmissionsClosed;
+  }
 
   const existing = await getFounderToggleDoc({ createIfMissing: false });
   const seed = existing
@@ -148,6 +156,9 @@ async function updateFounderToggles(patch = {}) {
   }
   if (!Object.prototype.hasOwnProperty.call(cleanPatch, 'reporterPortalClosed')) {
     setOnInsert.reporterPortalClosed = seed.reporterPortalClosed;
+  }
+  if (!Object.prototype.hasOwnProperty.call(cleanPatch, 'youthPulseSubmissionsClosed')) {
+    setOnInsert.youthPulseSubmissionsClosed = seed.youthPulseSubmissionsClosed;
   }
 
   return findOneAndUpdatePlain(
@@ -177,6 +188,9 @@ async function getEffectiveCommunityAccessState({ ensureFounderDoc = false } = {
   const reporterPortalClosed = typeof founderDoc?.reporterPortalClosed === 'boolean'
     ? founderDoc.reporterPortalClosed
     : legacyClosed.reporterPortalClosed;
+  const youthPulseSubmissionsClosed = typeof founderDoc?.youthPulseSubmissionsClosed === 'boolean'
+    ? founderDoc.youthPulseSubmissionsClosed
+    : legacyClosed.youthPulseSubmissionsClosed;
 
   const rawAllowNewSubmissions = pickBoolean(
     communitySettings && communitySettings.allowNewSubmissions,
@@ -209,6 +223,7 @@ async function getEffectiveCommunityAccessState({ ensureFounderDoc = false } = {
 
   const communityReporterEnabled = !communityReporterClosed;
   const reporterPortalEnabled = !reporterPortalClosed;
+  const youthPulseSubmissionsEnabled = !youthPulseSubmissionsClosed;
   const allowNewSubmissions = communityReporterEnabled && rawAllowNewSubmissions;
   const communityMyStoriesEnabled = reporterPortalEnabled && rawAllowMyStoriesPortal && rawCommunityMyStoriesEnabled;
   const allowMyStoriesPortal = reporterPortalEnabled && rawAllowMyStoriesPortal && rawCommunityMyStoriesEnabled;
@@ -216,8 +231,10 @@ async function getEffectiveCommunityAccessState({ ensureFounderDoc = false } = {
   return {
     communityReporterClosed,
     reporterPortalClosed,
+    youthPulseSubmissionsClosed,
     communityReporterEnabled,
     reporterPortalEnabled,
+    youthPulseSubmissionsEnabled,
     allowNewSubmissions,
     allowMyStoriesPortal,
     communityMyStoriesEnabled,

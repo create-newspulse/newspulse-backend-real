@@ -1082,39 +1082,23 @@ async function getCommunityReporterQueue(req, res) {
         message: 'Community reporter queue',
       });
     }
+    const { listSharedCommunityReporterQueue } = require('../services/sharedCommunityReporterQueue.service');
+    const result = await listSharedCommunityReporterQueue(req.query || {});
 
-    const status = (req.query.status || 'pending').toString();
-    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
-    const skip = (page - 1) * limit;
-
-    const filter = buildCommunitySubmissionAdminFilter(req.query, { defaultStatus: status });
-
-    const [docs, total] = await Promise.all([
-      CommunitySubmission.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      CommunitySubmission.countDocuments(filter),
-    ]);
-
-    const data = docs.map(d => ({
-      id: d._id.toString(),
-      headline: d.headline || '',
-      category: d.category || null,
-      desk: getSubmissionDeskMetadata(d).desk || null,
-      track: getSubmissionDeskMetadata(d).track || null,
-      reporter: (d.contact && d.contact.name) || d.reporterName || d.name || 'Unknown',
-      reporterName: (d.contact && d.contact.name) || d.reporterName || d.name || null,
-      reporterEmail: d.reporterEmailNorm || d.reporterEmail || d.email || (d.contact && d.contact.email) || null,
-      reporterPhone: (d.contact && d.contact.phone) || null,
-      location: d.reporterLocation || (d.location && d.location.city) || d.city || null,
-      locationObj: d.location || d.locationDetail || null,
-      attachments: Array.isArray(d.attachments) ? d.attachments : [],
-      priority: d.priority || 'normal',
-      aiRisk: typeof d.riskScore === 'number' ? d.riskScore : null,
-      status: d.status || 'under_review',
-      createdAt: d.createdAt || null,
-    }));
-
-    return res.status(200).json({ ok: true, success: true, status: 200, data, meta: { statusFilter: status, total, page, limit }, message: 'Community reporter queue' });
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: 200,
+      data: result.items,
+      meta: {
+        statusFilter: result.statusFilter,
+        sourceFilter: result.sourceFilter,
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+      },
+      message: 'Community reporter queue',
+    });
   } catch (err) {
     console.error('Error in GET /api/community-reporter/queue:', err?.message || err);
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to load community reporter queue' });

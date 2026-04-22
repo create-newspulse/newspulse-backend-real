@@ -478,6 +478,7 @@ const PUBLIC_SELECT = [
   'spotlightPriority',
   'spotlightExpiresAt',
   'isSponsored',
+  'isSponsoredArticle',
   'sponsorName',
   'sponsorLabel',
   'sponsorDisclosure',
@@ -526,6 +527,7 @@ const PUBLIC_ARTICLE_DETAIL_SELECT = [
   'spotlightPriority',
   'spotlightExpiresAt',
   'isSponsored',
+  'isSponsoredArticle',
   'sponsorName',
   'sponsorLabel',
   'sponsorDisclosure',
@@ -556,6 +558,7 @@ function _mapPublicArticleToNewsLikeShape(articleDoc) {
   out.summary = out.summary || out.description || '';
   out.lang = out.lang || out.language || out.originalLang || 'en';
   out.language = out.language || out.lang || 'en';
+  if (out.isSponsoredArticle === true && out.isSponsored !== true) out.isSponsored = true;
   if (out.isSponsored === true && !out.sponsorLabel) out.sponsorLabel = 'Sponsored';
   return out;
 }

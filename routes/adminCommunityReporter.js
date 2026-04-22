@@ -2,11 +2,21 @@ const express = require('express');
 const { requireAdminAuth, requireFounderOrAdmin } = require('../middleware/adminAuth');
 const ReporterContact = require('../models/ReporterContact');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const YouthPulseSubmission = require('../models/YouthPulseSubmission');
 const { addStrikeForReporter } = require('../services/reporterSafetyService');
 const News = require('../models/News');
 const mongoose = require('mongoose');
 const { upsertReporterContact } = require('../services/reporterContactService');
 const { findReporterContactByIdentifier } = require('../services/reporterLookup.service');
+const {
+  createYouthPulseDraft,
+  getYouthPulseSubmissionById,
+  normalizeYouthPulseStatus,
+  toYouthPulseAdminDto,
+} = require('../services/youthPulseSubmission.service');
+const {
+  listSharedCommunityReporterQueue,
+} = require('../services/sharedCommunityReporterQueue.service');
 const {
   WORKFLOW_STATUSES,
   YOUTH_PULSE_DESK,
@@ -229,24 +239,66 @@ function buildSubmissionListResponse(items) {
 
 async function listAdminSubmissions(req, res, options = {}) {
   try {
-    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
-    const limitRaw = Math.max(parseInt(req.query.limit || '20', 10), 1);
-    const limit = Math.min(limitRaw, 100);
-    const skip = (page - 1) * limit;
-    const filter = buildCommunitySubmissionAdminFilter(req.query, {
-      defaultStatus: req.query.status || 'pending',
-      forceDesk: options.forceDesk || null,
+    const result = await listSharedCommunityReporterQueue(
+      options.forceDesk ? { ...(req.query || {}), sourceType: 'youth_pulse' } : (req.query || {}),
+      options
+    );
+
+    return res.json({
+      success: true,
+      submissions: result.items,
+      total: result.total,
+      page: result.page,
+      limit: result.limit,
+      meta: {
+        statusFilter: result.statusFilter,
+        sourceFilter: result.sourceFilter,
+      },
     });
-
-    const [items, total] = await Promise.all([
-      CommunitySubmission.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      CommunitySubmission.countDocuments(filter),
-    ]);
-
-    return res.json({ success: true, submissions: buildSubmissionListResponse(items), total, page, limit });
   } catch (err) {
     console.error('[ADMIN_COMMUNITY_REPORTER][submissions] error', err?.message || err);
     return res.status(500).json({ ok: false, message: 'Failed to load submissions' });
+  }
+}
+
+async function loadSharedSubmissionById(id) {
+  if (!id || !/^[a-fA-F0-9]{24}$/.test(String(id))) return null;
+
+  const communitySubmission = await CommunitySubmission.findById(id);
+  if (communitySubmission) {
+    return { kind: 'community_reporter', submission: communitySubmission };
+  }
+
+  const youthSubmission = await getYouthPulseSubmissionById(id);
+  if (youthSubmission) {
+    return { kind: 'youth_pulse', submission: youthSubmission };
+  }
+
+  return null;
+}
+
+function mapYouthStatusFromSharedInput(req) {
+  const direct = normalizeYouthPulseStatus(
+    req.body?.status || req.body?.workflowStatus || req.body?.nextStatus,
+    null
+  );
+  if (direct) return direct;
+
+  const workflowStatus = normalizeWorkflowStatus(
+    req.body?.status || req.body?.workflowStatus || req.body?.nextStatus,
+    null
+  );
+  switch (workflowStatus) {
+    case 'APPROVED':
+      return 'approved';
+    case 'REJECTED':
+      return 'rejected';
+    case 'PUBLISHED':
+      return 'published';
+    case 'NEW':
+      return 'new';
+    default:
+      return 'under_review';
   }
 }
 
@@ -255,6 +307,37 @@ async function updateSubmissionWorkflowStatus(req, res) {
     const { id } = req.params || {};
     if (!id || !/^[a-fA-F0-9]{24}$/.test(id)) {
       return res.status(400).json({ ok: false, message: 'Invalid submission id' });
+    }
+
+    const loaded = await loadSharedSubmissionById(id);
+    if (!loaded) return res.status(404).json({ ok: false, message: 'Submission not found' });
+
+    if (loaded.kind === 'youth_pulse') {
+      const submission = loaded.submission;
+      const nextStatus = mapYouthStatusFromSharedInput(req);
+      if (!nextStatus) {
+        return res.status(400).json({ ok: false, message: 'Invalid workflow status' });
+      }
+
+      submission.status = nextStatus;
+      submission.reviewedBy = (req.admin && (req.admin.email || req.admin.id)) || 'system';
+      if (nextStatus === 'approved') {
+        submission.approvedBy = submission.reviewedBy;
+        submission.rejectionReason = null;
+      }
+      if (nextStatus === 'rejected') {
+        const reason = String(req.body?.rejectReason || req.body?.rejectionReason || req.body?.reason || '').trim();
+        if (!reason) {
+          return res.status(400).json({ ok: false, message: 'rejectionReason is required when rejecting' });
+        }
+        submission.rejectionReason = reason;
+      }
+      if (nextStatus === 'published' && !submission.linkedArticleId) {
+        return res.status(409).json({ ok: false, message: 'Publish handoff required before marking submission as published' });
+      }
+
+      await submission.save();
+      return res.json({ ok: true, success: true, submission: toYouthPulseAdminDto(submission.toObject ? submission.toObject() : submission) });
     }
 
     const workflowStatus = normalizeWorkflowStatus(
@@ -300,6 +383,32 @@ async function createSubmissionPublishHandoff(req, res) {
       return res.status(400).json({ ok: false, message: 'Invalid submission id' });
     }
 
+    const loaded = await loadSharedSubmissionById(id);
+    if (!loaded) return res.status(404).json({ ok: false, message: 'Submission not found' });
+
+    if (loaded.kind === 'youth_pulse') {
+      const submission = loaded.submission;
+      const currentStatus = normalizeYouthPulseStatus(submission.status, 'new');
+      if (!['approved', 'draft_created', 'published'].includes(currentStatus)) {
+        return res.status(409).json({ ok: false, message: 'Submission must be approved before publish handoff' });
+      }
+
+      const { submission: draftedSubmission, article } = await createYouthPulseDraft(submission, {
+        admin: (req.admin && (req.admin.email || req.admin.id)) || 'system',
+      });
+
+      return res.json({
+        ok: true,
+        success: true,
+        handoff: 'draft_created',
+        articleId: article && article._id ? String(article._id) : null,
+        submissionId: String(draftedSubmission._id),
+        submissionStatus: draftedSubmission.status,
+        sourceType: 'youth_pulse',
+        desk: 'youth-pulse',
+      });
+    }
+
     const submission = await CommunitySubmission.findById(id);
     if (!submission) return res.status(404).json({ ok: false, message: 'Submission not found' });
 
@@ -322,6 +431,7 @@ async function createSubmissionPublishHandoff(req, res) {
       articleId: article && article._id ? String(article._id) : null,
       submissionId: String(submission._id),
       submissionStatus: submission.status,
+      sourceType: 'community_reporter',
       desk: getSubmissionDeskMetadata(submission).desk || null,
     });
   } catch (e) {
@@ -333,12 +443,117 @@ async function createSubmissionPublishHandoff(req, res) {
 // Placeholder admin community-reporter routes to ensure server boots.
 // Keep responses minimal; real implementations can extend these.
 router.get('/submissions', requireAdminAuth, (req, res) => listAdminSubmissions(req, res));
-router.get('/youth-pulse', requireAdminAuth, (req, res) => listAdminSubmissions(req, res, { forceDesk: YOUTH_PULSE_DESK }));
-router.get('/youth-pulse/submissions', requireAdminAuth, (req, res) => listAdminSubmissions(req, res, { forceDesk: YOUTH_PULSE_DESK }));
 router.patch('/submissions/:id/status', requireAdminAuth, updateSubmissionWorkflowStatus);
-router.patch('/youth-pulse/submissions/:id/status', requireAdminAuth, updateSubmissionWorkflowStatus);
 router.post('/submissions/:id/publish-handoff', requireAdminAuth, createSubmissionPublishHandoff);
-router.post('/youth-pulse/submissions/:id/publish-handoff', requireAdminAuth, createSubmissionPublishHandoff);
+
+async function loadYouthPulseQueueSubmission(id) {
+  return getYouthPulseSubmissionById(id);
+}
+
+async function listYouthPulseQueue(req, res) {
+  try {
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limitRaw = Math.max(parseInt(req.query.limit || '20', 10), 1);
+    const limit = Math.min(limitRaw, 100);
+    const skip = (page - 1) * limit;
+    const filter = { sourceType: 'youth_pulse' };
+    const status = normalizeYouthPulseStatus(req.query.status, null);
+    const track = String(req.query.track || '').trim();
+
+    if (status) filter.status = status;
+    if (track) filter.track = track;
+
+    const [items, total] = await Promise.all([
+      YouthPulseSubmission.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      YouthPulseSubmission.countDocuments(filter),
+    ]);
+
+    return res.json({
+      success: true,
+      submissions: items.map((item) => toYouthPulseAdminDto(item)),
+      total,
+      page,
+      limit,
+    });
+  } catch (err) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][youth-pulse-list] error', err?.message || err);
+    return res.status(500).json({ ok: false, message: 'Failed to load Youth Pulse queue' });
+  }
+}
+
+async function updateYouthPulseQueueStatus(req, res) {
+  try {
+    const submission = await loadYouthPulseQueueSubmission(req.params.id);
+    if (!submission) return res.status(404).json({ ok: false, message: 'Youth Pulse submission not found' });
+
+    const nextStatus = normalizeYouthPulseStatus(req.body?.status, null);
+    if (!nextStatus) return res.status(400).json({ ok: false, message: 'Invalid Youth Pulse status' });
+
+    submission.status = nextStatus;
+    if (nextStatus === 'approved') {
+      submission.approvedBy = (req.admin && (req.admin.email || req.admin.id)) || 'admin';
+      submission.rejectionReason = null;
+    }
+    if (nextStatus === 'rejected') {
+      const reason = String(req.body?.rejectionReason || req.body?.reason || '').trim();
+      if (!reason) return res.status(400).json({ ok: false, message: 'rejectionReason is required' });
+      submission.rejectionReason = reason;
+    }
+    submission.reviewedBy = (req.admin && (req.admin.email || req.admin.id)) || 'admin';
+    await submission.save();
+
+    return res.json({ ok: true, success: true, submission: toYouthPulseAdminDto(submission.toObject ? submission.toObject() : submission) });
+  } catch (err) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][youth-pulse-status] error', err?.message || err);
+    return res.status(500).json({ ok: false, message: 'Failed to update Youth Pulse submission' });
+  }
+}
+
+async function createYouthPulseQueueDraft(req, res) {
+  try {
+    const submission = await loadYouthPulseQueueSubmission(req.params.id);
+    if (!submission) return res.status(404).json({ ok: false, message: 'Youth Pulse submission not found' });
+
+    const { submission: draftedSubmission, article } = await createYouthPulseDraft(submission, {
+      admin: (req.admin && (req.admin.email || req.admin.id)) || 'admin',
+    });
+
+    return res.json({
+      ok: true,
+      success: true,
+      handoff: 'draft_created',
+      submission: toYouthPulseAdminDto(draftedSubmission.toObject ? draftedSubmission.toObject() : draftedSubmission),
+      articleId: article && article._id ? String(article._id) : null,
+    });
+  } catch (err) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][youth-pulse-draft] error', err?.message || err);
+    return res.status(err?.statusCode || 500).json({ ok: false, message: err?.message || 'Failed to create Youth Pulse draft' });
+  }
+}
+
+router.get('/youth-pulse', requireAdminAuth, listYouthPulseQueue);
+router.get('/youth-pulse/submissions', requireAdminAuth, listYouthPulseQueue);
+router.get('/youth-pulse/submissions/:id', requireAdminAuth, async (req, res) => {
+  try {
+    const submission = await loadYouthPulseQueueSubmission(req.params.id);
+    if (!submission) return res.status(404).json({ ok: false, message: 'Youth Pulse submission not found' });
+    return res.json({ ok: true, success: true, submission: toYouthPulseAdminDto(submission.toObject ? submission.toObject() : submission) });
+  } catch (err) {
+    console.error('[ADMIN_COMMUNITY_REPORTER][youth-pulse-detail] error', err?.message || err);
+    return res.status(500).json({ ok: false, message: 'Failed to load Youth Pulse submission' });
+  }
+});
+router.patch('/youth-pulse/submissions/:id/status', requireAdminAuth, updateYouthPulseQueueStatus);
+router.post('/youth-pulse/submissions/:id/approve', requireAdminAuth, async (req, res) => {
+  req.body = { ...(req.body || {}), status: 'approved' };
+  return updateYouthPulseQueueStatus(req, res);
+});
+router.post('/youth-pulse/submissions/:id/reject', requireAdminAuth, async (req, res) => {
+  req.body = { ...(req.body || {}), status: 'rejected' };
+  return updateYouthPulseQueueStatus(req, res);
+});
+router.post('/youth-pulse/submissions/:id/create-draft', requireAdminAuth, createYouthPulseQueueDraft);
+router.post('/youth-pulse/submissions/:id/publish-handoff', requireAdminAuth, createYouthPulseQueueDraft);
 
 // GET /admin/community/journalist-applications
 router.get('/journalist-applications', requireAdminAuth, async (req, res) => {

@@ -1,12 +1,14 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const YouthPulseSubmission = require('../models/YouthPulseSubmission');
 const { runCommunityAiReview } = require('../services/communityAiReview');
 const {
   buildYouthPulseSubmissionCreate,
   toYouthPulseAdminDto,
   validateYouthPulsePublicPayload,
 } = require('../services/youthPulseSubmission.service');
+const { syncYouthPulseContributorStats, upsertYouthPulseContributor } = require('../services/youthPulseContributor.service');
 const {
   COMMUNITY_REPORTER_CATEGORIES,
   extractSubmissionAttachments,
@@ -14,21 +16,86 @@ const {
   normalizeCommunityReporterCategory,
   normalizeWorkflowStatus,
 } = require('../services/communitySubmissionWorkflow');
+const { getEffectiveCommunityAccessState } = require('../services/communityAccessToggleService');
 const router = express.Router();
+
+function shouldLogYouthPulsePublic() {
+  return String(process.env.NODE_ENV || '').toLowerCase() !== 'production';
+}
+
+function summarizeYouthPulsePayload(body = {}) {
+  const rawStory = body.storyBody || body.story || body.body || body.content || '';
+  return {
+    keys: Object.keys(body || {}).sort(),
+    track: body.track || body.selectedPublicTrack || null,
+    submissionType: body.submissionType || body.storyType || body.contentType || null,
+    hasStory: Boolean(String(rawStory || '').trim()),
+    storyLength: String(rawStory || '').trim().length,
+    hasKnowledgeSource: body.firstHandClaim !== undefined
+      || body.firstHand !== undefined
+      || body.isFirstHand !== undefined
+      || body.knowledgeSource !== undefined,
+    hasConsentGroup: Boolean(body.consents || body.consent || body.requiredConsents),
+  };
+}
+
+function logYouthPulsePublic(event, payload) {
+  if (!shouldLogYouthPulsePublic()) return;
+  try {
+    console.log(`[YOUTH_PULSE][public] ${event}`, payload);
+  } catch (_) {}
+}
 
 async function createYouthPulseSubmission(req, res) {
   try {
+    const accessState = await getEffectiveCommunityAccessState();
+    if (accessState.youthPulseSubmissionsClosed) {
+      return res.status(403).json({
+        ok: false,
+        success: false,
+        message: 'Youth Pulse submissions are temporarily closed.',
+      });
+    }
+
+    logYouthPulsePublic('request_received', summarizeYouthPulsePayload(req.body || {}));
+
     const parsed = validateYouthPulsePublicPayload(req.body || {});
     if (parsed.errors.length) {
+      logYouthPulsePublic('validation_failed', {
+        summary: summarizeYouthPulsePayload(req.body || {}),
+        errors: parsed.errors,
+        fieldErrors: parsed.fieldErrors,
+      });
       return res.status(400).json({
         success: false,
         ok: false,
         message: 'Validation failed',
         errors: parsed.errors,
+        fieldErrors: parsed.fieldErrors,
       });
     }
 
-    const submission = await CommunitySubmission.create(buildYouthPulseSubmissionCreate(parsed.value, req));
+    const contributor = await upsertYouthPulseContributor({
+      fullName: parsed.value.fullName,
+      email: parsed.value.email,
+      mobile: parsed.value.mobile,
+      college: parsed.value.college,
+      city: parsed.value.city,
+      state: parsed.value.state,
+      lastSubmissionAt: new Date(),
+    });
+
+    const submission = await YouthPulseSubmission.create(
+      buildYouthPulseSubmissionCreate(parsed.value, req, contributor._id)
+    );
+    await syncYouthPulseContributorStats(contributor._id).catch(() => null);
+
+    logYouthPulsePublic('submission_created', {
+      submissionId: String(submission._id),
+      status: submission.status,
+      track: submission.track || null,
+      sourceType: submission.sourceType || null,
+    });
 
     return res.status(201).json({
       success: true,
@@ -39,6 +106,11 @@ async function createYouthPulseSubmission(req, res) {
     });
   } catch (err) {
     console.error('[YOUTH_PULSE][create] error', err);
+    logYouthPulsePublic('submission_failed', {
+      name: err?.name || null,
+      message: err?.message || null,
+      validationKeys: err?.errors ? Object.keys(err.errors) : [],
+    });
     if (err && err.name === 'ValidationError') {
       return res.status(400).json({ success: false, ok: false, message: 'Validation error', details: err.errors });
     }
