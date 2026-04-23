@@ -35,6 +35,9 @@ const sponsoredFeatureSchema = new mongoose.Schema(
     labelText: { type: String, default: 'Sponsored Feature', trim: true },
     linkedArticleId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
     linkedArticleUrl: { type: String, default: null, trim: true },
+    comboCampaign: {
+      isActive: { type: Boolean, default: true },
+    },
     priority: { type: Number, default: 0, index: true },
   },
   { timestamps: true }
@@ -45,6 +48,12 @@ sponsoredFeatureSchema.pre('validate', function preValidate(next) {
     this.type = SPONSORED_FEATURE_TYPE;
     this.placementKey = normalizePlacementKey(this.placementKey || this.placement) || this.placementKey;
     this.placement = placementKeyToPlacement(this.placementKey) || this.placement || 'homepage_sponsored_feature';
+    if (!this.comboCampaign || typeof this.comboCampaign !== 'object') {
+      this.comboCampaign = { isActive: true };
+    }
+    if (typeof this.comboCampaign.comboCampaignIsActive === 'boolean' && typeof this.comboCampaign.isActive !== 'boolean') {
+      this.comboCampaign.isActive = this.comboCampaign.comboCampaignIsActive;
+    }
   } catch (_) {}
   next();
 });

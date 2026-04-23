@@ -33,6 +33,18 @@ const LINKED_ARTICLE_SELECT = [
   'sponsorFeatureLinkedId',
 ].join(' ');
 
+const LINKED_FEATURE_SELECT = [
+  'sponsorName',
+  'headline',
+  'ctaText',
+  'destinationUrl',
+  'isActive',
+  'linkedArticleId',
+  'comboCampaign',
+  'updatedAt',
+  'createdAt',
+].join(' ');
+
 function _coverImageUrl(doc) {
   if (!doc || typeof doc !== 'object') return null;
   if (doc.coverImage && typeof doc.coverImage === 'object' && !Array.isArray(doc.coverImage)) {
@@ -94,11 +106,58 @@ function isSponsoredArticleDoc(doc) {
   return !!(doc && (doc.isSponsoredArticle === true || doc.isSponsored === true));
 }
 
+function isComboCampaignEnabled(featureDoc) {
+  return !(featureDoc && featureDoc.comboCampaign && featureDoc.comboCampaign.isActive === false);
+}
+
 function deriveEffectiveDestination(featureDoc, linkedArticle) {
-  if (linkedArticle && linkedArticle.path) return linkedArticle.path;
+  if (isComboCampaignEnabled(featureDoc) && linkedArticle && linkedArticle.path) return linkedArticle.path;
   if (featureDoc && featureDoc.destinationUrl) return String(featureDoc.destinationUrl);
-  if (featureDoc && featureDoc.linkedArticleUrl) return String(featureDoc.linkedArticleUrl);
   return null;
+}
+
+function doesFeatureLinkToArticle(featureDoc, articleDoc) {
+  const linkedArticleId = String(featureDoc?.linkedArticleId || '').trim();
+  if (!linkedArticleId) return false;
+
+  const candidates = new Set(
+    [
+      articleDoc?._id,
+      articleDoc?.sourceNewsId,
+    ]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+  );
+
+  return candidates.has(linkedArticleId);
+}
+
+async function getLinkedSponsoredFeatureForArticle(articleDoc, { now = new Date() } = {}) {
+  if (!isSponsoredArticleDoc(articleDoc)) return null;
+
+  const featureId = String(articleDoc?.sponsorFeatureLinkedId || '').trim();
+  if (!mongoose.Types.ObjectId.isValid(featureId)) return null;
+
+  const featureDoc = await SponsoredFeature.findById(featureId).select(LINKED_FEATURE_SELECT).lean();
+  if (!featureDoc || !isComboCampaignEnabled(featureDoc) || !featureDoc.linkedArticleId) return null;
+
+  const linkedArticleDoc = await findLinkedArticleByAnyId(featureDoc.linkedArticleId, { publicOnly: true, now });
+  if (!linkedArticleDoc || !isSponsoredArticleDoc(linkedArticleDoc)) return null;
+  if (!doesFeatureLinkToArticle(featureDoc, articleDoc)) return null;
+
+  const linkedArticle = buildLinkedArticleDto(linkedArticleDoc);
+  return {
+    id: String(featureDoc._id || ''),
+    sponsorName: featureDoc.sponsorName || null,
+    headline: featureDoc.headline || null,
+    ctaText: featureDoc.ctaText || null,
+    destinationUrl: featureDoc.destinationUrl || null,
+    isActive: featureDoc.isActive === true,
+    comboCampaignIsActive: true,
+    linkedArticleId: String(featureDoc.linkedArticleId || '') || null,
+    linkedArticleSlug: linkedArticle?.slug || null,
+    linkedArticlePath: linkedArticle?.path || null,
+  };
 }
 
 function buildActiveSponsoredFeatureFilter(placementKey) {
@@ -119,6 +178,13 @@ function toPublicSponsoredFeatureDto(featureDoc, linkedArticle) {
   if (!featureDoc) return null;
   const linkedArticleDto = linkedArticle ? buildLinkedArticleDto(linkedArticle) : null;
   const targetUrl = deriveEffectiveDestination(featureDoc, linkedArticleDto);
+  const usesLinkedArticle = Boolean(
+    isComboCampaignEnabled(featureDoc)
+    && linkedArticleDto
+    && linkedArticleDto.path
+    && targetUrl
+    && targetUrl === linkedArticleDto.path
+  );
   return {
     label: featureDoc.labelText || 'Sponsored Feature',
     sponsorName: featureDoc.sponsorName || null,
@@ -126,9 +192,9 @@ function toPublicSponsoredFeatureDto(featureDoc, linkedArticle) {
     summary: featureDoc.summary || null,
     ctaText: featureDoc.ctaText || null,
     coverImage: featureDoc.coverImage || null,
-    targetType: linkedArticleDto && linkedArticleDto.path ? 'linked_article' : (targetUrl ? 'external_url' : null),
+    targetType: usesLinkedArticle ? 'linked_article' : (targetUrl ? 'external_url' : null),
     targetUrl,
-    linkedArticle: linkedArticleDto
+    linkedArticle: usesLinkedArticle && linkedArticleDto
       ? {
           slug: linkedArticleDto.slug || null,
           path: linkedArticleDto.path || null,
@@ -167,7 +233,9 @@ module.exports = {
   buildActiveSponsoredFeatureFilter,
   findLinkedArticleByAnyId,
   isSponsoredArticleDoc,
+  isComboCampaignEnabled,
   deriveEffectiveDestination,
+  getLinkedSponsoredFeatureForArticle,
   toPublicSponsoredFeatureDto,
   getActiveSponsoredFeatureByPlacement,
 };

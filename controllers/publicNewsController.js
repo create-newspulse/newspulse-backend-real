@@ -7,6 +7,7 @@ const { ensureOnDemandNewsTranslation, hasFullTranslation } = require('../servic
 const { translateHtmlStrict, detectLangFromContent } = require('../services/articleTranslation.service');
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
 const { buildPubliclyVisiblePublicArticleFilter } = require('../services/publicArticleVisibility.service');
+const { getLinkedSponsoredFeatureForArticle } = require('../services/sponsoredFeatures.service');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
 const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode, detectSlugLocale } = require('../lib/slug');
@@ -770,6 +771,24 @@ function _attachPublicRouteData(doc, requestedLang, { fallbackEnabled = false } 
   };
   doc.canonicalDetailUrl = _buildFrontendNewsPath(doc, safeDetailLang);
   doc.detailApiUrl = _buildPublicNewsApiPath(doc, requested, { fallbackEnabled });
+  return doc;
+}
+
+async function _attachLinkedSponsoredFeature(doc, { now = new Date() } = {}) {
+  if (!doc || (doc.isSponsoredArticle !== true && doc.isSponsored !== true)) {
+    if (doc && typeof doc === 'object') {
+      try { delete doc.linkedSponsoredFeature; } catch (_) {}
+    }
+    return doc;
+  }
+
+  const linkedSponsoredFeature = await getLinkedSponsoredFeatureForArticle(doc, { now });
+  if (linkedSponsoredFeature) {
+    doc.linkedSponsoredFeature = linkedSponsoredFeature;
+  } else {
+    try { delete doc.linkedSponsoredFeature; } catch (_) {}
+  }
+
   return doc;
 }
 
@@ -1560,6 +1579,7 @@ async function getPublicNewsBySlugOrId(req, res) {
       _setBaseLocalizationInPlace(out, base, null);
       try { delete out.translations; } catch (_) {}
       try { delete out.translationStatus; } catch (_) {}
+      await _attachLinkedSponsoredFeature(out);
       attachLocalizationFields(out, out.resolvedLang);
       return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
     }
@@ -1639,6 +1659,7 @@ async function getPublicNewsBySlugOrId(req, res) {
     try { delete out.translationStatus; } catch (_) {}
     try { delete out.translationError; } catch (_) {}
     try { delete out.translationNextRetryAt; } catch (_) {}
+    await _attachLinkedSponsoredFeature(out);
     attachLocalizationFields(out, desired);
     _attachPublicRouteData(out, desired, { fallbackEnabled });
     return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
@@ -1717,6 +1738,7 @@ async function getPublicNewsBySlug(req, res) {
       _setBaseLocalizationInPlace(out, base, null);
       try { delete out.translations; } catch (_) {}
       try { delete out.translationStatus; } catch (_) {}
+      await _attachLinkedSponsoredFeature(out);
       attachLocalizationFields(out, desired);
       return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
     }
@@ -1779,6 +1801,7 @@ async function getPublicNewsBySlug(req, res) {
     try { delete out.translationStatus; } catch (_) {}
     try { delete out.translationError; } catch (_) {}
     try { delete out.translationNextRetryAt; } catch (_) {}
+    await _attachLinkedSponsoredFeature(out);
     attachLocalizationFields(out, desired);
     _attachPublicRouteData(out, desired, { fallbackEnabled });
     return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));

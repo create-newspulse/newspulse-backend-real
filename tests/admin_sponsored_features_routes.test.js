@@ -68,6 +68,7 @@ test('GET /api/admin/sponsored-features/:id returns a dedicated sponsored featur
         destinationUrl: 'https://example.com/landing',
         coverImage: { url: 'https://img.example/feature.jpg', alt: 'Feature card', publicId: null },
         linkedArticleId,
+        comboCampaign: { isActive: true },
         isActive: true,
         startAt: new Date('2026-04-16T10:00:00.000Z'),
         endAt: new Date('2026-05-16T10:00:00.000Z'),
@@ -102,6 +103,12 @@ test('GET /api/admin/sponsored-features/:id returns a dedicated sponsored featur
     assert.equal(res.body.feature.type, 'sponsored_feature');
     assert.equal(res.body.feature.placement, 'homepage_sponsored_feature');
     assert.equal(res.body.feature.linkedSponsoredArticleId, linkedArticleId);
+    assert.equal(res.body.feature.comboCampaignIsActive, true);
+    assert.equal(res.body.feature.commercialState.sponsoredFeature.product, 'sponsored_feature');
+    assert.equal(res.body.feature.commercialState.sponsoredFeature.homepagePlacementOnly, true);
+    assert.equal(res.body.feature.commercialState.sponsoredArticle.product, 'sponsored_article');
+    assert.equal(res.body.feature.commercialState.comboCampaign.product, 'combo_campaign');
+    assert.equal(res.body.feature.commercialState.comboCampaign.isFrontendObject, false);
   } finally {
     SponsoredFeature.findById = prevFindById;
     Article.findOne = prevArticleFindOne;
@@ -175,10 +182,14 @@ test('POST /api/admin/sponsored-features creates a combo feature linked to a pub
     assert.equal(res.body.feature.placementKey, 'HOMEPAGE_SPONSORED_FEATURE');
     assert.equal(res.body.feature.linkedArticleId, linkedArticleId);
     assert.equal(res.body.feature.linkedSponsoredArticleId, linkedArticleId);
+    assert.equal(res.body.feature.comboCampaignIsActive, true);
     assert.equal(res.body.feature.internalCampaignName, 'Homepage combo for Acme');
     assert.equal(res.body.feature.shortSummary, 'Premium placement summary');
     assert.equal(res.body.feature.linkedArticle.slug, 'sponsored-article');
     assert.equal(res.body.feature.linkedArticle.apiUrl, '/api/public/news/sponsored-article');
+    assert.equal(res.body.feature.commercialState.comboCampaign.isActive, true);
+    assert.equal(res.body.feature.commercialState.comboCampaign.components.sponsoredFeatureLive, true);
+    assert.equal(res.body.feature.commercialState.comboCampaign.components.sponsoredArticleLive, true);
     assert.equal(deactivateCalls.length, 1);
     assert.deepEqual(deactivateCalls[0].filter, {
       isActive: true,
@@ -195,6 +206,134 @@ test('POST /api/admin/sponsored-features creates a combo feature linked to a pub
     Article.findOne = prevArticleFindOne;
     Article.updateMany = prevArticleUpdateMany;
     News.updateMany = prevNewsUpdateMany;
+  }
+});
+
+test('PATCH /api/admin/sponsored-features/:id/toggle turns off only the homepage feature and leaves sponsored article live', async () => {
+  const featureId = '507f1f77bcf86cd799439194';
+  const linkedArticleId = '507f1f77bcf86cd799439195';
+  const prevFindById = SponsoredFeature.findById;
+  const prevArticleFindOne = Article.findOne;
+
+  try {
+    SponsoredFeature.findById = async (id) => {
+      if (String(id) !== featureId) return null;
+      return {
+        _id: featureId,
+        placementKey: 'HOMEPAGE_SPONSORED_FEATURE',
+        placement: 'homepage_sponsored_feature',
+        sponsorName: 'Acme Corp',
+        internalTitle: 'Homepage reach only',
+        headline: 'Reach campaign',
+        summary: 'Feature summary',
+        ctaText: 'Read Sponsored Story',
+        destinationUrl: 'https://example.com/landing',
+        coverImage: { url: 'https://img.example/feature.jpg', alt: 'Feature card', publicId: null },
+        linkedArticleId,
+        comboCampaign: { isActive: true },
+        isActive: true,
+        startAt: new Date('2026-04-10T00:00:00.000Z'),
+        endAt: new Date('2026-05-20T00:00:00.000Z'),
+        save: async function save() { return this; },
+      };
+    };
+
+    let articleFindCalls = 0;
+    Article.findOne = () => {
+      articleFindCalls += 1;
+      return makeFindOneResult({
+        _id: linkedArticleId,
+        title: 'Sponsored Article',
+        summary: 'Article summary',
+        slug: 'sponsored-article',
+        language: 'en',
+        coverImage: { url: 'https://img.example/article.jpg', alt: 'Article', publicId: null },
+        isSponsored: true,
+        isSponsoredArticle: true,
+        sponsorName: 'Acme Corp',
+        sponsorFeatureEligible: true,
+        publishedAt: new Date('2026-04-15T10:00:00.000Z'),
+        updatedAt: new Date('2026-04-16T10:00:00.000Z'),
+      });
+    };
+
+    const res = await request(app)
+      .patch(`/api/admin/sponsored-features/${featureId}/toggle`)
+      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+      .send({ isActive: false });
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.feature.isActive, false);
+    assert.equal(res.body.feature.linkedArticle.slug, 'sponsored-article');
+    assert.equal(res.body.feature.commercialState.sponsoredFeature.isLive, false);
+    assert.equal(res.body.feature.commercialState.sponsoredArticle.isLive, true);
+    assert.equal(res.body.feature.commercialState.comboCampaign.isActive, false);
+    assert.ok(articleFindCalls >= 2);
+  } finally {
+    SponsoredFeature.findById = prevFindById;
+    Article.findOne = prevArticleFindOne;
+  }
+});
+
+test('PATCH /api/admin/sponsored-features/:id/combo-toggle turns off only the combo bundle and keeps the feature record active', async () => {
+  const featureId = '507f1f77bcf86cd799439196';
+  const linkedArticleId = '507f1f77bcf86cd799439197';
+  const prevFindById = SponsoredFeature.findById;
+  const prevArticleFindOne = Article.findOne;
+
+  try {
+    SponsoredFeature.findById = async (id) => {
+      if (String(id) !== featureId) return null;
+      return {
+        _id: featureId,
+        placementKey: 'HOMEPAGE_SPONSORED_FEATURE',
+        placement: 'homepage_sponsored_feature',
+        sponsorName: 'Acme Corp',
+        internalTitle: 'Homepage combo bundle',
+        headline: 'Combo campaign',
+        summary: 'Feature summary',
+        ctaText: 'Read Sponsored Story',
+        destinationUrl: 'https://example.com/landing',
+        coverImage: { url: 'https://img.example/feature.jpg', alt: 'Feature card', publicId: null },
+        linkedArticleId,
+        comboCampaign: { isActive: true },
+        isActive: true,
+        startAt: new Date('2026-04-10T00:00:00.000Z'),
+        endAt: new Date('2026-05-20T00:00:00.000Z'),
+        save: async function save() { return this; },
+      };
+    };
+
+    Article.findOne = () => makeFindOneResult({
+      _id: linkedArticleId,
+      title: 'Sponsored Article',
+      summary: 'Article summary',
+      slug: 'sponsored-article',
+      language: 'en',
+      coverImage: { url: 'https://img.example/article.jpg', alt: 'Article', publicId: null },
+      isSponsored: true,
+      isSponsoredArticle: true,
+      sponsorName: 'Acme Corp',
+      sponsorFeatureEligible: true,
+      publishedAt: new Date('2026-04-15T10:00:00.000Z'),
+      updatedAt: new Date('2026-04-16T10:00:00.000Z'),
+    });
+
+    const res = await request(app)
+      .patch(`/api/admin/sponsored-features/${featureId}/combo-toggle`)
+      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+      .send({ isActive: false });
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.feature.isActive, true);
+    assert.equal(res.body.feature.comboCampaignIsActive, false);
+    assert.equal(res.body.feature.commercialState.sponsoredFeature.isLive, true);
+    assert.equal(res.body.feature.commercialState.sponsoredArticle.isLive, true);
+    assert.equal(res.body.feature.commercialState.comboCampaign.isEnabled, false);
+    assert.equal(res.body.feature.commercialState.comboCampaign.isActive, false);
+  } finally {
+    SponsoredFeature.findById = prevFindById;
+    Article.findOne = prevArticleFindOne;
   }
 });
 
@@ -279,6 +418,7 @@ test('GET /api/admin/sponsored-features/dashboard returns list, active count, li
         destinationUrl: 'https://example.com/landing',
         coverImage: { url: 'https://img.example/feature.jpg', alt: 'Feature card', publicId: null },
         linkedArticleId,
+        comboCampaign: { isActive: true },
         isActive: true,
         priority: 10,
         updatedAt: new Date('2026-04-16T10:00:00.000Z'),

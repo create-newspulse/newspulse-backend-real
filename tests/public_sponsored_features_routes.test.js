@@ -260,6 +260,48 @@ test('GET /api/public/sponsored-feature falls back to destinationUrl when linked
   }
 });
 
+test('GET /api/public/sponsored-feature keeps homepage feature live and falls back to destinationUrl when linked sponsored article is no longer public', async () => {
+  const prevSponsoredFind = SponsoredFeature.find;
+  const prevArticleFindOne = Article.findOne;
+
+  try {
+    SponsoredFeature.find = () => makeFindResult([
+      {
+        _id: '507f1f77bcf86cd799439154',
+        sponsorName: 'Reach Sponsor',
+        internalTitle: 'Reach without article visibility',
+        headline: 'Homepage feature remains live',
+        summary: 'Feature summary',
+        ctaText: 'Visit sponsor',
+        destinationUrl: 'https://example.com/reach-only',
+        coverImage: { url: 'https://img.example/reach.jpg', alt: 'Reach', publicId: null },
+        isActive: true,
+        startAt: new Date('2026-04-10T00:00:00.000Z'),
+        endAt: new Date('2026-05-20T00:00:00.000Z'),
+        placementKey: 'HOMEPAGE_SPONSORED_FEATURE',
+        labelText: 'Sponsored Feature',
+        linkedArticleId: '507f1f77bcf86cd799439155',
+        priority: 6,
+        updatedAt: new Date('2026-04-16T00:00:00.000Z'),
+      },
+    ]);
+
+    Article.findOne = () => makeFindOneResult(null);
+
+    const res = await request(app).get('/api/public/sponsored-feature?placement=homepage');
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.feature.headline, 'Homepage feature remains live');
+    assert.equal(res.body.feature.targetType, 'external_url');
+    assert.equal(res.body.feature.targetUrl, 'https://example.com/reach-only');
+    assert.equal(res.body.feature.linkedArticle, null);
+  } finally {
+    SponsoredFeature.find = prevSponsoredFind;
+    Article.findOne = prevArticleFindOne;
+  }
+});
+
 test('GET /api/public/sponsored-feature?placement=homepage matches active placement-only records', async () => {
   const prevSponsoredFind = SponsoredFeature.find;
   let capturedFilter = null;

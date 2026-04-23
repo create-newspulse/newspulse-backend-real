@@ -9,6 +9,7 @@ const {
   createSponsoredFeature,
   updateSponsoredFeature,
   toggleSponsoredFeature,
+  toggleSponsoredFeatureCombo,
   deleteSponsoredFeature,
 } = require('../controllers/admin/sponsoredFeaturesController');
 
@@ -23,6 +24,7 @@ router.get('/sponsored-features/:id', getSponsoredFeature);
 router.post('/sponsored-features', createSponsoredFeature);
 router.put('/sponsored-features/:id', updateSponsoredFeature);
 router.patch('/sponsored-features/:id/toggle', toggleSponsoredFeature);
+router.patch('/sponsored-features/:id/combo-toggle', toggleSponsoredFeatureCombo);
 router.delete('/sponsored-features/:id', deleteSponsoredFeature);
 
 module.exports = router;
