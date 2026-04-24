@@ -23,6 +23,8 @@ async function main() {
   await mongoose.connect(MONGO_URI);
 
   const defaults = buildSlotEnabledDefaults(true, {
+    HOME_LEFT_300x250: false,
+    HOME_LEFT_300x600: false,
     HOME_RIGHT_300x600: false,
     HOME_BILLBOARD_970x250: false,
     BREAKING_SPONSOR: false,
@@ -49,7 +51,7 @@ async function main() {
 
     // Safety defaults for newly-added slots: if the persisted record predates the key,
     // treat it as disabled until explicitly enabled.
-    for (const key of ['FOOTER_BANNER_728x90', 'HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250', 'BREAKING_SPONSOR', 'LIVE_UPDATE_SPONSOR']) {
+    for (const key of ['FOOTER_BANNER_728x90', 'HOME_LEFT_300x250', 'HOME_LEFT_300x600', 'HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250', 'BREAKING_SPONSOR', 'LIVE_UPDATE_SPONSOR']) {
       const rawVal = typeof raw.get === 'function' ? raw.get(key) : raw[key];
       if (typeof rawVal !== 'boolean') slotEnabled[key] = false;
     }

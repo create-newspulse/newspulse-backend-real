@@ -35,6 +35,28 @@ test('GET /api/public/ads?slot=FOOTER_BANNER_728x90 returns stable shape when DB
   assert.equal(res.body.ad, null);
 });
 
+test('GET /api/public/ads?slot=HOME_LEFT_300x250 returns stable shape when DB is not connected', async () => {
+  const res = await request(app).get('/api/public/ads?slot=HOME_LEFT_300x250');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['cache-control'], 'no-store, max-age=0');
+  assert.equal(res.headers.pragma, 'no-cache');
+  assert.equal(res.headers.expires, '0');
+  assert.equal(res.body.ok, false);
+  assert.equal(res.body.enabled, true);
+  assert.equal(res.body.ad, null);
+});
+
+test('GET /api/public/ads?slot=HOME_LEFT_300x600 returns stable shape when DB is not connected', async () => {
+  const res = await request(app).get('/api/public/ads?slot=HOME_LEFT_300x600');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['cache-control'], 'no-store, max-age=0');
+  assert.equal(res.headers.pragma, 'no-cache');
+  assert.equal(res.headers.expires, '0');
+  assert.equal(res.body.ok, false);
+  assert.equal(res.body.enabled, true);
+  assert.equal(res.body.ad, null);
+});
+
 test('GET /api/public/ads?slot=FOOTER_BANNER_728x90&lang=en returns 200', async () => {
   const res = await request(app).get('/api/public/ads?slot=FOOTER_BANNER_728x90&lang=en');
   assert.equal(res.status, 200);
@@ -47,7 +69,7 @@ test('GET /api/public/ads?slot=FOOTER_BANNER_728x90&lang=en returns 200', async 
 });
 
 test('GET /api/public/ads returns 200 (not 400) for new valid slots', async () => {
-  const slots = ['HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250', 'BREAKING_SPONSOR', 'LIVE_UPDATE_SPONSOR'];
+  const slots = ['HOME_LEFT_300x250', 'HOME_LEFT_300x600', 'HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250', 'BREAKING_SPONSOR', 'LIVE_UPDATE_SPONSOR'];
   for (const slot of slots) {
     const res = await request(app).get(`/api/public/ads?slot=${encodeURIComponent(slot)}&lang=en`);
     assert.equal(res.status, 200);

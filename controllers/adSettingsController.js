@@ -6,6 +6,8 @@ const { buildSlotEnabledDefaults, AD_SLOTS } = require('../src/constants/adSlots
 const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.service');
 
 const DEFAULT_SLOT_ENABLED = buildSlotEnabledDefaults(true, {
+  HOME_LEFT_300x250: false,
+  HOME_LEFT_300x600: false,
   HOME_RIGHT_300x600: false,
   HOME_BILLBOARD_970x250: false,
   BREAKING_SPONSOR: false,
@@ -30,6 +32,12 @@ function normalizeSlotEnabled(raw) {
   // treat it as disabled until explicitly enabled.
   if (typeof raw.FOOTER_BANNER_728x90 !== 'boolean') {
     out.FOOTER_BANNER_728x90 = false;
+  }
+  if (typeof raw.HOME_LEFT_300x250 !== 'boolean') {
+    out.HOME_LEFT_300x250 = false;
+  }
+  if (typeof raw.HOME_LEFT_300x600 !== 'boolean') {
+    out.HOME_LEFT_300x600 = false;
   }
   if (typeof raw.HOME_RIGHT_300x600 !== 'boolean') {
     out.HOME_RIGHT_300x600 = false;

@@ -19,6 +19,8 @@ test('GET /api/public/ad-settings returns defaults when DB not connected', async
   assert.deepEqual(res.body.slotEnabled, {
     HOME_728x90: true,
     HOME_BILLBOARD_970x250: false,
+    HOME_LEFT_300x250: false,
+    HOME_LEFT_300x600: false,
     HOME_RIGHT_300x250: true,
     HOME_RIGHT_300x600: false,
     HOME_RIGHT_RAIL: true,
@@ -38,6 +40,8 @@ test('PUT /api/admin/ad-settings persists sponsor slots without changing other p
   let persistedSlotEnabled = {
     HOME_728x90: true,
     HOME_BILLBOARD_970x250: false,
+    HOME_LEFT_300x250: false,
+    HOME_LEFT_300x600: false,
     HOME_RIGHT_300x250: true,
     HOME_RIGHT_300x600: false,
     HOME_RIGHT_RAIL: true,
@@ -91,6 +95,7 @@ test('PUT /api/admin/ad-settings persists sponsor slots without changing other p
       slotEnabled: {
         BREAKING_SPONSOR: true,
         LIVE_UPDATE_SPONSOR: true,
+        HOME_LEFT_300x250: true,
       },
     });
 
@@ -98,6 +103,8 @@ test('PUT /api/admin/ad-settings persists sponsor slots without changing other p
   assert.equal(putRes.body.ok, true);
   assert.equal(putRes.body.slotEnabled.BREAKING_SPONSOR, true);
   assert.equal(putRes.body.slotEnabled.LIVE_UPDATE_SPONSOR, true);
+  assert.equal(putRes.body.slotEnabled.HOME_LEFT_300x250, true);
+  assert.equal(putRes.body.slotEnabled.HOME_LEFT_300x600, false);
   assert.equal(putRes.body.slotEnabled.FOOTER_BANNER_728x90, true);
   assert.equal(putRes.body.slotEnabled.HOME_RIGHT_300x600, false);
 
@@ -109,6 +116,8 @@ test('PUT /api/admin/ad-settings persists sponsor slots without changing other p
   assert.equal(getRes.body.ok, true);
   assert.equal(getRes.body.slotEnabled.BREAKING_SPONSOR, true);
   assert.equal(getRes.body.slotEnabled.LIVE_UPDATE_SPONSOR, true);
+  assert.equal(getRes.body.slotEnabled.HOME_LEFT_300x250, true);
+  assert.equal(getRes.body.slotEnabled.HOME_LEFT_300x600, false);
   assert.equal(getRes.body.slotEnabled.FOOTER_BANNER_728x90, true);
   assert.equal(getRes.body.slotEnabled.HOME_RIGHT_300x600, false);
 });

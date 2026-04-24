@@ -9,6 +9,8 @@ const AdSettingsSchema = new mongoose.Schema(
       type: Map,
       of: Boolean,
       default: () => buildSlotEnabledDefaults(true, {
+        HOME_LEFT_300x250: false,
+        HOME_LEFT_300x600: false,
         HOME_RIGHT_300x600: false,
         HOME_BILLBOARD_970x250: false,
         BREAKING_SPONSOR: false,
