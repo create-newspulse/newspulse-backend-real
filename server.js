@@ -361,6 +361,8 @@ const adminNewsTranslationsRouter = require('./routes/adminNewsTranslations.rout
 const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');
 const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
 const adminTickersSettingsRouter = require('./routes/adminTickersSettings.routes');
+const adminViralVideosRouter = require('./routes/adminViralVideos.routes');
+const publicViralVideosRouter = require('./routes/publicViralVideos.routes');
 const publicBroadcastRouter = require('./routes/publicBroadcast.routes');
 const publicTickerAdsRouter = require('./routes/publicTickerAds.routes');
 const publicApiBroadcastRouter = require('./routes/publicApiBroadcast.routes');
@@ -1769,6 +1771,8 @@ app.use('/admin-api/api/public', publicTickersSettingsRouter);
 
 // Public stories
 app.use('/api/public', publicRoutes);
+app.use('/api/public', publicViralVideosRouter);
+app.use('/api', publicViralVideosRouter);
 
 // Public config version for client-side refresh checks
 app.use('/api/public', publicVersionRouter);
@@ -1812,6 +1816,11 @@ app.use('/admin-api/api/admin', adminSponsoredFeaturesRouter);
 
 // Admin routes for legacy and new admin UI paths
 app.use('/api/admin', adminRoutes); // used by admin UI
+app.use('/api/admin', adminViralVideosRouter);
+app.use('/admin-api/admin', adminViralVideosRouter);
+app.use('/admin-api/api/admin', adminViralVideosRouter);
+app.use('/admin-api', adminViralVideosRouter);
+app.use('/admin-api/api', adminViralVideosRouter);
 app.use('/admin', adminRoutes);     // legacy path
 // Admin sponsor ads
 // Admin API proxy aliases (some admin builds proxy via /admin-api/*)
