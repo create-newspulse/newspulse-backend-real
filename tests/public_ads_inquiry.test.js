@@ -38,9 +38,10 @@ test('POST /api/public/ads/inquiry stores inquiry and triggers email (best-effor
       .send({ name: 'Alice', email: 'alice@example.com', message: 'Hello there' });
 
     assert.equal(res.statusCode, 201);
-    assert.deepEqual(res.body, { success: true, id: fixedId });
+    assert.deepEqual(res.body, { ok: true, success: true, id: fixedId });
 
     assert.ok(createArgs);
+    assert.equal(createArgs.advertiserName, 'Alice');
     assert.equal(createArgs.name, 'Alice');
     assert.equal(createArgs.email, 'alice@example.com');
     assert.equal(createArgs.message, 'Hello there');
@@ -103,12 +104,94 @@ test('POST /api/public/ads/inquiry prefers advertiserEmail when email matches in
       });
 
     assert.equal(res.statusCode, 201);
-    assert.deepEqual(res.body, { success: true, id: fixedId });
+    assert.deepEqual(res.body, { ok: true, success: true, id: fixedId });
 
     assert.ok(createArgs);
     assert.equal(createArgs.email, 'bob@example.com');
     assert.ok(mailArgs);
     assert.equal(mailArgs.email, 'bob@example.com');
+  } finally {
+    AdInquiry.create = prevCreate;
+    adsMailer.sendAdsInquiryMail = prevSend;
+  }
+});
+
+test('POST /api/public/ad-inquiries stores normalized public advertise inquiry with clean newlines', async () => {
+  const prevCreate = AdInquiry.create;
+  const prevSend = adsMailer.sendAdsInquiryMail;
+
+  const fixedId = '507f1f77bcf86cd799439013';
+  const fixedCreatedAt = new Date('2026-04-29T08:30:00.000Z');
+  let createArgs = null;
+  let mailArgs = null;
+
+  AdInquiry.create = async (doc) => {
+    createArgs = doc;
+    return { _id: fixedId, createdAt: fixedCreatedAt };
+  };
+  adsMailer.sendAdsInquiryMail = async (opts) => {
+    mailArgs = opts;
+    return { messageId: 'acceptance-message-id' };
+  };
+
+  try {
+    const res = await request(app)
+      .post('/api/public/ad-inquiries')
+      .send({
+        name: 'Kiran Test',
+        email: 'test@example.com',
+        slot: 'HOME_728x90',
+        message: 'Hello News Pulse Ads Team,\\n\\nI want to run a 7-day campaign.\\n\\nThanks',
+        pageUrl: 'https://newspulse.co.in/advertise',
+        source: 'advertise-page',
+      });
+
+    assert.equal(res.statusCode, 201);
+    assert.deepEqual(res.body, { ok: true, success: true, id: fixedId });
+    assert.equal(createArgs.advertiserName, 'Kiran Test');
+    assert.equal(createArgs.name, 'Kiran Test');
+    assert.equal(createArgs.email, 'test@example.com');
+    assert.equal(createArgs.placement, 'HOME_728x90');
+    assert.equal(createArgs.status, 'new');
+    assert.equal(createArgs.isRead, false);
+    assert.equal(createArgs.pageUrl, 'https://newspulse.co.in/advertise');
+    assert.equal(createArgs.source, 'advertise-page');
+    assert.equal(createArgs.message, 'Hello News Pulse Ads Team,\n\nI want to run a 7-day campaign.\n\nThanks');
+
+    assert.equal(mailArgs.name, 'Kiran Test');
+    assert.equal(mailArgs.email, 'test@example.com');
+    assert.equal(mailArgs.placement, 'HOME_728x90');
+    assert.equal(mailArgs.pageUrl, 'https://newspulse.co.in/advertise');
+    assert.equal(mailArgs.message, 'Hello News Pulse Ads Team,\n\nI want to run a 7-day campaign.\n\nThanks');
+  } finally {
+    AdInquiry.create = prevCreate;
+    adsMailer.sendAdsInquiryMail = prevSend;
+  }
+});
+
+test('POST /api/public/ad-inquiries keeps saved inquiry when notification email fails', async () => {
+  const prevCreate = AdInquiry.create;
+  const prevSend = adsMailer.sendAdsInquiryMail;
+
+  const fixedId = '507f1f77bcf86cd799439014';
+  let createCalled = false;
+
+  AdInquiry.create = async () => {
+    createCalled = true;
+    return { _id: fixedId, createdAt: new Date('2026-04-29T08:35:00.000Z') };
+  };
+  adsMailer.sendAdsInquiryMail = async () => {
+    throw new Error('SMTP unavailable');
+  };
+
+  try {
+    const res = await request(app)
+      .post('/api/public/ad-inquiries')
+      .send({ name: 'Email Fail Test', email: 'fail@example.com', message: 'Please send me ad rates' });
+
+    assert.equal(res.statusCode, 201);
+    assert.deepEqual(res.body, { ok: true, success: true, id: fixedId, warning: 'email_failed' });
+    assert.equal(createCalled, true);
   } finally {
     AdInquiry.create = prevCreate;
     adsMailer.sendAdsInquiryMail = prevSend;

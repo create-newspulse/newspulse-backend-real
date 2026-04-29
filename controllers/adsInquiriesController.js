@@ -22,12 +22,16 @@ curl -X PATCH http://localhost:5051/admin-api/ads/inquiries/<ID> \
 */
 
 const mongoose = require('mongoose');
+const sanitizeHtml = require('sanitize-html');
 
 const AdInquiry = require('../models/AdInquiry');
 const AuditLog = require('../models/AuditLog');
 const adsMailer = require('../utils/mailer');
 
 const STATUS_VALUES = ['new', 'read', 'deleted'];
+const PUBLIC_AD_INQUIRY_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const PUBLIC_AD_INQUIRY_RATE_LIMIT_MAX = 8;
+const publicAdInquiryRateBuckets = new Map();
 
 function _getAdsDbState() {
   const connection = (AdInquiry && AdInquiry.db) ? AdInquiry.db : mongoose.connection;
@@ -163,6 +167,54 @@ function _getReqIp(req) {
   const forwarded = String(req?.headers?.['x-forwarded-for'] || '');
   const forwardedIp = forwarded.split(',')[0].trim();
   return forwardedIp || req?.ip || req?.socket?.remoteAddress || null;
+}
+
+function _sanitizePublicText(value, { maxLength = 500, allowNewlines = false } = {}) {
+  if (value === undefined || value === null) return '';
+  let text = String(value)
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\n')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+
+  text = sanitizeHtml(text, { allowedTags: [], allowedAttributes: {} });
+  text = text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+  text = allowNewlines
+    ? text.split('\n').map((line) => line.replace(/[\t ]+/g, ' ').trim()).join('\n')
+    : text.replace(/\s+/g, ' ').trim();
+  text = text.replace(/\n{3,}/g, '\n\n').trim();
+  return text.slice(0, maxLength).trim();
+}
+
+function _isPublicAdInquiryRateLimited(req) {
+  const now = Date.now();
+  const key = String(_getReqIp(req) || 'unknown');
+  const bucket = publicAdInquiryRateBuckets.get(key);
+
+  if (!bucket || now - bucket.windowStart > PUBLIC_AD_INQUIRY_RATE_LIMIT_WINDOW_MS) {
+    publicAdInquiryRateBuckets.set(key, { windowStart: now, count: 1 });
+    return false;
+  }
+
+  bucket.count += 1;
+  return bucket.count > PUBLIC_AD_INQUIRY_RATE_LIMIT_MAX;
+}
+
+function _looksLikeSpamInquiry({ advertiserName, email, message }) {
+  const name = String(advertiserName || '').trim();
+  const msg = String(message || '').trim();
+  const alphaNumeric = `${name} ${msg}`.replace(/[^a-z0-9]/gi, '');
+  if (alphaNumeric.length < 6) return true;
+  if (/^(.)\1{5,}$/i.test(alphaNumeric)) return true;
+
+  const linkCount = (msg.match(/https?:\/\//gi) || []).length;
+  if (linkCount > 3) return true;
+
+  const emailLocal = String(email || '').split('@')[0].toLowerCase();
+  if (emailLocal && name.toLowerCase() === emailLocal && msg.toLowerCase() === emailLocal) return true;
+
+  return false;
 }
 
 function _parseInt(v, fallback) {
@@ -353,22 +405,33 @@ async function _createAdsPermanentDeleteAuditLogs(req, inquiries, deletedAt) {
 
 async function submitPublicAdInquiry(req, res) {
   try {
+    res.set('Cache-Control', 'no-store');
+
+    if (_isPublicAdInquiryRateLimited(req)) {
+      return res.status(429).json({ ok: false, success: false, message: 'Too many requests' });
+    }
+
     if (!isDbReady()) {
-      return res.status(503).json({ success: false, message: 'Database unavailable' });
+      return res.status(503).json({ ok: false, success: false, message: 'Database unavailable' });
     }
 
     const body = req.body && typeof req.body === 'object' ? req.body : {};
+    if (_sanitizePublicText(body.website || body.url || body.homepage, { maxLength: 200 })) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid inquiry' });
+    }
+
     // Accept both new and legacy field names
-    const advertiserName = String(body.advertiserName || body.advertiser_name || body.name || '').trim();
-    const companyName = String(body.companyName || body.company_name || body.company || '').trim();
-    const emailPrimary = String(body.email || '').trim();
-    const emailAlternate = String(
+    const advertiserName = _sanitizePublicText(body.advertiserName || body.advertiser_name || body.contactName || body.contact_name || body.name, { maxLength: 120 });
+    const companyName = _sanitizePublicText(body.companyName || body.company_name || body.company, { maxLength: 160 });
+    const emailPrimary = _sanitizePublicText(body.email, { maxLength: 254 }).toLowerCase();
+    const emailAlternate = _sanitizePublicText(
       body.advertiserEmail ||
       body.advertiser_email ||
       body.contactEmail ||
       body.contact_email ||
-      ''
-    ).trim();
+      '',
+      { maxLength: 254 }
+    ).toLowerCase();
 
     const internalEmails = _getInternalAdsEmails();
     const primaryLooksInternal = emailPrimary && internalEmails.has(emailPrimary.toLowerCase());
@@ -376,22 +439,29 @@ async function submitPublicAdInquiry(req, res) {
 
     // Prefer the primary email unless it matches a known internal inbox and a valid alternate is provided.
     const email = (primaryLooksInternal && alternateOk) ? emailAlternate : emailPrimary;
-    const phone = String(body.phone || '').trim();
-    const message = String(body.message || '').trim();
-    const budget = body.budget === undefined || body.budget === null ? '' : String(body.budget).trim();
-    const placement = String(body.placement || '').trim();
+    const phone = _sanitizePublicText(body.phone, { maxLength: 60 });
+    const message = _sanitizePublicText(body.message, { maxLength: 5000, allowNewlines: true });
+    const budget = _sanitizePublicText(body.budget, { maxLength: 120 });
+    const placement = _sanitizePublicText(body.placement || body.slot || body.adSlot || body.ad_slot, { maxLength: 120 });
+    const target = _sanitizePublicText(body.target, { maxLength: 240 });
+    const startDate = _sanitizePublicText(body.startDate || body.start_date, { maxLength: 80 });
+    const pageUrl = _sanitizePublicText(body.pageUrl || body.page_url, { maxLength: 500 });
+    const source = _sanitizePublicText(body.source, { maxLength: 120 });
 
     if (!_isNonEmptyString(advertiserName)) {
-      return res.status(400).json({ success: false, message: 'Missing required field: advertiserName' });
+      return res.status(400).json({ ok: false, success: false, message: 'Missing required field: name' });
     }
     if (!_isNonEmptyString(email)) {
-      return res.status(400).json({ success: false, message: 'Missing required field: email' });
+      return res.status(400).json({ ok: false, success: false, message: 'Missing required field: email' });
     }
     if (!_isValidEmail(email)) {
-      return res.status(400).json({ success: false, message: 'Invalid email' });
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid email' });
     }
     if (!_isNonEmptyString(message)) {
-      return res.status(400).json({ success: false, message: 'Missing required field: message' });
+      return res.status(400).json({ ok: false, success: false, message: 'Missing required field: message' });
+    }
+    if (_looksLikeSpamInquiry({ advertiserName, email, message })) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid inquiry' });
     }
 
     const ip = req.ip ? String(req.ip) : null;
@@ -409,6 +479,10 @@ async function submitPublicAdInquiry(req, res) {
       message,
       budget: budget || null,
       placement: placement || null,
+      target: target || null,
+      startDate: startDate || null,
+      pageUrl: pageUrl || null,
+      source: source || null,
       // keep legacy field populated for older clients/exports
       name: advertiserName,
       status: 'new',
@@ -420,7 +494,7 @@ async function submitPublicAdInquiry(req, res) {
         userAgent,
         referrer,
         referer: referrer,
-        site,
+        site: site || source || null,
       },
     });
 
@@ -438,6 +512,10 @@ async function submitPublicAdInquiry(req, res) {
         message,
         budget: budget || undefined,
         placement: placement || undefined,
+        target: target || undefined,
+        startDate: startDate || undefined,
+        pageUrl: pageUrl || undefined,
+        source: source || undefined,
         createdAt: inquiry?.createdAt || new Date(),
         inquiryId: id,
         meta: {
@@ -445,7 +523,7 @@ async function submitPublicAdInquiry(req, res) {
           userAgent,
           referrer,
           referer: referrer,
-          site,
+          site: site || source || null,
         },
       });
       emailSent = true;
@@ -455,10 +533,10 @@ async function submitPublicAdInquiry(req, res) {
     }
 
     // Keep response minimal/stable for the public website.
-    return res.status(201).json({ success: true, id });
+    return res.status(201).json({ ok: true, success: true, id, ...(emailSent ? {} : { warning: 'email_failed' }) });
   } catch (e) {
     console.error('[ads] submitPublicAdInquiry failed', { message: e?.message || String(e) });
-    return res.status(500).json({ success: false, message: e?.message || String(e) });
+    return res.status(500).json({ ok: false, success: false, message: 'Failed to submit inquiry' });
   }
 }
 

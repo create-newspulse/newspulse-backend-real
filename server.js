@@ -340,6 +340,7 @@ const publicSponsoredFeaturesRouter = require('./routes/publicSponsoredFeatures.
 const adminAdsRouter = require('./routes/adminAds.routes');
 const adminAdsInquiriesRouter = require('./routes/adminAdsInquiries.routes');
 const publicAdsInquiryRouter = require('./routes/publicAds');
+const { submitPublicAdInquiry } = require('./controllers/adsInquiriesController');
 const adminAdsInquiriesCompatRouter = require('./routes/adminAds');
 const adsRoutes = require('./routes/ads.routes');
 const publicAdSettingsRouter = require('./routes/publicAdSettings.routes');
@@ -1714,6 +1715,7 @@ app.use('/api/public', publicAdsRouter);
 app.use('/api/public', publicSponsoredFeaturesRouter);
 // Public inquiry endpoint expected by the admin panel/frontends
 app.use('/api/public/ads', publicAdsInquiryRouter);
+app.post('/api/public/ad-inquiries', submitPublicAdInquiry);
 
 const ADS_INQUIRY_MUTATION_ENDPOINTS = [
   'PATCH /api/ads/inquiries/:id/read',

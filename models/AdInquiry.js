@@ -12,6 +12,10 @@ const adInquirySchema = new mongoose.Schema(
     message: { type: String, required: true, trim: true },
     budget: { type: String, default: null, trim: true },
     placement: { type: String, default: null, trim: true },
+    target: { type: String, default: null, trim: true },
+    startDate: { type: String, default: null, trim: true },
+    pageUrl: { type: String, default: null, trim: true },
+    source: { type: String, default: null, trim: true },
 
     // Backward-compat fields used by older public forms/controllers
     // (Keep them optional; controllers should populate advertiserName going forward.)

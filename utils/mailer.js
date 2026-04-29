@@ -74,15 +74,15 @@ async function sendAdsInquiryMail({
   message,
   budget,
   placement,
+  target,
+  startDate,
+  pageUrl,
+  source,
   createdAt,
   inquiryId,
   meta,
 }) {
-  const to = _env('ADS_INQUIRY_TO');
-  if (!to) {
-    console.error('[ads][mailer][config-error] Missing ADS_INQUIRY_TO');
-    throw new Error('ADS_INQUIRY_TO is not set');
-  }
+  const to = _env('ADS_INQUIRY_TO') || 'newspulse.ads@gmail.com';
 
   const { user } = _getAdsSmtpConfig();
   const from = _env('ADS_INQUIRY_FROM') || user;
@@ -98,23 +98,35 @@ async function sendAdsInquiryMail({
   const referrer = meta && typeof meta === 'object' ? String(meta.referrer || meta.referer || '') : '';
   const siteFromMeta = meta && meta.site ? String(meta.site) : '';
   const siteFinal = siteFromMeta || site;
+  const cleanMessage = String(message || '')
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\n')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 
   const text = [
-    `Advertiser Name: ${displayName}`,
-    ...(companyName ? [`Company: ${String(companyName).trim()}`] : []),
+    `Name: ${displayName}`,
     `Email: ${String(email || '').trim()}`,
     ...(phone ? [`Phone: ${String(phone).trim()}`] : []),
+    ...(companyName ? [`Company: ${String(companyName).trim()}`] : []),
+    ...(placement ? [`Slot: ${String(placement).trim()}`] : []),
     ...(budget ? [`Budget: ${String(budget).trim()}`] : []),
-    ...(placement ? [`Placement: ${String(placement).trim()}`] : []),
+    ...(target ? [`Target: ${String(target).trim()}`] : []),
+    ...(startDate ? [`Start Date: ${String(startDate).trim()}`] : []),
+    ...(pageUrl ? [`Page URL: ${String(pageUrl).trim()}`] : []),
     `Timestamp: ${tsIso}`,
-    `Site: ${siteFinal}`,
+    ...(source ? [`Source: ${String(source).trim()}`] : []),
+    ...(siteFinal ? [`Site: ${siteFinal}`] : []),
     ...(ip ? [`IP: ${ip}`] : []),
     ...(userAgent ? [`User-Agent: ${userAgent}`] : []),
       ...(referrer ? [`Referer: ${referrer}`] : []),
     ...(inquiryId ? [`InquiryId: ${String(inquiryId)}`] : []),
     '',
     'Message:',
-    String(message || ''),
+    cleanMessage,
   ].join('\n');
 
   const transport = createAdsTransport();
