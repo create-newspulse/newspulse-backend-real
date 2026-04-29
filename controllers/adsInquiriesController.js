@@ -27,6 +27,7 @@ const sanitizeHtml = require('sanitize-html');
 const AdInquiry = require('../models/AdInquiry');
 const AuditLog = require('../models/AuditLog');
 const adsMailer = require('../utils/mailer');
+const { normalizeAdOpportunityKey } = require('../src/constants/adSlots');
 
 const STATUS_VALUES = ['new', 'read', 'deleted'];
 const PUBLIC_AD_INQUIRY_RATE_LIMIT_WINDOW_MS = 60 * 1000;
@@ -442,7 +443,8 @@ async function submitPublicAdInquiry(req, res) {
     const phone = _sanitizePublicText(body.phone, { maxLength: 60 });
     const message = _sanitizePublicText(body.message, { maxLength: 5000, allowNewlines: true });
     const budget = _sanitizePublicText(body.budget, { maxLength: 120 });
-    const placement = _sanitizePublicText(body.placement || body.slot || body.adSlot || body.ad_slot, { maxLength: 120 });
+    const rawPlacement = _sanitizePublicText(body.placement || body.slot || body.adSlot || body.ad_slot, { maxLength: 120 });
+    const placement = normalizeAdOpportunityKey(rawPlacement) || rawPlacement;
     const target = _sanitizePublicText(body.target, { maxLength: 240 });
     const startDate = _sanitizePublicText(body.startDate || body.start_date, { maxLength: 80 });
     const pageUrl = _sanitizePublicText(body.pageUrl || body.page_url, { maxLength: 500 });

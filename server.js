@@ -354,7 +354,7 @@ const publicTranslationRouter = require('./routes/publicTranslation.routes');
 const publicUiLabelsRouter = require('./routes/publicUiLabels.routes');
 const adminPublicSettingsRouter = require('./routes/adminPublicSettings.routes');
 const PublicSiteSettings = require('./models/PublicSiteSettings');
-const { ensureCategoryStripEnabled } = require('./controllers/publicSiteSettingsController');
+const { ensureCategoryStripEnabled, ensurePublicSettingsResponse } = require('./controllers/publicSiteSettingsController');
 const User = require('./models/User');
 const publicNewsRouter = require('./routes/publicNews.routes');
 const breakingRouter = require('./routes/breaking.routes');
@@ -2076,7 +2076,7 @@ for (const p of [
 async function _publicSettingsNoAuth(_req, res) {
   try {
     const doc = await PublicSiteSettings.getOrCreate();
-    const published = ensureCategoryStripEnabled(doc?.published || PublicSiteSettings.getDefaultSettings());
+    const published = ensurePublicSettingsResponse(doc?.published || PublicSiteSettings.getDefaultSettings());
     return res.json({
       ok: true,
       version: typeof doc?.version === 'number' ? doc.version : 1,
@@ -2087,7 +2087,7 @@ async function _publicSettingsNoAuth(_req, res) {
         : (doc?.updatedAt ? new Date(doc.updatedAt).toISOString() : new Date().toISOString()),
     });
   } catch (e) {
-    const published = ensureCategoryStripEnabled(PublicSiteSettings.getDefaultSettings());
+    const published = ensurePublicSettingsResponse(PublicSiteSettings.getDefaultSettings());
     return res.json({
       ok: true,
       version: 1,

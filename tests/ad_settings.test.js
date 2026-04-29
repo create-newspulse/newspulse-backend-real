@@ -4,6 +4,7 @@ const request = require('supertest');
 const mongoose = require('mongoose');
 
 const AdSettings = require('../models/AdSettings');
+const { REAL_TOGGLEABLE_AD_SLOTS } = require('../src/constants/adSlots');
 
 const app = require('../server');
 
@@ -12,10 +13,17 @@ function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
   return `np.${b64}`;
 }
 
+function assertHasRealToggleableSlots(slotEnabled) {
+  for (const slot of REAL_TOGGLEABLE_AD_SLOTS) {
+    assert.equal(typeof slotEnabled[slot], 'boolean', `${slot} should be present as boolean`);
+  }
+}
+
 test('GET /api/public/ad-settings returns defaults when DB not connected', async () => {
   const res = await request(app).get('/api/public/ad-settings');
   assert.equal(res.status, 200);
   assert.equal(res.body.ok, true);
+  assertHasRealToggleableSlots(res.body.slotEnabled);
   assert.deepEqual(res.body.slotEnabled, {
     HOME_728x90: true,
     HOME_BILLBOARD_970x250: false,
@@ -96,6 +104,7 @@ test('PUT /api/admin/ad-settings persists sponsor slots without changing other p
         BREAKING_SPONSOR: true,
         LIVE_UPDATE_SPONSOR: true,
         HOME_LEFT_300x250: true,
+        HOME_LEFT_300x600: true,
       },
     });
 
@@ -104,9 +113,10 @@ test('PUT /api/admin/ad-settings persists sponsor slots without changing other p
   assert.equal(putRes.body.slotEnabled.BREAKING_SPONSOR, true);
   assert.equal(putRes.body.slotEnabled.LIVE_UPDATE_SPONSOR, true);
   assert.equal(putRes.body.slotEnabled.HOME_LEFT_300x250, true);
-  assert.equal(putRes.body.slotEnabled.HOME_LEFT_300x600, false);
+  assert.equal(putRes.body.slotEnabled.HOME_LEFT_300x600, true);
   assert.equal(putRes.body.slotEnabled.FOOTER_BANNER_728x90, true);
   assert.equal(putRes.body.slotEnabled.HOME_RIGHT_300x600, false);
+  assertHasRealToggleableSlots(putRes.body.slotEnabled);
 
   const getRes = await request(app)
     .get('/api/admin/ad-settings')
@@ -117,9 +127,10 @@ test('PUT /api/admin/ad-settings persists sponsor slots without changing other p
   assert.equal(getRes.body.slotEnabled.BREAKING_SPONSOR, true);
   assert.equal(getRes.body.slotEnabled.LIVE_UPDATE_SPONSOR, true);
   assert.equal(getRes.body.slotEnabled.HOME_LEFT_300x250, true);
-  assert.equal(getRes.body.slotEnabled.HOME_LEFT_300x600, false);
+  assert.equal(getRes.body.slotEnabled.HOME_LEFT_300x600, true);
   assert.equal(getRes.body.slotEnabled.FOOTER_BANNER_728x90, true);
   assert.equal(getRes.body.slotEnabled.HOME_RIGHT_300x600, false);
+  assertHasRealToggleableSlots(getRes.body.slotEnabled);
 });
 
 test('GET /api/admin/ad-settings is protected (401 when unauthenticated)', async () => {

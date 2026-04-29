@@ -67,6 +67,21 @@ function categoryStripOnSettings() {
   };
 }
 
+function defaultDailyWonders() {
+  return {
+    enabled: true,
+    showOnHomepage: true,
+    label: 'DAILY WONDERS',
+    title: 'Thought of the Day',
+    subtitle: 'One meaningful thought to pause, reflect, and move through the day with clarity.',
+    thoughtLabel: "TODAY'S THOUGHT",
+    thoughtText: 'A peaceful mind does not come from a perfect day, but from choosing calm in the middle of it.',
+    reminderLabel: 'GENTLE REMINDER',
+    reminderText: 'You do not need to solve the whole day at once. One honest step is enough.',
+    footerText: 'A small daily pause for calm, clarity, and inspiration.',
+  };
+}
+
 function assertCategoryStripOn(settings) {
   assert.equal(settings.categoryStrip.enabled, true);
   assert.equal(settings.publicSite.homepage.categoryStripEnabled, true);
@@ -113,6 +128,149 @@ test('GET /api/public/settings returns published homepage modules OFF as OFF', a
   assert.equal(res.body.ok, true);
   assert.equal(res.body.version, 12);
   assertHomepageOff(res.body.published);
+  assert.deepEqual(res.body.published.dailyWonders, defaultDailyWonders());
+});
+
+test('savePublicSettings stores top-level dailyWonders without changing inspirationHub or DroneTV fields', async (t) => {
+  const prevReadyState = mongoose.connection.readyState;
+  const prevGetOrCreate = PublicSiteSettings.getOrCreate;
+  const prevGetDefaultSettings = PublicSiteSettings.getDefaultSettings;
+
+  mongoose.connection.readyState = 1;
+
+  const settingsDoc = {
+    scope: 'development',
+    version: 31,
+    draft: {
+      publicSite: { homepage: { categoryStripEnabled: true } },
+      homepage: { modules: { categoryStrip: { enabled: true, order: 1 } } },
+      inspirationHub: {
+        enabled: true,
+        droneTvEnabled: true,
+        youtubeUrl: 'https://youtu.be/SLDHOwReM-Q',
+        title: 'Inspiration Hub',
+        droneTvTitle: 'DroneTV Live',
+        dailyWondersTitle: 'Legacy hub daily title',
+      },
+    },
+    published: {
+      publicSite: { homepage: { categoryStripEnabled: true } },
+      homepage: { modules: { categoryStrip: { enabled: true, order: 1 } } },
+      dailyWonders: defaultDailyWonders(),
+    },
+    async save() {
+      return this;
+    },
+  };
+
+  PublicSiteSettings.getDefaultSettings = () => ({
+    publicSite: { homepage: { categoryStripEnabled: true } },
+    homepage: { modules: { categoryStrip: { enabled: true, order: 1 } } },
+    dailyWonders: defaultDailyWonders(),
+  });
+  PublicSiteSettings.getOrCreate = async () => settingsDoc;
+
+  t.after(() => {
+    mongoose.connection.readyState = prevReadyState;
+    PublicSiteSettings.getOrCreate = prevGetOrCreate;
+    PublicSiteSettings.getDefaultSettings = prevGetDefaultSettings;
+  });
+
+  const req = {
+    method: 'PATCH',
+    body: {
+      dailyWonders: {
+        enabled: true,
+        showOnHomepage: true,
+        thoughtText: 'Updated thought for the frontend.',
+        reminderText: 'Updated reminder for the frontend.',
+        publishDate: '2026-04-29',
+      },
+    },
+  };
+  const res = createRes();
+
+  await controller.savePublicSettings(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.draft.dailyWonders.thoughtText, 'Updated thought for the frontend.');
+  assert.equal(res.body.draft.dailyWonders.reminderText, 'Updated reminder for the frontend.');
+  assert.equal(res.body.draft.dailyWonders.publishDate, '2026-04-29');
+  assert.equal(res.body.draft.dailyWonders.title, 'Thought of the Day');
+  assert.equal(res.body.draft.inspirationHub.droneTvEnabled, true);
+  assert.equal(res.body.draft.inspirationHub.droneTvTitle, 'DroneTV Live');
+  assert.equal(res.body.draft.inspirationHub.dailyWondersTitle, 'Legacy hub daily title');
+});
+
+test('publishSettings exposes updated dailyWonders for frontend reads', async (t) => {
+  const prevReadyState = mongoose.connection.readyState;
+  const prevGetOrCreate = PublicSiteSettings.getOrCreate;
+
+  mongoose.connection.readyState = 1;
+
+  const updatedDailyWonders = {
+    ...defaultDailyWonders(),
+    thoughtText: 'A fresh thought from admin.',
+    reminderText: 'A fresh reminder from admin.',
+  };
+  const settingsDoc = {
+    scope: 'development',
+    version: 40,
+    draft: {
+      publicSite: { homepage: { categoryStripEnabled: true } },
+      homepage: { modules: { categoryStrip: { enabled: true, order: 1 } } },
+      dailyWonders: updatedDailyWonders,
+    },
+    published: homepageOffSettings(),
+    publishedUpdatedAt: new Date('2026-04-28T10:00:00.000Z'),
+    async save() {
+      return this;
+    },
+  };
+
+  PublicSiteSettings.getOrCreate = async () => settingsDoc;
+
+  t.after(() => {
+    mongoose.connection.readyState = prevReadyState;
+    PublicSiteSettings.getOrCreate = prevGetOrCreate;
+  });
+
+  const publishRes = createRes();
+  await controller.publishSettings({}, publishRes);
+
+  assert.equal(publishRes.statusCode, 200);
+  assert.equal(publishRes.body.published.dailyWonders.thoughtText, 'A fresh thought from admin.');
+  assert.equal(publishRes.body.published.dailyWonders.reminderText, 'A fresh reminder from admin.');
+
+  const publicRes = await request(app).get('/api/public/settings');
+
+  assert.equal(publicRes.status, 200);
+  assert.equal(publicRes.body.ok, true);
+  assert.equal(publicRes.body.published.dailyWonders.thoughtText, 'A fresh thought from admin.');
+  assert.equal(publicRes.body.published.dailyWonders.reminderText, 'A fresh reminder from admin.');
+});
+
+test('savePublicSettings rejects invalid dailyWonders field types', async (t) => {
+  const prevReadyState = mongoose.connection.readyState;
+  const prevGetOrCreate = PublicSiteSettings.getOrCreate;
+
+  mongoose.connection.readyState = 1;
+  PublicSiteSettings.getOrCreate = async () => ({
+    draft: { dailyWonders: defaultDailyWonders() },
+    published: { dailyWonders: defaultDailyWonders() },
+    async save() {},
+  });
+
+  t.after(() => {
+    mongoose.connection.readyState = prevReadyState;
+    PublicSiteSettings.getOrCreate = prevGetOrCreate;
+  });
+
+  const res = createRes();
+  await controller.savePublicSettings({ method: 'PATCH', body: { dailyWonders: { enabled: 'yes' } } }, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.message, 'Invalid type for dailyWonders.enabled: expected boolean');
 });
 
 test('savePublicSettings stores canonical categoryStrip.enabled ON in draft shape', async (t) => {

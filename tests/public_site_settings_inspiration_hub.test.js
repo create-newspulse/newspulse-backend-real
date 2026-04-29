@@ -126,7 +126,10 @@ test('savePublicSettings stores inspirationHub as isolated derived block', async
     narrationText: '',
     autoplayMuted: true,
     showOnHomepage: true,
+    showOnInspirationHubPage: false,
     showOnCategoryPage: false,
+    videoTitle: 'Drone TV',
+    videoSubtitle: 'Skyline feed',
     quotes: [],
     cards: [],
     content: {
@@ -279,7 +282,10 @@ test('publishSettings copies normalized inspirationHub into published response',
     narrationText: '',
     autoplayMuted: false,
     showOnHomepage: true,
+    showOnInspirationHubPage: true,
     showOnCategoryPage: true,
+    videoTitle: 'Drone TV',
+    videoSubtitle: 'Skyline feed',
     quotes: [],
     cards: [],
     content: {
@@ -297,6 +303,87 @@ test('publishSettings copies normalized inspirationHub into published response',
       },
     },
   });
+});
+
+test('getPublishedSettings maps legacy DroneTV homepage aliases into canonical visible settings', async (t) => {
+  const prevReadyState = mongoose.connection.readyState;
+  const prevGetOrCreate = PublicSiteSettings.getOrCreate;
+
+  mongoose.connection.readyState = 1;
+
+  PublicSiteSettings.getOrCreate = async () => ({
+    scope: 'production',
+    version: 11,
+    published: {
+      ...baseSettings(),
+      inspirationHub: {
+        enableInspirationHub: true,
+        enableDroneTVVideo: true,
+        homepageEnabled: true,
+        droneTvYoutubeUrl: 'https://youtu.be/SLDHOwReM-Q',
+        videoTitle: 'Admin DroneTV Title',
+        videoSubtitle: 'Admin DroneTV Subtitle',
+      },
+    },
+    publishedUpdatedAt: new Date('2026-04-29T10:00:00.000Z'),
+  });
+
+  t.after(() => {
+    mongoose.connection.readyState = prevReadyState;
+    PublicSiteSettings.getOrCreate = prevGetOrCreate;
+  });
+
+  const res = createRes();
+  await controller.getPublishedSettings({}, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.published.inspirationHub.enabled, true);
+  assert.equal(res.body.published.inspirationHub.droneTvEnabled, true);
+  assert.equal(res.body.published.inspirationHub.showOnHomepage, true);
+  assert.equal(res.body.published.inspirationHub.youtubeUrl, 'https://youtu.be/SLDHOwReM-Q');
+  assert.equal(res.body.published.inspirationHub.embedUrl, 'https://www.youtube-nocookie.com/embed/SLDHOwReM-Q?rel=0');
+  assert.equal(res.body.published.inspirationHub.title, 'Admin DroneTV Title');
+  assert.equal(res.body.published.inspirationHub.subtitle, 'Admin DroneTV Subtitle');
+  assert.equal(res.body.published.inspirationHub.videoTitle, 'Admin DroneTV Title');
+  assert.equal(res.body.published.inspirationHub.videoSubtitle, 'Admin DroneTV Subtitle');
+  assert.equal(res.body.published.inspirationHub.showOnInspirationHubPage, false);
+});
+
+test('getPublishedSettings keeps Inspiration Hub hidden when explicit enabled is false', async (t) => {
+  const prevReadyState = mongoose.connection.readyState;
+  const prevGetOrCreate = PublicSiteSettings.getOrCreate;
+
+  mongoose.connection.readyState = 1;
+
+  PublicSiteSettings.getOrCreate = async () => ({
+    scope: 'production',
+    version: 12,
+    published: {
+      ...baseSettings(),
+      inspirationHub: {
+        enabled: false,
+        enableInspirationHub: true,
+        droneTvEnabled: true,
+        showOnHomepage: true,
+        embedUrl: 'https://www.youtube-nocookie.com/embed/SLDHOwReM-Q?rel=0',
+      },
+    },
+    publishedUpdatedAt: new Date('2026-04-29T10:05:00.000Z'),
+  });
+
+  t.after(() => {
+    mongoose.connection.readyState = prevReadyState;
+    PublicSiteSettings.getOrCreate = prevGetOrCreate;
+  });
+
+  const res = createRes();
+  await controller.getPublishedSettings({}, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.published.inspirationHub.enabled, false);
+  assert.equal(res.body.published.inspirationHub.droneTvEnabled, true);
+  assert.equal(res.body.published.inspirationHub.showOnHomepage, true);
+  assert.equal(res.body.published.inspirationHub.embedUrl, 'https://www.youtube-nocookie.com/embed/SLDHOwReM-Q?rel=0');
 });
 
 test('savePublicSettings rejects invalid inspirationHub youtube URLs', async (t) => {
@@ -387,7 +474,7 @@ test('savePublicSettings allows removing the optional inspirationHub block', asy
   assert.equal(res.body.draft.liveTv.enabled, true);
 });
 
-test('getPublishedSettings leaves legacy public settings unchanged when inspirationHub is absent', async (t) => {
+test('getPublishedSettings adds disabled public inspirationHub contract when absent', async (t) => {
   const prevReadyState = mongoose.connection.readyState;
   const prevGetOrCreate = PublicSiteSettings.getOrCreate;
 
@@ -412,7 +499,15 @@ test('getPublishedSettings leaves legacy public settings unchanged when inspirat
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.version, 3);
-  assert.equal('inspirationHub' in res.body.published, false);
+  assert.equal(res.body.published.inspirationHub.enabled, false);
+  assert.equal(res.body.published.inspirationHub.droneTvEnabled, false);
+  assert.equal(res.body.published.inspirationHub.showOnHomepage, false);
+  assert.equal(res.body.published.inspirationHub.showOnInspirationHubPage, false);
+  assert.equal(res.body.published.inspirationHub.autoplayMuted, false);
+  assert.equal(res.body.published.inspirationHub.youtubeUrl, '');
+  assert.equal(res.body.published.inspirationHub.embedUrl, '');
+  assert.equal(res.body.published.inspirationHub.videoTitle, 'Inspiration Hub');
+  assert.equal(res.body.published.inspirationHub.videoSubtitle, 'A calm space for perspective, clarity, and meaningful stories.');
   assert.equal(res.body.published.liveTv.enabled, true);
 });
 

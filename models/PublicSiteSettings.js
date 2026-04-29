@@ -40,6 +40,18 @@ const defaultSettings = {
     enabled: true,
     embedUrl: '',
   },
+  dailyWonders: {
+    enabled: true,
+    showOnHomepage: true,
+    label: 'DAILY WONDERS',
+    title: 'Thought of the Day',
+    subtitle: 'One meaningful thought to pause, reflect, and move through the day with clarity.',
+    thoughtLabel: "TODAY'S THOUGHT",
+    thoughtText: 'A peaceful mind does not come from a perfect day, but from choosing calm in the middle of it.',
+    reminderLabel: 'GENTLE REMINDER',
+    reminderText: 'You do not need to solve the whole day at once. One honest step is enough.',
+    footerText: 'A small daily pause for calm, clarity, and inspiration.',
+  },
   // Language & Theme configuration
   languageTheme: {
     languages: ['en', 'hi', 'gu'],

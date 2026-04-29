@@ -10,6 +10,7 @@ const app = require('../server');
 
 const AdInquiry = require('../models/AdInquiry');
 const adsMailer = require('../utils/mailer');
+const { CANONICAL_AD_OPPORTUNITIES } = require('../src/constants/adSlots');
 
 test('POST /api/public/ads/inquiry stores inquiry and triggers email (best-effort)', async () => {
   const prevCreate = AdInquiry.create;
@@ -192,6 +193,47 @@ test('POST /api/public/ad-inquiries keeps saved inquiry when notification email 
     assert.equal(res.statusCode, 201);
     assert.deepEqual(res.body, { ok: true, success: true, id: fixedId, warning: 'email_failed' });
     assert.equal(createCalled, true);
+  } finally {
+    AdInquiry.create = prevCreate;
+    adsMailer.sendAdsInquiryMail = prevSend;
+  }
+});
+
+test('POST /api/public/ads/inquiry preserves all canonical ad opportunity keys and combo alias', async () => {
+  const prevCreate = AdInquiry.create;
+  const prevSend = adsMailer.sendAdsInquiryMail;
+  const placements = [];
+  const mailPlacements = [];
+
+  AdInquiry.create = async (doc) => {
+    placements.push(doc.placement);
+    return { _id: `507f1f77bcf86cd7994390${String(placements.length).padStart(2, '0')}`, createdAt: new Date('2026-04-30T08:00:00.000Z') };
+  };
+  adsMailer.sendAdsInquiryMail = async (opts) => {
+    mailPlacements.push(opts.placement);
+    return { messageId: `message-${mailPlacements.length}` };
+  };
+
+  try {
+    for (const [index, placement] of CANONICAL_AD_OPPORTUNITIES.entries()) {
+      const res = await request(app)
+        .post('/api/public/ads/inquiry')
+        .set('x-forwarded-for', `203.0.113.${index + 1}`)
+        .send({ name: 'Opportunity Test', email: 'opportunity@example.com', message: 'Please send rates', slot: placement });
+
+      assert.equal(res.statusCode, 201);
+    }
+
+    const aliasRes = await request(app)
+      .post('/api/public/ads/inquiry')
+      .set('x-forwarded-for', '203.0.113.250')
+      .send({ name: 'Opportunity Test', email: 'opportunity@example.com', message: 'Please send rates', slot: 'SPONSORED_FEATURE_ARTICLE_COMBO' });
+
+    assert.equal(aliasRes.statusCode, 201);
+    assert.deepEqual(placements.slice(0, CANONICAL_AD_OPPORTUNITIES.length), CANONICAL_AD_OPPORTUNITIES);
+    assert.deepEqual(mailPlacements.slice(0, CANONICAL_AD_OPPORTUNITIES.length), CANONICAL_AD_OPPORTUNITIES);
+    assert.equal(placements.at(-1), 'COMBO_CAMPAIGN');
+    assert.equal(mailPlacements.at(-1), 'COMBO_CAMPAIGN');
   } finally {
     AdInquiry.create = prevCreate;
     adsMailer.sendAdsInquiryMail = prevSend;

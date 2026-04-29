@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const request = require('supertest');
 
 const app = require('../server');
+const { REAL_TOGGLEABLE_AD_SLOTS } = require('../src/constants/adSlots');
 
 test('GET /api/public/ads without slot returns {enabled:false, ad:null}', async () => {
   const res = await request(app).get('/api/public/ads');
@@ -68,9 +69,8 @@ test('GET /api/public/ads?slot=FOOTER_BANNER_728x90&lang=en returns 200', async 
   assert.equal(res.body.ad, null);
 });
 
-test('GET /api/public/ads returns 200 (not 400) for new valid slots', async () => {
-  const slots = ['HOME_LEFT_300x250', 'HOME_LEFT_300x600', 'HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250', 'BREAKING_SPONSOR', 'LIVE_UPDATE_SPONSOR'];
-  for (const slot of slots) {
+test('GET /api/public/ads returns 200 (not 400) for all real toggleable slots', async () => {
+  for (const slot of REAL_TOGGLEABLE_AD_SLOTS) {
     const res = await request(app).get(`/api/public/ads?slot=${encodeURIComponent(slot)}&lang=en`);
     assert.equal(res.status, 200);
     assert.equal(res.headers['cache-control'], 'no-store, max-age=0');

@@ -5,16 +5,26 @@ const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.ser
 
 const INSPIRATION_HUB_BOOLEAN_FIELDS = [
   'enabled',
+  'enableInspirationHub',
+  'isEnabled',
   'droneTvEnabled',
+  'enableDroneTVVideo',
   'autoplayMuted',
   'showOnHomepage',
+  'homepageEnabled',
+  'showOnInspirationHubPage',
   'showOnCategoryPage',
 ];
 
 const INSPIRATION_HUB_TEXT_FIELDS = [
   'youtubeUrl',
+  'droneTvYoutubeUrl',
+  'embedUrl',
+  'droneTvEmbedUrl',
   'title',
   'subtitle',
+  'videoTitle',
+  'videoSubtitle',
   'droneTvTitle',
   'droneTvSubtitle',
   'dailyWondersTitle',
@@ -39,6 +49,23 @@ const INSPIRATION_HUB_COLLECTION_FIELDS = [
 
 const INSPIRATION_HUB_LANGS = ['en', 'hi', 'gu'];
 
+const DAILY_WONDERS_BOOLEAN_FIELDS = [
+  'enabled',
+  'showOnHomepage',
+];
+
+const DAILY_WONDERS_TEXT_FIELDS = [
+  'label',
+  'title',
+  'subtitle',
+  'thoughtLabel',
+  'thoughtText',
+  'reminderLabel',
+  'reminderText',
+  'footerText',
+  'publishDate',
+];
+
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
@@ -50,6 +77,26 @@ function hasOwn(obj, key) {
 function normalizeOptionalString(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
+}
+
+function firstDefined(source, keys) {
+  if (!source || typeof source !== 'object') return undefined;
+  for (const key of keys) {
+    if (hasOwn(source, key) && source[key] !== undefined) return source[key];
+  }
+  return undefined;
+}
+
+function firstNonEmptyString(source, keys, fallback = '') {
+  const value = firstDefined(source, keys);
+  const normalized = normalizeOptionalString(value);
+  return normalized || fallback;
+}
+
+function firstBoolean(source, keys, fallback = false) {
+  const value = firstDefined(source, keys);
+  if (typeof value === 'boolean') return value;
+  return fallback;
 }
 
 function cloneJsonValue(value) {
@@ -229,9 +276,11 @@ function validateInspirationHubPayload(payload) {
     }
   }
 
-  if (hasOwn(hub.value, 'youtubeUrl')) {
-    const parsed = extractYouTubeVideoId(hub.value.youtubeUrl);
-    if (!parsed.ok) return { ok: false, message: parsed.message };
+  for (const field of ['youtubeUrl', 'droneTvYoutubeUrl']) {
+    if (hasOwn(hub.value, field)) {
+      const parsed = extractYouTubeVideoId(hub.value[field]);
+      if (!parsed.ok) return { ok: false, message: parsed.message.replace('inspirationHub.youtubeUrl', `inspirationHub.${field}`) };
+    }
   }
 
   return null;
@@ -247,27 +296,36 @@ function normalizeInspirationHub(settingsObj) {
   }
 
   const source = base.inspirationHub;
-  const parsed = extractYouTubeVideoId(source.youtubeUrl);
-  const autoplayMuted = typeof source.autoplayMuted === 'boolean' ? source.autoplayMuted : false;
+  const youtubeUrlInput = firstNonEmptyString(source, ['youtubeUrl', 'droneTvYoutubeUrl']);
+  const embedUrlInput = firstNonEmptyString(source, ['embedUrl', 'droneTvEmbedUrl']);
+  const parsed = extractYouTubeVideoId(youtubeUrlInput);
+  const autoplayMuted = firstBoolean(source, ['autoplayMuted'], false);
   const derivedEmbedUrl = parsed.ok ? buildYouTubeEmbedUrl(parsed.videoId, autoplayMuted) : '';
+  const resolvedEmbedUrl = derivedEmbedUrl || embedUrlInput;
 
   const normalizedContent = normalizeInspirationHubContent(source.content, source);
+  const title = firstNonEmptyString(source, ['title', 'videoTitle', 'droneTvTitle'], 'Inspiration Hub');
+  const subtitle = firstNonEmptyString(source, ['subtitle', 'videoSubtitle', 'droneTvSubtitle'], 'A calm space for perspective, clarity, and meaningful stories.');
+  const showOnInspirationHubPage = firstBoolean(source, ['showOnInspirationHubPage', 'showOnCategoryPage'], false);
   const normalizedHub = {
     ...source,
-    enabled: typeof source.enabled === 'boolean' ? source.enabled : false,
-    droneTvEnabled: typeof source.droneTvEnabled === 'boolean' ? source.droneTvEnabled : false,
-    youtubeUrl: parsed.ok ? parsed.normalizedUrl : normalizeOptionalString(source.youtubeUrl),
-    embedUrl: derivedEmbedUrl,
-    title: normalizeOptionalString(source.title),
-    subtitle: normalizeOptionalString(source.subtitle),
+    enabled: firstBoolean(source, ['enabled', 'enableInspirationHub', 'isEnabled'], false),
+    droneTvEnabled: firstBoolean(source, ['droneTvEnabled', 'enableDroneTVVideo'], false),
+    youtubeUrl: parsed.ok ? parsed.normalizedUrl : youtubeUrlInput,
+    embedUrl: resolvedEmbedUrl,
+    title,
+    subtitle,
+    videoTitle: firstNonEmptyString(source, ['videoTitle', 'title', 'droneTvTitle'], title),
+    videoSubtitle: firstNonEmptyString(source, ['videoSubtitle', 'subtitle', 'droneTvSubtitle'], subtitle),
     droneTvTitle: normalizeOptionalString(source.droneTvTitle),
     droneTvSubtitle: normalizeOptionalString(source.droneTvSubtitle),
     dailyWondersTitle: normalizeOptionalString(source.dailyWondersTitle),
     dailyWondersSubtitle: normalizeOptionalString(source.dailyWondersSubtitle),
     narrationText: normalizeOptionalString(source.narrationText),
     autoplayMuted,
-    showOnHomepage: typeof source.showOnHomepage === 'boolean' ? source.showOnHomepage : false,
-    showOnCategoryPage: typeof source.showOnCategoryPage === 'boolean' ? source.showOnCategoryPage : false,
+    showOnHomepage: firstBoolean(source, ['showOnHomepage', 'homepageEnabled'], false),
+    showOnInspirationHubPage,
+    showOnCategoryPage: firstBoolean(source, ['showOnCategoryPage', 'showOnInspirationHubPage'], false),
     quotes: Array.isArray(source.quotes) ? cloneJsonValue(source.quotes) : [],
     cards: Array.isArray(source.cards) ? cloneJsonValue(source.cards) : [],
   };
@@ -283,6 +341,61 @@ function normalizeInspirationHub(settingsObj) {
   return base;
 }
 
+function getDefaultDailyWonders() {
+  const defaults = PublicSiteSettings.getDefaultSettings();
+  return cloneJsonValue(defaults.dailyWonders || {});
+}
+
+function validateDailyWondersPayload(payload) {
+  const dailyWonders = getNested(payload, 'dailyWonders');
+  if (!dailyWonders.exists) return null;
+
+  if (dailyWonders.value === null) return null;
+
+  if (!isPlainObject(dailyWonders.value)) {
+    return { ok: false, message: 'Invalid value for dailyWonders: expected object' };
+  }
+
+  for (const field of DAILY_WONDERS_BOOLEAN_FIELDS) {
+    if (hasOwn(dailyWonders.value, field) && dailyWonders.value[field] !== undefined && typeof dailyWonders.value[field] !== 'boolean') {
+      return { ok: false, message: `Invalid type for dailyWonders.${field}: expected boolean` };
+    }
+  }
+
+  for (const field of DAILY_WONDERS_TEXT_FIELDS) {
+    if (hasOwn(dailyWonders.value, field) && dailyWonders.value[field] !== undefined && dailyWonders.value[field] !== null && typeof dailyWonders.value[field] !== 'string') {
+      return { ok: false, message: `Invalid type for dailyWonders.${field}: expected string` };
+    }
+  }
+
+  return null;
+}
+
+function normalizeDailyWonders(settingsObj) {
+  const base = (settingsObj && typeof settingsObj === 'object') ? settingsObj : {};
+  const defaults = getDefaultDailyWonders();
+  const source = isPlainObject(base.dailyWonders) ? base.dailyWonders : {};
+
+  const normalized = {
+    enabled: typeof source.enabled === 'boolean' ? source.enabled : defaults.enabled,
+    showOnHomepage: typeof source.showOnHomepage === 'boolean' ? source.showOnHomepage : defaults.showOnHomepage,
+  };
+
+  for (const field of DAILY_WONDERS_TEXT_FIELDS) {
+    const fallback = hasOwn(defaults, field) ? defaults[field] : '';
+    const value = hasOwn(source, field) ? source[field] : fallback;
+    const normalizedValue = normalizeOptionalString(value);
+    if (field === 'publishDate') {
+      if (normalizedValue) normalized.publishDate = normalizedValue;
+      continue;
+    }
+    normalized[field] = normalizedValue;
+  }
+
+  base.dailyWonders = normalized;
+  return base;
+}
+
 function ensureCategoryStripEnabled(settingsObj) {
   const base = (settingsObj && typeof settingsObj === 'object') ? settingsObj : {};
   if (!base.publicSite || typeof base.publicSite !== 'object') base.publicSite = {};
@@ -291,11 +404,28 @@ function ensureCategoryStripEnabled(settingsObj) {
     base.publicSite.homepage.categoryStripEnabled = true;
   }
 
+  if (!base.categoryStrip || typeof base.categoryStrip !== 'object') base.categoryStrip = {};
+
   // Backward/forward-compat normalization for homepage modules and tickers.
   // Different frontend builds have used different key names over time.
   if (!base.homepage || typeof base.homepage !== 'object') base.homepage = {};
   if (!base.homepage.modules || typeof base.homepage.modules !== 'object') base.homepage.modules = {};
   const modules = base.homepage.modules;
+
+  if (!modules.categoryStrip || typeof modules.categoryStrip !== 'object') {
+    modules.categoryStrip = { enabled: base.publicSite.homepage.categoryStripEnabled, order: 1 };
+  }
+
+  if (typeof base.categoryStrip.enabled === 'boolean') {
+    base.publicSite.homepage.categoryStripEnabled = base.categoryStrip.enabled;
+    modules.categoryStrip.enabled = base.categoryStrip.enabled;
+  } else if (typeof modules.categoryStrip.enabled === 'boolean') {
+    base.categoryStrip.enabled = modules.categoryStrip.enabled;
+    base.publicSite.homepage.categoryStripEnabled = modules.categoryStrip.enabled;
+  } else {
+    base.categoryStrip.enabled = base.publicSite.homepage.categoryStripEnabled;
+    modules.categoryStrip.enabled = base.publicSite.homepage.categoryStripEnabled;
+  }
 
   // trendingStrip <-> trending
   if (modules.trending && !modules.trendingStrip) modules.trendingStrip = modules.trending;
@@ -311,6 +441,10 @@ function ensureCategoryStripEnabled(settingsObj) {
 
   // Ensure tickers object exists and normalize speed field names.
   if (!base.tickers || typeof base.tickers !== 'object') base.tickers = {};
+  if (base.tickers.breakingTicker && !base.tickers.breaking) base.tickers.breaking = base.tickers.breakingTicker;
+  if (base.tickers.breaking && !base.tickers.breakingTicker) base.tickers.breakingTicker = base.tickers.breaking;
+  if (base.tickers.liveUpdates && !base.tickers.live) base.tickers.live = base.tickers.liveUpdates;
+  if (base.tickers.live && !base.tickers.liveUpdates) base.tickers.liveUpdates = base.tickers.live;
   for (const k of ['breaking', 'live']) {
     if (!base.tickers[k] || typeof base.tickers[k] !== 'object') continue;
     const t = base.tickers[k];
@@ -319,7 +453,17 @@ function ensureCategoryStripEnabled(settingsObj) {
   }
 
   normalizeInspirationHub(base);
+  normalizeDailyWonders(base);
 
+  return base;
+}
+
+function ensurePublicSettingsResponse(settingsObj) {
+  const base = ensureCategoryStripEnabled(settingsObj);
+  if (!hasOwn(base, 'inspirationHub')) {
+    base.inspirationHub = {};
+  }
+  normalizeInspirationHub(base);
   return base;
 }
 
@@ -434,6 +578,11 @@ async function updateDraftSettings(req, res) {
     const inspirationHubValidationErr = validateInspirationHubPayload(draftData);
     if (inspirationHubValidationErr) {
       return res.status(400).json(inspirationHubValidationErr);
+    }
+
+    const dailyWondersValidationErr = validateDailyWondersPayload(draftData);
+    if (dailyWondersValidationErr) {
+      return res.status(400).json(dailyWondersValidationErr);
     }
 
     const settings = await PublicSiteSettings.getOrCreate();
@@ -564,6 +713,9 @@ async function savePublicSettings(req, res) {
     const inspirationHubValidationErr = validateInspirationHubPayload(newData);
     if (inspirationHubValidationErr) return res.status(400).json(inspirationHubValidationErr);
 
+    const dailyWondersValidationErr = validateDailyWondersPayload(newData);
+    if (dailyWondersValidationErr) return res.status(400).json(dailyWondersValidationErr);
+
     if (String(req.method || '').toUpperCase() === 'PUT') {
       // Replace draft entirely
       settings.draft = ensureCategoryStripEnabled(newData);
@@ -598,7 +750,7 @@ async function getPublishedSettings(req, res) {
   try {
     // Public endpoint should stay stable even if DB is down.
     if (!isDbReady()) {
-      const fallback = ensureCategoryStripEnabled(PublicSiteSettings.getDefaultSettings());
+      const fallback = ensurePublicSettingsResponse(PublicSiteSettings.getDefaultSettings());
       res.set('Cache-Control', 'no-store, max-age=0');
       return res.status(200).json({
         ok: true,
@@ -609,7 +761,7 @@ async function getPublishedSettings(req, res) {
       });
     }
     const settings = await PublicSiteSettings.getOrCreate();
-    const published = ensureCategoryStripEnabled(settings.published || PublicSiteSettings.getDefaultSettings());
+    const published = ensurePublicSettingsResponse(settings.published || PublicSiteSettings.getDefaultSettings());
 
     res.set('Cache-Control', 'no-store, max-age=0');
 
@@ -634,6 +786,7 @@ async function getPublishedSettings(req, res) {
 
 module.exports = {
   ensureCategoryStripEnabled,
+  ensurePublicSettingsResponse,
   getPublicSettings,
   getDraftSettings,
   updateDraftSettings,
