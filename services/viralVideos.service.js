@@ -4,42 +4,10 @@ const ViralVideo = require('../models/ViralVideo');
 const DEFAULT_LIMIT = 12;
 const MAX_LIMIT = 50;
 const DEFAULT_FEATURED_LIMIT = 3;
-const MAX_FEATURED_LIMIT = 6;
-
-function resolveUploadedVideo(doc) {
-  const uploaded = doc && doc.uploadedVideo && typeof doc.uploadedVideo === 'object' ? doc.uploadedVideo : null;
-  if (!uploaded) {
-    return {
-      storageId: null,
-      fileName: null,
-      originalName: null,
-      mimeType: null,
-      provider: null,
-      relativeUrl: null,
-      url: null,
-      size: 0,
-    };
-  }
-
-  return {
-    storageId: uploaded.storageId ? String(uploaded.storageId) : null,
-    fileName: uploaded.fileName ? String(uploaded.fileName) : null,
-    originalName: uploaded.originalName ? String(uploaded.originalName) : null,
-    mimeType: uploaded.mimeType ? String(uploaded.mimeType) : null,
-    provider: uploaded.provider ? String(uploaded.provider) : null,
-    relativeUrl: uploaded.relativeUrl ? String(uploaded.relativeUrl) : null,
-    url: uploaded.url ? String(uploaded.url) : null,
-    size: typeof uploaded.size === 'number' ? uploaded.size : 0,
-  };
-}
-
-function resolvePlaybackVideoUrl(doc) {
-  const uploaded = resolveUploadedVideo(doc);
-  return uploaded.url || uploaded.relativeUrl || doc.videoUrl || null;
-}
+const MAX_FEATURED_LIMIT = 3;
 
 function resolveFeaturedVideoUrl(doc) {
-  return resolvePlaybackVideoUrl(doc) || doc.embedUrl || null;
+  return doc && doc.videoUrl ? String(doc.videoUrl) : null;
 }
 
 function resolveFeaturedThumbnailUrl(doc) {
@@ -75,7 +43,10 @@ function parseArchiveFilters(query = {}) {
 
 function buildPublishedFilter(filters = {}) {
   const filter = {
-    isPublished: true,
+    $or: [
+      { isPublished: true },
+      { status: 'published' },
+    ],
     publishedAt: { $ne: null },
   };
 
@@ -104,35 +75,18 @@ function buildHomepageVisibilityFilter(filters = {}) {
   };
 }
 
-function nonEmptyStringQuery() {
-  return { $type: 'string', $ne: '' };
-}
-
 function buildFeaturedHomepageFilter(filters = {}) {
   const filter = {
     $and: [
       {
-        $or: [
-          { isPublished: true },
-          { status: 'published' },
-        ],
+        status: 'published',
       },
       {
         $or: [
-          { isFeatured: true },
+          { isHomepageVisible: true },
           { homepageFeatured: true },
+          { isFeatured: true },
           { isFeaturedHomepage: true },
-        ],
-      },
-      {
-        $or: [
-          { thumbnailUrl: nonEmptyStringQuery() },
-          { 'posterImage.url': nonEmptyStringQuery() },
-          { 'thumbnail.url': nonEmptyStringQuery() },
-          { videoUrl: nonEmptyStringQuery() },
-          { 'uploadedVideo.url': nonEmptyStringQuery() },
-          { 'uploadedVideo.relativeUrl': nonEmptyStringQuery() },
-          { embedUrl: nonEmptyStringQuery() },
         ],
       },
     ],
@@ -164,6 +118,12 @@ function normalizePosterImage(image) {
   };
 }
 
+function normalizeSourceType(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'upload' || raw === 'uploaded') return 'upload';
+  return 'url';
+}
+
 function toPublicViralVideoCard(doc) {
   if (!doc) return null;
 
@@ -176,17 +136,26 @@ function toPublicViralVideoCard(doc) {
     thumbnailUrl: doc.thumbnailUrl || normalizePosterImage(doc.posterImage).url,
     posterImage: normalizePosterImage(doc.posterImage),
     thumbnail: normalizePosterImage(doc.posterImage),
-    sourceType: doc.sourceType || null,
+    sourceType: normalizeSourceType(doc.sourceType),
+    videoStorageProvider: doc.videoStorageProvider || null,
+    videoPublicId: doc.videoPublicId || null,
+    videoKey: doc.videoKey || null,
+    videoMimeType: doc.videoMimeType || null,
+    videoSizeBytes: typeof doc.videoSizeBytes === 'number' ? doc.videoSizeBytes : null,
+    videoDuration: typeof doc.videoDuration === 'number' ? doc.videoDuration : null,
     language: doc.language || null,
     category: doc.category || null,
     tags: Array.isArray(doc.tags) ? doc.tags : [],
     isHomepageVisible: doc.isHomepageVisible === true,
+    showOnHomepage: doc.isHomepageVisible === true,
     homepageFeatured: doc.homepageFeatured === true || doc.isFeatured === true || doc.isFeaturedHomepage === true,
     isFeaturedHomepage: doc.homepageFeatured === true || doc.isFeatured === true || doc.isFeaturedHomepage === true,
     isFeatured: doc.homepageFeatured === true || doc.isFeatured === true || doc.isFeaturedHomepage === true,
     status: doc.status || (doc.isPublished === true ? 'published' : 'draft'),
+    videoUrl: doc.videoUrl || null,
     publishedAt: doc.publishedAt || null,
     sortOrder: typeof doc.sortOrder === 'number' ? doc.sortOrder : 0,
+    priority: typeof doc.sortOrder === 'number' ? doc.sortOrder : 0,
   };
 }
 
@@ -202,15 +171,23 @@ function toPublicViralVideoTeaser(doc) {
 
 function toPublicFeaturedViralVideo(doc) {
   if (!doc) return null;
+  const homepageFlag = doc.isHomepageVisible === true || doc.homepageFeatured === true || doc.isFeatured === true || doc.isFeaturedHomepage === true;
 
   return {
+    id: String(doc._id),
     _id: String(doc._id),
     title: doc.title || null,
     slug: doc.slug || null,
+    summary: doc.summary || null,
     thumbnailUrl: resolveFeaturedThumbnailUrl(doc),
     videoUrl: resolveFeaturedVideoUrl(doc),
     language: doc.language || null,
+    category: doc.category || null,
     status: doc.status || (doc.isPublished === true ? 'published' : 'draft'),
+    showOnHomepage: homepageFlag,
+    publishedAt: doc.publishedAt || null,
+    sortOrder: typeof doc.sortOrder === 'number' ? doc.sortOrder : 0,
+    priority: typeof doc.sortOrder === 'number' ? doc.sortOrder : 0,
     homepageFeatured: doc.homepageFeatured === true || doc.isFeatured === true || doc.isFeaturedHomepage === true,
   };
 }
@@ -221,8 +198,7 @@ function toPublicViralVideoDetail(doc) {
 
   return {
     ...base,
-    uploadedVideo: resolveUploadedVideo(doc),
-    videoUrl: resolvePlaybackVideoUrl(doc),
+    videoUrl: doc.videoUrl || null,
     embedUrl: doc.embedUrl || null,
     isPublished: doc.isPublished === true,
     createdAt: doc.createdAt || null,

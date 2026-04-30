@@ -1,6 +1,7 @@
 const express = require('express');
 
 const { requireAdminAuth } = require('../middleware/adminAuth');
+const { coverUpload } = require('./uploads.routes');
 const {
 	getViralVideosSettings,
 	updateViralVideosSettings,
@@ -9,6 +10,7 @@ const {
 	getAdminViralVideoById,
 	updateAdminViralVideo,
 	deleteAdminViralVideo,
+	uploadViralVideoThumbnailFile,
 	uploadViralVideoFile,
 } = require('../controllers/adminViralVideosController');
 
@@ -20,7 +22,8 @@ router.get('/viral-videos/settings', getViralVideosSettings);
 router.put('/viral-videos/settings', updateViralVideosSettings);
 router.get('/viral-videos', listAdminViralVideos);
 router.post('/viral-videos', createAdminViralVideo);
-router.post('/viral-videos/upload', uploadViralVideoFile);
+router.post('/viral-videos/upload', coverUpload.any(), uploadViralVideoThumbnailFile);
+router.post('/viral-videos/upload-thumbnail', coverUpload.any(), uploadViralVideoThumbnailFile);
 router.post('/viral-videos/upload-video', uploadViralVideoFile);
 router.get('/viral-videos/:id', getAdminViralVideoById);
 router.put('/viral-videos/:id', updateAdminViralVideo);

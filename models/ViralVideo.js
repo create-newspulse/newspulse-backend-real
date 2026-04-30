@@ -2,14 +2,14 @@ const mongoose = require('mongoose');
 const { slugifyUnicode } = require('../lib/slug');
 
 const LANGUAGE_VALUES = ['en', 'hi', 'gu'];
-const SOURCE_TYPE_VALUES = ['uploaded', 'embed', 'external', 'reel', 'short_clip'];
+const SOURCE_TYPE_VALUES = ['url', 'upload'];
 
 function normalizeSourceType(value) {
   const raw = String(value || '').trim().toLowerCase();
-  if (!raw) return 'embed';
-  if (raw === 'short clip' || raw === 'short-clip') return 'short_clip';
-  if (raw === 'reels') return 'reel';
-  return SOURCE_TYPE_VALUES.includes(raw) ? raw : 'embed';
+  if (!raw) return 'url';
+  if (raw === 'uploaded' || raw === 'file' || raw === 'cloud') return 'upload';
+  if (raw === 'embed' || raw === 'external' || raw === 'reel' || raw === 'reels' || raw === 'short_clip' || raw === 'short clip' || raw === 'short-clip') return 'url';
+  return SOURCE_TYPE_VALUES.includes(raw) ? raw : 'url';
 }
 
 function normalizeStringArray(values) {
@@ -33,20 +33,6 @@ const imageSchema = new mongoose.Schema(
   { _id: false }
 );
 
-const uploadedVideoSchema = new mongoose.Schema(
-  {
-    storageId: { type: String, default: null, trim: true },
-    fileName: { type: String, default: null, trim: true },
-    originalName: { type: String, default: null, trim: true },
-    mimeType: { type: String, default: null, trim: true },
-    provider: { type: String, default: null, trim: true },
-    relativeUrl: { type: String, default: null, trim: true },
-    url: { type: String, default: null, trim: true },
-    size: { type: Number, default: 0 },
-  },
-  { _id: false }
-);
-
 const viralVideoSchema = new mongoose.Schema(
   {
     title: { type: String, required: true, trim: true },
@@ -54,16 +40,21 @@ const viralVideoSchema = new mongoose.Schema(
     summary: { type: String, default: null, trim: true, alias: 'shortCaption' },
     thumbnailUrl: { type: String, default: null, trim: true },
     posterImage: { type: imageSchema, default: () => ({}), alias: 'thumbnail' },
-    uploadedVideo: { type: uploadedVideoSchema, default: () => ({}) },
     videoUrl: { type: String, default: null, trim: true },
     embedUrl: { type: String, default: null, trim: true },
     sourceType: {
       type: String,
       enum: SOURCE_TYPE_VALUES,
-      default: 'embed',
+      default: 'url',
       index: true,
       set: normalizeSourceType,
     },
+    videoStorageProvider: { type: String, default: null, trim: true },
+    videoPublicId: { type: String, default: null, trim: true },
+    videoKey: { type: String, default: null, trim: true },
+    videoMimeType: { type: String, default: null, trim: true },
+    videoSizeBytes: { type: Number, default: null },
+    videoDuration: { type: Number, default: null },
     language: { type: String, enum: LANGUAGE_VALUES, default: 'en', index: true },
     category: { type: String, default: null, trim: true, index: true },
     tags: {
@@ -73,11 +64,11 @@ const viralVideoSchema = new mongoose.Schema(
     },
     isPublished: { type: Boolean, default: false, index: true },
     status: { type: String, enum: ['draft', 'published'], default: 'draft', index: true },
-    isHomepageVisible: { type: Boolean, default: true, index: true },
+    isHomepageVisible: { type: Boolean, default: true, index: true, alias: 'showOnHomepage' },
     homepageFeatured: { type: Boolean, default: false, index: true },
     isFeatured: { type: Boolean, default: false, index: true, alias: 'isFeaturedHomepage' },
     publishedAt: { type: Date, default: null, index: true },
-    sortOrder: { type: Number, default: 0, index: true },
+    sortOrder: { type: Number, default: 0, index: true, alias: 'priority' },
   },
   { timestamps: true }
 );
@@ -99,19 +90,6 @@ viralVideoSchema.pre('validate', function ensureCanonicalFields(next) {
 
   if (this.posterImage.url && !this.thumbnailUrl) {
     this.thumbnailUrl = this.posterImage.url;
-  }
-
-  if (!this.uploadedVideo || typeof this.uploadedVideo !== 'object') {
-    this.uploadedVideo = {
-      storageId: null,
-      fileName: null,
-      originalName: null,
-      mimeType: null,
-      provider: null,
-      relativeUrl: null,
-      url: null,
-      size: 0,
-    };
   }
 
   if (this.status === 'published') {
@@ -136,8 +114,8 @@ viralVideoSchema.pre('validate', function ensureCanonicalFields(next) {
     this.homepageFeatured = true;
   }
 
-  if (!this.uploadedVideo?.url && !this.uploadedVideo?.relativeUrl && !this.videoUrl && !this.embedUrl) {
-    this.invalidate('videoUrl', 'Either videoUrl or embedUrl is required');
+  if (!this.videoUrl) {
+    this.invalidate('videoUrl', 'videoUrl is required');
   }
 
   next();

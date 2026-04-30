@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const request = require('supertest');
 
 const app = require('../server');
+const cloudinary = require('../lib/cloudinary');
 const {
   ADMIN_MEDIA_ACCEPTED_MIME_TYPES,
   ARTICLE_COVER_ACCEPTED_MIME_TYPES,
@@ -63,4 +64,53 @@ test('POST /api/uploads/cover rejects unsupported MIME types before Cloudinary u
   assert.equal(res.statusCode, 400);
   assert.equal(res.body.code, MEDIA_TYPE_NOT_ALLOWED_CODE);
   assert.equal(res.body.message, MEDIA_TYPE_NOT_ALLOWED_MESSAGE);
+});
+
+test('POST /api/uploads/cover uploads article cover through shared Cloudinary service', async (t) => {
+  const prevIsCloudinaryConfigured = cloudinary.isCloudinaryConfigured;
+  const prevUploadFromBuffer = cloudinary.uploadFromBuffer;
+  const prevUploadFromDataUri = cloudinary.uploadFromDataUri;
+
+  t.after(() => {
+    cloudinary.isCloudinaryConfigured = prevIsCloudinaryConfigured;
+    cloudinary.uploadFromBuffer = prevUploadFromBuffer;
+    cloudinary.uploadFromDataUri = prevUploadFromDataUri;
+  });
+
+  cloudinary.isCloudinaryConfigured = () => true;
+  cloudinary.uploadFromDataUri = async () => { throw new Error('data uri fallback should not be used'); };
+  cloudinary.uploadFromBuffer = async (buffer, options) => {
+    assert.ok(Buffer.isBuffer(buffer));
+    assert.equal(options.folder, 'newspulse/articles');
+    return {
+      secure_url: 'https://res.cloudinary.com/demo/image/upload/article-cover.jpg',
+      public_id: 'newspulse/articles/article-cover',
+      width: 1200,
+      height: 675,
+      format: 'jpg',
+      bytes: 2345,
+    };
+  };
+
+  const res = await request(app)
+    .post('/api/uploads/cover')
+    .attach('cover', Buffer.from('jpgdata'), {
+      filename: 'cover.jpg',
+      contentType: 'image/jpeg',
+    });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.success, true);
+  assert.deepEqual(res.body.data, {
+    url: 'https://res.cloudinary.com/demo/image/upload/article-cover.jpg',
+    secureUrl: 'https://res.cloudinary.com/demo/image/upload/article-cover.jpg',
+    secure_url: 'https://res.cloudinary.com/demo/image/upload/article-cover.jpg',
+    publicId: 'newspulse/articles/article-cover',
+    public_id: 'newspulse/articles/article-cover',
+    width: 1200,
+    height: 675,
+    format: 'jpg',
+    bytes: 2345,
+  });
 });

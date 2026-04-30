@@ -11,6 +11,7 @@ const ViralVideo = require('../models/ViralVideo');
 function enableViralVideosSetting() {
   return {
     value: {
+      viralVideosFrontendEnabled: true,
       frontendEnabled: true,
     },
   };
@@ -19,9 +20,14 @@ function enableViralVideosSetting() {
 function disableViralVideosSetting() {
   return {
     value: {
+      viralVideosFrontendEnabled: false,
       frontendEnabled: false,
     },
   };
+}
+
+function expectedFeaturedSettings(enabled) {
+  return { frontendEnabled: enabled, viralVideosFrontendEnabled: enabled };
 }
 
 function makeFindResult(items) {
@@ -71,7 +77,7 @@ function createVideo(overrides = {}) {
     posterImage: overrides.posterImage || { url: 'https://img.example/video.jpg', alt: 'Poster', publicId: null },
     videoUrl: overrides.videoUrl !== undefined ? overrides.videoUrl : null,
     embedUrl: overrides.embedUrl !== undefined ? overrides.embedUrl : 'https://www.youtube.com/embed/demo',
-    sourceType: overrides.sourceType || 'embed',
+    sourceType: overrides.sourceType || 'url',
     language: overrides.language || 'en',
     category: overrides.category || 'funny',
     tags: overrides.tags || ['cats'],
@@ -89,32 +95,17 @@ function createVideo(overrides = {}) {
 }
 
 function expectedFeaturedHomepageFilter() {
-  const nonEmptyString = { $type: 'string', $ne: '' };
-
   return {
     $and: [
       {
-        $or: [
-          { isPublished: true },
-          { status: 'published' },
-        ],
+        status: 'published',
       },
       {
         $or: [
-          { isFeatured: true },
+          { isHomepageVisible: true },
           { homepageFeatured: true },
+          { isFeatured: true },
           { isFeaturedHomepage: true },
-        ],
-      },
-      {
-        $or: [
-          { thumbnailUrl: nonEmptyString },
-          { 'posterImage.url': nonEmptyString },
-          { 'thumbnail.url': nonEmptyString },
-          { videoUrl: nonEmptyString },
-          { 'uploadedVideo.url': nonEmptyString },
-          { 'uploadedVideo.relativeUrl': nonEmptyString },
-          { embedUrl: nonEmptyString },
         ],
       },
     ],
@@ -152,7 +143,10 @@ test('GET /api/public/viral-videos returns paginated published archive items', a
     assert.equal(res.body.totalPages, 1);
     assert.deepEqual(res.body.filters, { lang: 'en', category: 'funny', year: null, month: null, tag: 'cats' });
     assert.deepEqual(capturedFilter, {
-      isPublished: true,
+      $or: [
+        { isPublished: true },
+        { status: 'published' },
+      ],
       publishedAt: { $ne: null },
       language: 'en',
       category: 'funny',
@@ -184,8 +178,10 @@ test('GET /api/public/viral-videos/featured returns record saved with homepageFe
           videoUrl: 'https://cdn.example/homepage-featured.mp4',
           embedUrl: null,
           language: 'gu',
+          category: 'news',
           isPublished: false,
           status: 'published',
+          isHomepageVisible: false,
           isFeatured: false,
           isFeaturedHomepage: false,
           homepageFeatured: true,
@@ -196,20 +192,22 @@ test('GET /api/public/viral-videos/featured returns record saved with homepageFe
     const res = await request(app).get('/api/public/viral-videos/featured?limit=1');
 
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, {
-      ok: true,
-      settings: { frontendEnabled: true },
-      video: {
-        _id: '507f1f77bcf86cd799439333',
-        title: 'Homepage Featured Fields',
-        slug: 'homepage-featured-fields',
-        thumbnailUrl: 'https://img.example/homepage-featured.jpg',
-        videoUrl: 'https://cdn.example/homepage-featured.mp4',
-        language: 'gu',
-        status: 'published',
-        homepageFeatured: true,
-      },
-    });
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.enabled, true);
+    assert.deepEqual(res.body.settings, expectedFeaturedSettings(true));
+    assert.equal(res.body.video.slug, 'homepage-featured-fields');
+    assert.equal(res.body.video.id, '507f1f77bcf86cd799439333');
+    assert.equal(res.body.video.title, 'Homepage Featured Fields');
+    assert.equal(res.body.video.summary, 'Short summary');
+    assert.equal(res.body.video.language, 'gu');
+    assert.equal(res.body.video.category, 'news');
+    assert.equal(res.body.video.thumbnailUrl, 'https://img.example/homepage-featured.jpg');
+    assert.equal(res.body.video.videoUrl, 'https://cdn.example/homepage-featured.mp4');
+    assert.equal(res.body.video.status, 'published');
+    assert.equal(res.body.video.showOnHomepage, true);
+    assert.ok(res.body.video.publishedAt);
+    assert.equal(res.body.items.length, 1);
+    assert.deepEqual(res.body.videos, res.body.items);
     assert.deepEqual(capturedFilters, [expectedFeaturedHomepageFilter()]);
   } finally {
     ViralVideo.find = prevFind;
@@ -262,6 +260,7 @@ test('GET /api/public/viral-videos returns an empty archive payload when global 
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.ok, true);
     assert.equal(res.body.enabled, false);
+    assert.equal(res.body.viralVideosFrontendEnabled, false);
     assert.deepEqual(res.body.items, []);
     assert.equal(res.body.total, 0);
   } finally {
@@ -299,17 +298,13 @@ test('GET /api/public/viral-videos/featured returns homepage featured video resp
 
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.ok, true);
-    assert.deepEqual(res.body.settings, { frontendEnabled: true });
-    assert.deepEqual(res.body.video, {
-      _id: '507f1f77bcf86cd799439303',
-      title: 'Featured Viral',
-      slug: 'featured-viral',
-      thumbnailUrl: 'https://img.example/video.jpg',
-      videoUrl: 'https://cdn.example/featured-viral.mp4',
-      language: 'gu',
-      status: 'published',
-      homepageFeatured: true,
-    });
+    assert.equal(res.body.enabled, true);
+    assert.deepEqual(res.body.settings, expectedFeaturedSettings(true));
+    assert.equal(res.body.video.slug, 'featured-viral');
+    assert.equal(res.body.video.thumbnailUrl, 'https://img.example/video.jpg');
+    assert.equal(res.body.video.videoUrl, 'https://cdn.example/featured-viral.mp4');
+    assert.equal(res.body.items.length, 1);
+    assert.deepEqual(res.body.videos, res.body.items);
     assert.deepEqual(capturedFilters[0], expectedFeaturedHomepageFilter());
   } finally {
     ViralVideo.find = prevFind;
@@ -333,8 +328,11 @@ test('GET /api/public/viral-videos/featured returns null video when no featured-
 
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.ok, true);
-    assert.deepEqual(res.body.settings, { frontendEnabled: true });
+    assert.equal(res.body.enabled, true);
+    assert.deepEqual(res.body.settings, expectedFeaturedSettings(true));
     assert.equal(res.body.video, null);
+    assert.deepEqual(res.body.items, []);
+    assert.deepEqual(res.body.videos, []);
     assert.deepEqual(capturedFilters, [expectedFeaturedHomepageFilter()]);
   } finally {
     ViralVideo.find = prevFind;
@@ -342,7 +340,7 @@ test('GET /api/public/viral-videos/featured returns null video when no featured-
   }
 });
 
-test('GET /api/public/viral-videos/featured returns null when no eligible media-backed featured item exists', async () => {
+test('GET /api/public/viral-videos/featured returns enabled true with empty items when no homepage item exists', async () => {
   const prevFind = ViralVideo.find;
   const prevFindOneSetting = SystemSetting.findOne;
   const capturedFilters = [];
@@ -358,8 +356,11 @@ test('GET /api/public/viral-videos/featured returns null when no eligible media-
 
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.ok, true);
-    assert.deepEqual(res.body.settings, { frontendEnabled: true });
+    assert.equal(res.body.enabled, true);
+    assert.deepEqual(res.body.settings, expectedFeaturedSettings(true));
     assert.equal(res.body.video, null);
+    assert.deepEqual(res.body.items, []);
+    assert.deepEqual(res.body.videos, []);
     assert.deepEqual(capturedFilters, [expectedFeaturedHomepageFilter()]);
   } finally {
     ViralVideo.find = prevFind;
@@ -367,7 +368,7 @@ test('GET /api/public/viral-videos/featured returns null when no eligible media-
   }
 });
 
-test('GET /api/public/viral-videos/featured returns an eligible homepage video when only a thumbnail is present', async () => {
+test('GET /api/public/viral-videos/featured returns an eligible homepage video when thumbnail and videoUrl are present', async () => {
   const prevFind = ViralVideo.find;
   const prevFindOneSetting = SystemSetting.findOne;
   const capturedFilters = [];
@@ -383,7 +384,7 @@ test('GET /api/public/viral-videos/featured returns an eligible homepage video w
           title: 'Thumbnail Only Featured',
           thumbnailUrl: 'https://img.example/thumbnail-only.jpg',
           posterImage: { url: null, alt: null, publicId: null },
-          videoUrl: null,
+          videoUrl: 'https://cdn.example/thumbnail-plus-url.mp4',
           embedUrl: null,
           uploadedVideo: { url: null, relativeUrl: null },
           language: 'gu',
@@ -399,20 +400,13 @@ test('GET /api/public/viral-videos/featured returns an eligible homepage video w
     const res = await request(app).get('/api/public/viral-videos/featured?limit=1');
 
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, {
-      ok: true,
-      settings: { frontendEnabled: true },
-      video: {
-        _id: '507f1f77bcf86cd799439334',
-        title: 'Thumbnail Only Featured',
-        slug: 'thumbnail-only-featured',
-        thumbnailUrl: 'https://img.example/thumbnail-only.jpg',
-        videoUrl: null,
-        language: 'gu',
-        status: 'published',
-        homepageFeatured: true,
-      },
-    });
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.enabled, true);
+    assert.deepEqual(res.body.settings, expectedFeaturedSettings(true));
+    assert.equal(res.body.video.slug, 'thumbnail-only-featured');
+    assert.equal(res.body.video.thumbnailUrl, 'https://img.example/thumbnail-only.jpg');
+    assert.equal(res.body.video.videoUrl, 'https://cdn.example/thumbnail-plus-url.mp4');
+    assert.equal(res.body.items.length, 1);
     assert.deepEqual(capturedFilters, [expectedFeaturedHomepageFilter()]);
   } finally {
     ViralVideo.find = prevFind;
@@ -434,23 +428,25 @@ test('GET /api/public/viral-videos/featured returns no homepage content when glo
 
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.ok, true);
-    assert.deepEqual(res.body.settings, { frontendEnabled: false });
+    assert.equal(res.body.enabled, false);
+    assert.deepEqual(res.body.settings, expectedFeaturedSettings(false));
     assert.equal(res.body.video, null);
+    assert.deepEqual(res.body.items, []);
   } finally {
     ViralVideo.find = prevFind;
     SystemSetting.findOne = prevFindOneSetting;
   }
 });
 
-test('GET /api/public/viral-videos/featured returns latest frontendEnabled value without stale cache', async () => {
+test('GET /api/public/viral-videos/featured returns latest viralVideosFrontendEnabled value without stale cache', async () => {
   const prevFind = ViralVideo.find;
   const prevFindOneSetting = SystemSetting.findOne;
-  let frontendEnabled = false;
+  let viralVideosFrontendEnabled = false;
   let featuredQueries = 0;
 
   try {
     SystemSetting.findOne = () => ({
-      lean: async () => ({ value: { frontendEnabled } }),
+      lean: async () => ({ value: { viralVideosFrontendEnabled } }),
     });
     ViralVideo.find = () => {
       featuredQueries += 1;
@@ -465,12 +461,15 @@ test('GET /api/public/viral-videos/featured returns latest frontendEnabled value
     assert.equal(offRes.headers.expires, '0');
     assert.deepEqual(offRes.body, {
       ok: true,
-      settings: { frontendEnabled: false },
+      enabled: false,
+      settings: expectedFeaturedSettings(false),
       video: null,
+      items: [],
+      videos: [],
     });
     assert.equal(featuredQueries, 0);
 
-    frontendEnabled = true;
+    viralVideosFrontendEnabled = true;
     const onRes = await request(app).get('/api/public/viral-videos/featured?limit=1');
 
     assert.equal(onRes.statusCode, 200);
@@ -479,19 +478,25 @@ test('GET /api/public/viral-videos/featured returns latest frontendEnabled value
     assert.equal(onRes.headers.expires, '0');
     assert.deepEqual(onRes.body, {
       ok: true,
-      settings: { frontendEnabled: true },
+      enabled: true,
+      settings: expectedFeaturedSettings(true),
       video: null,
+      items: [],
+      videos: [],
     });
     assert.equal(featuredQueries, 1);
 
-    frontendEnabled = false;
+    viralVideosFrontendEnabled = false;
     const offAgainRes = await request(app).get('/api/public/viral-videos/featured?limit=1');
 
     assert.equal(offAgainRes.statusCode, 200);
     assert.deepEqual(offAgainRes.body, {
       ok: true,
-      settings: { frontendEnabled: false },
+      enabled: false,
+      settings: expectedFeaturedSettings(false),
       video: null,
+      items: [],
+      videos: [],
     });
     assert.equal(featuredQueries, 1);
   } finally {
@@ -513,7 +518,7 @@ test('GET /api/public/viral-videos/:slug returns detail payload', async () => {
         title: 'Detail Viral',
         videoUrl: 'https://cdn.example/video.mp4',
         embedUrl: null,
-        sourceType: 'uploaded',
+        sourceType: 'upload',
         isFeatured: true,
         sortOrder: 8,
       })
@@ -526,7 +531,7 @@ test('GET /api/public/viral-videos/:slug returns detail payload', async () => {
     assert.equal(res.body.item.slug, 'viral-detail');
     assert.equal(res.body.item.videoUrl, 'https://cdn.example/video.mp4');
     assert.equal(res.body.item.embedUrl, null);
-    assert.equal(res.body.item.sourceType, 'uploaded');
+    assert.equal(res.body.item.sourceType, 'upload');
     assert.equal(res.body.item.isPublished, true);
     assert.equal(res.body.item.thumbnail.url, 'https://img.example/video.jpg');
     assert.equal(res.body.item.isFeaturedHomepage, true);
@@ -624,8 +629,9 @@ test('GET /api/viral-videos/settings returns a stable compatibility settings pay
     assert.deepEqual(res.body, {
       ok: true,
       enabled: false,
-      data: { enabled: false },
-      settings: { enabled: false },
+      viralVideosFrontendEnabled: false,
+      data: { enabled: false, viralVideosFrontendEnabled: false },
+      settings: { enabled: false, viralVideosFrontendEnabled: false },
     });
   } finally {
     SystemSetting.findOne = prevFindOneSetting;

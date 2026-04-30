@@ -21,6 +21,7 @@ function buildEmptyArchiveResponse() {
   return {
     ok: true,
     enabled: false,
+    viralVideosFrontendEnabled: false,
     items: [],
     page: 1,
     limit: 0,
@@ -40,13 +41,14 @@ async function getPublicViralVideosSettings(_req, res, next) {
   try {
     res.set('Cache-Control', 'no-store');
     const settings = await getViralVideosSettings();
-    const enabled = settings.frontendEnabled !== false;
+    const enabled = settings.viralVideosFrontendEnabled !== false;
 
     return res.status(200).json({
       ok: true,
       enabled,
-      data: { enabled },
-      settings: { enabled },
+      viralVideosFrontendEnabled: enabled,
+      data: { enabled, viralVideosFrontendEnabled: enabled },
+      settings: { enabled, viralVideosFrontendEnabled: enabled },
     });
   } catch (error) {
     return next(error);
@@ -76,18 +78,19 @@ async function listFeaturedPublicViralVideos(req, res, next) {
   try {
     setFeaturedNoCacheHeaders(res);
     const settings = await getViralVideosSettings();
-    const frontendEnabled = settings.frontendEnabled !== false;
+    const frontendEnabled = settings.viralVideosFrontendEnabled !== false;
+    const responseSettings = { frontendEnabled, viralVideosFrontendEnabled: frontendEnabled };
 
     if (!isDbReady()) {
-      return res.status(200).json({ ok: true, settings: { frontendEnabled }, video: null });
+      return res.status(200).json({ ok: true, enabled: frontendEnabled, settings: responseSettings, video: null, items: [], videos: [] });
     }
 
     if (!frontendEnabled) {
-      return res.status(200).json({ ok: true, settings: { frontendEnabled: false }, video: null });
+      return res.status(200).json({ ok: true, enabled: false, settings: responseSettings, video: null, items: [], videos: [] });
     }
 
     const items = await listFeaturedViralVideos(req.query);
-    return res.status(200).json({ ok: true, settings: { frontendEnabled: true }, video: items[0] || null });
+    return res.status(200).json({ ok: true, enabled: true, settings: responseSettings, video: items[0] || null, items, videos: items });
   } catch (error) {
     return next(error);
   }
