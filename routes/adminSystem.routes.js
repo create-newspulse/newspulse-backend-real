@@ -6,12 +6,117 @@ const { requireAdminAuth, requireFounderAuth } = require('../middleware/adminAut
 const { requireOwnerKey } = require('../middleware/requireOwnerKey');
 const { settingsService } = require('../services/settingsService');
 const mongoose = require('mongoose');
+const { getRedisClient, isRedisReady } = require('../lib/redis');
+const { getMailerStatus } = require('../lib/mailer');
 let SystemSnapshot = null;
 try { SystemSnapshot = require('../models/SystemSnapshot'); } catch (_) {}
+let getPublishTranslationWorkerStatus = null;
+try { ({ getPublishTranslationWorkerStatus } = require('../services/publishAsyncTranslation.service')); } catch (_) {}
 
 function isDbReady() {
   return mongoose.connection.readyState === 1;
 }
+
+function safeSection(status, message) {
+  return { status, message };
+}
+
+function getMongodbHealth() {
+  try {
+    const readyState = typeof mongoose?.connection?.readyState === 'number' ? mongoose.connection.readyState : null;
+    if (readyState === 1) return safeSection('ok', 'MongoDB connection is ready.');
+    if (readyState === 0) return safeSection('error', 'MongoDB is disconnected.');
+    if (readyState === 2) return safeSection('unknown', 'MongoDB connection is still opening.');
+    if (readyState === 3) return safeSection('error', 'MongoDB connection is disconnecting.');
+    return safeSection('unknown', 'MongoDB connection state is unavailable.');
+  } catch (_) {
+    return safeSection('unknown', 'MongoDB health could not be checked safely.');
+  }
+}
+
+function getRedisHealth() {
+  try {
+    const client = getRedisClient();
+    if (!client) return safeSection('not_configured', 'Redis is not configured.');
+    if (isRedisReady()) return safeSection('connected', 'Redis client is connected.');
+    const status = String(client.status || '').toLowerCase();
+    if (status === 'connect' || status === 'connecting' || status === 'reconnecting') {
+      return safeSection('unknown', 'Redis client is connecting.');
+    }
+    return safeSection('error', 'Redis client is not ready.');
+  } catch (_) {
+    return safeSection('unknown', 'Redis health could not be checked safely.');
+  }
+}
+
+function getTranslationWorkerHealth() {
+  try {
+    if (typeof getPublishTranslationWorkerStatus !== 'function') {
+      return safeSection('unknown', 'Translation worker status is not exposed.');
+    }
+    const status = getPublishTranslationWorkerStatus();
+    if (status && status.running === true) return safeSection('running', 'Translation worker is running.');
+    if (status && status.status === 'stopped') return safeSection('stopped', 'Translation worker is not running.');
+    return safeSection('unknown', 'Translation worker status is unavailable.');
+  } catch (_) {
+    return safeSection('unknown', 'Translation worker status could not be checked safely.');
+  }
+}
+
+function getSmtpEmailHealth() {
+  try {
+    const status = getMailerStatus();
+    return status && status.configured === true
+      ? safeSection('configured', 'SMTP/email provider is configured.')
+      : safeSection('missing', 'SMTP/email provider configuration is incomplete.');
+  } catch (_) {
+    return safeSection('unknown', 'SMTP/email status could not be checked safely.');
+  }
+}
+
+function getEnvironmentHealth() {
+  try {
+    const hasJwtSecret = !!String(process.env.JWT_SECRET || '').trim();
+    const hasNodeEnv = !!String(process.env.NODE_ENV || '').trim();
+    if (hasJwtSecret && hasNodeEnv) return safeSection('ok', 'Required runtime labels are present.');
+    return safeSection('check_needed', 'One or more safe runtime checks need attention.');
+  } catch (_) {
+    return safeSection('check_needed', 'Environment status could not be checked safely.');
+  }
+}
+
+function buildSafeOwnerSystemHealth() {
+  return {
+    backendApi: safeSection('ok', 'Backend API is responding.'),
+    mongodb: getMongodbHealth(),
+    redis: getRedisHealth(),
+    translationWorker: getTranslationWorkerHealth(),
+    smtpEmail: getSmtpEmailHealth(),
+    environment: getEnvironmentHealth(),
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+// GET /api/admin/safe-owner-zone/system-health
+// Read-only Safe Owner Zone health summary. Returns safe labels only; no secrets.
+router.get('/safe-owner-zone/system-health', requireAdminAuth, (_req, res) => {
+  try {
+    return res.status(200).json({ ok: true, data: buildSafeOwnerSystemHealth() });
+  } catch (_) {
+    return res.status(200).json({
+      ok: true,
+      data: {
+        backendApi: safeSection('error', 'Backend health check failed softly.'),
+        mongodb: safeSection('unknown', 'MongoDB health is unavailable.'),
+        redis: safeSection('unknown', 'Redis health is unavailable.'),
+        translationWorker: safeSection('unknown', 'Translation worker status is unavailable.'),
+        smtpEmail: safeSection('unknown', 'SMTP/email status is unavailable.'),
+        environment: safeSection('check_needed', 'Environment status is unavailable.'),
+        checkedAt: new Date().toISOString(),
+      },
+    });
+  }
+});
 
 // GET /admin-api/admin/system/translation-status
 // Debug endpoint for admin panel: translation providers/config health.
