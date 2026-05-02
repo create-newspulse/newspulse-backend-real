@@ -753,15 +753,6 @@ async function enqueueTranslateAndSave(newsId, options = {}) {
 let _workerStarted = false;
 let _workerTimer = null;
 
-function getPublishTranslationWorkerStatus() {
-  const env = String(process.env.NODE_ENV || '').toLowerCase();
-  if (env === 'test') return { running: false, status: 'stopped' };
-  return {
-    running: _workerStarted === true && !!_workerTimer,
-    status: _workerStarted === true && !!_workerTimer ? 'running' : 'stopped',
-  };
-}
-
 function startPublishTranslationWorker(options = {}) {
   const logger = options.logger || console;
   const env = String(process.env.NODE_ENV || '').toLowerCase();
@@ -929,6 +920,5 @@ module.exports = {
   markPublishTranslationPending,
   enqueueTranslateAndSave,
   translateAndSave,
-  getPublishTranslationWorkerStatus,
   startPublishTranslationWorker,
 };
