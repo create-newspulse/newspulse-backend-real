@@ -17,12 +17,14 @@ const CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Cloudinary video upload 
 const CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE = 'Cloudinary video upload failed.';
 const IMAGE_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Image upload is not configured in this environment. Paste an image URL to continue.';
 const THUMBNAIL_IMAGE_TYPE_NOT_ALLOWED_MESSAGE = 'Only JPG, JPEG, PNG, or WEBP thumbnail images are allowed.';
+const VIDEO_FILE_MISSING_MESSAGE = 'No video file received. Please select an MP4, WebM, or MOV file.';
 const VIDEO_UPLOAD_TYPE_NOT_ALLOWED_MESSAGE = 'Only MP4, WebM, or MOV videos are allowed.';
 const VIDEO_UPLOAD_TOO_LARGE_MESSAGE = 'Video file is too large. Please upload below 100MB.';
 const VIDEO_UPLOAD_FAILED_MESSAGE = 'Video upload failed';
 const VIRAL_VIDEO_MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const VIRAL_VIDEO_ACCEPTED_MIME_TYPES = new Set(['video/mp4', 'video/webm', 'video/quicktime']);
 const VIRAL_VIDEO_ACCEPTED_EXTENSIONS = new Set(['.mp4', '.webm', '.mov']);
+const VIRAL_VIDEO_UPLOAD_FIELD_NAMES = ['video', 'videoFile', 'file'];
 
 function normalizeSourceType(value) {
   const raw = String(value || '').trim().toLowerCase();
@@ -571,6 +573,15 @@ function getUploadedFiles(req) {
   return [];
 }
 
+function selectViralVideoUploadFile(files) {
+  const uploadedFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  for (const fieldName of VIRAL_VIDEO_UPLOAD_FIELD_NAMES) {
+    const match = uploadedFiles.find((file) => String(file?.fieldname || '') === fieldName);
+    if (match) return match;
+  }
+  return uploadedFiles.find(Boolean) || null;
+}
+
 function isVideoUploadAttempt(file) {
   return String(file?.mimetype || '').toLowerCase().startsWith('video/');
 }
@@ -596,7 +607,7 @@ function assertAllowedViralVideoFile(file) {
   if (!VIRAL_VIDEO_ACCEPTED_MIME_TYPES.has(mimeType) || !VIRAL_VIDEO_ACCEPTED_EXTENSIONS.has(extension)) {
     const error = new Error(VIDEO_UPLOAD_TYPE_NOT_ALLOWED_MESSAGE);
     error.status = 400;
-    error.code = 'VIDEO_TYPE_NOT_ALLOWED';
+    error.code = 'INVALID_VIDEO_TYPE';
     throw error;
   }
 
@@ -685,12 +696,12 @@ async function uploadViralVideoThumbnailFile(req, res) {
 }
 
 async function handleViralVideoUploadRequest(req, res, file) {
-  if (!file) return res.status(400).json({ ok: false, message: 'No video file uploaded' });
+  if (!file) return res.status(400).json({ ok: false, code: 'VIDEO_FILE_MISSING', message: VIDEO_FILE_MISSING_MESSAGE });
 
   if (isLikelyVideoUpload(file)) {
     assertAllowedViralVideoFile(file);
   } else {
-    return res.status(400).json({ ok: false, message: VIDEO_UPLOAD_TYPE_NOT_ALLOWED_MESSAGE, code: 'VIDEO_TYPE_NOT_ALLOWED' });
+    return res.status(400).json({ ok: false, code: 'INVALID_VIDEO_TYPE', message: VIDEO_UPLOAD_TYPE_NOT_ALLOWED_MESSAGE });
   }
 
   const settings = await readViralVideosSettings();
@@ -783,7 +794,15 @@ async function uploadViralVideoFile(req, res) {
         return res.status(typeof err.status === 'number' ? err.status : 400).json({ ok: false, message: err.message || 'Upload failed' });
       }
       const files = getUploadedFiles(req);
-      const file = files.find(Boolean);
+      const file = selectViralVideoUploadFile(files);
+      logViralVideoCloudinaryUpload('route-hit', {
+        route: req.originalUrl || req.path,
+        fileReceived: !!file,
+        fieldName: file ? String(file.fieldname || '') : null,
+        mimetype: file ? String(file.mimetype || '').trim().toLowerCase() || null : null,
+        size: file && typeof file.size === 'number' ? file.size : null,
+        cloudinaryConfigPresent: getCloudinaryVideoConfigStatus().configured === true,
+      });
       return await handleViralVideoUploadRequest(req, res, file);
     } catch (error) {
       return res.status(typeof error?.status === 'number' ? error.status : 500).json({ ok: false, code: error?.code || undefined, message: error?.message || 'Upload failed' });

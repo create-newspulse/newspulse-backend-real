@@ -895,6 +895,77 @@ test('POST /api/admin/viral-videos/upload-video treats missing upload flag as en
   assert.deepEqual(res.body.viralVideosCloudUpload, configuredCloudUploadCapability(true));
 });
 
+test('POST /api/admin/viral-videos/upload-video accepts video, videoFile, and file multipart fields', async (t) => {
+  stubDbReady(t);
+  stubCloudinaryConfig(t, true);
+
+  const prevFindOne = SystemSetting.findOne;
+  const prevUploadFromBuffer = cloudinary.uploadFromBuffer;
+  t.after(() => {
+    SystemSetting.findOne = prevFindOne;
+    cloudinary.uploadFromBuffer = prevUploadFromBuffer;
+  });
+
+  const fieldNames = [];
+  SystemSetting.findOne = () => ({ lean: async () => ({ key: VIRAL_VIDEOS_SETTINGS_KEY, value: { frontendEnabled: true, viralVideosCloudUploadEnabled: true } }) });
+  cloudinary.uploadFromBuffer = async (_buffer, options) => {
+    assert.equal(options.resourceType, 'video');
+    const index = fieldNames.length;
+    return {
+      secure_url: `https://res.cloudinary.com/demo/video/upload/viral-field-${index}.mp4`,
+      public_id: `newspulse/viral-videos/viral-field-${index}`,
+      resource_type: 'video',
+    };
+  };
+
+  for (const fieldName of ['video', 'videoFile', 'file']) {
+    fieldNames.push(fieldName);
+    const res = await request(app)
+      .post('/api/admin/viral-videos/upload-video')
+      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+      .attach(fieldName, Buffer.from('videodata'), { filename: 'clip.mp4', contentType: 'video/mp4' });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.ok, true);
+    assert.match(res.body.videoFileUrl, /^https:\/\/res\.cloudinary\.com\/demo\/video\/upload\/viral-field-/);
+    assert.equal(res.body.videoMimeType, 'video/mp4');
+  }
+
+  assert.deepEqual(fieldNames, ['video', 'videoFile', 'file']);
+});
+
+test('POST /api/admin/viral-videos/upload-video returns VIDEO_FILE_MISSING when no file is received', async (t) => {
+  stubDbReady(t);
+  stubCloudinaryConfig(t, true);
+
+  const prevFindOne = SystemSetting.findOne;
+  const prevUploadFromBuffer = cloudinary.uploadFromBuffer;
+  t.after(() => {
+    SystemSetting.findOne = prevFindOne;
+    cloudinary.uploadFromBuffer = prevUploadFromBuffer;
+  });
+
+  let cloudinaryCalled = false;
+  SystemSetting.findOne = () => ({ lean: async () => ({ key: VIRAL_VIDEOS_SETTINGS_KEY, value: { frontendEnabled: true, viralVideosCloudUploadEnabled: true } }) });
+  cloudinary.uploadFromBuffer = async () => {
+    cloudinaryCalled = true;
+    throw new Error('upload should not run without a file');
+  };
+
+  const res = await request(app)
+    .post('/api/admin/viral-videos/upload-video')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .field('title', 'No video file');
+
+  assert.equal(res.statusCode, 400);
+  assert.deepEqual(res.body, {
+    ok: false,
+    code: 'VIDEO_FILE_MISSING',
+    message: 'No video file received. Please select an MP4, WebM, or MOV file.',
+  });
+  assert.equal(cloudinaryCalled, false);
+});
+
 test('POST /api/admin/viral-videos/upload-video uploads allowed Cloudinary video formats', async (t) => {
   stubDbReady(t);
   stubCloudinaryConfig(t, true);
@@ -983,7 +1054,7 @@ test('POST /api/admin/viral-videos/upload-video rejects unsafe video MIME or ext
 
     assert.equal(res.statusCode, 400);
     assert.equal(res.body.ok, false);
-    assert.equal(res.body.code, 'VIDEO_TYPE_NOT_ALLOWED');
+    assert.equal(res.body.code, 'INVALID_VIDEO_TYPE');
     assert.equal(res.body.message, 'Only MP4, WebM, or MOV videos are allowed.');
   }
 
