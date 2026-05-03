@@ -1078,6 +1078,114 @@ test('PATCH /api/admin/viral-videos/:id/unpublish and publish aliases update sta
   assert.equal(payloads[1].isPublished, true);
 });
 
+test('PATCH /api/admin/viral-videos/:id/status updates status fields', async (t) => {
+  stubDbReady(t);
+
+  const prevFindOneAndUpdate = ViralVideo.findOneAndUpdate;
+  t.after(() => { ViralVideo.findOneAndUpdate = prevFindOneAndUpdate; });
+
+  const payloads = [];
+  ViralVideo.findOneAndUpdate = async (_query, update) => {
+    payloads.push(update.$set);
+    return {
+      _id: '507f1f77bcf86cd799439530',
+      title: 'Status route item',
+      slug: 'status-route-item',
+      ...update.$set,
+      createdAt: new Date('2026-05-03T08:00:00.000Z'),
+      updatedAt: new Date('2026-05-03T08:00:00.000Z'),
+    };
+  };
+
+  const res = await request(app)
+    .patch('/api/admin/viral-videos/507f1f77bcf86cd799439530/status')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .send({ status: 'published' });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.item.status, 'published');
+  assert.equal(res.body.item.isPublished, true);
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].status, 'published');
+});
+
+test('PATCH /api/admin/viral-videos/:id/status updates isActive and isHomepageVisible', async (t) => {
+  stubDbReady(t);
+
+  const prevFindOneAndUpdate = ViralVideo.findOneAndUpdate;
+  t.after(() => { ViralVideo.findOneAndUpdate = prevFindOneAndUpdate; });
+
+  const payloads = [];
+  ViralVideo.findOneAndUpdate = async (_query, update) => {
+    payloads.push(update.$set);
+    return {
+      _id: '507f1f77bcf86cd799439531',
+      title: 'Status route item 2',
+      slug: 'status-route-item-2',
+      ...update.$set,
+      createdAt: new Date('2026-05-03T08:00:00.000Z'),
+      updatedAt: new Date('2026-05-03T08:00:00.000Z'),
+    };
+  };
+
+  const res = await request(app)
+    .patch('/api/admin/viral-videos/507f1f77bcf86cd799439531/status')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .send({ status: 'draft', isActive: false, showOnHomepage: false });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.item.status, 'draft');
+  assert.equal(res.body.item.isPublished, false);
+  assert.equal(res.body.item.isActive, false);
+  assert.equal(payloads[0].isHomepageVisible, false);
+});
+
+test('POST /api/admin/viral-videos/:id/status also works for status update', async (t) => {
+  stubDbReady(t);
+
+  const prevFindOneAndUpdate = ViralVideo.findOneAndUpdate;
+  t.after(() => { ViralVideo.findOneAndUpdate = prevFindOneAndUpdate; });
+
+  ViralVideo.findOneAndUpdate = async (_query, update) => ({
+    _id: '507f1f77bcf86cd799439532',
+    title: 'Post status item',
+    slug: 'post-status-item',
+    ...update.$set,
+    createdAt: new Date('2026-05-03T08:00:00.000Z'),
+    updatedAt: new Date('2026-05-03T08:00:00.000Z'),
+  });
+
+  const res = await request(app)
+    .post('/api/admin/viral-videos/507f1f77bcf86cd799439532/status')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .send({ status: 'published', showOnHomepage: true });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.item.status, 'published');
+  assert.equal(res.body.item.isHomepageVisible, true);
+});
+
+test('PATCH /api/admin/viral-videos/:id/status returns 404 JSON when video not found', async (t) => {
+  stubDbReady(t);
+
+  const prevFindOneAndUpdate = ViralVideo.findOneAndUpdate;
+  t.after(() => { ViralVideo.findOneAndUpdate = prevFindOneAndUpdate; });
+
+  ViralVideo.findOneAndUpdate = async () => null;
+
+  const res = await request(app)
+    .patch('/api/admin/viral-videos/507f1f77bcf86cd799439533/status')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .send({ status: 'published' });
+
+  assert.equal(res.statusCode, 404);
+  assert.equal(res.body.ok, false);
+  assert.equal(res.body.message, 'Viral video not found');
+});
+
 test('GET unknown /api/admin/viral-videos path returns scoped JSON 404', async (t) => {
   stubDbReady(t);
 

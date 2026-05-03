@@ -16,6 +16,7 @@ const {
 	publishAdminViralVideo,
 	unpublishAdminViralVideo,
 	previewAdminViralVideo,
+	updateAdminViralVideoStatus,
 } = require('../controllers/adminViralVideosController');
 
 const router = express.Router();
@@ -39,6 +40,8 @@ router.post('/viral-videos/:id/publish', publishAdminViralVideo);
 router.patch('/viral-videos/:id/publish', publishAdminViralVideo);
 router.post('/viral-videos/:id/unpublish', unpublishAdminViralVideo);
 router.patch('/viral-videos/:id/unpublish', unpublishAdminViralVideo);
+router.patch('/viral-videos/:id/status', updateAdminViralVideoStatus);
+router.post('/viral-videos/:id/status', updateAdminViralVideoStatus);
 router.get('/viral-videos/:id', getAdminViralVideoById);
 router.put('/viral-videos/:id', updateAdminViralVideo);
 router.patch('/viral-videos/:id', updateAdminViralVideo);

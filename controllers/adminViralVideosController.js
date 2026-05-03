@@ -513,6 +513,10 @@ async function unpublishAdminViralVideo(req, res) {
   return updateAdminViralVideo(req, res);
 }
 
+async function updateAdminViralVideoStatus(req, res) {
+  return updateAdminViralVideo(req, res);
+}
+
 function getUploadedFiles(req) {
   if (req.file) return [req.file];
   if (Array.isArray(req.files)) return req.files.filter(Boolean);
@@ -717,6 +721,7 @@ module.exports = {
   previewAdminViralVideo,
   publishAdminViralVideo,
   unpublishAdminViralVideo,
+  updateAdminViralVideoStatus,
   uploadViralVideoThumbnailFile,
   uploadViralVideoFile,
   uploadViralVideoMediaFile,
