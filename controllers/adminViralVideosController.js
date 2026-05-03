@@ -488,6 +488,31 @@ async function deleteAdminViralVideo(req, res, next) {
   }
 }
 
+async function previewAdminViralVideo(req, res, next) {
+  return getAdminViralVideoById(req, res, next);
+}
+
+async function publishAdminViralVideo(req, res) {
+  const nextBody = {
+    ...(req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {}),
+    status: 'published',
+    isPublished: true,
+    publishedAt: new Date(),
+  };
+  req.body = nextBody;
+  return updateAdminViralVideo(req, res);
+}
+
+async function unpublishAdminViralVideo(req, res) {
+  const nextBody = {
+    ...(req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {}),
+    status: 'draft',
+    isPublished: false,
+  };
+  req.body = nextBody;
+  return updateAdminViralVideo(req, res);
+}
+
 function getUploadedFiles(req) {
   if (req.file) return [req.file];
   if (Array.isArray(req.files)) return req.files.filter(Boolean);
@@ -689,6 +714,9 @@ module.exports = {
   getAdminViralVideoById,
   updateAdminViralVideo,
   deleteAdminViralVideo,
+  previewAdminViralVideo,
+  publishAdminViralVideo,
+  unpublishAdminViralVideo,
   uploadViralVideoThumbnailFile,
   uploadViralVideoFile,
   uploadViralVideoMediaFile,

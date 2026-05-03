@@ -975,3 +975,118 @@ test('POST /api/admin/viral-videos/upload-video returns clear Cloudinary failure
     code: 'CLOUDINARY_UPLOAD_FAILED',
   });
 });
+
+test('POST /api/admin/viral-videos/upload/video aliases to video upload endpoint', async (t) => {
+  stubDbReady(t);
+  stubCloudinaryConfig(t, true);
+
+  const prevFindOne = SystemSetting.findOne;
+  const prevUploadFromBuffer = cloudinary.uploadFromBuffer;
+  t.after(() => {
+    SystemSetting.findOne = prevFindOne;
+    cloudinary.uploadFromBuffer = prevUploadFromBuffer;
+  });
+
+  SystemSetting.findOne = () => ({ lean: async () => ({ key: VIRAL_VIDEOS_SETTINGS_KEY, value: { frontendEnabled: true, viralVideosCloudUploadEnabled: true } }) });
+  cloudinary.uploadFromBuffer = async (_buffer, options) => {
+    assert.equal(options.resourceType, 'video');
+    return {
+      secure_url: 'https://res.cloudinary.com/demo/video/upload/viral-alias-path.mp4',
+      public_id: 'newspulse/viral-videos/viral-alias-path',
+      resource_type: 'video',
+    };
+  };
+
+  const res = await request(app)
+    .post('/api/admin/viral-videos/upload/video')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .attach('video', Buffer.from('videodata'), { filename: 'clip.mp4', contentType: 'video/mp4' });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.videoFileUrl, 'https://res.cloudinary.com/demo/video/upload/viral-alias-path.mp4');
+});
+
+test('GET /api/admin/viral-videos/:id/preview aliases to item fetch', async (t) => {
+  stubDbReady(t);
+
+  const prevFindById = ViralVideo.findById;
+  t.after(() => { ViralVideo.findById = prevFindById; });
+
+  ViralVideo.findById = () => ({
+    lean: async () => ({
+      _id: '507f1f77bcf86cd799439521',
+      title: 'Preview item',
+      slug: 'preview-item',
+      summary: 'Preview summary',
+      sourceType: 'url',
+      isPublished: false,
+      isActive: true,
+    }),
+  });
+
+  const res = await request(app)
+    .get('/api/admin/viral-videos/507f1f77bcf86cd799439521/preview')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.item.slug, 'preview-item');
+});
+
+test('PATCH /api/admin/viral-videos/:id/unpublish and publish aliases update status', async (t) => {
+  stubDbReady(t);
+
+  const prevFindOneAndUpdate = ViralVideo.findOneAndUpdate;
+  t.after(() => { ViralVideo.findOneAndUpdate = prevFindOneAndUpdate; });
+
+  const payloads = [];
+  ViralVideo.findOneAndUpdate = async (_query, update) => {
+    payloads.push(update.$set);
+    return {
+      _id: '507f1f77bcf86cd799439522',
+      title: 'Status item',
+      slug: 'status-item',
+      ...update.$set,
+      createdAt: new Date('2026-05-02T08:00:00.000Z'),
+      updatedAt: new Date('2026-05-02T08:00:00.000Z'),
+    };
+  };
+
+  const unpublishRes = await request(app)
+    .patch('/api/admin/viral-videos/507f1f77bcf86cd799439522/unpublish')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .send({});
+  assert.equal(unpublishRes.statusCode, 200);
+  assert.equal(unpublishRes.body.ok, true);
+  assert.equal(unpublishRes.body.item.status, 'draft');
+  assert.equal(unpublishRes.body.item.isPublished, false);
+
+  const publishRes = await request(app)
+    .patch('/api/admin/viral-videos/507f1f77bcf86cd799439522/publish')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .send({});
+  assert.equal(publishRes.statusCode, 200);
+  assert.equal(publishRes.body.ok, true);
+  assert.equal(publishRes.body.item.status, 'published');
+  assert.equal(publishRes.body.item.isPublished, true);
+
+  assert.equal(payloads.length, 2);
+  assert.equal(payloads[0].status, 'draft');
+  assert.equal(payloads[0].isPublished, false);
+  assert.equal(payloads[1].status, 'published');
+  assert.equal(payloads[1].isPublished, true);
+});
+
+test('GET unknown /api/admin/viral-videos path returns scoped JSON 404', async (t) => {
+  stubDbReady(t);
+
+  const res = await request(app)
+    .get('/api/admin/viral-videos/not-a-real-endpoint/extra')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`);
+
+  assert.equal(res.statusCode, 404);
+  assert.equal(res.body.ok, false);
+  assert.equal(res.body.message, 'Viral Videos admin route not found');
+  assert.equal(res.body.method, 'GET');
+});
