@@ -685,6 +685,80 @@ test('POST /api/admin/viral-videos/upload-thumbnail returns clear missing image 
   assert.equal(uploadCalled, false);
 });
 
+test('POST /api/admin/viral-videos/upload routes MP4 to video upload flow', async (t) => {
+  stubDbReady(t);
+  stubCloudinaryConfig(t, true);
+
+  const prevFindOne = SystemSetting.findOne;
+  const prevUploadFromBuffer = cloudinary.uploadFromBuffer;
+  t.after(() => {
+    SystemSetting.findOne = prevFindOne;
+    cloudinary.uploadFromBuffer = prevUploadFromBuffer;
+  });
+
+  SystemSetting.findOne = () => ({ lean: async () => ({ key: VIRAL_VIDEOS_SETTINGS_KEY, value: { frontendEnabled: true, viralVideosCloudUploadEnabled: true } }) });
+  cloudinary.uploadFromBuffer = async (_buffer, options) => {
+    assert.equal(options.resourceType, 'video');
+    assert.equal(options.folder, 'newspulse/viral-videos');
+    return {
+      secure_url: 'https://res.cloudinary.com/demo/video/upload/viral-alias.mp4',
+      public_id: 'newspulse/viral-videos/viral-alias',
+      resource_type: 'video',
+    };
+  };
+
+  const res = await request(app)
+    .post('/api/admin/viral-videos/upload')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .attach('video', Buffer.from('videodata'), { filename: 'clip.mp4', contentType: 'video/mp4' });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.videoFileUrl, 'https://res.cloudinary.com/demo/video/upload/viral-alias.mp4');
+  assert.equal(res.body.resource_type, 'video');
+  assert.equal(res.body.message, undefined);
+});
+
+test('POST /api/admin/viral-videos/upload keeps thumbnail upload working for image files', async (t) => {
+  stubDbReady(t);
+
+  const prevIsCloudinaryConfigured = cloudinary.isCloudinaryConfigured;
+  const prevUploadFromBuffer = cloudinary.uploadFromBuffer;
+  const prevUploadFromDataUri = cloudinary.uploadFromDataUri;
+
+  t.after(() => {
+    cloudinary.isCloudinaryConfigured = prevIsCloudinaryConfigured;
+    cloudinary.uploadFromBuffer = prevUploadFromBuffer;
+    cloudinary.uploadFromDataUri = prevUploadFromDataUri;
+  });
+
+  cloudinary.isCloudinaryConfigured = () => true;
+  cloudinary.uploadFromDataUri = async () => { throw new Error('data uri fallback should not be used'); };
+  cloudinary.uploadFromBuffer = async (_buffer, options) => {
+    assert.equal(options.folder, 'newspulse/articles');
+    return {
+      secure_url: 'https://res.cloudinary.com/demo/image/upload/viral-alias-thumb.jpg',
+      public_id: 'newspulse/articles/viral-alias-thumb',
+      format: 'jpg',
+      bytes: 1200,
+    };
+  };
+
+  const res = await request(app)
+    .post('/api/admin/viral-videos/upload')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .attach('thumbnail', Buffer.from('jpgdata'), { filename: 'thumb.jpg', contentType: 'image/jpeg' });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.thumbnailUrl, 'https://res.cloudinary.com/demo/image/upload/viral-alias-thumb.jpg');
+  assert.deepEqual(res.body.posterImage, {
+    url: 'https://res.cloudinary.com/demo/image/upload/viral-alias-thumb.jpg',
+    publicId: 'newspulse/articles/viral-alias-thumb',
+    alt: null,
+  });
+});
+
 test('POST /api/admin/viral-videos/upload-video rejects video files', async (t) => {
   stubDbReady(t);
   stubCloudinaryConfig(t, false);
@@ -864,7 +938,7 @@ test('POST /api/admin/viral-videos/upload-video rejects unsafe video MIME or ext
     assert.equal(res.statusCode, 400);
     assert.equal(res.body.ok, false);
     assert.equal(res.body.code, 'VIDEO_TYPE_NOT_ALLOWED');
-    assert.equal(res.body.message, 'Only MP4, WebM, or MOV video files are allowed.');
+    assert.equal(res.body.message, 'Only MP4, WebM, or MOV videos are allowed.');
   }
 
   assert.equal(cloudinaryCalled, false);
@@ -897,7 +971,7 @@ test('POST /api/admin/viral-videos/upload-video returns clear Cloudinary failure
   assert.equal(res.statusCode, 502);
   assert.deepEqual(res.body, {
     ok: false,
-    message: 'Video upload failed',
+    message: 'Cloudinary rejected the upload',
     code: 'CLOUDINARY_UPLOAD_FAILED',
   });
 });

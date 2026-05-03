@@ -12,6 +12,7 @@ const {
 	deleteAdminViralVideo,
 	uploadViralVideoThumbnailFile,
 	uploadViralVideoFile,
+	uploadViralVideoMediaFile,
 } = require('../controllers/adminViralVideosController');
 
 const router = express.Router();
@@ -22,7 +23,7 @@ router.get('/viral-videos/settings', getViralVideosSettings);
 router.put('/viral-videos/settings', updateViralVideosSettings);
 router.get('/viral-videos', listAdminViralVideos);
 router.post('/viral-videos', createAdminViralVideo);
-router.post('/viral-videos/upload', coverUpload.any(), uploadViralVideoThumbnailFile);
+router.post('/viral-videos/upload', uploadViralVideoMediaFile);
 router.post('/viral-videos/upload-thumbnail', coverUpload.any(), uploadViralVideoThumbnailFile);
 router.post('/viral-videos/thumbnail-upload', coverUpload.any(), uploadViralVideoThumbnailFile);
 router.post('/viral-videos/thumbnail', coverUpload.any(), uploadViralVideoThumbnailFile);
