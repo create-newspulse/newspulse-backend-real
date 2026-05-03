@@ -28,7 +28,7 @@ async function loginAsAdmin() {
 
 test('accepted MIME type constants match required admin media formats', () => {
   assert.deepEqual(ADMIN_MEDIA_ACCEPTED_MIME_TYPES, ['image/jpeg', 'image/png', 'video/mp4']);
-  assert.deepEqual(ARTICLE_COVER_ACCEPTED_MIME_TYPES, ['image/jpeg', 'image/png']);
+  assert.deepEqual(ARTICLE_COVER_ACCEPTED_MIME_TYPES, ['image/jpeg', 'image/png', 'image/webp']);
 });
 
 test('deriveMediaType stores image uploads as image and mp4 uploads as video', () => {

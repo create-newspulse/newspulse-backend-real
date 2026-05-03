@@ -6,6 +6,90 @@ const MAX_LIMIT = 50;
 const DEFAULT_FEATURED_LIMIT = 3;
 const MAX_FEATURED_LIMIT = 3;
 
+function getBackendBaseUrl() {
+  const raw = String(
+    process.env.PUBLIC_BASE_URL
+    || process.env.BACKEND_BASE_URL
+    || process.env.RENDER_EXTERNAL_URL
+    || process.env.API_BASE_URL
+    || ''
+  ).trim();
+  if (raw) return raw.replace(/\/+$/, '');
+  return `http://localhost:${process.env.PORT || '5052'}`;
+}
+
+function absolutizeViralMediaUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (raw.startsWith('/uploads/')) return `${getBackendBaseUrl()}${raw}`;
+  if (raw.startsWith('uploads/')) return `${getBackendBaseUrl()}/${raw}`;
+  return raw;
+}
+
+function isUploadedVideoUrl(value) {
+  const raw = String(value || '').trim().split(/[?#]/)[0].toLowerCase();
+  return /\.(mp4|webm|mov)$/.test(raw) || raw.startsWith('/uploads/') || raw.startsWith('uploads/');
+}
+
+function isYouTubeUrl(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  return /(^|\/\/)(www\.)?(youtube\.com|youtu\.be)\//.test(raw);
+}
+
+function isXStatusUrl(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  return /(^|\/\/)(www\.)?(x\.com|twitter\.com)\/(i\/status\/|[^/?#]+\/status\/)[^/?#]+/.test(raw);
+}
+
+function resolvePosterImageUrl(doc) {
+  return absolutizeViralMediaUrl(doc?.thumbnailUrl || doc?.posterImageUrl || normalizePosterImage(doc?.posterImage).url);
+}
+
+function resolveVideoType(doc) {
+  const explicit = String(doc?.videoType || '').trim().toLowerCase();
+  const videoCandidate = doc?.videoFileUrl || doc?.videoUrl || doc?.embedUrl || doc?.sourceUrl;
+
+  if (doc?.sourceType === 'upload' || explicit === 'uploaded' || isUploadedVideoUrl(videoCandidate)) return 'uploaded';
+  if (explicit === 'youtube' || isYouTubeUrl(videoCandidate)) return 'youtube';
+  if (explicit === 'x' || isXStatusUrl(videoCandidate)) return 'x';
+  if (explicit === 'external') return 'external';
+
+  if (doc?.sourceType === 'upload' || isUploadedVideoUrl(videoCandidate)) return 'uploaded';
+  if (isYouTubeUrl(videoCandidate)) return 'youtube';
+  if (isXStatusUrl(videoCandidate)) return 'x';
+  return 'external';
+}
+
+function resolvePlaybackMode(doc, videoType) {
+  const explicit = String(doc?.playbackMode || '').trim().toLowerCase();
+  if (videoType === 'uploaded') return 'internal';
+  if (videoType === 'youtube') return 'embed';
+  if (videoType === 'x') return 'x_embed';
+  if (explicit === 'internal' || explicit === 'embed' || explicit === 'x_embed' || explicit === 'external') return explicit;
+  return 'external';
+}
+
+function resolveVideoFileUrl(doc, videoType) {
+  if (videoType !== 'uploaded') return null;
+  return absolutizeViralMediaUrl(doc?.videoFileUrl || doc?.videoUrl);
+}
+
+function resolveSourceUrl(doc, videoType) {
+  if (doc?.sourceUrl) return String(doc.sourceUrl);
+  if (videoType === 'external') return doc?.videoUrl || doc?.embedUrl || null;
+  if (videoType === 'youtube') return doc?.videoUrl || doc?.embedUrl || null;
+  if (videoType === 'x') return doc?.videoUrl || doc?.embedUrl || null;
+  return null;
+}
+
+function resolvePublicVideoUrl(doc, videoType, videoFileUrl) {
+  if (videoType === 'uploaded') return videoFileUrl;
+  if (videoType === 'youtube') return doc?.videoUrl || doc?.embedUrl || null;
+  if (videoType === 'x') return doc?.videoUrl || doc?.sourceUrl || doc?.embedUrl || null;
+  return null;
+}
+
 function resolveFeaturedVideoUrl(doc) {
   return doc && doc.videoUrl ? String(doc.videoUrl) : null;
 }
@@ -37,15 +121,33 @@ function parseArchiveFilters(query = {}) {
   const year = parsePositiveInt(query.year, null, { min: 2000, max: 9999 });
   const month = parsePositiveInt(query.month, null, { min: 1, max: 12 });
   const tag = String(query.tag || '').trim() || null;
+  const allowFallback = ['fallback', 'fallbackToBase', 'allowFallback'].some((key) => {
+    const raw = String(query[key] ?? '').trim().toLowerCase();
+    return raw === 'true' || raw === '1' || raw === 'yes' || raw === 'y';
+  });
 
-  return { page, limit, lang, category, year, month, tag };
+  return { page, limit, lang, category, year, month, tag, allowFallback };
+}
+
+function buildActiveFilterClause() {
+  return { $or: [{ isActive: true }, { isActive: { $exists: false } }] };
+}
+
+function buildGlobalFrontendFilterClause() {
+  return { $or: [{ globalFrontend: true }, { globalFrontend: { $exists: false } }] };
 }
 
 function buildPublishedFilter(filters = {}) {
   const filter = {
-    $or: [
-      { isPublished: true },
-      { status: 'published' },
+    $and: [
+      buildActiveFilterClause(),
+      buildGlobalFrontendFilterClause(),
+      {
+        $or: [
+          { isPublished: true },
+          { status: 'published' },
+        ],
+      },
     ],
     publishedAt: { $ne: null },
   };
@@ -78,6 +180,8 @@ function buildHomepageVisibilityFilter(filters = {}) {
 function buildFeaturedHomepageFilter(filters = {}) {
   const filter = {
     $and: [
+      buildActiveFilterClause(),
+      buildGlobalFrontendFilterClause(),
       {
         status: 'published',
       },
@@ -107,12 +211,14 @@ function buildListSort() {
 }
 
 function normalizePosterImage(image) {
+  const url = image && typeof image === 'object' ? image.url : null;
+
   if (!image || typeof image !== 'object') {
     return { url: null, alt: null, publicId: null };
   }
 
   return {
-    url: image.url ? String(image.url) : null,
+    url: absolutizeViralMediaUrl(url),
     alt: image.alt ? String(image.alt) : null,
     publicId: image.publicId ? String(image.publicId) : null,
   };
@@ -126,6 +232,12 @@ function normalizeSourceType(value) {
 
 function toPublicViralVideoCard(doc) {
   if (!doc) return null;
+  const videoType = resolveVideoType(doc);
+  const playbackMode = resolvePlaybackMode(doc, videoType);
+  const posterImageUrl = resolvePosterImageUrl(doc);
+  const posterImage = normalizePosterImage({ ...(doc.posterImage || {}), url: posterImageUrl });
+  const videoFileUrl = resolveVideoFileUrl(doc, videoType);
+  const sourceUrl = resolveSourceUrl(doc, videoType);
 
   return {
     id: String(doc._id),
@@ -133,9 +245,14 @@ function toPublicViralVideoCard(doc) {
     slug: doc.slug || null,
     shortCaption: doc.summary || null,
     summary: doc.summary || null,
-    thumbnailUrl: doc.thumbnailUrl || normalizePosterImage(doc.posterImage).url,
-    posterImage: normalizePosterImage(doc.posterImage),
-    thumbnail: normalizePosterImage(doc.posterImage),
+    thumbnailUrl: posterImageUrl,
+    posterImageUrl,
+    posterImage,
+    thumbnail: posterImage,
+    sourceName: doc.sourceName || null,
+    sourceUrl,
+    videoType,
+    playbackMode,
     sourceType: normalizeSourceType(doc.sourceType),
     videoStorageProvider: doc.videoStorageProvider || null,
     videoPublicId: doc.videoPublicId || null,
@@ -148,12 +265,16 @@ function toPublicViralVideoCard(doc) {
     tags: Array.isArray(doc.tags) ? doc.tags : [],
     isHomepageVisible: doc.isHomepageVisible === true,
     showOnHomepage: doc.isHomepageVisible === true,
+    isActive: doc.isActive !== false,
+    globalFrontend: doc.globalFrontend !== false,
     homepageFeatured: doc.homepageFeatured === true || doc.isFeatured === true || doc.isFeaturedHomepage === true,
     isFeaturedHomepage: doc.homepageFeatured === true || doc.isFeatured === true || doc.isFeaturedHomepage === true,
     isFeatured: doc.homepageFeatured === true || doc.isFeatured === true || doc.isFeaturedHomepage === true,
     status: doc.status || (doc.isPublished === true ? 'published' : 'draft'),
-    videoUrl: doc.videoUrl || null,
+    videoUrl: resolvePublicVideoUrl(doc, videoType, videoFileUrl),
+    videoFileUrl,
     publishedAt: doc.publishedAt || null,
+    updatedAt: doc.updatedAt || null,
     sortOrder: typeof doc.sortOrder === 'number' ? doc.sortOrder : 0,
     priority: typeof doc.sortOrder === 'number' ? doc.sortOrder : 0,
   };
@@ -172,6 +293,11 @@ function toPublicViralVideoTeaser(doc) {
 function toPublicFeaturedViralVideo(doc) {
   if (!doc) return null;
   const homepageFlag = doc.isHomepageVisible === true || doc.homepageFeatured === true || doc.isFeatured === true || doc.isFeaturedHomepage === true;
+  const videoType = resolveVideoType(doc);
+  const playbackMode = resolvePlaybackMode(doc, videoType);
+  const posterImageUrl = resolvePosterImageUrl(doc);
+  const videoFileUrl = resolveVideoFileUrl(doc, videoType);
+  const sourceUrl = resolveSourceUrl(doc, videoType);
 
   return {
     id: String(doc._id),
@@ -179,13 +305,22 @@ function toPublicFeaturedViralVideo(doc) {
     title: doc.title || null,
     slug: doc.slug || null,
     summary: doc.summary || null,
-    thumbnailUrl: resolveFeaturedThumbnailUrl(doc),
-    videoUrl: resolveFeaturedVideoUrl(doc),
+    thumbnailUrl: posterImageUrl || resolveFeaturedThumbnailUrl(doc),
+    posterImageUrl: posterImageUrl || resolveFeaturedThumbnailUrl(doc),
+    videoUrl: resolvePublicVideoUrl(doc, videoType, videoFileUrl),
+    videoFileUrl,
+    sourceUrl,
+    sourceName: doc.sourceName || null,
+    videoType,
+    playbackMode,
     language: doc.language || null,
     category: doc.category || null,
     status: doc.status || (doc.isPublished === true ? 'published' : 'draft'),
+    isActive: doc.isActive !== false,
+    globalFrontend: doc.globalFrontend !== false,
     showOnHomepage: homepageFlag,
     publishedAt: doc.publishedAt || null,
+    updatedAt: doc.updatedAt || null,
     sortOrder: typeof doc.sortOrder === 'number' ? doc.sortOrder : 0,
     priority: typeof doc.sortOrder === 'number' ? doc.sortOrder : 0,
     homepageFeatured: doc.homepageFeatured === true || doc.isFeatured === true || doc.isFeaturedHomepage === true,
@@ -198,7 +333,8 @@ function toPublicViralVideoDetail(doc) {
 
   return {
     ...base,
-    videoUrl: doc.videoUrl || null,
+    videoUrl: base.videoUrl,
+    videoFileUrl: base.videoFileUrl,
     embedUrl: doc.embedUrl || null,
     isPublished: doc.isPublished === true,
     createdAt: doc.createdAt || null,
@@ -211,10 +347,20 @@ async function listPublishedViralVideos(rawQuery = {}) {
   const filter = buildPublishedFilter(filters);
   const skip = (filters.page - 1) * filters.limit;
 
-  const [items, total] = await Promise.all([
+  let [items, total] = await Promise.all([
     ViralVideo.find(filter).sort(buildListSort()).skip(skip).limit(filters.limit).lean(),
     ViralVideo.countDocuments(filter),
   ]);
+
+  let usedLanguageFallback = false;
+  if (filters.lang && filters.allowFallback && total === 0) {
+    const fallbackFilters = { ...filters, lang: null };
+    const fallbackFilter = buildPublishedFilter(fallbackFilters);
+    const fallbackItems = await ViralVideo.find(fallbackFilter).sort(buildListSort()).limit(filters.limit).lean();
+    items = fallbackItems || [];
+    total = items.length;
+    usedLanguageFallback = items.length > 0;
+  }
 
   return {
     items: (items || []).map(toPublicViralVideoCard),
@@ -229,6 +375,7 @@ async function listPublishedViralVideos(rawQuery = {}) {
       month: filters.month,
       tag: filters.tag,
     },
+    usedLanguageFallback,
   };
 }
 
@@ -247,7 +394,11 @@ async function getPublishedViralVideoBySlug(slug) {
   if (!candidates.length) return null;
 
   const filter = {
-    isPublished: true,
+    $and: [
+      buildActiveFilterClause(),
+      buildGlobalFrontendFilterClause(),
+      { isPublished: true },
+    ],
     publishedAt: { $ne: null },
     slug: candidates.length === 1 ? candidates[0] : { $in: candidates },
   };
@@ -261,7 +412,11 @@ async function listRelatedPublishedViralVideos(slug, rawQuery = {}) {
   if (!candidates.length) return [];
 
   const baseDoc = await ViralVideo.findOne({
-    isPublished: true,
+    $and: [
+      buildActiveFilterClause(),
+      buildGlobalFrontendFilterClause(),
+      { isPublished: true },
+    ],
     publishedAt: { $ne: null },
     slug: candidates.length === 1 ? candidates[0] : { $in: candidates },
   }).lean();
@@ -269,7 +424,11 @@ async function listRelatedPublishedViralVideos(slug, rawQuery = {}) {
 
   const limit = parsePositiveInt(rawQuery.limit, 6, { min: 1, max: 12 });
   const relatedFilter = {
-    isPublished: true,
+    $and: [
+      buildActiveFilterClause(),
+      buildGlobalFrontendFilterClause(),
+      { isPublished: true },
+    ],
     publishedAt: { $ne: null },
     _id: { $ne: baseDoc._id },
   };
@@ -286,6 +445,8 @@ async function listRelatedPublishedViralVideos(slug, rawQuery = {}) {
 
 module.exports = {
   buildPublishedFilter,
+  buildActiveFilterClause,
+  buildGlobalFrontendFilterClause,
   buildHomepageVisibilityFilter,
   buildFeaturedHomepageFilter,
   listPublishedViralVideos,

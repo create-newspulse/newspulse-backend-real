@@ -148,6 +148,7 @@ router.get('/cover', (_req, res) => {
 
 async function handleCoverImageUpload(req, res, options = {}) {
   const notConfiguredMessage = String(options.notConfiguredMessage || DEFAULT_COVER_UPLOAD_NOT_CONFIGURED_MESSAGE).trim() || DEFAULT_COVER_UPLOAD_NOT_CONFIGURED_MESSAGE;
+  const validationMessage = options.validationMessage ? String(options.validationMessage) : undefined;
 
   try {
     const file = pickCoverFile(req);
@@ -166,7 +167,7 @@ async function handleCoverImageUpload(req, res, options = {}) {
       });
     }
 
-    const mimeType = assertAllowedArticleCoverMimeType(file.mimetype);
+    const mimeType = assertAllowedArticleCoverMimeType(file.mimetype, validationMessage);
 
     if (!cloudinaryUploads.isCloudinaryConfigured()) {
       try {

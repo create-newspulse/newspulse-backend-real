@@ -30,6 +30,30 @@ function expectedFeaturedSettings(enabled) {
   return { frontendEnabled: enabled, viralVideosFrontendEnabled: enabled };
 }
 
+function expectedActiveClause() {
+  return { $or: [{ isActive: true }, { isActive: { $exists: false } }] };
+}
+
+function expectedGlobalFrontendClause() {
+  return { $or: [{ globalFrontend: true }, { globalFrontend: { $exists: false } }] };
+}
+
+function expectedPublishedArchiveBaseFilter() {
+  return {
+    $and: [
+      expectedActiveClause(),
+      expectedGlobalFrontendClause(),
+      {
+        $or: [
+          { isPublished: true },
+          { status: 'published' },
+        ],
+      },
+    ],
+    publishedAt: { $ne: null },
+  };
+}
+
 function makeFindResult(items) {
   let rows = Array.isArray(items) ? [...items] : [];
 
@@ -81,6 +105,10 @@ function createVideo(overrides = {}) {
     language: overrides.language || 'en',
     category: overrides.category || 'funny',
     tags: overrides.tags || ['cats'],
+    sourceName: overrides.sourceName || 'News Pulse',
+    sourceUrl: overrides.sourceUrl !== undefined ? overrides.sourceUrl : null,
+    isActive: overrides.isActive !== undefined ? overrides.isActive : true,
+    globalFrontend: overrides.globalFrontend !== undefined ? overrides.globalFrontend : true,
     isPublished: overrides.isPublished !== undefined ? overrides.isPublished : true,
     status: overrides.status,
     isHomepageVisible: overrides.isHomepageVisible !== undefined ? overrides.isHomepageVisible : true,
@@ -91,12 +119,18 @@ function createVideo(overrides = {}) {
     createdAt: overrides.createdAt || new Date('2026-04-24T09:00:00.000Z'),
     updatedAt: overrides.updatedAt || new Date('2026-04-24T09:30:00.000Z'),
     sortOrder: overrides.sortOrder !== undefined ? overrides.sortOrder : 0,
+    posterImageUrl: overrides.posterImageUrl,
+    videoFileUrl: overrides.videoFileUrl,
+    videoType: overrides.videoType,
+    playbackMode: overrides.playbackMode,
   };
 }
 
 function expectedFeaturedHomepageFilter() {
   return {
     $and: [
+      expectedActiveClause(),
+      expectedGlobalFrontendClause(),
       {
         status: 'published',
       },
@@ -137,21 +171,161 @@ test('GET /api/public/viral-videos returns paginated published archive items', a
     assert.equal(res.body.items.length, 2);
     assert.equal(res.body.items[0].slug, 'latest-viral');
     assert.equal(res.body.items[0].isHomepageVisible, true);
+    assert.equal(res.body.items[0].isActive, true);
+    assert.equal(res.body.items[0].sourceName, 'News Pulse');
     assert.equal(res.body.page, 1);
     assert.equal(res.body.limit, 2);
     assert.equal(res.body.total, 2);
     assert.equal(res.body.totalPages, 1);
     assert.deepEqual(res.body.filters, { lang: 'en', category: 'funny', year: null, month: null, tag: 'cats' });
     assert.deepEqual(capturedFilter, {
-      $or: [
-        { isPublished: true },
-        { status: 'published' },
-      ],
+      ...expectedPublishedArchiveBaseFilter(),
       publishedAt: { $ne: null },
       language: 'en',
       category: 'funny',
       tags: 'cats',
     });
+  } finally {
+    ViralVideo.find = originals.find;
+    ViralVideo.countDocuments = originals.countDocuments;
+    SystemSetting.findOne = originals.findOneSetting;
+  }
+});
+
+test('GET /api/public/viral-videos returns Gujarati active published card with thumbnail', async () => {
+  const originals = { find: ViralVideo.find, countDocuments: ViralVideo.countDocuments, findOneSetting: SystemSetting.findOne };
+  let capturedFilter = null;
+
+  try {
+    SystemSetting.findOne = () => ({ lean: async () => enableViralVideosSetting() });
+    ViralVideo.find = (filter) => {
+      capturedFilter = filter;
+      return makeFindResult([
+        createVideo({
+          _id: '507f1f77bcf86cd799439388',
+          slug: 'gujarati-short-card',
+          title: 'Gujarati short card',
+          language: 'gu',
+          sourceName: 'Divya Bhaskar',
+          thumbnailUrl: 'https://img.example/gujarati-short.jpg',
+          posterImage: { url: 'https://img.example/gujarati-short.jpg', alt: 'Gujarati short card', publicId: null },
+          videoUrl: 'https://cdn.example/gujarati-short.mp4',
+          status: 'published',
+          isActive: true,
+        }),
+      ]);
+    };
+    ViralVideo.countDocuments = async (filter) => {
+      capturedFilter = filter;
+      return 1;
+    };
+
+    const res = await request(app).get('/api/public/viral-videos?lang=gu&limit=6');
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.items.length, 1);
+    assert.equal(res.body.items[0].language, 'gu');
+    assert.equal(res.body.items[0].sourceName, 'Divya Bhaskar');
+    assert.equal(res.body.items[0].status, 'published');
+    assert.equal(res.body.items[0].isActive, true);
+    assert.equal(res.body.items[0].thumbnailUrl, 'https://img.example/gujarati-short.jpg');
+    assert.equal(res.body.items[0].posterImageUrl, 'https://img.example/gujarati-short.jpg');
+    assert.equal(res.body.items[0].posterImage.url, 'https://img.example/gujarati-short.jpg');
+    assert.equal(res.body.items[0].videoUrl, 'https://cdn.example/gujarati-short.mp4');
+    assert.equal(res.body.items[0].videoFileUrl, 'https://cdn.example/gujarati-short.mp4');
+    assert.equal(res.body.items[0].videoType, 'uploaded');
+    assert.equal(res.body.items[0].playbackMode, 'internal');
+    assert.deepEqual(capturedFilter, {
+      ...expectedPublishedArchiveBaseFilter(),
+      language: 'gu',
+    });
+  } finally {
+    ViralVideo.find = originals.find;
+    ViralVideo.countDocuments = originals.countDocuments;
+    SystemSetting.findOne = originals.findOneSetting;
+  }
+});
+
+test('GET /api/public/viral-videos returns absolute uploaded thumbnail and poster image URLs', async (t) => {
+  const originals = { find: ViralVideo.find, countDocuments: ViralVideo.countDocuments, findOneSetting: SystemSetting.findOne, publicBaseUrl: process.env.PUBLIC_BASE_URL };
+  let capturedFilter = null;
+
+  try {
+    process.env.PUBLIC_BASE_URL = 'https://api.newspulse.test';
+    SystemSetting.findOne = () => ({ lean: async () => enableViralVideosSetting() });
+    ViralVideo.find = (filter) => {
+      capturedFilter = filter;
+      return makeFindResult([
+        createVideo({
+          _id: '507f1f77bcf86cd799439389',
+          slug: 'uploaded-thumbnail-card',
+          thumbnailUrl: '/uploads/viral-thumb.jpg',
+          posterImageUrl: '/uploads/viral-thumb.jpg',
+          posterImage: { url: '/uploads/viral-thumb.jpg', alt: 'Uploaded poster', publicId: null },
+          videoUrl: '/uploads/viral-clip.mp4',
+          status: 'published',
+          isActive: true,
+          globalFrontend: true,
+        }),
+      ]);
+    };
+    ViralVideo.countDocuments = async (filter) => {
+      capturedFilter = filter;
+      return 1;
+    };
+
+    const res = await request(app).get('/api/public/viral-videos?lang=en&limit=1');
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.items.length, 1);
+    assert.equal(res.body.items[0].thumbnailUrl, 'https://api.newspulse.test/uploads/viral-thumb.jpg');
+    assert.equal(res.body.items[0].posterImageUrl, 'https://api.newspulse.test/uploads/viral-thumb.jpg');
+    assert.equal(res.body.items[0].posterImage.url, 'https://api.newspulse.test/uploads/viral-thumb.jpg');
+    assert.equal(res.body.items[0].videoFileUrl, 'https://api.newspulse.test/uploads/viral-clip.mp4');
+    assert.equal(res.body.items[0].videoUrl, 'https://api.newspulse.test/uploads/viral-clip.mp4');
+    assert.equal(res.body.items[0].videoType, 'uploaded');
+    assert.equal(res.body.items[0].playbackMode, 'internal');
+    assert.deepEqual(capturedFilter, {
+      ...expectedPublishedArchiveBaseFilter(),
+      language: 'en',
+    });
+  } finally {
+    ViralVideo.find = originals.find;
+    ViralVideo.countDocuments = originals.countDocuments;
+    SystemSetting.findOne = originals.findOneSetting;
+    if (originals.publicBaseUrl === undefined) delete process.env.PUBLIC_BASE_URL; else process.env.PUBLIC_BASE_URL = originals.publicBaseUrl;
+  }
+});
+
+test('GET /api/public/viral-videos returns external source pages as non-playable links', async () => {
+  const originals = { find: ViralVideo.find, countDocuments: ViralVideo.countDocuments, findOneSetting: SystemSetting.findOne };
+
+  try {
+    SystemSetting.findOne = () => ({ lean: async () => enableViralVideosSetting() });
+    ViralVideo.find = () => makeFindResult([
+      createVideo({
+        _id: '507f1f77bcf86cd799439390',
+        slug: 'external-source-card',
+        videoUrl: 'https://www.instagram.com/reel/demo/',
+        sourceUrl: 'https://www.instagram.com/reel/demo/',
+        embedUrl: null,
+        status: 'published',
+        isActive: true,
+      }),
+    ]);
+    ViralVideo.countDocuments = async () => 1;
+
+    const res = await request(app).get('/api/public/viral-videos?limit=1');
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.items[0].videoType, 'external');
+    assert.equal(res.body.items[0].playbackMode, 'external');
+    assert.equal(res.body.items[0].sourceUrl, 'https://www.instagram.com/reel/demo/');
+    assert.equal(res.body.items[0].videoUrl, null);
+    assert.equal(res.body.items[0].videoFileUrl, null);
   } finally {
     ViralVideo.find = originals.find;
     ViralVideo.countDocuments = originals.countDocuments;
@@ -541,6 +715,95 @@ test('GET /api/public/viral-videos/:slug returns detail payload', async () => {
   }
 });
 
+test('GET /api/public/viral-videos/:slug returns X status embed contract', async () => {
+  const prevFindOne = ViralVideo.findOne;
+  const prevFindOneSetting = SystemSetting.findOne;
+
+  try {
+    const xUrl = 'https://x.com/i/status/2050104453630718079';
+    SystemSetting.findOne = () => ({ lean: async () => enableViralVideosSetting() });
+    ViralVideo.findOne = () => makeFindOneResult(
+      createVideo({
+        _id: '507f1f77bcf86cd799439391',
+        slug: 'x-status-detail',
+        title: 'X Status Detail',
+        sourceName: 'X',
+        sourceUrl: xUrl,
+        videoUrl: xUrl,
+        embedUrl: null,
+        videoType: 'x',
+        playbackMode: 'x_embed',
+        thumbnailUrl: 'https://img.example/x-status.jpg',
+        posterImageUrl: 'https://img.example/x-status.jpg',
+        posterImage: { url: 'https://img.example/x-status.jpg', alt: 'X status', publicId: null },
+        status: 'published',
+        isActive: true,
+      })
+    );
+
+    const res = await request(app).get('/api/public/viral-videos/x-status-detail');
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.item.slug, 'x-status-detail');
+    assert.equal(res.body.item.videoType, 'x');
+    assert.equal(res.body.item.playbackMode, 'x_embed');
+    assert.equal(res.body.item.videoUrl, xUrl);
+    assert.equal(res.body.item.sourceUrl, xUrl);
+    assert.equal(res.body.item.sourceName, 'X');
+    assert.equal(res.body.item.videoFileUrl, null);
+    assert.equal(res.body.item.thumbnailUrl, 'https://img.example/x-status.jpg');
+    assert.equal(res.body.item.posterImageUrl, 'https://img.example/x-status.jpg');
+  } finally {
+    ViralVideo.findOne = prevFindOne;
+    SystemSetting.findOne = prevFindOneSetting;
+  }
+});
+
+test('GET /api/public/viral-videos/:slug upgrades saved external X status metadata', async () => {
+  const prevFindOne = ViralVideo.findOne;
+  const prevFindOneSetting = SystemSetting.findOne;
+
+  try {
+    const xUrl = 'https://x.com/i/status/2050104453630718079';
+    SystemSetting.findOne = () => ({ lean: async () => enableViralVideosSetting() });
+    ViralVideo.findOne = () => makeFindOneResult(
+      createVideo({
+        _id: '507f1f77bcf86cd799439392',
+        slug: 'saved-external-x-status',
+        title: 'Saved External X Status',
+        sourceName: 'News source',
+        sourceUrl: xUrl,
+        videoUrl: xUrl,
+        embedUrl: null,
+        videoType: 'external',
+        playbackMode: 'external',
+        videoFileUrl: null,
+        thumbnailUrl: 'https://img.example/saved-x-status.jpg',
+        posterImageUrl: 'https://img.example/saved-x-status.jpg',
+        posterImage: { url: 'https://img.example/saved-x-status.jpg', alt: 'Saved X status', publicId: null },
+        status: 'published',
+        isActive: true,
+      })
+    );
+
+    const res = await request(app).get('/api/public/viral-videos/saved-external-x-status');
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.item.videoType, 'x');
+    assert.equal(res.body.item.playbackMode, 'x_embed');
+    assert.equal(res.body.item.videoUrl, xUrl);
+    assert.equal(res.body.item.sourceUrl, xUrl);
+    assert.equal(res.body.item.videoFileUrl, null);
+    assert.equal(res.body.item.thumbnailUrl, 'https://img.example/saved-x-status.jpg');
+    assert.equal(res.body.item.posterImageUrl, 'https://img.example/saved-x-status.jpg');
+  } finally {
+    ViralVideo.findOne = prevFindOne;
+    SystemSetting.findOne = prevFindOneSetting;
+  }
+});
+
 test('GET /api/public/viral-videos/:slug returns 404 when global viral videos visibility is off', async () => {
   const prevFindOne = ViralVideo.findOne;
   const prevFindOneSetting = SystemSetting.findOne;
@@ -601,7 +864,11 @@ test('GET /api/public/viral-videos/:slug/related returns related published archi
     assert.equal(res.body.items.length, 1);
     assert.equal(res.body.items[0].slug, 'viral-related');
     assert.deepEqual(capturedRelatedFilter, {
-      isPublished: true,
+      $and: [
+        expectedActiveClause(),
+        expectedGlobalFrontendClause(),
+        { isPublished: true },
+      ],
       publishedAt: { $ne: null },
       _id: { $ne: '507f1f77bcf86cd799439305' },
       $or: [

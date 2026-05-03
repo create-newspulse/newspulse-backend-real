@@ -86,6 +86,8 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
     console.log('[startup][cloudinary] cloudinary url present:', st?.env?.cloudinaryUrlPresent ? 'yes' : 'no');
     // eslint-disable-next-line no-console
     console.log('[startup][cloudinary] final cloudinary configured:', st?.configured ? 'yes' : 'no');
+    // eslint-disable-next-line no-console
+    console.log('[startup][cloudinary][video-upload] config available:', st?.configured ? 'yes' : 'no');
 
     // Apply Cloudinary config at startup when available (no network calls).
     if (st.configured) {

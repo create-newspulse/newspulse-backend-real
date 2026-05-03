@@ -37,6 +37,18 @@ function setFeaturedNoCacheHeaders(res) {
   res.set('Expires', '0');
 }
 
+function logViralVideosFetchFailure(scope, error) {
+  try {
+    // eslint-disable-next-line no-console
+    console.error('[viral-videos][public-fetch-failed]', {
+      scope,
+      message: error?.message || String(error),
+      ...(error?.name ? { name: error.name } : {}),
+      ...(error?.code ? { code: error.code } : {}),
+    });
+  } catch (_) {}
+}
+
 async function getPublicViralVideosSettings(_req, res, next) {
   try {
     res.set('Cache-Control', 'no-store');
@@ -51,6 +63,7 @@ async function getPublicViralVideosSettings(_req, res, next) {
       settings: { enabled, viralVideosFrontendEnabled: enabled },
     });
   } catch (error) {
+    logViralVideosFetchFailure('settings', error);
     return next(error);
   }
 }
@@ -70,6 +83,7 @@ async function listPublicViralVideos(req, res, next) {
     const result = await listPublishedViralVideos(req.query);
     return res.status(200).json({ ok: true, enabled: true, ...result });
   } catch (error) {
+    logViralVideosFetchFailure('archive', error);
     return next(error);
   }
 }
@@ -92,6 +106,7 @@ async function listFeaturedPublicViralVideos(req, res, next) {
     const items = await listFeaturedViralVideos(req.query);
     return res.status(200).json({ ok: true, enabled: true, settings: responseSettings, video: items[0] || null, items, videos: items });
   } catch (error) {
+    logViralVideosFetchFailure('featured', error);
     return next(error);
   }
 }
@@ -115,6 +130,7 @@ async function getPublicViralVideoBySlug(req, res, next) {
 
     return res.status(200).json({ ok: true, item });
   } catch (error) {
+    logViralVideosFetchFailure('detail', error);
     return next(error);
   }
 }
@@ -138,6 +154,7 @@ async function listRelatedPublicViralVideos(req, res, next) {
 
     return res.status(200).json({ ok: true, items });
   } catch (error) {
+    logViralVideosFetchFailure('related', error);
     return next(error);
   }
 }

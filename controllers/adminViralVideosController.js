@@ -1,8 +1,10 @@
 const multer = require('multer');
 const mongoose = require('mongoose');
+const path = require('path');
 
 const ViralVideo = require('../models/ViralVideo');
 const { handleCoverImageUpload } = require('../routes/uploads.routes');
+const cloudinaryUploads = require('../lib/cloudinary');
 const {
   getViralVideosSettings: readViralVideosSettings,
   saveViralVideosSettings,
@@ -10,8 +12,14 @@ const {
 
 const CLOUD_VIDEO_UPLOAD_NOT_CONNECTED_MESSAGE = 'Cloud video upload is not connected yet. Use Video URL for now.';
 const CLOUD_VIDEO_UPLOAD_DISABLED_MESSAGE = 'Cloud video upload is available but disabled. Use Video URL unless enabled.';
-const CLOUD_VIDEO_UPLOAD_NOT_IMPLEMENTED_MESSAGE = 'Cloud video upload is enabled but not implemented yet. Use Video URL for now.';
+const CLOUD_VIDEO_UPLOAD_READY_MESSAGE = 'Cloud video upload is ready.';
 const IMAGE_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Image upload is not configured in this environment. Paste an image URL to continue.';
+const THUMBNAIL_IMAGE_TYPE_NOT_ALLOWED_MESSAGE = 'Only JPG, JPEG, PNG, or WEBP thumbnail images are allowed.';
+const VIDEO_UPLOAD_TYPE_NOT_ALLOWED_MESSAGE = 'Only MP4, WebM, or MOV video files are allowed.';
+const VIDEO_UPLOAD_FAILED_MESSAGE = 'Video upload failed';
+const VIRAL_VIDEO_MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+const VIRAL_VIDEO_ACCEPTED_MIME_TYPES = new Set(['video/mp4', 'video/webm', 'video/quicktime']);
+const VIRAL_VIDEO_ACCEPTED_EXTENSIONS = new Set(['.mp4', '.webm', '.mov']);
 
 function normalizeSourceType(value) {
   const raw = String(value || '').trim().toLowerCase();
@@ -23,7 +31,7 @@ function normalizeSourceType(value) {
 
 const viralVideoUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: VIRAL_VIDEO_MAX_UPLOAD_BYTES },
 });
 
 function isDbReady() {
@@ -63,10 +71,79 @@ function normalizePosterImage(value) {
   };
 }
 
+function isUploadedVideoUrl(value) {
+  const raw = String(value || '').trim().split(/[?#]/)[0].toLowerCase();
+  return /\.(mp4|webm|mov)$/.test(raw) || raw.startsWith('/uploads/') || raw.startsWith('uploads/');
+}
+
+function isYouTubeUrl(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  return /(^|\/\/)(www\.)?(youtube\.com|youtu\.be)\//.test(raw);
+}
+
+function isXStatusUrl(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  return /(^|\/\/)(www\.)?(x\.com|twitter\.com)\/(i\/status\/|[^/?#]+\/status\/)[^/?#]+/.test(raw);
+}
+
+function resolveVideoContract(payload) {
+  const suppliedVideoUrl = payload.videoUrl || payload.videoFileUrl || payload.embedUrl || payload.sourceUrl || null;
+  const requestedVideoType = String(payload.videoType || '').trim().toLowerCase();
+  const requestedPlaybackMode = String(payload.playbackMode || '').trim().toLowerCase();
+
+  if (payload.videoFileUrl || payload.sourceType === 'upload' || requestedVideoType === 'uploaded' || isUploadedVideoUrl(suppliedVideoUrl)) {
+    const fileUrl = payload.videoFileUrl || payload.videoUrl || suppliedVideoUrl;
+    payload.videoFileUrl = fileUrl || null;
+    payload.videoUrl = fileUrl || payload.videoUrl || null;
+    payload.videoType = 'uploaded';
+    payload.playbackMode = 'internal';
+    payload.sourceType = 'upload';
+    return;
+  }
+
+  if (requestedVideoType === 'youtube' || requestedPlaybackMode === 'embed' || isYouTubeUrl(suppliedVideoUrl)) {
+    payload.videoType = 'youtube';
+    payload.playbackMode = 'embed';
+    payload.sourceType = 'url';
+    if (!payload.embedUrl) payload.embedUrl = suppliedVideoUrl;
+    if (!payload.videoUrl) payload.videoUrl = suppliedVideoUrl;
+    if (!payload.sourceUrl && payload.videoUrl) payload.sourceUrl = payload.videoUrl;
+    return;
+  }
+
+  if (requestedVideoType === 'x' || requestedPlaybackMode === 'x_embed' || isXStatusUrl(suppliedVideoUrl)) {
+    const xUrl = payload.videoUrl || payload.sourceUrl || payload.embedUrl || suppliedVideoUrl;
+    payload.videoType = 'x';
+    payload.playbackMode = 'x_embed';
+    payload.sourceType = 'url';
+    payload.videoUrl = xUrl || payload.videoUrl || null;
+    payload.sourceUrl = xUrl || payload.sourceUrl || null;
+    payload.sourceName = 'X';
+    return;
+  }
+
+  payload.videoType = 'external';
+  payload.playbackMode = 'external';
+  payload.sourceType = 'url';
+  if (!payload.sourceUrl && suppliedVideoUrl) payload.sourceUrl = suppliedVideoUrl;
+}
+
 function normalizeOptionalNumber(value) {
   if (value === undefined || value === null || value === '') return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function logViralVideosCreateFailure(error) {
+  try {
+    // eslint-disable-next-line no-console
+    console.error('[viral-videos][admin-create-failed]', {
+      message: error?.message || String(error),
+      ...(error?.name ? { name: error.name } : {}),
+      ...(error?.code ? { code: error.code } : {}),
+      ...(typeof error?.status === 'number' ? { status: error.status } : {}),
+    });
+  } catch (_) {}
 }
 
 function hasEnv(name) {
@@ -74,7 +151,11 @@ function hasEnv(name) {
 }
 
 function hasCloudinaryConfig() {
-  return (hasEnv('CLOUDINARY_CLOUD_NAME') && hasEnv('CLOUDINARY_API_KEY') && hasEnv('CLOUDINARY_API_SECRET')) || hasEnv('CLOUDINARY_URL');
+  try {
+    return cloudinaryUploads.getCloudinaryConfigStatus().configured === true;
+  } catch (_) {
+    return (hasEnv('CLOUDINARY_CLOUD_NAME') && hasEnv('CLOUDINARY_API_KEY') && hasEnv('CLOUDINARY_API_SECRET')) || hasEnv('CLOUDINARY_URL');
+  }
 }
 
 function resolveVideoUploadProvider() {
@@ -105,7 +186,7 @@ function buildViralVideosCloudUploadCapability(settings = {}) {
     available,
     provider: provider.provider,
     message: available
-      ? (enabled ? CLOUD_VIDEO_UPLOAD_NOT_IMPLEMENTED_MESSAGE : CLOUD_VIDEO_UPLOAD_DISABLED_MESSAGE)
+      ? (enabled ? CLOUD_VIDEO_UPLOAD_READY_MESSAGE : CLOUD_VIDEO_UPLOAD_DISABLED_MESSAGE)
       : CLOUD_VIDEO_UPLOAD_NOT_CONNECTED_MESSAGE,
   };
 }
@@ -140,11 +221,17 @@ function toAdminViralVideoDto(doc) {
     slug: source.slug || null,
     summary: source.summary || null,
     shortCaption: source.summary || null,
-    thumbnailUrl: source.thumbnailUrl || source.posterImage?.url || null,
+    sourceName: source.sourceName || null,
+    sourceUrl: source.sourceUrl || null,
+    thumbnailUrl: source.thumbnailUrl || source.posterImageUrl || source.posterImage?.url || null,
+    posterImageUrl: source.posterImageUrl || source.thumbnailUrl || source.posterImage?.url || null,
     posterImage: normalizePosterImage(source.posterImage),
     thumbnail: normalizePosterImage(source.posterImage),
     videoUrl: source.videoUrl || null,
+    videoFileUrl: source.videoFileUrl || null,
     embedUrl: source.embedUrl || null,
+    videoType: source.videoType || null,
+    playbackMode: source.playbackMode || null,
     sourceType: normalizeSourceType(source.sourceType),
     videoStorageProvider: source.videoStorageProvider || null,
     videoPublicId: source.videoPublicId || null,
@@ -155,6 +242,8 @@ function toAdminViralVideoDto(doc) {
     language: source.language || 'en',
     category: source.category || null,
     tags: Array.isArray(source.tags) ? source.tags : [],
+    isActive: source.isActive !== false,
+    globalFrontend: source.globalFrontend !== false,
     isPublished: source.isPublished === true,
     status: source.status || (source.isPublished === true ? 'published' : 'draft'),
     isHomepageVisible: source.isHomepageVisible !== false,
@@ -199,12 +288,18 @@ function buildViralVideoPayload(body = {}, { partial = false } = {}) {
   assignString('slug');
   assignString('summary');
   assignString('shortCaption', 'summary');
+  assignString('sourceName');
+  assignString('sourceUrl');
   assignString('thumbnailUrl');
+  assignString('posterImageUrl');
   assignString('videoUrl');
+  assignString('videoFileUrl');
   assignString('embedUrl');
   assignString('language');
   assignString('category');
   if (Object.prototype.hasOwnProperty.call(body, 'sourceType')) payload.sourceType = normalizeSourceType(body.sourceType);
+  if (Object.prototype.hasOwnProperty.call(body, 'videoType')) payload.videoType = normalizeOptionalString(body.videoType);
+  if (Object.prototype.hasOwnProperty.call(body, 'playbackMode')) payload.playbackMode = normalizeOptionalString(body.playbackMode);
   assignString('videoStorageProvider');
   assignString('videoPublicId');
   assignString('videoKey');
@@ -212,14 +307,24 @@ function buildViralVideoPayload(body = {}, { partial = false } = {}) {
   if (Object.prototype.hasOwnProperty.call(body, 'videoSizeBytes')) payload.videoSizeBytes = normalizeOptionalNumber(body.videoSizeBytes);
   if (Object.prototype.hasOwnProperty.call(body, 'videoDuration')) payload.videoDuration = normalizeOptionalNumber(body.videoDuration);
   if (Object.prototype.hasOwnProperty.call(body, 'tags')) payload.tags = normalizeStringArray(body.tags);
+  if (Object.prototype.hasOwnProperty.call(body, 'isActive')) payload.isActive = normalizeBoolean(body.isActive, true);
   if (Object.prototype.hasOwnProperty.call(body, 'posterImage')) payload.posterImage = normalizePosterImage(body.posterImage);
   if (Object.prototype.hasOwnProperty.call(body, 'thumbnail')) payload.posterImage = normalizePosterImage(body.thumbnail);
   if (Object.prototype.hasOwnProperty.call(body, 'thumbnailUrl')) {
     const thumbnailUrl = normalizeOptionalString(body.thumbnailUrl);
     payload.thumbnailUrl = thumbnailUrl;
+    if (thumbnailUrl && !payload.posterImageUrl) payload.posterImageUrl = thumbnailUrl;
     if (!payload.posterImage && thumbnailUrl) payload.posterImage = { url: thumbnailUrl, publicId: null, alt: null };
   }
+  if (Object.prototype.hasOwnProperty.call(body, 'posterImageUrl')) {
+    const posterImageUrl = normalizeOptionalString(body.posterImageUrl);
+    payload.posterImageUrl = posterImageUrl;
+    if (posterImageUrl && !payload.thumbnailUrl) payload.thumbnailUrl = posterImageUrl;
+    if (!payload.posterImage && posterImageUrl) payload.posterImage = { url: posterImageUrl, publicId: null, alt: null };
+  }
   if (payload.posterImage && payload.posterImage.url && !payload.thumbnailUrl) payload.thumbnailUrl = payload.posterImage.url;
+  if (payload.posterImage && payload.posterImage.url && !payload.posterImageUrl) payload.posterImageUrl = payload.posterImage.url;
+  if (Object.prototype.hasOwnProperty.call(body, 'globalFrontend')) payload.globalFrontend = normalizeBoolean(body.globalFrontend, true);
   if (Object.prototype.hasOwnProperty.call(body, 'status')) {
     const status = String(body.status || '').trim().toLowerCase() === 'published' ? 'published' : 'draft';
     payload.status = status;
@@ -247,6 +352,18 @@ function buildViralVideoPayload(body = {}, { partial = false } = {}) {
     payload.sortOrder = Number.isFinite(parsed) ? parsed : 0;
   }
   if (Object.prototype.hasOwnProperty.call(body, 'publishedAt')) payload.publishedAt = body.publishedAt ? new Date(body.publishedAt) : null;
+  if (payload.isPublished === true && !Object.prototype.hasOwnProperty.call(payload, 'publishedAt')) payload.publishedAt = new Date();
+
+  const hasVideoContractInput = [
+    'videoUrl',
+    'videoFileUrl',
+    'embedUrl',
+    'sourceUrl',
+    'sourceType',
+    'videoType',
+    'playbackMode',
+  ].some((key) => Object.prototype.hasOwnProperty.call(body, key));
+  if (!partial || hasVideoContractInput) resolveVideoContract(payload);
 
   if (!partial && !payload.title) {
     const error = new Error('title is required');
@@ -325,6 +442,7 @@ async function createAdminViralVideo(req, res) {
     const doc = await ViralVideo.create(buildViralVideoPayload(req.body));
     return res.status(201).json({ ok: true, item: toAdminViralVideoDto(doc) });
   } catch (error) {
+    logViralVideosCreateFailure(error);
     return res.status(typeof error.status === 'number' ? error.status : 500).json({ ok: false, message: error.message || 'Failed to create viral video' });
   }
 }
@@ -380,6 +498,52 @@ function isVideoUploadAttempt(file) {
   return String(file?.mimetype || '').toLowerCase().startsWith('video/');
 }
 
+function getViralVideoUploadFolder() {
+  const folder = String(process.env.CLOUDINARY_VIRAL_VIDEOS_FOLDER || 'newspulse/viral-videos').trim();
+  return folder || 'newspulse/viral-videos';
+}
+
+function assertAllowedViralVideoFile(file) {
+  const mimeType = String(file?.mimetype || '').trim().toLowerCase();
+  const extension = path.extname(String(file?.originalname || '')).trim().toLowerCase();
+
+  if (!VIRAL_VIDEO_ACCEPTED_MIME_TYPES.has(mimeType) || !VIRAL_VIDEO_ACCEPTED_EXTENSIONS.has(extension)) {
+    const error = new Error(VIDEO_UPLOAD_TYPE_NOT_ALLOWED_MESSAGE);
+    error.status = 400;
+    error.code = 'VIDEO_TYPE_NOT_ALLOWED';
+    throw error;
+  }
+
+  return { mimeType, extension };
+}
+
+function toStableViralVideoUploadResponse(result, file, capability) {
+  const secureUrl = result?.secure_url || result?.url || null;
+  if (!secureUrl) {
+    const error = new Error(VIDEO_UPLOAD_FAILED_MESSAGE);
+    error.code = 'CLOUDINARY_UPLOAD_FAILED';
+    throw error;
+  }
+
+  return {
+    ok: true,
+    url: secureUrl,
+    secure_url: secureUrl,
+    secureUrl,
+    resource_type: 'video',
+    public_id: result?.public_id || null,
+    publicId: result?.public_id || null,
+    videoUrl: secureUrl,
+    videoFileUrl: secureUrl,
+    videoStorageProvider: 'cloudinary',
+    videoPublicId: result?.public_id || null,
+    videoMimeType: String(file?.mimetype || '').trim().toLowerCase() || null,
+    videoSizeBytes: typeof file?.size === 'number' ? file.size : null,
+    viralVideosCloudUploadAvailable: true,
+    viralVideosCloudUpload: capability,
+  };
+}
+
 async function uploadViralVideoThumbnailFile(req, res) {
   const originalStatus = res.status.bind(res);
   const originalJson = res.json.bind(res);
@@ -420,7 +584,10 @@ async function uploadViralVideoThumbnailFile(req, res) {
   };
 
   try {
-    return await handleCoverImageUpload(req, res, { notConfiguredMessage: IMAGE_UPLOAD_NOT_CONFIGURED_MESSAGE });
+    return await handleCoverImageUpload(req, res, {
+      notConfiguredMessage: IMAGE_UPLOAD_NOT_CONFIGURED_MESSAGE,
+      validationMessage: THUMBNAIL_IMAGE_TYPE_NOT_ALLOWED_MESSAGE,
+    });
   } catch (error) {
     res.status = originalStatus;
     res.json = originalJson;
@@ -432,22 +599,45 @@ async function uploadViralVideoFile(req, res) {
   return viralVideoUpload.any()(req, res, async (err) => {
     try {
       if (err) {
-        if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ ok: false, message: 'File too large (max 10MB)' });
+        if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ ok: false, message: 'File too large (max 100MB)', code: 'VIDEO_FILE_TOO_LARGE' });
         return res.status(typeof err.status === 'number' ? err.status : 400).json({ ok: false, message: err.message || 'Upload failed' });
       }
       const files = getUploadedFiles(req);
-      if (files.some(isVideoUploadAttempt)) {
-        const settings = await readViralVideosSettings();
-        const capability = buildViralVideosCloudUploadCapability(settings);
-        if (capability.available !== true) {
-          return res.status(400).json({ ok: false, message: CLOUD_VIDEO_UPLOAD_NOT_CONNECTED_MESSAGE, viralVideosCloudUploadAvailable: false, viralVideosCloudUpload: capability });
-        }
-        if (capability.enabled !== true) {
-          return res.status(400).json({ ok: false, message: CLOUD_VIDEO_UPLOAD_DISABLED_MESSAGE, viralVideosCloudUploadAvailable: true, viralVideosCloudUpload: capability });
-        }
-        return res.status(501).json({ ok: false, message: CLOUD_VIDEO_UPLOAD_NOT_IMPLEMENTED_MESSAGE, viralVideosCloudUploadAvailable: true, viralVideosCloudUpload: capability });
+      const file = files.find(Boolean);
+      if (!file) return res.status(400).json({ ok: false, message: 'No video file uploaded' });
+
+      if (isVideoUploadAttempt(file)) {
+        assertAllowedViralVideoFile(file);
+      } else {
+        return res.status(400).json({ ok: false, message: VIDEO_UPLOAD_TYPE_NOT_ALLOWED_MESSAGE, code: 'VIDEO_TYPE_NOT_ALLOWED' });
       }
-      return res.status(400).json({ ok: false, message: 'Video file upload is not available yet. Use Video URL for now.' });
+
+      const settings = await readViralVideosSettings();
+      const capability = buildViralVideosCloudUploadCapability(settings);
+      if (capability.available !== true) {
+        return res.status(400).json({ ok: false, message: CLOUD_VIDEO_UPLOAD_NOT_CONNECTED_MESSAGE, viralVideosCloudUploadAvailable: false, viralVideosCloudUpload: capability });
+      }
+      if (capability.enabled !== true) {
+        return res.status(400).json({ ok: false, message: CLOUD_VIDEO_UPLOAD_DISABLED_MESSAGE, viralVideosCloudUploadAvailable: true, viralVideosCloudUpload: capability });
+      }
+
+      try {
+        const uploaded = await cloudinaryUploads.uploadFromBuffer(file.buffer, {
+          folder: getViralVideoUploadFolder(),
+          resourceType: 'video',
+        });
+        return res.status(200).json(toStableViralVideoUploadResponse(uploaded, file, capability));
+      } catch (uploadError) {
+        try {
+          // eslint-disable-next-line no-console
+          console.error('[viral-videos][video-upload-failed]', {
+            message: uploadError?.message || String(uploadError),
+            ...(uploadError?.code ? { code: uploadError.code } : {}),
+            ...(typeof uploadError?.http_code === 'number' ? { httpCode: uploadError.http_code } : {}),
+          });
+        } catch (_) {}
+        return res.status(502).json({ ok: false, message: VIDEO_UPLOAD_FAILED_MESSAGE, code: 'CLOUDINARY_UPLOAD_FAILED' });
+      }
     } catch (error) {
       return res.status(typeof error?.status === 'number' ? error.status : 500).json({ ok: false, code: error?.code || undefined, message: error?.message || 'Upload failed' });
     }
