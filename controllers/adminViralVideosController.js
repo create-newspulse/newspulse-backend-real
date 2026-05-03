@@ -13,6 +13,8 @@ const {
 const CLOUD_VIDEO_UPLOAD_NOT_CONNECTED_MESSAGE = 'Cloud video upload is not connected yet. Use Video URL for now.';
 const CLOUD_VIDEO_UPLOAD_DISABLED_MESSAGE = 'Cloud video upload is available but disabled. Use Video URL unless enabled.';
 const CLOUD_VIDEO_UPLOAD_READY_MESSAGE = 'Cloud video upload is ready.';
+const CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Cloudinary video upload is not configured on backend.';
+const CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE = 'Cloudinary video upload failed.';
 const IMAGE_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Image upload is not configured in this environment. Paste an image URL to continue.';
 const THUMBNAIL_IMAGE_TYPE_NOT_ALLOWED_MESSAGE = 'Only JPG, JPEG, PNG, or WEBP thumbnail images are allowed.';
 const VIDEO_UPLOAD_TYPE_NOT_ALLOWED_MESSAGE = 'Only MP4, WebM, or MOV videos are allowed.';
@@ -157,6 +159,50 @@ function hasCloudinaryConfig() {
   } catch (_) {
     return (hasEnv('CLOUDINARY_CLOUD_NAME') && hasEnv('CLOUDINARY_API_KEY') && hasEnv('CLOUDINARY_API_SECRET')) || hasEnv('CLOUDINARY_URL');
   }
+}
+
+function getCloudinaryVideoConfigStatus() {
+  try {
+    return cloudinaryUploads.getCloudinaryConfigStatus();
+  } catch (_) {
+    const cloudNamePresent = hasEnv('CLOUDINARY_CLOUD_NAME');
+    const apiKeyPresent = hasEnv('CLOUDINARY_API_KEY');
+    const apiSecretPresent = hasEnv('CLOUDINARY_API_SECRET');
+    const cloudinaryUrlPresent = hasEnv('CLOUDINARY_URL');
+    return {
+      configured: (cloudNamePresent && apiKeyPresent && apiSecretPresent) || cloudinaryUrlPresent,
+      mode: cloudNamePresent && apiKeyPresent && apiSecretPresent ? 'keys' : (cloudinaryUrlPresent ? 'url' : 'missing'),
+      missing: [
+        ...(!cloudNamePresent ? ['CLOUDINARY_CLOUD_NAME'] : []),
+        ...(!apiKeyPresent ? ['CLOUDINARY_API_KEY'] : []),
+        ...(!apiSecretPresent ? ['CLOUDINARY_API_SECRET'] : []),
+      ],
+      env: { cloudNamePresent, apiKeyPresent, apiSecretPresent, cloudinaryUrlPresent },
+    };
+  }
+}
+
+function sanitizeCloudinaryProviderMessage(error) {
+  const raw = String(error?.message || error?.error?.message || 'Cloudinary upload failed').trim();
+  const secretValues = [
+    process.env.CLOUDINARY_API_SECRET,
+    process.env.CLOUDINARY_API_KEY,
+    process.env.CLOUDINARY_URL,
+  ].map((value) => String(value || '').trim()).filter(Boolean);
+
+  let message = raw;
+  for (const value of secretValues) {
+    message = message.split(value).join('[redacted]');
+  }
+
+  return message.slice(0, 500);
+}
+
+function logViralVideoCloudinaryUpload(event, details = {}) {
+  try {
+    // eslint-disable-next-line no-console
+    console.error(`[viral-videos][cloudinary-video-upload][${event}]`, details);
+  } catch (_) {}
 }
 
 function resolveVideoUploadProvider() {
@@ -649,12 +695,27 @@ async function handleViralVideoUploadRequest(req, res, file) {
 
   const settings = await readViralVideosSettings();
   const capability = buildViralVideosCloudUploadCapability(settings);
+  const cloudinaryConfig = getCloudinaryVideoConfigStatus();
+  const uploadDiagnostics = {
+    cloudinaryConfigPresent: cloudinaryConfig.configured === true,
+    provider: 'CLOUDINARY',
+    resource_type: 'video',
+    file: {
+      mimetype: String(file?.mimetype || '').trim().toLowerCase() || null,
+      size: typeof file?.size === 'number' ? file.size : null,
+    },
+  };
   if (capability.available !== true) {
+    logViralVideoCloudinaryUpload('config-missing', {
+      ...uploadDiagnostics,
+      missing: Array.isArray(cloudinaryConfig.missing) ? cloudinaryConfig.missing : [],
+    });
     return res.status(400).json({
       ok: false,
+      code: 'CLOUDINARY_CONFIG_MISSING',
       enabled: capability.enabled === true,
-      provider: capability.provider,
-      message: CLOUD_VIDEO_UPLOAD_NOT_CONNECTED_MESSAGE,
+      provider: 'cloudinary',
+      message: CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE,
       viralVideosCloudUploadAvailable: false,
       viralVideosCloudUpload: capability,
     });
@@ -669,23 +730,48 @@ async function handleViralVideoUploadRequest(req, res, file) {
       viralVideosCloudUpload: capability,
     });
   }
+  if (cloudinaryConfig.configured !== true) {
+    logViralVideoCloudinaryUpload('config-missing', {
+      ...uploadDiagnostics,
+      missing: Array.isArray(cloudinaryConfig.missing) ? cloudinaryConfig.missing : [],
+    });
+    return res.status(400).json({
+      ok: false,
+      code: 'CLOUDINARY_CONFIG_MISSING',
+      enabled: capability.enabled === true,
+      provider: 'cloudinary',
+      message: CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE,
+      viralVideosCloudUploadAvailable: false,
+      viralVideosCloudUpload: {
+        ...capability,
+        available: false,
+        provider: 'cloudinary',
+        message: CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE,
+      },
+    });
+  }
 
   try {
+    logViralVideoCloudinaryUpload('attempt', uploadDiagnostics);
     const uploaded = await cloudinaryUploads.uploadFromBuffer(file.buffer, {
       folder: getViralVideoUploadFolder(),
       resourceType: 'video',
     });
     return res.status(200).json(toStableViralVideoUploadResponse(uploaded, file, capability));
   } catch (uploadError) {
-    try {
-      // eslint-disable-next-line no-console
-      console.error('[viral-videos][video-upload-failed]', {
-        message: uploadError?.message || String(uploadError),
-        ...(uploadError?.code ? { code: uploadError.code } : {}),
-        ...(typeof uploadError?.http_code === 'number' ? { httpCode: uploadError.http_code } : {}),
-      });
-    } catch (_) {}
-    return res.status(502).json({ ok: false, message: uploadError?.message || VIDEO_UPLOAD_FAILED_MESSAGE, code: 'CLOUDINARY_UPLOAD_FAILED' });
+    const providerMessage = sanitizeCloudinaryProviderMessage(uploadError);
+    logViralVideoCloudinaryUpload('failed', {
+      ...uploadDiagnostics,
+      providerMessage,
+      ...(uploadError?.code ? { providerCode: String(uploadError.code).slice(0, 100) } : {}),
+      ...(typeof uploadError?.http_code === 'number' ? { httpCode: uploadError.http_code } : {}),
+    });
+    return res.status(502).json({
+      ok: false,
+      code: 'CLOUDINARY_UPLOAD_FAILED',
+      message: CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE,
+      providerMessage,
+    });
   }
 }
 

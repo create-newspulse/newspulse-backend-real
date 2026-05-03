@@ -13,6 +13,8 @@ const { VIRAL_VIDEOS_SETTINGS_KEY } = require('../lib/viralVideosSettings');
 
 const CLOUD_VIDEO_NOT_CONNECTED_MESSAGE = 'Cloud video upload is not connected yet. Use Video URL for now.';
 const CLOUD_VIDEO_DISABLED_MESSAGE = 'Cloud video upload is available but disabled. Use Video URL unless enabled.';
+const CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Cloudinary video upload is not configured on backend.';
+const CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE = 'Cloudinary video upload failed.';
 const IMAGE_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Image upload is not configured in this environment. Paste an image URL to continue.';
 const THUMBNAIL_IMAGE_TYPE_NOT_ALLOWED_MESSAGE = 'Only JPG, JPEG, PNG, or WEBP thumbnail images are allowed.';
 
@@ -784,7 +786,9 @@ test('POST /api/admin/viral-videos/upload-video rejects video files', async (t) 
 
   assert.equal(res.statusCode, 400);
   assert.equal(res.body.ok, false);
-  assert.equal(res.body.message, CLOUD_VIDEO_NOT_CONNECTED_MESSAGE);
+  assert.equal(res.body.code, 'CLOUDINARY_CONFIG_MISSING');
+  assert.equal(res.body.provider, 'cloudinary');
+  assert.equal(res.body.message, CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE);
   assert.equal(res.body.viralVideosCloudUploadAvailable, false);
   assert.deepEqual(res.body.viralVideosCloudUpload, missingCloudUploadCapability(false));
   assert.equal(cloudinaryCalled, false);
@@ -815,7 +819,9 @@ test('POST /api/admin/viral-videos/upload-video reports enabled but unavailable 
 
   assert.equal(res.statusCode, 400);
   assert.equal(res.body.ok, false);
-  assert.equal(res.body.message, CLOUD_VIDEO_NOT_CONNECTED_MESSAGE);
+  assert.equal(res.body.code, 'CLOUDINARY_CONFIG_MISSING');
+  assert.equal(res.body.provider, 'cloudinary');
+  assert.equal(res.body.message, CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE);
   assert.equal(res.body.viralVideosCloudUploadAvailable, false);
   assert.deepEqual(res.body.viralVideosCloudUpload, missingCloudUploadCapability(true));
   assert.equal(cloudinaryCalled, false);
@@ -998,8 +1004,9 @@ test('POST /api/admin/viral-videos/upload-video returns clear Cloudinary failure
   SystemSetting.findOne = () => ({ lean: async () => ({ key: VIRAL_VIDEOS_SETTINGS_KEY, value: { frontendEnabled: true, viralVideosCloudUploadEnabled: true } }) });
   cloudinary.uploadFromBuffer = async (_buffer, options) => {
     assert.equal(options.resourceType, 'video');
-    const err = new Error('Cloudinary rejected the upload');
+    const err = new Error('Cloudinary rejected the upload: secret');
     err.http_code = 500;
+    err.code = 'cloudinary_reject';
     throw err;
   };
 
@@ -1011,8 +1018,9 @@ test('POST /api/admin/viral-videos/upload-video returns clear Cloudinary failure
   assert.equal(res.statusCode, 502);
   assert.deepEqual(res.body, {
     ok: false,
-    message: 'Cloudinary rejected the upload',
     code: 'CLOUDINARY_UPLOAD_FAILED',
+    message: CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE,
+    providerMessage: 'Cloudinary rejected the upload: [redacted]',
   });
 });
 
