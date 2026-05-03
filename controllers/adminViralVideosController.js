@@ -179,7 +179,8 @@ function resolveVideoUploadProvider() {
 
 function buildViralVideosCloudUploadCapability(settings = {}) {
   const provider = resolveVideoUploadProvider();
-  const enabled = settings.viralVideosCloudUploadEnabled === true;
+  const enabled = settings.viralVideosCloudUploadEnabled === true
+    || (settings.__viralVideosCloudUploadEnabledExplicit !== true && provider.available === true);
   const available = provider.available === true;
 
   return {
@@ -566,6 +567,9 @@ function toStableViralVideoUploadResponse(result, file, capability) {
 
   return {
     ok: true,
+    enabled: capability?.enabled === true,
+    provider: capability?.provider || null,
+    message: capability?.message || CLOUD_VIDEO_UPLOAD_READY_MESSAGE,
     url: secureUrl,
     secure_url: secureUrl,
     secureUrl,
@@ -646,10 +650,24 @@ async function handleViralVideoUploadRequest(req, res, file) {
   const settings = await readViralVideosSettings();
   const capability = buildViralVideosCloudUploadCapability(settings);
   if (capability.available !== true) {
-    return res.status(400).json({ ok: false, message: CLOUD_VIDEO_UPLOAD_NOT_CONNECTED_MESSAGE, viralVideosCloudUploadAvailable: false, viralVideosCloudUpload: capability });
+    return res.status(400).json({
+      ok: false,
+      enabled: capability.enabled === true,
+      provider: capability.provider,
+      message: CLOUD_VIDEO_UPLOAD_NOT_CONNECTED_MESSAGE,
+      viralVideosCloudUploadAvailable: false,
+      viralVideosCloudUpload: capability,
+    });
   }
   if (capability.enabled !== true) {
-    return res.status(400).json({ ok: false, message: CLOUD_VIDEO_UPLOAD_DISABLED_MESSAGE, viralVideosCloudUploadAvailable: true, viralVideosCloudUpload: capability });
+    return res.status(400).json({
+      ok: false,
+      enabled: capability.enabled === true,
+      provider: capability.provider,
+      message: CLOUD_VIDEO_UPLOAD_DISABLED_MESSAGE,
+      viralVideosCloudUploadAvailable: true,
+      viralVideosCloudUpload: capability,
+    });
   }
 
   try {

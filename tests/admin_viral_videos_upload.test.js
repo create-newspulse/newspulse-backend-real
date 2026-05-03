@@ -716,7 +716,7 @@ test('POST /api/admin/viral-videos/upload routes MP4 to video upload flow', asyn
   assert.equal(res.body.ok, true);
   assert.equal(res.body.videoFileUrl, 'https://res.cloudinary.com/demo/video/upload/viral-alias.mp4');
   assert.equal(res.body.resource_type, 'video');
-  assert.equal(res.body.message, undefined);
+  assert.equal(res.body.message, 'Cloud video upload is ready.');
 });
 
 test('POST /api/admin/viral-videos/upload keeps thumbnail upload working for image files', async (t) => {
@@ -846,10 +846,47 @@ test('POST /api/admin/viral-videos/upload-video reports configured but disabled 
 
   assert.equal(res.statusCode, 400);
   assert.equal(res.body.ok, false);
+  assert.equal(res.body.enabled, false);
+  assert.equal(res.body.provider, 'cloudinary');
   assert.equal(res.body.message, CLOUD_VIDEO_DISABLED_MESSAGE);
   assert.equal(res.body.viralVideosCloudUploadAvailable, true);
   assert.deepEqual(res.body.viralVideosCloudUpload, configuredCloudUploadCapability(false));
   assert.equal(cloudinaryCalled, false);
+});
+
+test('POST /api/admin/viral-videos/upload-video treats missing upload flag as enabled when Cloudinary is configured', async (t) => {
+  stubDbReady(t);
+  stubCloudinaryConfig(t, true);
+
+  const prevFindOne = SystemSetting.findOne;
+  const prevUploadFromBuffer = cloudinary.uploadFromBuffer;
+  t.after(() => {
+    SystemSetting.findOne = prevFindOne;
+    cloudinary.uploadFromBuffer = prevUploadFromBuffer;
+  });
+
+  SystemSetting.findOne = () => ({ lean: async () => ({ key: VIRAL_VIDEOS_SETTINGS_KEY, value: { frontendEnabled: true } }) });
+  cloudinary.uploadFromBuffer = async (_buffer, options) => {
+    assert.equal(options.resourceType, 'video');
+    return {
+      secure_url: 'https://res.cloudinary.com/demo/video/upload/viral-missing-flag.mp4',
+      public_id: 'newspulse/viral-videos/viral-missing-flag',
+      resource_type: 'video',
+    };
+  };
+
+  const res = await request(app)
+    .post('/api/admin/viral-videos/upload-video')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .attach('video', Buffer.from('videodata'), { filename: 'clip.mp4', contentType: 'video/mp4' });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.enabled, true);
+  assert.equal(res.body.provider, 'cloudinary');
+  assert.equal(res.body.message, 'Cloud video upload is ready.');
+  assert.equal(res.body.videoFileUrl, 'https://res.cloudinary.com/demo/video/upload/viral-missing-flag.mp4');
+  assert.deepEqual(res.body.viralVideosCloudUpload, configuredCloudUploadCapability(true));
 });
 
 test('POST /api/admin/viral-videos/upload-video uploads allowed Cloudinary video formats', async (t) => {
@@ -892,6 +929,9 @@ test('POST /api/admin/viral-videos/upload-video uploads allowed Cloudinary video
 
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.ok, true);
+    assert.equal(res.body.enabled, true);
+    assert.equal(res.body.provider, 'cloudinary');
+    assert.equal(res.body.message, 'Cloud video upload is ready.');
     assert.equal(res.body.url, res.body.secure_url);
     assert.match(res.body.url, /^https:\/\/res\.cloudinary\.com\/demo\/video\/upload\//);
     assert.equal(res.body.resource_type, 'video');
