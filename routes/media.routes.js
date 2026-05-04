@@ -57,17 +57,30 @@ function isMediaTrashed(doc) {
   return !!doc && (doc.isDeleted === true || String(doc.status || '').toLowerCase() === 'trash' || String(doc.status || '').toLowerCase() === 'deleted');
 }
 
+function isLocalDiskMediaRecord(doc) {
+  const provider = String(doc?.provider || '').toLowerCase();
+  const storageProvider = String(doc?.storageProvider || '').toUpperCase();
+  return provider === 'local-disk' || storageProvider === 'LOCAL_DISK' || !!doc?.relativeUrl;
+}
+
+function isCloudinaryMediaRecord(doc) {
+  const provider = String(doc?.provider || '').toLowerCase();
+  const storageProvider = String(doc?.storageProvider || '').toUpperCase();
+  return provider === 'cloudinary' || storageProvider === 'CLOUDINARY' || !!doc?.cloudinaryPublicId;
+}
+
 async function restoreMediaItemById(itemId, req) {
-  const providerStatus = getMediaLibraryProviderStatus();
-  if (providerStatus.provider !== 'local-disk') {
-    const err = new Error('Restore is only available for local media storage');
-    err.status = 409;
-    err.reason = 'restore not supported for current media provider';
+  const existing = await findMediaRecordByIdOrStorageId(itemId);
+  if (!existing) {
+    const err = new Error('Media record not found');
+    err.status = 404;
     throw err;
   }
 
   const indexed = await restoreMediaRecord(itemId);
-  restoreLocalMediaItem(indexed.storageId || itemId);
+  if (isLocalDiskMediaRecord(existing)) {
+    restoreLocalMediaItem(indexed.storageId || itemId);
+  }
   return indexed;
 }
 
@@ -87,7 +100,24 @@ async function permanentlyDeleteMediaItemById(itemId) {
   }
 
   const storageId = existing.storageId ? String(existing.storageId) : itemId;
-  const result = await deleteMediaLibraryItem(storageId);
+  let result = null;
+  if (isLocalDiskMediaRecord(existing)) {
+    result = await deleteMediaLibraryItem(storageId, { provider: 'local-disk' });
+  } else if (isCloudinaryMediaRecord(existing)) {
+    result = {
+      id: storageId,
+      removed: true,
+      cloudinaryDeleted: false,
+      message: 'Cloudinary asset was not deleted; database record removed only.',
+    };
+  } else {
+    result = {
+      id: storageId,
+      removed: true,
+      storageDeleted: false,
+      message: 'Database record removed only.',
+    };
+  }
   await removeMediaRecord(String(existing._id));
   return {
     id: String(existing._id),
@@ -432,12 +462,14 @@ router.post('/upload', requireAdminAuth, mediaUpload.any(), async (req, res) => 
 
 router.patch('/items/:itemId/trash', requireAdminAuth, (req, res) => {
   return Promise.resolve().then(async () => {
-    const providerStatus = getMediaLibraryProviderStatus();
-    if (providerStatus.provider !== 'local-disk') {
-      return res.status(409).json({ ok: false, success: false, provider: providerStatus.provider, reason: 'trash not supported for current media provider', message: 'Trash is only available for local media storage' });
+    const existing = await findMediaRecordByIdOrStorageId(req.params.itemId);
+    if (!existing) {
+      return res.status(404).json({ ok: false, success: false, message: 'Media record not found' });
     }
     const indexed = await markMediaDeleted(req.params.itemId, req.admin || null);
-    trashLocalMediaItem(indexed.storageId || req.params.itemId);
+    if (isLocalDiskMediaRecord(existing)) {
+      trashLocalMediaItem(indexed.storageId || req.params.itemId);
+    }
     return res.status(200).json({ ok: true, success: true, data: indexed, message: 'Media moved to trash' });
   }).catch((e) => {
     return res.status(e?.status || 500).json({ ok: false, success: false, message: e?.message || 'Failed to trash media' });
