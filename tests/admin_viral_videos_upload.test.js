@@ -940,6 +940,38 @@ test('POST /api/admin/viral-videos/upload-video accepts video, videoFile, and fi
   assert.deepEqual(fieldNames, ['video', 'videoFile', 'file']);
 });
 
+test('POST /admin-api/admin/viral-videos/upload-video reaches Viral Videos upload endpoint', async (t) => {
+  stubDbReady(t);
+  stubCloudinaryConfig(t, true);
+
+  const prevFindOne = SystemSetting.findOne;
+  const prevUploadFromBuffer = cloudinary.uploadFromBuffer;
+  t.after(() => {
+    SystemSetting.findOne = prevFindOne;
+    cloudinary.uploadFromBuffer = prevUploadFromBuffer;
+  });
+
+  SystemSetting.findOne = () => ({ lean: async () => ({ key: VIRAL_VIDEOS_SETTINGS_KEY, value: { frontendEnabled: true, viralVideosCloudUploadEnabled: true } }) });
+  cloudinary.uploadFromBuffer = async (buffer, options) => {
+    assert.equal(buffer.toString('utf8'), 'videodata');
+    assert.equal(options.resourceType, 'video');
+    return {
+      secure_url: 'https://res.cloudinary.com/demo/video/upload/viral-admin-api-alias.mp4',
+      public_id: 'newspulse/viral-videos/viral-admin-api-alias',
+      resource_type: 'video',
+    };
+  };
+
+  const res = await request(app)
+    .post('/admin-api/admin/viral-videos/upload-video')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .attach('video', Buffer.from('videodata'), { filename: 'clip.mp4', contentType: 'video/mp4' });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.videoFileUrl, 'https://res.cloudinary.com/demo/video/upload/viral-admin-api-alias.mp4');
+});
+
 test('POST /api/admin/viral-videos/upload-video returns VIDEO_FILE_MISSING when no file is received', async (t) => {
   stubDbReady(t);
   stubCloudinaryConfig(t, true);

@@ -814,6 +814,7 @@ async function uploadViralVideoFile(req, res) {
       const cloudinaryConfig = getCloudinaryVideoConfigStatus();
       logViralVideoCloudinaryUpload('route-hit', {
         route: req.originalUrl || req.path,
+        authValid: true,
         fileReceived: !!file,
         ...buildViralVideoCloudinaryDiagnostics(cloudinaryConfig, file),
       });

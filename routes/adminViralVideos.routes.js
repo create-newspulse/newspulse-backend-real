@@ -43,15 +43,32 @@ function getAdminToken(req) {
 	return String(cookies.np_admin_token || '').trim();
 }
 
+function logViralVideosUploadAuth(req, authValid, reason = null) {
+	try {
+		// eslint-disable-next-line no-console
+		console.error('[viral-videos][cloudinary-video-upload][auth-check]', {
+			route: req.originalUrl || req.path,
+			authValid,
+			...(reason ? { reason } : {}),
+		});
+	} catch (_) {}
+}
+
 function requireViralVideosAdminAuth(req, res, next) {
 	if (isViralVideoUploadPath(req)) {
 		const token = getAdminToken(req);
 		if (token && !token.startsWith('np.')) {
 			const decoded = jwt.decode(token);
 			if (decoded && typeof decoded.exp === 'number' && decoded.exp <= Math.floor(Date.now() / 1000)) {
+				logViralVideosUploadAuth(req, false, 'expired');
 				return res.status(401).json({ ok: false, code: 'ADMIN_AUTH_EXPIRED', message: 'Admin session expired. Please login again.' });
 			}
 		}
+		return requireAdminAuth(req, res, (err) => {
+			if (err) return next(err);
+			logViralVideosUploadAuth(req, true);
+			return next();
+		});
 	}
 	return requireAdminAuth(req, res, next);
 }
