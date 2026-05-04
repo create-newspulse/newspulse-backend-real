@@ -5,14 +5,13 @@ const request = require('supertest');
 const app = require('../server');
 const cloudinary = require('../lib/cloudinary');
 const { uploadMediaLibraryFile } = require('../lib/mediaLibraryStorage');
-const Media = require('../models/Media');
 const {
   ADMIN_MEDIA_ACCEPTED_MIME_TYPES,
   ARTICLE_COVER_ACCEPTED_MIME_TYPES,
   MEDIA_TYPE_NOT_ALLOWED_CODE,
   MEDIA_TYPE_NOT_ALLOWED_MESSAGE,
 } = require('../lib/mediaUploadValidation');
-const { deriveMediaType, syncCloudinaryMediaLibrary } = require('../services/mediaLibraryService');
+const { deriveMediaType } = require('../services/mediaLibraryService');
 
 async function loginAsAdmin() {
   const email = String(process.env.ADMIN_EMAIL || '').trim();
@@ -183,136 +182,6 @@ test('Media Library upload rejects local disk fallback unless explicitly enabled
       return true;
     }
   );
-});
-
-test('Cloudinary sync imports missing image and video assets into Media Library records', async (t) => {
-  const prevGetCloudinaryConfigStatus = cloudinary.getCloudinaryConfigStatus;
-  const prevListResourcesByPrefix = cloudinary.listResourcesByPrefix;
-  const prevFindOne = Media.findOne;
-  const prevCreate = Media.create;
-  const prevCloudinaryFolder = process.env.CLOUDINARY_FOLDER;
-
-  const created = [];
-  const calls = [];
-
-  t.after(() => {
-    cloudinary.getCloudinaryConfigStatus = prevGetCloudinaryConfigStatus;
-    cloudinary.listResourcesByPrefix = prevListResourcesByPrefix;
-    Media.findOne = prevFindOne;
-    Media.create = prevCreate;
-    if (prevCloudinaryFolder === undefined) delete process.env.CLOUDINARY_FOLDER;
-    else process.env.CLOUDINARY_FOLDER = prevCloudinaryFolder;
-  });
-
-  process.env.CLOUDINARY_FOLDER = 'newspulse/articles';
-  cloudinary.getCloudinaryConfigStatus = () => ({ configured: true, mode: 'keys', missing: [], env: {} });
-  cloudinary.listResourcesByPrefix = async ({ prefix, resourceType }) => {
-    calls.push({ prefix, resourceType });
-    if (prefix === 'newspulse/media-library' && resourceType === 'image') {
-      return {
-        resources: [{
-          public_id: 'newspulse/media-library/imported-image',
-          resource_type: 'image',
-          secure_url: 'https://res.cloudinary.com/demo/image/upload/v1/newspulse/media-library/imported-image.jpg',
-          format: 'jpg',
-          bytes: 3456,
-          created_at: '2026-05-01T10:00:00Z',
-        }],
-      };
-    }
-    if (prefix === 'newspulse/viral-videos' && resourceType === 'video') {
-      return {
-        resources: [{
-          public_id: 'newspulse/viral-videos/imported-video',
-          resource_type: 'video',
-          secure_url: 'https://res.cloudinary.com/demo/video/upload/v1/newspulse/viral-videos/imported-video.mp4',
-          format: 'mp4',
-          bytes: 7890,
-          created_at: '2026-05-02T11:00:00Z',
-        }],
-      };
-    }
-    return { resources: [] };
-  };
-  Media.findOne = async () => null;
-  Media.create = async (payload) => {
-    created.push(payload);
-    return { _id: `media-${created.length}`, ...payload };
-  };
-
-  const summary = await syncCloudinaryMediaLibrary();
-
-  assert.equal(summary.ok, true);
-  assert.equal(summary.importedImages, 1);
-  assert.equal(summary.importedVideos, 1);
-  assert.equal(summary.skippedExisting, 0);
-  assert.equal(summary.failed, 0);
-  assert.equal(summary.totalScanned, 2);
-  assert.equal(created.length, 2);
-  assert.ok(calls.some((call) => call.prefix === 'newspulse/articles' && call.resourceType === 'image'));
-  assert.equal(created[0].storageProvider, 'CLOUDINARY');
-  assert.equal(created[0].cloudinaryPublicId, 'newspulse/media-library/imported-image');
-  assert.equal(created[0].mediaType, 'image');
-  assert.equal(created[0].assetUrl, 'https://res.cloudinary.com/demo/image/upload/v1/newspulse/media-library/imported-image.jpg');
-  assert.equal(created[1].mediaType, 'video');
-  assert.equal(created[1].videoUrl, 'https://res.cloudinary.com/demo/video/upload/v1/newspulse/viral-videos/imported-video.mp4');
-  assert.equal(created[1].posterUrl, 'https://res.cloudinary.com/demo/video/upload/so_0/v1/newspulse/viral-videos/imported-video.jpg');
-});
-
-test('Cloudinary sync skips duplicates and only fills empty existing fields', async (t) => {
-  const prevGetCloudinaryConfigStatus = cloudinary.getCloudinaryConfigStatus;
-  const prevListResourcesByPrefix = cloudinary.listResourcesByPrefix;
-  const prevFindOne = Media.findOne;
-  const prevCreate = Media.create;
-  const existing = {
-    _id: 'existing-media',
-    cloudinaryPublicId: 'newspulse/articles/existing-image',
-    assetUrl: 'https://res.cloudinary.com/demo/image/upload/custom/existing-image.jpg',
-    url: 'https://res.cloudinary.com/demo/image/upload/custom/existing-image.jpg',
-    saveCalled: false,
-    async save() { this.saveCalled = true; return this; },
-  };
-  let createCalled = false;
-
-  t.after(() => {
-    cloudinary.getCloudinaryConfigStatus = prevGetCloudinaryConfigStatus;
-    cloudinary.listResourcesByPrefix = prevListResourcesByPrefix;
-    Media.findOne = prevFindOne;
-    Media.create = prevCreate;
-  });
-
-  cloudinary.getCloudinaryConfigStatus = () => ({ configured: true, mode: 'keys', missing: [], env: {} });
-  cloudinary.listResourcesByPrefix = async ({ prefix, resourceType }) => {
-    if (prefix === 'newspulse/articles' && resourceType === 'image') {
-      return {
-        resources: [{
-          public_id: 'newspulse/articles/existing-image',
-          resource_type: 'image',
-          secure_url: 'https://res.cloudinary.com/demo/image/upload/v1/newspulse/articles/existing-image.jpg',
-          format: 'jpg',
-          bytes: 1234,
-          created_at: '2026-05-03T12:00:00Z',
-        }],
-      };
-    }
-    return { resources: [] };
-  };
-  Media.findOne = async () => existing;
-  Media.create = async () => { createCalled = true; throw new Error('duplicate should not be created'); };
-
-  const summary = await syncCloudinaryMediaLibrary({ prefixes: ['newspulse/articles'] });
-
-  assert.equal(summary.importedImages, 0);
-  assert.equal(summary.importedVideos, 0);
-  assert.equal(summary.skippedExisting, 1);
-  assert.equal(summary.failed, 0);
-  assert.equal(summary.totalScanned, 1);
-  assert.equal(createCalled, false);
-  assert.equal(existing.saveCalled, true);
-  assert.equal(existing.assetUrl, 'https://res.cloudinary.com/demo/image/upload/custom/existing-image.jpg');
-  assert.equal(existing.storageProvider, 'CLOUDINARY');
-  assert.equal(existing.mediaType, 'image');
-  assert.equal(existing.size, 1234);
 });
 
 test('POST /admin-api/media/upload rejects unsupported MIME types', async () => {

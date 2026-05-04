@@ -2,14 +2,11 @@ const mongoose = require('mongoose');
 
 const MediaSchema = new mongoose.Schema({
   storageId: { type: String, default: null, index: true },
-  cloudinaryPublicId: { type: String, default: null, index: true },
-  resourceType: { type: String, default: null, index: true },
   provider: { type: String, default: 'local-disk', index: true },
   storageProvider: { type: String, default: null, index: true },
   source: { type: String, default: 'admin-media-library', index: true },
   status: { type: String, default: 'active', index: true },
   isDeleted: { type: Boolean, default: false, index: true },
-  type: { type: String, default: null, index: true },
   mediaType: { type: String, default: 'file', index: true },
   mimeType: { type: String, default: null },
   fileName: { type: String, default: null },

@@ -23,13 +23,3 @@ test('GET /admin-api/media/stats returns 401 JSON when unauthenticated', async (
   assert.equal(res.body.code, 'UNAUTHORIZED');
   assert.equal(res.body.message, 'Unauthorized');
 });
-
-test('POST /api/admin/media-library/sync-cloudinary returns 401 JSON when unauthenticated', async () => {
-  const res = await request(app)
-    .post('/api/admin/media-library/sync-cloudinary')
-    .set('Accept', 'application/json');
-
-  assert.equal(res.statusCode, 401);
-  assert.equal(res.body.code, 'UNAUTHORIZED');
-  assert.equal(res.body.message, 'Unauthorized');
-});
