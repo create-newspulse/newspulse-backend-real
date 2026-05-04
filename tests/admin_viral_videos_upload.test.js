@@ -908,7 +908,8 @@ test('POST /api/admin/viral-videos/upload-video accepts video, videoFile, and fi
 
   const fieldNames = [];
   SystemSetting.findOne = () => ({ lean: async () => ({ key: VIRAL_VIDEOS_SETTINGS_KEY, value: { frontendEnabled: true, viralVideosCloudUploadEnabled: true } }) });
-  cloudinary.uploadFromBuffer = async (_buffer, options) => {
+  cloudinary.uploadFromBuffer = async (buffer, options) => {
+    assert.equal(buffer.toString('utf8'), 'videodata');
     assert.equal(options.resourceType, 'video');
     const index = fieldNames.length;
     return {
@@ -981,6 +982,7 @@ test('POST /api/admin/viral-videos/upload-video uploads allowed Cloudinary video
   SystemSetting.findOne = () => ({ lean: async () => ({ key: VIRAL_VIDEOS_SETTINGS_KEY, value: { frontendEnabled: true, viralVideosCloudUploadEnabled: true } }) });
   cloudinary.uploadFromBuffer = async (buffer, options) => {
     assert.ok(Buffer.isBuffer(buffer));
+    assert.equal(buffer.toString('utf8'), 'videodata');
     calls.push(options);
     const index = calls.length;
     return {

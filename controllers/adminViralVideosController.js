@@ -207,6 +207,23 @@ function logViralVideoCloudinaryUpload(event, details = {}) {
   } catch (_) {}
 }
 
+function buildViralVideoCloudinaryDiagnostics(cloudinaryConfig, file) {
+  return {
+    cloudinaryConfigPresent: cloudinaryConfig.configured === true,
+    cloudinaryCloudNamePresent: cloudinaryConfig.env?.cloudNamePresent === true,
+    cloudinaryApiKeyPresent: cloudinaryConfig.env?.apiKeyPresent === true,
+    cloudinaryApiSecretPresent: cloudinaryConfig.env?.apiSecretPresent === true,
+    provider: 'CLOUDINARY',
+    resource_type: 'video',
+    file: {
+      fieldName: file ? String(file.fieldname || '') || null : null,
+      originalFilename: file ? String(file.originalname || '').slice(0, 200) || null : null,
+      mimetype: file ? String(file.mimetype || '').trim().toLowerCase() || null : null,
+      size: file && typeof file.size === 'number' ? file.size : null,
+    },
+  };
+}
+
 function resolveVideoUploadProvider() {
   if (hasCloudinaryConfig()) return { available: true, provider: 'cloudinary' };
 
@@ -707,15 +724,7 @@ async function handleViralVideoUploadRequest(req, res, file) {
   const settings = await readViralVideosSettings();
   const capability = buildViralVideosCloudUploadCapability(settings);
   const cloudinaryConfig = getCloudinaryVideoConfigStatus();
-  const uploadDiagnostics = {
-    cloudinaryConfigPresent: cloudinaryConfig.configured === true,
-    provider: 'CLOUDINARY',
-    resource_type: 'video',
-    file: {
-      mimetype: String(file?.mimetype || '').trim().toLowerCase() || null,
-      size: typeof file?.size === 'number' ? file.size : null,
-    },
-  };
+  const uploadDiagnostics = buildViralVideoCloudinaryDiagnostics(cloudinaryConfig, file);
   if (capability.available !== true) {
     logViralVideoCloudinaryUpload('config-missing', {
       ...uploadDiagnostics,
@@ -795,13 +804,11 @@ async function uploadViralVideoFile(req, res) {
       }
       const files = getUploadedFiles(req);
       const file = selectViralVideoUploadFile(files);
+      const cloudinaryConfig = getCloudinaryVideoConfigStatus();
       logViralVideoCloudinaryUpload('route-hit', {
         route: req.originalUrl || req.path,
         fileReceived: !!file,
-        fieldName: file ? String(file.fieldname || '') : null,
-        mimetype: file ? String(file.mimetype || '').trim().toLowerCase() || null : null,
-        size: file && typeof file.size === 'number' ? file.size : null,
-        cloudinaryConfigPresent: getCloudinaryVideoConfigStatus().configured === true,
+        ...buildViralVideoCloudinaryDiagnostics(cloudinaryConfig, file),
       });
       return await handleViralVideoUploadRequest(req, res, file);
     } catch (error) {
