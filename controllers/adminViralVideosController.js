@@ -17,7 +17,7 @@ const CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Cloudinary video upload 
 const CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE = 'Cloudinary video upload failed.';
 const IMAGE_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Image upload is not configured in this environment. Paste an image URL to continue.';
 const THUMBNAIL_IMAGE_TYPE_NOT_ALLOWED_MESSAGE = 'Only JPG, JPEG, PNG, or WEBP thumbnail images are allowed.';
-const VIDEO_FILE_MISSING_MESSAGE = 'No video file received.';
+const VIDEO_FILE_MISSING_MESSAGE = 'No video file received. Please select an MP4, WebM, or MOV file.';
 const VIDEO_UPLOAD_TYPE_NOT_ALLOWED_MESSAGE = 'Only MP4, WebM, or MOV videos are allowed.';
 const VIDEO_UPLOAD_TOO_LARGE_MESSAGE = 'Video file is too large. Please upload below 100MB.';
 const VIDEO_UPLOAD_FAILED_MESSAGE = 'Video upload failed';
@@ -184,8 +184,9 @@ function getCloudinaryVideoConfigStatus() {
   }
 }
 
-function sanitizeCloudinaryProviderMessage(error) {
-  const raw = String(error?.message || error?.error?.message || 'Cloudinary upload failed').trim();
+function sanitizeCloudinaryMessageText(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
   const secretValues = [
     process.env.CLOUDINARY_API_SECRET,
     process.env.CLOUDINARY_API_KEY,
@@ -198,6 +199,22 @@ function sanitizeCloudinaryProviderMessage(error) {
   }
 
   return message.slice(0, 500);
+}
+
+function sanitizeCloudinaryProviderMessage(error) {
+  return sanitizeCloudinaryMessageText(error?.error?.message) || sanitizeCloudinaryMessageText(error?.message) || 'Cloudinary upload failed';
+}
+
+function buildSafeCloudinaryErrorDetails(error) {
+  const errorMessage = sanitizeCloudinaryMessageText(error?.message);
+  const nestedErrorMessage = sanitizeCloudinaryMessageText(error?.error?.message);
+  return {
+    providerMessage: sanitizeCloudinaryProviderMessage(error),
+    ...(errorMessage ? { errorMessage } : {}),
+    ...(nestedErrorMessage ? { nestedErrorMessage } : {}),
+    ...(typeof error?.http_code === 'number' ? { httpCode: error.http_code } : {}),
+    ...(error?.name ? { errorName: String(error.name).slice(0, 100) } : {}),
+  };
 }
 
 function logViralVideoCloudinaryUpload(event, details = {}) {
@@ -730,7 +747,7 @@ async function handleViralVideoUploadRequest(req, res, file) {
       ...uploadDiagnostics,
       missing: Array.isArray(cloudinaryConfig.missing) ? cloudinaryConfig.missing : [],
     });
-    return res.status(400).json({
+    return res.status(500).json({
       ok: false,
       code: 'CLOUDINARY_CONFIG_MISSING',
       enabled: capability.enabled === true,
@@ -756,7 +773,7 @@ async function handleViralVideoUploadRequest(req, res, file) {
       ...uploadDiagnostics,
       missing: Array.isArray(cloudinaryConfig.missing) ? cloudinaryConfig.missing : [],
     });
-    return res.status(400).json({
+    return res.status(500).json({
       ok: false,
       code: 'CLOUDINARY_CONFIG_MISSING',
       enabled: capability.enabled === true,
@@ -785,19 +802,17 @@ async function handleViralVideoUploadRequest(req, res, file) {
     });
     return res.status(200).json(toStableViralVideoUploadResponse(uploaded, file, capability));
   } catch (uploadError) {
-    const providerMessage = sanitizeCloudinaryProviderMessage(uploadError);
+    const safeCloudinaryError = buildSafeCloudinaryErrorDetails(uploadError);
     logViralVideoCloudinaryUpload('upload-stream-error', {
       ...uploadDiagnostics,
-      providerMessage,
+      ...safeCloudinaryError,
       ...(uploadError?.code ? { providerCode: String(uploadError.code).slice(0, 100) } : {}),
-      ...(typeof uploadError?.http_code === 'number' ? { httpCode: uploadError.http_code } : {}),
-      ...(uploadError?.name ? { errorName: String(uploadError.name).slice(0, 100) } : {}),
     });
     return res.status(400).json({
       ok: false,
       code: 'CLOUDINARY_UPLOAD_FAILED',
       message: CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE,
-      providerMessage,
+      providerMessage: safeCloudinaryError.providerMessage,
     });
   }
 }

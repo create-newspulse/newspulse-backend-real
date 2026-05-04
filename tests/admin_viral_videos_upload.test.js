@@ -789,7 +789,7 @@ test('POST /api/admin/viral-videos/upload-video rejects video files', async (t) 
     .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
     .attach('video', Buffer.from('bad'), { filename: 'clip.mp4', contentType: 'video/mp4' });
 
-  assert.equal(res.statusCode, 400);
+  assert.equal(res.statusCode, 500);
   assert.equal(res.body.ok, false);
   assert.equal(res.body.code, 'CLOUDINARY_CONFIG_MISSING');
   assert.equal(res.body.provider, 'cloudinary');
@@ -822,7 +822,7 @@ test('POST /api/admin/viral-videos/upload-video reports enabled but unavailable 
     .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
     .attach('video', Buffer.from('bad'), { filename: 'clip.mp4', contentType: 'video/mp4' });
 
-  assert.equal(res.statusCode, 400);
+  assert.equal(res.statusCode, 500);
   assert.equal(res.body.ok, false);
   assert.equal(res.body.code, 'CLOUDINARY_CONFIG_MISSING');
   assert.equal(res.body.provider, 'cloudinary');
@@ -999,7 +999,7 @@ test('POST /api/admin/viral-videos/upload-video returns VIDEO_FILE_MISSING when 
   assert.deepEqual(res.body, {
     ok: false,
     code: 'VIDEO_FILE_MISSING',
-    message: 'No video file received.',
+    message: 'No video file received. Please select an MP4, WebM, or MOV file.',
   });
   assert.equal(cloudinaryCalled, false);
 });
@@ -1168,6 +1168,41 @@ test('POST /api/admin/viral-videos/upload-video returns clear Cloudinary failure
     code: 'CLOUDINARY_UPLOAD_FAILED',
     message: CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE,
     providerMessage: 'Cloudinary rejected the upload: [redacted]',
+  });
+});
+
+test('POST /api/admin/viral-videos/upload-video returns nested safe Cloudinary provider message', async (t) => {
+  stubDbReady(t);
+  stubCloudinaryConfig(t, true);
+
+  const prevFindOne = SystemSetting.findOne;
+  const prevUploadFromBuffer = cloudinary.uploadFromBuffer;
+  t.after(() => {
+    SystemSetting.findOne = prevFindOne;
+    cloudinary.uploadFromBuffer = prevUploadFromBuffer;
+  });
+
+  SystemSetting.findOne = () => ({ lean: async () => ({ key: VIRAL_VIDEOS_SETTINGS_KEY, value: { frontendEnabled: true, viralVideosCloudUploadEnabled: true } }) });
+  cloudinary.uploadFromBuffer = async (_buffer, options) => {
+    assert.equal(options.resourceType, 'video');
+    const err = new Error('Cloudinary upload request failed');
+    err.name = 'CloudinaryError';
+    err.http_code = 400;
+    err.error = { message: 'Invalid video file: secret' };
+    throw err;
+  };
+
+  const res = await request(app)
+    .post('/api/admin/viral-videos/upload-video')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .attach('video', Buffer.from('videodata'), { filename: 'clip.mp4', contentType: 'video/mp4' });
+
+  assert.equal(res.statusCode, 400);
+  assert.deepEqual(res.body, {
+    ok: false,
+    code: 'CLOUDINARY_UPLOAD_FAILED',
+    message: CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE,
+    providerMessage: 'Invalid video file: [redacted]',
   });
 });
 
