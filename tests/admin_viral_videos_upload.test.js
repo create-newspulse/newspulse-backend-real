@@ -967,7 +967,7 @@ test('POST /api/admin/viral-videos/upload-video returns VIDEO_FILE_MISSING when 
   assert.deepEqual(res.body, {
     ok: false,
     code: 'VIDEO_FILE_MISSING',
-    message: 'No video file received. Please select an MP4, WebM, or MOV file.',
+    message: 'No video file received.',
   });
   assert.equal(cloudinaryCalled, false);
 });
@@ -1130,7 +1130,7 @@ test('POST /api/admin/viral-videos/upload-video returns clear Cloudinary failure
     .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
     .attach('video', Buffer.from('videodata'), { filename: 'clip.mp4', contentType: 'video/mp4' });
 
-  assert.equal(res.statusCode, 502);
+  assert.equal(res.statusCode, 400);
   assert.deepEqual(res.body, {
     ok: false,
     code: 'CLOUDINARY_UPLOAD_FAILED',

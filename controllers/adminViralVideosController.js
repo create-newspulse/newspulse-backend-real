@@ -17,7 +17,7 @@ const CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Cloudinary video upload 
 const CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE = 'Cloudinary video upload failed.';
 const IMAGE_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Image upload is not configured in this environment. Paste an image URL to continue.';
 const THUMBNAIL_IMAGE_TYPE_NOT_ALLOWED_MESSAGE = 'Only JPG, JPEG, PNG, or WEBP thumbnail images are allowed.';
-const VIDEO_FILE_MISSING_MESSAGE = 'No video file received. Please select an MP4, WebM, or MOV file.';
+const VIDEO_FILE_MISSING_MESSAGE = 'No video file received.';
 const VIDEO_UPLOAD_TYPE_NOT_ALLOWED_MESSAGE = 'Only MP4, WebM, or MOV videos are allowed.';
 const VIDEO_UPLOAD_TOO_LARGE_MESSAGE = 'Video file is too large. Please upload below 100MB.';
 const VIDEO_UPLOAD_FAILED_MESSAGE = 'Video upload failed';
@@ -743,6 +743,7 @@ async function handleViralVideoUploadRequest(req, res, file) {
   if (capability.enabled !== true) {
     return res.status(400).json({
       ok: false,
+      code: 'CLOUDINARY_UPLOAD_DISABLED',
       enabled: capability.enabled === true,
       provider: capability.provider,
       message: CLOUD_VIDEO_UPLOAD_DISABLED_MESSAGE,
@@ -772,12 +773,12 @@ async function handleViralVideoUploadRequest(req, res, file) {
   }
 
   try {
-    logViralVideoCloudinaryUpload('upload-start', uploadDiagnostics);
+    logViralVideoCloudinaryUpload('upload-stream-start', uploadDiagnostics);
     const uploaded = await cloudinaryUploads.uploadFromBuffer(file.buffer, {
       folder: getViralVideoUploadFolder(),
       resourceType: 'video',
     });
-    logViralVideoCloudinaryUpload('upload-success', {
+    logViralVideoCloudinaryUpload('upload-stream-success', {
       ...uploadDiagnostics,
       secureUrlPresent: !!(uploaded?.secure_url || uploaded?.url),
       publicIdPresent: !!uploaded?.public_id,
@@ -785,13 +786,14 @@ async function handleViralVideoUploadRequest(req, res, file) {
     return res.status(200).json(toStableViralVideoUploadResponse(uploaded, file, capability));
   } catch (uploadError) {
     const providerMessage = sanitizeCloudinaryProviderMessage(uploadError);
-    logViralVideoCloudinaryUpload('failed', {
+    logViralVideoCloudinaryUpload('upload-stream-error', {
       ...uploadDiagnostics,
       providerMessage,
       ...(uploadError?.code ? { providerCode: String(uploadError.code).slice(0, 100) } : {}),
       ...(typeof uploadError?.http_code === 'number' ? { httpCode: uploadError.http_code } : {}),
+      ...(uploadError?.name ? { errorName: String(uploadError.name).slice(0, 100) } : {}),
     });
-    return res.status(502).json({
+    return res.status(400).json({
       ok: false,
       code: 'CLOUDINARY_UPLOAD_FAILED',
       message: CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE,
