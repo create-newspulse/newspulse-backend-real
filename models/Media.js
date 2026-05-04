@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const MediaSchema = new mongoose.Schema({
   storageId: { type: String, default: null, index: true },
   provider: { type: String, default: 'local-disk', index: true },
+  storageProvider: { type: String, default: null, index: true },
   source: { type: String, default: 'admin-media-library', index: true },
   status: { type: String, default: 'active', index: true },
   isDeleted: { type: Boolean, default: false, index: true },
@@ -12,9 +13,14 @@ const MediaSchema = new mongoose.Schema({
   originalName: { type: String, default: null },
   size: { type: Number, default: 0 },
   url: { type: String, default: null },
+  assetUrl: { type: String, default: null },
+  videoUrl: { type: String, default: null },
+  posterUrl: { type: String, default: null },
+  thumbnailUrl: { type: String, default: null },
   relativeUrl: { type: String, default: null },
   secureUrl: { type: String, default: null },
   title: { type: String, default: null },
+  uploadedAt: { type: Date, default: null },
   uploadedBy: {
     id: { type: String, default: null },
     email: { type: String, default: null },

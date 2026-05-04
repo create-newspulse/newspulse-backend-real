@@ -27,7 +27,16 @@ function resolveMediaAssetUrl(doc, options = {}) {
   if (relativeUrl && provider === 'local-disk' && options.req) {
     return buildPublicUrl(options.req, relativeUrl);
   }
-  return doc?.url || doc?.secureUrl || relativeUrl || null;
+  return doc?.assetUrl || doc?.url || doc?.secureUrl || relativeUrl || null;
+}
+
+function normalizeStorageProvider(uploadedOrDoc) {
+  const explicit = String(uploadedOrDoc?.storageProvider || '').trim();
+  if (explicit) return explicit;
+  const provider = String(uploadedOrDoc?.provider || '').trim().toLowerCase();
+  if (provider === 'cloudinary') return 'CLOUDINARY';
+  if (provider === 'local-disk') return 'LOCAL_DISK';
+  return provider ? provider.toUpperCase() : null;
 }
 
 function mapMediaRecord(doc, options = {}) {
@@ -48,9 +57,11 @@ function mapMediaRecord(doc, options = {}) {
         ? 'FILE_TOO_SMALL_FOR_PREVIEW'
         : 'PREVIEW_UNAVAILABLE';
   const previewUrl = previewAvailable && isImage ? assetUrl : null;
-  const thumbnailUrl = previewAvailable && isImage ? assetUrl : null;
-  const playbackUrl = previewAvailable && isVideo ? assetUrl : null;
-  const posterUrl = isVideo ? null : thumbnailUrl;
+  const videoUrl = isVideo ? (doc.videoUrl || assetUrl) : null;
+  const thumbnailUrl = doc.thumbnailUrl || (previewAvailable && isImage ? assetUrl : null);
+  const playbackUrl = previewAvailable && isVideo ? videoUrl : null;
+  const posterUrl = isVideo ? (doc.posterUrl || thumbnailUrl || null) : thumbnailUrl;
+  const uploadedAt = doc.uploadedAt || doc.createdAt || null;
 
   return {
     id: String(doc._id),
@@ -63,12 +74,14 @@ function mapMediaRecord(doc, options = {}) {
     mimeType: doc.mimeType || null,
     mediaType,
     provider: doc.provider || 'unknown',
+    storageProvider: normalizeStorageProvider(doc),
     source: doc.source || null,
     status: doc.status || 'active',
     isDeleted: doc.isDeleted === true,
     deleted: doc.isDeleted === true,
     url: assetUrl,
     assetUrl,
+    videoUrl,
     originalUrl: assetUrl,
     previewUrl,
     thumbnailUrl,
@@ -78,6 +91,7 @@ function mapMediaRecord(doc, options = {}) {
     previewAvailable,
     previewReason,
     relativeUrl: doc.relativeUrl || null,
+    uploadedAt: uploadedAt ? new Date(uploadedAt).toISOString() : null,
     createdAt: doc.createdAt ? new Date(doc.createdAt).toISOString() : null,
     updatedAt: doc.updatedAt ? new Date(doc.updatedAt).toISOString() : null,
     uploadedBy: doc.uploadedBy || null,
@@ -86,6 +100,10 @@ function mapMediaRecord(doc, options = {}) {
 
 async function createIndexedMediaRecord(req, uploaded, options = {}) {
   const mediaType = options.mediaType || deriveMediaType(uploaded && uploaded.mimeType);
+  const assetUrl = uploaded && (uploaded.assetUrl || uploaded.url || uploaded.secureUrl) ? String(uploaded.assetUrl || uploaded.url || uploaded.secureUrl) : null;
+  const thumbnailUrl = uploaded && uploaded.thumbnailUrl ? String(uploaded.thumbnailUrl) : (mediaType === 'image' ? assetUrl : null);
+  const videoUrl = uploaded && uploaded.videoUrl ? String(uploaded.videoUrl) : (mediaType === 'video' ? assetUrl : null);
+  const posterUrl = uploaded && uploaded.posterUrl ? String(uploaded.posterUrl) : (mediaType === 'video' ? thumbnailUrl : null);
   const uploadedBy = req && req.admin ? {
     id: req.admin.id || null,
     email: req.admin.email || null,
@@ -95,6 +113,7 @@ async function createIndexedMediaRecord(req, uploaded, options = {}) {
   const created = await Media.create({
     storageId: uploaded && uploaded.id ? String(uploaded.id) : null,
     provider: uploaded && uploaded.provider ? String(uploaded.provider) : 'unknown',
+    storageProvider: normalizeStorageProvider(uploaded),
     source: options.source || 'admin-media-library',
     status: 'active',
     isDeleted: false,
@@ -103,10 +122,15 @@ async function createIndexedMediaRecord(req, uploaded, options = {}) {
     fileName: uploaded && uploaded.fileName ? String(uploaded.fileName) : null,
     originalName: uploaded && uploaded.name ? String(uploaded.name) : (uploaded && uploaded.fileName ? String(uploaded.fileName) : null),
     size: typeof uploaded?.size === 'number' ? uploaded.size : 0,
-    url: uploaded && uploaded.url ? String(uploaded.url) : null,
+    url: assetUrl,
+    assetUrl,
+    videoUrl,
+    posterUrl,
+    thumbnailUrl,
     relativeUrl: uploaded && uploaded.relativeUrl ? String(uploaded.relativeUrl) : null,
-    secureUrl: uploaded && uploaded.url ? String(uploaded.url) : null,
+    secureUrl: assetUrl,
     title: uploaded && uploaded.name ? String(uploaded.name) : null,
+    uploadedAt: uploaded && uploaded.uploadedAt ? new Date(uploaded.uploadedAt) : new Date(),
     uploadedBy,
     deletedAt: null,
     restoredAt: null,
