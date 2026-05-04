@@ -803,6 +803,7 @@ async function handleViralVideoUploadRequest(req, res, file) {
     return res.status(200).json(toStableViralVideoUploadResponse(uploaded, file, capability));
   } catch (uploadError) {
     const safeCloudinaryError = buildSafeCloudinaryErrorDetails(uploadError);
+    const cloudinaryFailureMessage = `${CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE} ${safeCloudinaryError.providerMessage}`.trim();
     logViralVideoCloudinaryUpload('upload-stream-error', {
       ...uploadDiagnostics,
       ...safeCloudinaryError,
@@ -811,11 +812,15 @@ async function handleViralVideoUploadRequest(req, res, file) {
     return res.status(400).json({
       ok: false,
       code: 'CLOUDINARY_UPLOAD_FAILED',
-      message: CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE,
+      message: cloudinaryFailureMessage,
       providerMessage: safeCloudinaryError.providerMessage,
       error: safeCloudinaryError.providerMessage,
       errorMessage: safeCloudinaryError.providerMessage,
       reason: safeCloudinaryError.providerMessage,
+      userMessage: cloudinaryFailureMessage,
+      displayMessage: cloudinaryFailureMessage,
+      cloudinaryError: safeCloudinaryError.providerMessage,
+      providerError: safeCloudinaryError.providerMessage,
       details: {
         providerMessage: safeCloudinaryError.providerMessage,
       },

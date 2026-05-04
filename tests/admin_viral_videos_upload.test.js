@@ -1166,11 +1166,15 @@ test('POST /api/admin/viral-videos/upload-video returns clear Cloudinary failure
   assert.deepEqual(res.body, {
     ok: false,
     code: 'CLOUDINARY_UPLOAD_FAILED',
-    message: CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE,
+    message: `${CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE} Cloudinary rejected the upload: [redacted]`,
     providerMessage: 'Cloudinary rejected the upload: [redacted]',
     error: 'Cloudinary rejected the upload: [redacted]',
     errorMessage: 'Cloudinary rejected the upload: [redacted]',
     reason: 'Cloudinary rejected the upload: [redacted]',
+    userMessage: `${CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE} Cloudinary rejected the upload: [redacted]`,
+    displayMessage: `${CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE} Cloudinary rejected the upload: [redacted]`,
+    cloudinaryError: 'Cloudinary rejected the upload: [redacted]',
+    providerError: 'Cloudinary rejected the upload: [redacted]',
     details: {
       providerMessage: 'Cloudinary rejected the upload: [redacted]',
     },
@@ -1207,11 +1211,15 @@ test('POST /api/admin/viral-videos/upload-video returns nested safe Cloudinary p
   assert.deepEqual(res.body, {
     ok: false,
     code: 'CLOUDINARY_UPLOAD_FAILED',
-    message: CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE,
+    message: `${CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE} Invalid video file: [redacted]`,
     providerMessage: 'Invalid video file: [redacted]',
     error: 'Invalid video file: [redacted]',
     errorMessage: 'Invalid video file: [redacted]',
     reason: 'Invalid video file: [redacted]',
+    userMessage: `${CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE} Invalid video file: [redacted]`,
+    displayMessage: `${CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE} Invalid video file: [redacted]`,
+    cloudinaryError: 'Invalid video file: [redacted]',
+    providerError: 'Invalid video file: [redacted]',
     details: {
       providerMessage: 'Invalid video file: [redacted]',
     },
