@@ -1168,6 +1168,12 @@ test('POST /api/admin/viral-videos/upload-video returns clear Cloudinary failure
     code: 'CLOUDINARY_UPLOAD_FAILED',
     message: CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE,
     providerMessage: 'Cloudinary rejected the upload: [redacted]',
+    error: 'Cloudinary rejected the upload: [redacted]',
+    errorMessage: 'Cloudinary rejected the upload: [redacted]',
+    reason: 'Cloudinary rejected the upload: [redacted]',
+    details: {
+      providerMessage: 'Cloudinary rejected the upload: [redacted]',
+    },
   });
 });
 
@@ -1203,6 +1209,12 @@ test('POST /api/admin/viral-videos/upload-video returns nested safe Cloudinary p
     code: 'CLOUDINARY_UPLOAD_FAILED',
     message: CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE,
     providerMessage: 'Invalid video file: [redacted]',
+    error: 'Invalid video file: [redacted]',
+    errorMessage: 'Invalid video file: [redacted]',
+    reason: 'Invalid video file: [redacted]',
+    details: {
+      providerMessage: 'Invalid video file: [redacted]',
+    },
   });
 });
 

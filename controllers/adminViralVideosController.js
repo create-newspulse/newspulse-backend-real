@@ -813,6 +813,12 @@ async function handleViralVideoUploadRequest(req, res, file) {
       code: 'CLOUDINARY_UPLOAD_FAILED',
       message: CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE,
       providerMessage: safeCloudinaryError.providerMessage,
+      error: safeCloudinaryError.providerMessage,
+      errorMessage: safeCloudinaryError.providerMessage,
+      reason: safeCloudinaryError.providerMessage,
+      details: {
+        providerMessage: safeCloudinaryError.providerMessage,
+      },
     });
   }
 }
