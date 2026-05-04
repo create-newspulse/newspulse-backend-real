@@ -804,6 +804,9 @@ app.use('/api/media', mediaRoutes);
 app.use('/admin-api/media', mediaRoutes);
 app.use('/admin-api/api/media', mediaRoutes);
 
+const mediaLibrarySyncRoutes = require('./routes/mediaLibrarySync.routes');
+app.use('/api/admin/media-library', mediaLibrarySyncRoutes);
+
 // Admin panel compat endpoints (fast fallbacks)
 const adminCompatRoutes = require('./src/routes/adminCompat.routes');
 app.use('/api', adminCompatRoutes);
