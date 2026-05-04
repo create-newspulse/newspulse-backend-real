@@ -15,8 +15,6 @@ const MediaSchema = new mongoose.Schema({
   fileName: { type: String, default: null },
   originalName: { type: String, default: null },
   size: { type: Number, default: 0 },
-  usageCount: { type: Number, default: 0, index: true },
-  useCount: { type: Number, default: 0, index: true },
   url: { type: String, default: null },
   assetUrl: { type: String, default: null },
   videoUrl: { type: String, default: null },

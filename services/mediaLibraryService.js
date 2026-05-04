@@ -86,8 +86,6 @@ function mapCloudinaryAssetToMediaPayload(asset) {
     relativeUrl: null,
     secureUrl: url,
     title: getCloudinaryFileName(asset),
-    usageCount: 0,
-    useCount: 0,
     uploadedAt,
     deletedAt: null,
     restoredAt: null,
@@ -333,8 +331,6 @@ function mapMediaRecord(doc, options = {}) {
     title: doc.title || doc.originalName || doc.fileName || null,
     size,
     fileSize: size,
-    usageCount: typeof doc.usageCount === 'number' ? doc.usageCount : 0,
-    useCount: typeof doc.useCount === 'number' ? doc.useCount : 0,
     mimeType: doc.mimeType || null,
     type: doc.type || mediaType,
     mediaType,
@@ -392,8 +388,6 @@ async function createIndexedMediaRecord(req, uploaded, options = {}) {
     fileName: uploaded && uploaded.fileName ? String(uploaded.fileName) : null,
     originalName: uploaded && uploaded.name ? String(uploaded.name) : (uploaded && uploaded.fileName ? String(uploaded.fileName) : null),
     size: typeof uploaded?.size === 'number' ? uploaded.size : 0,
-    usageCount: 0,
-    useCount: 0,
     url: assetUrl,
     assetUrl,
     videoUrl,
@@ -431,42 +425,6 @@ function buildListFilter(options = {}) {
 async function listIndexedMediaRecords(options = {}) {
   const docs = await Media.find(buildListFilter(options)).sort({ createdAt: -1 }).lean();
   return docs.map((doc) => mapMediaRecord(doc, { req: options.req || null }));
-}
-
-function normalizePositiveInteger(value, fallback, max) {
-  const parsed = Number.parseInt(String(value || ''), 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return max ? Math.min(parsed, max) : parsed;
-}
-
-function buildUnusedMediaFilter() {
-  return {
-    isDeleted: false,
-    status: { $in: ['active', 'Active', null] },
-    usageCount: { $in: [0, null] },
-    useCount: { $in: [0, null] },
-  };
-}
-
-async function listUnusedMediaRecords(options = {}) {
-  const page = normalizePositiveInteger(options.page, 1, 10_000);
-  const limit = normalizePositiveInteger(options.limit, 50, 200);
-  const skip = (page - 1) * limit;
-  const filter = buildUnusedMediaFilter();
-
-  const query = Media.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean();
-  const [docs, total] = await Promise.all([
-    query,
-    Media.countDocuments(filter),
-  ]);
-
-  return {
-    items: docs.map((doc) => mapMediaRecord(doc, { req: options.req || null })),
-    page,
-    limit,
-    total,
-    totalPages: Math.max(1, Math.ceil(total / limit)),
-  };
 }
 
 async function getIndexedMediaStats() {
@@ -632,7 +590,6 @@ module.exports = {
   getCloudinarySyncPrefixes,
   importCloudinaryAssetToMediaLibrary,
   listIndexedMediaRecords,
-  listUnusedMediaRecords,
   mapMediaRecord,
   markMediaDeleted,
   removeMediaRecord,
