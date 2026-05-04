@@ -1,4 +1,5 @@
 const express = require('express');
+const jwt = require('jsonwebtoken');
 
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const { coverUpload } = require('./uploads.routes');
@@ -21,7 +22,41 @@ const {
 
 const router = express.Router();
 
-router.use('/viral-videos', requireAdminAuth);
+function parseCookies(header) {
+	const cookies = {};
+	String(header || '').split(';').forEach((part) => {
+		const [key, ...valueParts] = part.trim().split('=');
+		if (!key) return;
+		cookies[key] = decodeURIComponent(valueParts.join('=') || '');
+	});
+	return cookies;
+}
+
+function isViralVideoUploadPath(req) {
+	return /\/viral-videos\/(upload-video|upload\/video|video-upload)(?:[/?]|$)/.test(String(req.originalUrl || req.path || ''));
+}
+
+function getAdminToken(req) {
+	const authHeader = String(req.headers.authorization || '');
+	if (authHeader.toLowerCase().startsWith('bearer ')) return authHeader.slice('Bearer '.length).trim();
+	const cookies = parseCookies(req.headers.cookie || '');
+	return String(cookies.np_admin_token || '').trim();
+}
+
+function requireViralVideosAdminAuth(req, res, next) {
+	if (isViralVideoUploadPath(req)) {
+		const token = getAdminToken(req);
+		if (token && !token.startsWith('np.')) {
+			const decoded = jwt.decode(token);
+			if (decoded && typeof decoded.exp === 'number' && decoded.exp <= Math.floor(Date.now() / 1000)) {
+				return res.status(401).json({ ok: false, code: 'ADMIN_AUTH_EXPIRED', message: 'Admin session expired. Please login again.' });
+			}
+		}
+	}
+	return requireAdminAuth(req, res, next);
+}
+
+router.use('/viral-videos', requireViralVideosAdminAuth);
 
 router.get('/viral-videos/settings', getViralVideosSettings);
 router.put('/viral-videos/settings', updateViralVideosSettings);

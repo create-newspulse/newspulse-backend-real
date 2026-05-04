@@ -772,10 +772,15 @@ async function handleViralVideoUploadRequest(req, res, file) {
   }
 
   try {
-    logViralVideoCloudinaryUpload('attempt', uploadDiagnostics);
+    logViralVideoCloudinaryUpload('upload-start', uploadDiagnostics);
     const uploaded = await cloudinaryUploads.uploadFromBuffer(file.buffer, {
       folder: getViralVideoUploadFolder(),
       resourceType: 'video',
+    });
+    logViralVideoCloudinaryUpload('upload-success', {
+      ...uploadDiagnostics,
+      secureUrlPresent: !!(uploaded?.secure_url || uploaded?.url),
+      publicIdPresent: !!uploaded?.public_id,
     });
     return res.status(200).json(toStableViralVideoUploadResponse(uploaded, file, capability));
   } catch (uploadError) {

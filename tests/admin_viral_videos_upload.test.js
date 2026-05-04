@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
 const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
 
 process.env.NODE_ENV = 'test';
 
@@ -79,6 +80,10 @@ function stubCloudinaryConfig(t, configured) {
 function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
   const b64 = Buffer.from(`${email}:0`, 'utf8').toString('base64');
   return `np.${b64}`;
+}
+
+function makeExpiredAdminJwt() {
+  return jwt.sign({ sub: 'admin-id', email: 'admin@newspulse.ai', role: 'admin' }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: -60 });
 }
 
 function stubDbReady(t) {
@@ -964,6 +969,43 @@ test('POST /api/admin/viral-videos/upload-video returns VIDEO_FILE_MISSING when 
     code: 'VIDEO_FILE_MISSING',
     message: 'No video file received. Please select an MP4, WebM, or MOV file.',
   });
+  assert.equal(cloudinaryCalled, false);
+});
+
+test('POST /api/admin/viral-videos/upload-video returns ADMIN_AUTH_EXPIRED for expired admin JWT', async (t) => {
+  stubDbReady(t);
+  stubCloudinaryConfig(t, true);
+
+  const prevFindOne = SystemSetting.findOne;
+  const prevUploadFromBuffer = cloudinary.uploadFromBuffer;
+  t.after(() => {
+    SystemSetting.findOne = prevFindOne;
+    cloudinary.uploadFromBuffer = prevUploadFromBuffer;
+  });
+
+  let settingsRead = false;
+  let cloudinaryCalled = false;
+  SystemSetting.findOne = () => {
+    settingsRead = true;
+    return { lean: async () => ({ key: VIRAL_VIDEOS_SETTINGS_KEY, value: { frontendEnabled: true, viralVideosCloudUploadEnabled: true } }) };
+  };
+  cloudinary.uploadFromBuffer = async () => {
+    cloudinaryCalled = true;
+    throw new Error('upload should not run for expired admin sessions');
+  };
+
+  const res = await request(app)
+    .post('/api/admin/viral-videos/upload-video')
+    .set('Authorization', `Bearer ${makeExpiredAdminJwt()}`)
+    .attach('video', Buffer.from('videodata'), { filename: 'clip.mp4', contentType: 'video/mp4' });
+
+  assert.equal(res.statusCode, 401);
+  assert.deepEqual(res.body, {
+    ok: false,
+    code: 'ADMIN_AUTH_EXPIRED',
+    message: 'Admin session expired. Please login again.',
+  });
+  assert.equal(settingsRead, false);
   assert.equal(cloudinaryCalled, false);
 });
 

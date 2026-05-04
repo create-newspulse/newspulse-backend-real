@@ -505,6 +505,7 @@ router.use((req, res, next) => {
   // Legacy namespace: let server.js handle /admin/* (tests rely on /admin/login, /admin/refresh, /admin/metrics).
   // Exiting the router here prevents this file from shadowing those handlers.
   if (req.baseUrl === '/admin') return next('router');
+  if (req.path === '/viral-videos' || req.path.startsWith('/viral-videos/')) return next('router');
   if (req.path === '/seed-founder' || req.path === '/bootstrap-founder') return next('router');
   return requireAdminAuth(req, res, next);
 });
