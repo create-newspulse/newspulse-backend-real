@@ -9,6 +9,10 @@ const SiteSettingsSchema = new mongoose.Schema(
     maintenanceMode: { type: Boolean, default: false },
 
     brandName: { type: String, default: 'News Pulse' },
+    adminFeatureVisibility: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
+    },
   },
   { timestamps: true },
 );

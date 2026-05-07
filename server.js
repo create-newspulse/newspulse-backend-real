@@ -306,6 +306,7 @@ const adminContributorNetworkRouter = require('./routes/adminContributorNetwork.
 const { getReporterDirectory } = require('./controllers/adminContributorNetworkController');
 const founderRoutesRouter = require('./routes/admin/founderRoutes');
 const founderFeatureTogglesRouter = require('./routes/admin/founderFeatureToggles');
+const adminSafeOwnerZoneFeatureVisibilityRouter = require('./routes/adminSafeOwnerZoneFeatureVisibility.routes');
 const alertsRouter = require('./routes/alerts');
 const securityRouter = require('./routes/security');
 const adminThreatRouter = require('./routes/adminThreatRoutes');
@@ -1979,12 +1980,16 @@ app.use('/admin-api/api/admin', adminPublicSettingsRouter);
 // Community Reporter Settings router (same mount /api/admin)
 app.use('/api/admin', communityReporterSettingsRouter);
 // Founder feature toggles (admin/founder protected)
+app.use('/api/admin', adminSafeOwnerZoneFeatureVisibilityRouter);
 app.use('/api/admin/founder', founderRoutesRouter);
 app.use('/api/admin/founder', founderFeatureTogglesRouter);
+app.use('/admin-api/admin', adminSafeOwnerZoneFeatureVisibilityRouter);
 app.use('/admin-api/admin/founder', founderRoutesRouter);
 app.use('/admin-api/admin/founder', founderFeatureTogglesRouter);
+app.use('/admin-api/api/admin', adminSafeOwnerZoneFeatureVisibilityRouter);
 app.use('/admin-api/api/admin/founder', founderRoutesRouter);
 app.use('/admin-api/api/admin/founder', founderFeatureTogglesRouter);
+app.use('/admin', adminSafeOwnerZoneFeatureVisibilityRouter);
 app.use('/admin/founder', founderRoutesRouter);
 app.use('/admin/founder', founderFeatureTogglesRouter);
 

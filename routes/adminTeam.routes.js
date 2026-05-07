@@ -4,10 +4,14 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 
 const User = require('../models/User');
+const { requireAdminAuth } = require('../middleware/adminAuth');
 const { requireAuth, requireFounder } = require('../middleware/requireAuth');
 const { logAudit } = require('../lib/audit');
 
 const router = express.Router();
+
+const TEAM_SELECTABLE_ROLES = Object.freeze(['editor']);
+const DEFAULT_FOUNDER_EMAIL = 'newspulse.team@gmail.com';
 
 function hasPermission(req, perm) {
   const role = String(req.user?.role || '').toLowerCase();
@@ -22,6 +26,34 @@ function requireFounderOrPermission(perm) {
     if (!hasPermission(req, perm)) return bad(res, 403, 'Forbidden', 'FORBIDDEN');
     return next();
   };
+}
+
+function syncReqUserFromAdmin(req) {
+  if (!req.admin) return;
+  req.user = {
+    id: req.admin.id || null,
+    email: req.admin.email || null,
+    name: req.admin.name || null,
+    role: req.admin.role || null,
+    designation: req.admin.designation || null,
+    permissions: Array.isArray(req.admin.permissions) ? req.admin.permissions : [],
+    status: req.admin.status || 'active',
+    mustChangePassword: Boolean(req.admin.mustChangePassword),
+    tokenVersion: typeof req.admin.tokenVersion === 'number' ? req.admin.tokenVersion : 0,
+  };
+}
+
+function requireTeamAuth(req, res, next) {
+  const authHeader = String(req.headers.authorization || '');
+  if (authHeader.toLowerCase().startsWith('bearer ')) {
+    return requireAuth(req, res, next);
+  }
+
+  return requireAdminAuth(req, res, function onAuthed(err) {
+    if (err) return next(err);
+    syncReqUserFromAdmin(req);
+    return next();
+  });
 }
 
 function ok(res, data) {
@@ -42,7 +74,7 @@ function teamUserSafeDto(u) {
     id: String(u._id),
     name: u.name || '',
     email: u.email || '',
-    role: u.role || 'staff',
+    role: u.role || 'editor',
     designation: u.designation || null,
     permissions: Array.isArray(u.permissions) ? u.permissions : [],
     status: u.status || 'active',
@@ -57,7 +89,7 @@ function userDto(u) {
     id: String(u._id),
     name: u.name || '',
     email: u.email || '',
-    role: u.role || 'staff',
+    role: u.role || 'editor',
     designation: u.designation || null,
     status: u.status || 'active',
     permissions: Array.isArray(u.permissions) ? u.permissions : [],
@@ -71,6 +103,47 @@ function normalizeRole(value) {
   const role = String(value || '').trim().toLowerCase();
   if (role === 'founder' || role === 'admin' || role === 'editor' || role === 'staff') return role;
   return null;
+}
+
+function normalizeSelectableRole(value) {
+  const role = normalizeRole(value);
+  if (!role) return null;
+  return TEAM_SELECTABLE_ROLES.includes(role) ? role : null;
+}
+
+function getFounderEmails() {
+  return new Set(
+    [
+      process.env.FOUNDER_EMAIL,
+      process.env.ADMIN_EMAIL,
+      process.env.ADMIN_SEED_FOUNDER_EMAIL,
+      DEFAULT_FOUNDER_EMAIL,
+    ]
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+function isProtectedFounderUser(user) {
+  if (!user) return false;
+  const role = String(user.role || '').trim().toLowerCase();
+  if (role === 'founder') return true;
+
+  const email = String(user.email || '').trim().toLowerCase();
+  return email ? getFounderEmails().has(email) : false;
+}
+
+async function findUserByIdOr404(id, res) {
+  const user = await User.findById(id);
+  if (!user) {
+    bad(res, 404, 'Not found');
+    return null;
+  }
+  return user;
+}
+
+function availableRolesPayload() {
+  return TEAM_SELECTABLE_ROLES.slice();
 }
 
 function normalizePermissions(value) {
@@ -116,14 +189,15 @@ async function setTempPasswordAndForceChange(userId) {
 }
 
 // GET /api/admin/team/users
-router.get('/team/users', requireAuth, requireFounderOrPermission('team.manage'), async (_req, res) => {
+router.get('/team/users', requireTeamAuth, requireFounderOrPermission('team.manage'), async (_req, res) => {
   if (!isDbReady()) {
     return res.status(200).json({
       ok: true,
       success: true,
       status: 200,
       message: 'OK (DB unavailable)',
-      data: { users: [] },
+      data: { users: [], availableRoles: availableRolesPayload() },
+      availableRoles: availableRolesPayload(),
       users: [],
     });
   }
@@ -138,25 +212,29 @@ router.get('/team/users', requireAuth, requireFounderOrPermission('team.manage')
     success: true,
     status: 200,
     message: 'OK',
-    data: { users },
+    data: { users, availableRoles: availableRolesPayload() },
+    availableRoles: availableRolesPayload(),
     users,
   });
 });
 
 // POST /api/admin/team/users
 // Founder-only: creates user and returns one-time tempPassword
-router.post('/team/users', requireAuth, requireFounderOrPermission('team.manage'), async (req, res) => {
+router.post('/team/users', requireTeamAuth, requireFounder, async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const fullName = String(body.fullName || body.name || '').trim();
   const email = String(body.email || '').trim().toLowerCase();
-  const role = normalizeRole(body.role) || 'staff';
+  const roleInputPresent = body.role !== undefined && body.role !== null && String(body.role || '').trim() !== '';
+  const role = roleInputPresent ? normalizeSelectableRole(body.role) : 'editor';
   const designation = body.designation != null ? String(body.designation || '').trim() : null;
   const permissions = normalizePermissions(body.permissions);
 
   if (!fullName) return bad(res, 400, 'fullName is required');
-  if (!email) return bad(res, 400, 'email is required');
+  if (!email) return bad(res, 400, 'Blank email not allowed', 'INVALID_EMAIL');
+  if (!role) return bad(res, 400, 'Invalid role not allowed', 'INVALID_ROLE');
+  if (getFounderEmails().has(email)) return bad(res, 409, 'Duplicate founder email not allowed', 'DUPLICATE_FOUNDER_EMAIL');
 
   const existing = await User.findOne({ email }).lean();
   if (existing) return bad(res, 409, 'Email already exists');
@@ -194,11 +272,15 @@ router.post('/team/users', requireAuth, requireFounderOrPermission('team.manage'
 
 // PATCH /api/admin/team/users/:id
 // Founder-only: updates role/designation/permissions/fullName
-router.patch('/team/users/:id', requireAuth, requireFounderOrPermission('team.manage'), async (req, res) => {
+router.patch('/team/users/:id', requireTeamAuth, requireFounder, async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
   if (!mongoose.isValidObjectId(id)) return bad(res, 400, 'Invalid id');
+
+  const existingUser = await findUserByIdOr404(id, res);
+  if (!existingUser) return;
+  if (isProtectedFounderUser(existingUser)) return bad(res, 403, 'Founder account is protected', 'FOUNDER_PROTECTED');
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
 
@@ -209,8 +291,8 @@ router.patch('/team/users/:id', requireAuth, requireFounderOrPermission('team.ma
     patch.name = fullName;
   }
   if (body.role != null) {
-    const role = normalizeRole(body.role);
-    if (!role) return bad(res, 400, 'Invalid role');
+    const role = normalizeSelectableRole(body.role);
+    if (!role) return bad(res, 400, 'Invalid role not allowed', 'INVALID_ROLE');
     patch.role = role;
   }
   if (body.designation !== undefined) {
@@ -237,11 +319,15 @@ function normalizeStatus(value) {
 
 // PATCH /api/admin/team/users/:id/status  body: { status: 'active'|'suspended' }
 // Founder-only
-router.patch('/team/users/:id/status', requireAuth, requireFounderOrPermission('team.manage'), async (req, res) => {
+router.patch('/team/users/:id/status', requireTeamAuth, requireFounder, async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
   if (!mongoose.isValidObjectId(id)) return bad(res, 400, 'Invalid id');
+
+  const targetUser = await findUserByIdOr404(id, res);
+  if (!targetUser) return;
+  if (isProtectedFounderUser(targetUser)) return bad(res, 403, 'Founder account is protected', 'FOUNDER_PROTECTED');
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const status = normalizeStatus(body.status);
@@ -260,11 +346,15 @@ router.patch('/team/users/:id/status', requireAuth, requireFounderOrPermission('
 });
 
 // POST /api/admin/team/users/:id/activate
-router.post('/team/users/:id/activate', requireAuth, requireFounderOrPermission('team.manage'), async (req, res) => {
+router.post('/team/users/:id/activate', requireTeamAuth, requireFounder, async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
   if (!mongoose.isValidObjectId(id)) return bad(res, 400, 'Invalid id');
+
+  const targetUser = await findUserByIdOr404(id, res);
+  if (!targetUser) return;
+  if (isProtectedFounderUser(targetUser)) return bad(res, 403, 'Founder account is protected', 'FOUNDER_PROTECTED');
 
   const updated = await User.findByIdAndUpdate(
     id,
@@ -278,11 +368,15 @@ router.post('/team/users/:id/activate', requireAuth, requireFounderOrPermission(
 });
 
 // POST /api/admin/team/users/:id/suspend
-router.post('/team/users/:id/suspend', requireAuth, requireFounderOrPermission('team.manage'), async (req, res) => {
+router.post('/team/users/:id/suspend', requireTeamAuth, requireFounder, async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
   if (!mongoose.isValidObjectId(id)) return bad(res, 400, 'Invalid id');
+
+  const targetUser = await findUserByIdOr404(id, res);
+  if (!targetUser) return;
+  if (isProtectedFounderUser(targetUser)) return bad(res, 403, 'Founder account is protected', 'FOUNDER_PROTECTED');
 
   const updated = await User.findByIdAndUpdate(
     id,
@@ -296,11 +390,15 @@ router.post('/team/users/:id/suspend', requireAuth, requireFounderOrPermission('
 });
 
 // POST /api/admin/team/users/:id/force-reset
-router.post('/team/users/:id/force-reset', requireAuth, requireFounderOrPermission('team.manage'), async (req, res) => {
+router.post('/team/users/:id/force-reset', requireTeamAuth, requireFounder, async (req, res) => {
   if (!isDbReady()) return bad(res, 503, 'Database unavailable');
 
   const { id } = req.params;
   if (!mongoose.isValidObjectId(id)) return bad(res, 400, 'Invalid id');
+
+  const targetUser = await findUserByIdOr404(id, res);
+  if (!targetUser) return;
+  if (isProtectedFounderUser(targetUser)) return bad(res, 403, 'Founder account is protected', 'FOUNDER_PROTECTED');
 
   const { updated, tempPassword } = await setTempPasswordAndForceChange(id);
   if (!updated) return bad(res, 404, 'Not found');
@@ -310,13 +408,13 @@ router.post('/team/users/:id/force-reset', requireAuth, requireFounderOrPermissi
 });
 
 // Backward-compat aliases (older UIs used PATCH instead of POST)
-router.patch('/team/users/:id/activate', requireAuth, requireFounderOrPermission('team.manage'), (req, res) => {
+router.patch('/team/users/:id/activate', requireTeamAuth, requireFounder, (req, res) => {
   req.method = 'POST';
   req.url = `/team/users/${req.params.id}/activate`;
   return router.handle(req, res);
 });
 
-router.patch('/team/users/:id/suspend', requireAuth, requireFounderOrPermission('team.manage'), (req, res) => {
+router.patch('/team/users/:id/suspend', requireTeamAuth, requireFounder, (req, res) => {
   req.method = 'POST';
   req.url = `/team/users/${req.params.id}/suspend`;
   return router.handle(req, res);
