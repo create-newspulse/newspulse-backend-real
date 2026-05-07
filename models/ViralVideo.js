@@ -31,6 +31,12 @@ function isUploadedVideoUrl(value) {
   return /\.(mp4|webm|mov)$/.test(raw) || raw.startsWith('/uploads/') || raw.startsWith('uploads/');
 }
 
+function normalizeVideoFileCandidate(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  return raw;
+}
+
 function isYouTubeUrl(value) {
   const raw = String(value || '').trim().toLowerCase();
   return /(^|\/\/)(www\.)?(youtube\.com|youtu\.be)\//.test(raw);
@@ -137,14 +143,26 @@ viralVideoSchema.pre('validate', function ensureCanonicalFields(next) {
     this.videoUrl = this.videoFileUrl;
   }
 
-  const videoCandidate = this.videoFileUrl || this.videoUrl || this.embedUrl || this.sourceUrl;
-  if (this.videoFileUrl || this.sourceType === 'upload' || this.videoType === 'uploaded' || isUploadedVideoUrl(videoCandidate)) {
-    const fileUrl = this.videoFileUrl || this.videoUrl || videoCandidate;
-    this.videoFileUrl = fileUrl || null;
-    this.videoUrl = fileUrl || this.videoUrl || null;
-    this.videoType = 'uploaded';
-    this.playbackMode = 'internal';
-    this.sourceType = 'upload';
+  const explicitVideoFileUrl = normalizeVideoFileCandidate(this.videoFileUrl);
+  const playableUrl = normalizeVideoFileCandidate(this.videoUrl);
+  const embedCandidate = normalizeVideoFileCandidate(this.embedUrl);
+  const sourceCandidate = normalizeVideoFileCandidate(this.sourceUrl);
+  const videoCandidate = explicitVideoFileUrl || playableUrl || embedCandidate || sourceCandidate;
+  const uploadedCandidate = explicitVideoFileUrl || (isUploadedVideoUrl(playableUrl) ? playableUrl : null);
+  if (uploadedCandidate || this.videoType === 'uploaded') {
+    const fileUrl = uploadedCandidate;
+    if (!fileUrl) {
+      this.videoType = 'external';
+      this.playbackMode = 'external';
+      this.sourceType = 'url';
+      if (!this.sourceUrl && videoCandidate) this.sourceUrl = videoCandidate;
+    } else {
+      this.videoFileUrl = fileUrl || null;
+      this.videoUrl = fileUrl || this.videoUrl || null;
+      this.videoType = 'uploaded';
+      this.playbackMode = 'internal';
+      this.sourceType = 'upload';
+    }
   } else if (this.videoType === 'youtube' || this.playbackMode === 'embed' || isYouTubeUrl(videoCandidate)) {
     this.videoType = 'youtube';
     this.playbackMode = 'embed';

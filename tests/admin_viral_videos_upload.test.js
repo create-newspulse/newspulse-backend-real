@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const request = require('supertest');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
+const fs = require('fs');
+const path = require('path');
 
 process.env.NODE_ENV = 'test';
 
@@ -14,9 +16,7 @@ const { VIRAL_VIDEOS_SETTINGS_KEY } = require('../lib/viralVideosSettings');
 
 const CLOUD_VIDEO_NOT_CONNECTED_MESSAGE = 'Cloud video upload is not connected yet. Use Video URL for now.';
 const CLOUD_VIDEO_DISABLED_MESSAGE = 'Cloud video upload is available but disabled. Use Video URL unless enabled.';
-const CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Cloudinary video upload is not configured on backend.';
 const CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE = 'Cloudinary video upload failed.';
-const IMAGE_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Image upload is not configured in this environment. Paste an image URL to continue.';
 const THUMBNAIL_IMAGE_TYPE_NOT_ALLOWED_MESSAGE = 'Only JPG, JPEG, PNG, or WEBP thumbnail images are allowed.';
 
 function missingCloudUploadCapability(enabled = false) {
@@ -99,6 +99,22 @@ function makeFindResult(items) {
     limit() { return this; },
     lean: async () => items,
   };
+}
+
+function getLocalViralUploadPathFromUrl(url) {
+  const parsed = new URL(String(url));
+  const pathname = decodeURIComponent(parsed.pathname || '');
+  assert.match(pathname, /^\/uploads\/viral-videos\//);
+  return path.join(process.cwd(), ...pathname.replace(/^\/+/, '').split('/'));
+}
+
+function assertAndCleanupLocalViralUpload(t, url) {
+  const filePath = getLocalViralUploadPathFromUrl(url);
+  assert.equal(fs.existsSync(filePath), true);
+  t.after(() => {
+    try { fs.rmSync(filePath, { force: true }); } catch (_) {}
+  });
+  return filePath;
 }
 
 test('GET /api/admin/viral-videos/settings returns default settings shape', async (t) => {
@@ -401,6 +417,63 @@ test('POST /api/admin/viral-videos saves thumbnailUrl and videoUrl without uploa
   assert.equal(capturedPayload.videoFileUrl, 'https://cdn.example.com/videos/clip.mp4');
 });
 
+test('POST /api/admin/viral-videos keeps uploaded video and poster when optional source URL is present', async (t) => {
+  stubDbReady(t);
+
+  const prevCreate = ViralVideo.create;
+  t.after(() => { ViralVideo.create = prevCreate; });
+
+  let capturedPayload = null;
+  ViralVideo.create = async (payload) => {
+    capturedPayload = payload;
+    return {
+      _id: '507f1f77bcf86cd799439506',
+      ...payload,
+      createdAt: new Date('2026-05-01T08:00:00.000Z'),
+      updatedAt: new Date('2026-05-01T08:00:00.000Z'),
+    };
+  };
+
+  const uploadedVideoUrl = 'https://api.newspulse.test/uploads/viral-videos/videos/uploaded-clip.mp4';
+  const posterUrl = 'https://api.newspulse.test/uploads/viral-videos/posters/uploaded-poster.jpg';
+  const sourceUrl = 'https://x.com/newspulse/status/2050104453630718079';
+
+  const res = await request(app)
+    .post('/api/admin/viral-videos')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .send({
+      title: 'Uploaded source-linked clip',
+      slug: 'uploaded-source-linked-clip',
+      summary: 'Uploaded video with optional source link',
+      language: 'en',
+      videoFileUrl: uploadedVideoUrl,
+      thumbnailUrl: posterUrl,
+      posterImageUrl: posterUrl,
+      sourceUrl,
+      sourceName: 'News Pulse Desk',
+      status: 'published',
+      isActive: true,
+      globalFrontend: true,
+      showOnHomepage: false,
+    });
+
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.item.videoFileUrl, uploadedVideoUrl);
+  assert.equal(res.body.item.videoUrl, uploadedVideoUrl);
+  assert.equal(res.body.item.sourceUrl, sourceUrl);
+  assert.equal(res.body.item.thumbnailUrl, posterUrl);
+  assert.equal(res.body.item.posterImageUrl, posterUrl);
+  assert.equal(res.body.item.videoType, 'uploaded');
+  assert.equal(res.body.item.playbackMode, 'internal');
+  assert.equal(res.body.item.showOnHomepage, false);
+  assert.equal(capturedPayload.videoFileUrl, uploadedVideoUrl);
+  assert.equal(capturedPayload.videoUrl, uploadedVideoUrl);
+  assert.equal(capturedPayload.sourceUrl, sourceUrl);
+  assert.equal(capturedPayload.thumbnailUrl, posterUrl);
+  assert.equal(capturedPayload.posterImageUrl, posterUrl);
+});
+
 test('POST /api/admin/viral-videos publishes Gujarati video with thumbnail fields for public API', async (t) => {
   stubDbReady(t);
 
@@ -650,7 +723,7 @@ test('POST /admin-api/viral-videos/upload/image returns thumbnail-specific wrong
   assert.equal(uploadCalled, false);
 });
 
-test('POST /api/admin/viral-videos/upload-thumbnail returns clear missing image upload env message', async (t) => {
+test('POST /api/admin/viral-videos/upload-thumbnail stores poster locally when Cloudinary is not configured', async (t) => {
   stubDbReady(t);
 
   const prevIsCloudinaryConfigured = cloudinary.isCloudinaryConfigured;
@@ -686,9 +759,18 @@ test('POST /api/admin/viral-videos/upload-thumbnail returns clear missing image 
     .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
     .attach('thumbnail', Buffer.from('jpgdata'), { filename: 'thumb.jpg', contentType: 'image/jpeg' });
 
-  assert.equal(res.statusCode, 503);
-  assert.equal(res.body.ok, false);
-  assert.equal(res.body.message, IMAGE_UPLOAD_NOT_CONFIGURED_MESSAGE);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.provider, 'local');
+  assert.match(res.body.thumbnailUrl, /^http:\/\/[^/]+\/uploads\/viral-videos\/posters\/.+\.jpg$/);
+  assert.equal(res.body.posterImageUrl, res.body.thumbnailUrl);
+  assert.equal(res.body.posterImage.url, res.body.thumbnailUrl);
+  assert.equal(res.body.thumbnail.url, res.body.thumbnailUrl);
+  assertAndCleanupLocalViralUpload(t, res.body.thumbnailUrl);
+
+  const directRes = await request(app).get(new URL(res.body.posterImageUrl).pathname);
+  assert.equal(directRes.statusCode, 200);
+  assert.match(directRes.headers['content-type'] || '', /^image\/jpeg/);
   assert.equal(uploadCalled, false);
 });
 
@@ -766,7 +848,7 @@ test('POST /api/admin/viral-videos/upload keeps thumbnail upload working for ima
   });
 });
 
-test('POST /api/admin/viral-videos/upload-video rejects video files', async (t) => {
+test('POST /api/admin/viral-videos/upload-video stores MP4 locally when cloud upload is unavailable', async (t) => {
   stubDbReady(t);
   stubCloudinaryConfig(t, false);
 
@@ -789,17 +871,25 @@ test('POST /api/admin/viral-videos/upload-video rejects video files', async (t) 
     .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
     .attach('video', Buffer.from('bad'), { filename: 'clip.mp4', contentType: 'video/mp4' });
 
-  assert.equal(res.statusCode, 500);
-  assert.equal(res.body.ok, false);
-  assert.equal(res.body.code, 'CLOUDINARY_CONFIG_MISSING');
-  assert.equal(res.body.provider, 'cloudinary');
-  assert.equal(res.body.message, CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.code, 'LOCAL_UPLOAD_FALLBACK');
+  assert.equal(res.body.provider, 'local');
+  assert.equal(res.body.videoStorageProvider, 'local');
+  assert.equal(res.body.videoMimeType, 'video/mp4');
+  assert.match(res.body.videoFileUrl, /^http:\/\/[^/]+\/uploads\/viral-videos\/videos\/.+\.mp4$/);
+  assert.equal(res.body.videoUrl, res.body.videoFileUrl);
+  assertAndCleanupLocalViralUpload(t, res.body.videoFileUrl);
+
+  const directRes = await request(app).get(new URL(res.body.videoFileUrl).pathname);
+  assert.equal(directRes.statusCode, 200);
+  assert.match(directRes.headers['content-type'] || '', /^video\/mp4/);
   assert.equal(res.body.viralVideosCloudUploadAvailable, false);
   assert.deepEqual(res.body.viralVideosCloudUpload, missingCloudUploadCapability(false));
   assert.equal(cloudinaryCalled, false);
 });
 
-test('POST /api/admin/viral-videos/upload-video reports enabled but unavailable cloud upload', async (t) => {
+test('POST /api/admin/viral-videos/upload-video stores MP4 locally when cloud upload is enabled but unavailable', async (t) => {
   stubDbReady(t);
   stubCloudinaryConfig(t, false);
 
@@ -822,17 +912,18 @@ test('POST /api/admin/viral-videos/upload-video reports enabled but unavailable 
     .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
     .attach('video', Buffer.from('bad'), { filename: 'clip.mp4', contentType: 'video/mp4' });
 
-  assert.equal(res.statusCode, 500);
-  assert.equal(res.body.ok, false);
-  assert.equal(res.body.code, 'CLOUDINARY_CONFIG_MISSING');
-  assert.equal(res.body.provider, 'cloudinary');
-  assert.equal(res.body.message, CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.code, 'LOCAL_UPLOAD_FALLBACK');
+  assert.equal(res.body.provider, 'local');
+  assert.match(res.body.videoFileUrl, /^http:\/\/[^/]+\/uploads\/viral-videos\/videos\/.+\.mp4$/);
+  assertAndCleanupLocalViralUpload(t, res.body.videoFileUrl);
   assert.equal(res.body.viralVideosCloudUploadAvailable, false);
   assert.deepEqual(res.body.viralVideosCloudUpload, missingCloudUploadCapability(true));
   assert.equal(cloudinaryCalled, false);
 });
 
-test('POST /api/admin/viral-videos/upload-video reports configured but disabled cloud upload', async (t) => {
+test('POST /api/admin/viral-videos/upload-video stores MP4 locally when cloud upload is configured but disabled', async (t) => {
   stubDbReady(t);
   stubCloudinaryConfig(t, true);
 
@@ -855,11 +946,13 @@ test('POST /api/admin/viral-videos/upload-video reports configured but disabled 
     .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
     .attach('video', Buffer.from('bad'), { filename: 'clip.mp4', contentType: 'video/mp4' });
 
-  assert.equal(res.statusCode, 400);
-  assert.equal(res.body.ok, false);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.code, 'LOCAL_UPLOAD_FALLBACK');
   assert.equal(res.body.enabled, false);
-  assert.equal(res.body.provider, 'cloudinary');
-  assert.equal(res.body.message, CLOUD_VIDEO_DISABLED_MESSAGE);
+  assert.equal(res.body.provider, 'local');
+  assert.match(res.body.videoFileUrl, /^http:\/\/[^/]+\/uploads\/viral-videos\/videos\/.+\.mp4$/);
+  assertAndCleanupLocalViralUpload(t, res.body.videoFileUrl);
   assert.equal(res.body.viralVideosCloudUploadAvailable, true);
   assert.deepEqual(res.body.viralVideosCloudUpload, configuredCloudUploadCapability(false));
   assert.equal(cloudinaryCalled, false);
@@ -1097,6 +1190,89 @@ test('POST /api/admin/viral-videos/upload-video uploads allowed Cloudinary video
   assert.equal(calls.length, 3);
   assert.deepEqual(calls.map((call) => call.resourceType), ['video', 'video', 'video']);
   assert.deepEqual(calls.map((call) => call.folder), ['newspulse/viral-videos', 'newspulse/viral-videos', 'newspulse/viral-videos']);
+});
+
+test('POST /api/admin/viral-videos/upload-video returns vertical metadata without warnings when available', async (t) => {
+  stubDbReady(t);
+  stubCloudinaryConfig(t, true);
+
+  const prevFindOne = SystemSetting.findOne;
+  const prevUploadFromBuffer = cloudinary.uploadFromBuffer;
+  t.after(() => {
+    SystemSetting.findOne = prevFindOne;
+    cloudinary.uploadFromBuffer = prevUploadFromBuffer;
+  });
+
+  SystemSetting.findOne = () => ({ lean: async () => ({ key: VIRAL_VIDEOS_SETTINGS_KEY, value: { frontendEnabled: true, viralVideosCloudUploadEnabled: true } }) });
+  cloudinary.uploadFromBuffer = async () => ({
+    secure_url: 'https://res.cloudinary.com/demo/video/upload/viral-vertical.mp4',
+    public_id: 'newspulse/viral-videos/viral-vertical',
+    resource_type: 'video',
+    width: 1080,
+    height: 1920,
+    duration: 14.2,
+  });
+
+  const res = await request(app)
+    .post('/api/admin/viral-videos/upload-video')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .attach('video', Buffer.from('videodata'), { filename: 'clip.mp4', contentType: 'video/mp4' });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.videoFileUrl, 'https://res.cloudinary.com/demo/video/upload/viral-vertical.mp4');
+  assert.equal(res.body.metadataAvailable, true);
+  assert.deepEqual(res.body.warnings, []);
+  assert.deepEqual(res.body.videoMetadata, {
+    width: 1080,
+    height: 1920,
+    duration: 14.2,
+    orientation: 'vertical',
+    aspectRatio: '1080:1920',
+    preferredAspectRatio: '9:16',
+    preferredResolution: 'best',
+    preferredResolutions: {
+      best: { width: 1080, height: 1920 },
+      good: { width: 720, height: 1280 },
+    },
+  });
+});
+
+test('POST /api/admin/viral-videos/upload-video returns landscape warning when metadata is available', async (t) => {
+  stubDbReady(t);
+  stubCloudinaryConfig(t, true);
+
+  const prevFindOne = SystemSetting.findOne;
+  const prevUploadFromBuffer = cloudinary.uploadFromBuffer;
+  t.after(() => {
+    SystemSetting.findOne = prevFindOne;
+    cloudinary.uploadFromBuffer = prevUploadFromBuffer;
+  });
+
+  SystemSetting.findOne = () => ({ lean: async () => ({ key: VIRAL_VIDEOS_SETTINGS_KEY, value: { frontendEnabled: true, viralVideosCloudUploadEnabled: true } }) });
+  cloudinary.uploadFromBuffer = async () => ({
+    secure_url: 'https://res.cloudinary.com/demo/video/upload/viral-landscape.mp4',
+    public_id: 'newspulse/viral-videos/viral-landscape',
+    resource_type: 'video',
+    width: 1920,
+    height: 1080,
+    duration: 11.5,
+  });
+
+  const res = await request(app)
+    .post('/api/admin/viral-videos/upload-video')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .attach('video', Buffer.from('videodata'), { filename: 'clip.mp4', contentType: 'video/mp4' });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.videoFileUrl, 'https://res.cloudinary.com/demo/video/upload/viral-landscape.mp4');
+  assert.equal(res.body.metadataAvailable, true);
+  assert.deepEqual(res.body.warnings, ['Landscape video may be cropped in the vertical reel player.']);
+  assert.equal(res.body.videoMetadata.orientation, 'landscape');
+  assert.equal(res.body.videoMetadata.width, 1920);
+  assert.equal(res.body.videoMetadata.height, 1080);
+  assert.equal(res.body.videoMetadata.preferredResolution, null);
 });
 
 test('POST /api/admin/viral-videos/upload-video rejects unsafe video MIME or extension', async (t) => {

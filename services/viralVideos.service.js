@@ -49,13 +49,14 @@ function resolvePosterImageUrl(doc) {
 function resolveVideoType(doc) {
   const explicit = String(doc?.videoType || '').trim().toLowerCase();
   const videoCandidate = doc?.videoFileUrl || doc?.videoUrl || doc?.embedUrl || doc?.sourceUrl;
+  const uploadedCandidate = doc?.videoFileUrl || (isUploadedVideoUrl(doc?.videoUrl) ? doc.videoUrl : null);
 
-  if (doc?.sourceType === 'upload' || explicit === 'uploaded' || isUploadedVideoUrl(videoCandidate)) return 'uploaded';
+  if (uploadedCandidate || explicit === 'uploaded') return uploadedCandidate ? 'uploaded' : 'external';
   if (explicit === 'youtube' || isYouTubeUrl(videoCandidate)) return 'youtube';
   if (explicit === 'x' || isXStatusUrl(videoCandidate)) return 'x';
   if (explicit === 'external') return 'external';
 
-  if (doc?.sourceType === 'upload' || isUploadedVideoUrl(videoCandidate)) return 'uploaded';
+  if (isUploadedVideoUrl(videoCandidate)) return 'uploaded';
   if (isYouTubeUrl(videoCandidate)) return 'youtube';
   if (isXStatusUrl(videoCandidate)) return 'x';
   return 'external';

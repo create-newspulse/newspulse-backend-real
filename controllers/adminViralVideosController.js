@@ -1,6 +1,8 @@
 const multer = require('multer');
 const mongoose = require('mongoose');
 const path = require('path');
+const crypto = require('crypto');
+const fs = require('fs/promises');
 
 const ViralVideo = require('../models/ViralVideo');
 const { handleCoverImageUpload } = require('../routes/uploads.routes');
@@ -13,7 +15,6 @@ const {
 const CLOUD_VIDEO_UPLOAD_NOT_CONNECTED_MESSAGE = 'Cloud video upload is not connected yet. Use Video URL for now.';
 const CLOUD_VIDEO_UPLOAD_DISABLED_MESSAGE = 'Cloud video upload is available but disabled. Use Video URL unless enabled.';
 const CLOUD_VIDEO_UPLOAD_READY_MESSAGE = 'Cloud video upload is ready.';
-const CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Cloudinary video upload is not configured on backend.';
 const CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE = 'Cloudinary video upload failed.';
 const IMAGE_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Image upload is not configured in this environment. Paste an image URL to continue.';
 const THUMBNAIL_IMAGE_TYPE_NOT_ALLOWED_MESSAGE = 'Only JPG, JPEG, PNG, or WEBP thumbnail images are allowed.';
@@ -25,6 +26,12 @@ const VIRAL_VIDEO_MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const VIRAL_VIDEO_ACCEPTED_MIME_TYPES = new Set(['video/mp4', 'video/webm', 'video/quicktime']);
 const VIRAL_VIDEO_ACCEPTED_EXTENSIONS = new Set(['.mp4', '.webm', '.mov']);
 const VIRAL_VIDEO_UPLOAD_FIELD_NAMES = ['video', 'videoFile', 'file'];
+const VIRAL_VIDEO_THUMBNAIL_FIELD_NAMES = ['thumbnail', 'poster', 'posterImage', 'cover', 'image', 'file'];
+const VIRAL_VIDEO_ACCEPTED_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const VIRAL_VIDEO_ACCEPTED_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+const VIRAL_VIDEO_LOCAL_UPLOAD_MESSAGE = 'Viral video uploaded successfully.';
+const VIRAL_VIDEO_THUMBNAIL_LOCAL_UPLOAD_MESSAGE = 'Viral video thumbnail uploaded successfully';
+const VIRAL_VIDEO_LANDSCAPE_WARNING = 'Landscape video may be cropped in the vertical reel player.';
 
 function normalizeSourceType(value) {
   const raw = String(value || '').trim().toLowerCase();
@@ -81,6 +88,12 @@ function isUploadedVideoUrl(value) {
   return /\.(mp4|webm|mov)$/.test(raw) || raw.startsWith('/uploads/') || raw.startsWith('uploads/');
 }
 
+function normalizeVideoFileCandidate(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  return raw;
+}
+
 function isYouTubeUrl(value) {
   const raw = String(value || '').trim().toLowerCase();
   return /(^|\/\/)(www\.)?(youtube\.com|youtu\.be)\//.test(raw);
@@ -92,14 +105,26 @@ function isXStatusUrl(value) {
 }
 
 function resolveVideoContract(payload) {
-  const suppliedVideoUrl = payload.videoUrl || payload.videoFileUrl || payload.embedUrl || payload.sourceUrl || null;
+  const explicitVideoFileUrl = normalizeVideoFileCandidate(payload.videoFileUrl);
+  const playableUrl = normalizeVideoFileCandidate(payload.videoUrl);
+  const embedUrl = normalizeVideoFileCandidate(payload.embedUrl);
+  const sourceUrl = normalizeVideoFileCandidate(payload.sourceUrl);
+  const suppliedVideoUrl = explicitVideoFileUrl || playableUrl || embedUrl || sourceUrl || null;
+  const uploadedCandidate = explicitVideoFileUrl || (isUploadedVideoUrl(playableUrl) ? playableUrl : null);
   const requestedVideoType = String(payload.videoType || '').trim().toLowerCase();
   const requestedPlaybackMode = String(payload.playbackMode || '').trim().toLowerCase();
 
-  if (payload.videoFileUrl || payload.sourceType === 'upload' || requestedVideoType === 'uploaded' || isUploadedVideoUrl(suppliedVideoUrl)) {
-    const fileUrl = payload.videoFileUrl || payload.videoUrl || suppliedVideoUrl;
-    payload.videoFileUrl = fileUrl || null;
-    payload.videoUrl = fileUrl || payload.videoUrl || null;
+  if (uploadedCandidate || requestedVideoType === 'uploaded') {
+    if (!uploadedCandidate) {
+      payload.videoType = 'external';
+      payload.playbackMode = 'external';
+      payload.sourceType = 'url';
+      if (!payload.sourceUrl && suppliedVideoUrl) payload.sourceUrl = suppliedVideoUrl;
+      return;
+    }
+
+    payload.videoFileUrl = uploadedCandidate;
+    payload.videoUrl = uploadedCandidate;
     payload.videoType = 'uploaded';
     payload.playbackMode = 'internal';
     payload.sourceType = 'upload';
@@ -616,6 +641,15 @@ function selectViralVideoUploadFile(files) {
   return uploadedFiles.find(Boolean) || null;
 }
 
+function selectViralVideoThumbnailFile(files) {
+  const uploadedFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  for (const fieldName of VIRAL_VIDEO_THUMBNAIL_FIELD_NAMES) {
+    const match = uploadedFiles.find((file) => String(file?.fieldname || '') === fieldName);
+    if (match) return match;
+  }
+  return uploadedFiles.find(Boolean) || null;
+}
+
 function isVideoUploadAttempt(file) {
   return String(file?.mimetype || '').toLowerCase().startsWith('video/');
 }
@@ -648,6 +682,107 @@ function assertAllowedViralVideoFile(file) {
   return { mimeType, extension };
 }
 
+function assertAllowedViralVideoThumbnailFile(file) {
+  const mimeType = String(file?.mimetype || '').trim().toLowerCase();
+  const extension = path.extname(String(file?.originalname || '')).trim().toLowerCase();
+
+  if (!VIRAL_VIDEO_ACCEPTED_IMAGE_MIME_TYPES.has(mimeType) || !VIRAL_VIDEO_ACCEPTED_IMAGE_EXTENSIONS.has(extension)) {
+    const error = new Error(THUMBNAIL_IMAGE_TYPE_NOT_ALLOWED_MESSAGE);
+    error.status = 400;
+    error.code = 'MEDIA_TYPE_NOT_ALLOWED';
+    throw error;
+  }
+
+  return { mimeType, extension };
+}
+
+function getRequestBaseUrl(req) {
+  const envBase = String(process.env.PUBLIC_BASE_URL || process.env.BACKEND_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (envBase) return envBase;
+  const host = req && typeof req.get === 'function' ? req.get('host') : null;
+  if (host) return `${req.protocol || 'http'}://${host}`;
+  return `http://localhost:${process.env.PORT || '5052'}`;
+}
+
+function buildLocalUploadFilename(file, extension) {
+  const basename = path.basename(String(file?.originalname || 'upload')).replace(/\.[^.]*$/, '');
+  const safeBase = basename.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'viral-video';
+  const random = crypto.randomBytes(6).toString('hex');
+  return `${Date.now()}-${random}-${safeBase}${extension}`;
+}
+
+function normalizePositiveInteger(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.round(parsed);
+}
+
+function buildViralVideoUploadMetadata(details = {}) {
+  const width = normalizePositiveInteger(details.width);
+  const height = normalizePositiveInteger(details.height);
+  const duration = typeof details.duration === 'number' && Number.isFinite(details.duration) && details.duration > 0
+    ? details.duration
+    : null;
+
+  if (!width || !height) {
+    return {
+      metadataAvailable: false,
+      warnings: [],
+      videoMetadata: null,
+    };
+  }
+
+  const orientation = height > width ? 'vertical' : (width > height ? 'landscape' : 'square');
+  const aspectRatio = `${width}:${height}`;
+  const isBestResolution = width === 1080 && height === 1920;
+  const isGoodResolution = width === 720 && height === 1280;
+  const warnings = [];
+
+  if (orientation === 'landscape') {
+    warnings.push(VIRAL_VIDEO_LANDSCAPE_WARNING);
+  }
+
+  return {
+    metadataAvailable: true,
+    warnings,
+    videoMetadata: {
+      width,
+      height,
+      duration,
+      orientation,
+      aspectRatio,
+      preferredAspectRatio: '9:16',
+      preferredResolution: isBestResolution ? 'best' : (isGoodResolution ? 'good' : null),
+      preferredResolutions: {
+        best: { width: 1080, height: 1920 },
+        good: { width: 720, height: 1280 },
+      },
+    },
+  };
+}
+
+async function saveLocalViralVideoUpload(file, { req, kind }) {
+  if (!file || !Buffer.isBuffer(file.buffer)) {
+    const error = new Error('Invalid upload');
+    error.status = 400;
+    throw error;
+  }
+
+  const meta = kind === 'thumbnail' ? assertAllowedViralVideoThumbnailFile(file) : assertAllowedViralVideoFile(file);
+  const subfolder = kind === 'thumbnail' ? 'posters' : 'videos';
+  const relativeFolder = path.posix.join('uploads', 'viral-videos', subfolder);
+  const absoluteFolder = path.join(process.cwd(), 'uploads', 'viral-videos', subfolder);
+  await fs.mkdir(absoluteFolder, { recursive: true });
+
+  const filename = buildLocalUploadFilename(file, meta.extension);
+  const absolutePath = path.join(absoluteFolder, filename);
+  await fs.writeFile(absolutePath, file.buffer, { flag: 'wx' });
+
+  const relativeUrl = `/${relativeFolder}/${encodeURIComponent(filename)}`;
+  const absoluteUrl = `${getRequestBaseUrl(req)}${relativeUrl}`;
+  return { ...meta, filename, relativeUrl, absoluteUrl };
+}
+
 function toStableViralVideoUploadResponse(result, file, capability) {
   const secureUrl = result?.secure_url || result?.url || null;
   if (!secureUrl) {
@@ -655,6 +790,12 @@ function toStableViralVideoUploadResponse(result, file, capability) {
     error.code = 'CLOUDINARY_UPLOAD_FAILED';
     throw error;
   }
+
+  const uploadMetadata = buildViralVideoUploadMetadata({
+    width: result?.width,
+    height: result?.height,
+    duration: result?.duration,
+  });
 
   return {
     ok: true,
@@ -673,12 +814,54 @@ function toStableViralVideoUploadResponse(result, file, capability) {
     videoPublicId: result?.public_id || null,
     videoMimeType: String(file?.mimetype || '').trim().toLowerCase() || null,
     videoSizeBytes: typeof file?.size === 'number' ? file.size : null,
+    metadataAvailable: uploadMetadata.metadataAvailable,
+    warnings: uploadMetadata.warnings,
+    videoMetadata: uploadMetadata.videoMetadata,
     viralVideosCloudUploadAvailable: true,
     viralVideosCloudUpload: capability,
   };
 }
 
 async function uploadViralVideoThumbnailFile(req, res) {
+  if (!cloudinaryUploads.isCloudinaryConfigured()) {
+    try {
+      const file = selectViralVideoThumbnailFile(getUploadedFiles(req));
+      if (!file) {
+        return res.status(400).json({
+          ok: false,
+          message: "No file received. Use multipart field 'thumbnail', 'cover', or 'file'.",
+        });
+      }
+
+      const saved = await saveLocalViralVideoUpload(file, { req, kind: 'thumbnail' });
+      const posterImage = { url: saved.absoluteUrl, publicId: null, alt: null };
+      return res.status(200).json({
+        ok: true,
+        success: true,
+        provider: 'local',
+        message: VIRAL_VIDEO_THUMBNAIL_LOCAL_UPLOAD_MESSAGE,
+        url: saved.absoluteUrl,
+        secureUrl: saved.absoluteUrl,
+        secure_url: saved.absoluteUrl,
+        thumbnailUrl: saved.absoluteUrl,
+        posterImageUrl: saved.absoluteUrl,
+        posterImage,
+        thumbnail: posterImage,
+        filename: saved.filename,
+        data: {
+          url: saved.absoluteUrl,
+          secureUrl: saved.absoluteUrl,
+          secure_url: saved.absoluteUrl,
+          publicId: null,
+          public_id: null,
+          filename: saved.filename,
+        },
+      });
+    } catch (error) {
+      return res.status(typeof error?.status === 'number' ? error.status : 500).json({ ok: false, success: false, code: error?.code || undefined, message: error?.message || 'Upload failed' });
+    }
+  }
+
   const originalStatus = res.status.bind(res);
   const originalJson = res.json.bind(res);
   let statusCode = 200;
@@ -742,50 +925,36 @@ async function handleViralVideoUploadRequest(req, res, file) {
   const capability = buildViralVideosCloudUploadCapability(settings);
   const cloudinaryConfig = getCloudinaryVideoConfigStatus();
   const uploadDiagnostics = buildViralVideoCloudinaryDiagnostics(cloudinaryConfig, file);
-  if (capability.available !== true) {
+  if (capability.available !== true || capability.enabled !== true || cloudinaryConfig.configured !== true) {
     logViralVideoCloudinaryUpload('config-missing', {
       ...uploadDiagnostics,
       missing: Array.isArray(cloudinaryConfig.missing) ? cloudinaryConfig.missing : [],
     });
-    return res.status(500).json({
-      ok: false,
-      code: 'CLOUDINARY_CONFIG_MISSING',
+    const saved = await saveLocalViralVideoUpload(file, { req, kind: 'video' });
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      code: 'LOCAL_UPLOAD_FALLBACK',
       enabled: capability.enabled === true,
-      provider: 'cloudinary',
-      message: CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE,
-      viralVideosCloudUploadAvailable: false,
+      provider: 'local',
+      message: VIRAL_VIDEO_LOCAL_UPLOAD_MESSAGE,
+      url: saved.absoluteUrl,
+      secure_url: saved.absoluteUrl,
+      secureUrl: saved.absoluteUrl,
+      resource_type: 'video',
+      public_id: null,
+      publicId: null,
+      videoUrl: saved.absoluteUrl,
+      videoFileUrl: saved.absoluteUrl,
+      videoStorageProvider: 'local',
+      videoPublicId: null,
+      videoMimeType: saved.mimeType,
+      videoSizeBytes: typeof file?.size === 'number' ? file.size : null,
+      metadataAvailable: false,
+      warnings: [],
+      videoMetadata: null,
+      viralVideosCloudUploadAvailable: capability.available === true,
       viralVideosCloudUpload: capability,
-    });
-  }
-  if (capability.enabled !== true) {
-    return res.status(400).json({
-      ok: false,
-      code: 'CLOUDINARY_UPLOAD_DISABLED',
-      enabled: capability.enabled === true,
-      provider: capability.provider,
-      message: CLOUD_VIDEO_UPLOAD_DISABLED_MESSAGE,
-      viralVideosCloudUploadAvailable: true,
-      viralVideosCloudUpload: capability,
-    });
-  }
-  if (cloudinaryConfig.configured !== true) {
-    logViralVideoCloudinaryUpload('config-missing', {
-      ...uploadDiagnostics,
-      missing: Array.isArray(cloudinaryConfig.missing) ? cloudinaryConfig.missing : [],
-    });
-    return res.status(500).json({
-      ok: false,
-      code: 'CLOUDINARY_CONFIG_MISSING',
-      enabled: capability.enabled === true,
-      provider: 'cloudinary',
-      message: CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE,
-      viralVideosCloudUploadAvailable: false,
-      viralVideosCloudUpload: {
-        ...capability,
-        available: false,
-        provider: 'cloudinary',
-        message: CLOUDINARY_VIDEO_UPLOAD_NOT_CONFIGURED_MESSAGE,
-      },
     });
   }
 
