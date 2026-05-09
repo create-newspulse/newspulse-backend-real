@@ -5,3 +5,16 @@ services:
     rootDir: .
     buildCommand: npm install
     startCommand: node server.js
+    envVars:
+      - key: GRIEVANCE_TO_EMAIL
+        value: grievance@newspulse.co.in
+      - key: GRIEVANCE_SMTP_HOST
+        value: mail.newspulse.co.in
+      - key: GRIEVANCE_SMTP_PORT
+        value: "465"
+      - key: GRIEVANCE_SMTP_SECURE
+        value: "true"
+      - key: GRIEVANCE_SMTP_USER
+        value: grievance@newspulse.co.in
+      - key: GRIEVANCE_SMTP_PASS
+        sync: false
