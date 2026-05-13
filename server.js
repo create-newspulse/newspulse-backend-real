@@ -354,11 +354,13 @@ const publicRoutes = require('./routes/public.routes');
 const siteSettingsRoutes = require('./routes/siteSettings.routes');
 const publicSettingsRouter = require('./routes/publicSettings.routes');
 const publicComplianceReportsRouter = require('./routes/publicComplianceReports.routes');
+const publicComplianceSettingsRouter = require('./routes/publicComplianceSettings.routes');
 const publicVersionRouter = require('./routes/publicVersion.routes');
 const publicTranslationRouter = require('./routes/publicTranslation.routes');
 const publicUiLabelsRouter = require('./routes/publicUiLabels.routes');
 const adminPublicSettingsRouter = require('./routes/adminPublicSettings.routes');
 const adminComplianceReportsRouter = require('./routes/adminComplianceReports.routes');
+const adminComplianceSettingsRouter = require('./routes/adminComplianceSettings.routes');
 const PublicSiteSettings = require('./models/PublicSiteSettings');
 const { ensureCategoryStripEnabled, ensurePublicSettingsResponse } = require('./controllers/publicSiteSettingsController');
 const User = require('./models/User');
@@ -1791,9 +1793,12 @@ app.use('/admin-api/api/public', publicVersionRouter);
 // Public site settings (published only, no auth)
 app.use('/api/public', publicSettingsRouter);
 app.use('/api/public', publicComplianceReportsRouter);
+app.use('/api/public', publicComplianceSettingsRouter);
 // Admin UI proxy basePath support (some frontends call /admin-api/* even for public reads)
 app.use('/admin-api/public', publicSettingsRouter);
+app.use('/admin-api/public', publicComplianceSettingsRouter);
 app.use('/admin-api/api/public', publicSettingsRouter);
+app.use('/admin-api/api/public', publicComplianceSettingsRouter);
 
 // Startup confirmation (production): settings endpoints mounted under /api
 if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
@@ -1818,13 +1823,16 @@ try {
 // Global ad slot settings (mounted early so it cannot be shadowed by /api/admin)
 app.use('/api/admin', adminAdSettingsRouter);
 app.use('/api/admin', adminComplianceReportsRouter);
+app.use('/api/admin', adminComplianceSettingsRouter);
 app.use('/api/admin', adminSponsoredFeaturesRouter);
 // Alias support
 app.use('/admin-api/admin', adminAdSettingsRouter);
 app.use('/admin-api/admin', adminComplianceReportsRouter);
+app.use('/admin-api/admin', adminComplianceSettingsRouter);
 app.use('/admin-api/admin', adminSponsoredFeaturesRouter);
 app.use('/admin-api/api/admin', adminAdSettingsRouter);
 app.use('/admin-api/api/admin', adminComplianceReportsRouter);
+app.use('/admin-api/api/admin', adminComplianceSettingsRouter);
 app.use('/admin-api/api/admin', adminSponsoredFeaturesRouter);
 
 // Admin routes for legacy and new admin UI paths
