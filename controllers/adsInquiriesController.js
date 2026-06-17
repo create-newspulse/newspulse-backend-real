@@ -32,6 +32,7 @@ const { normalizeAdOpportunityKey } = require('../src/constants/adSlots');
 const STATUS_VALUES = ['new', 'read', 'deleted'];
 const PUBLIC_AD_INQUIRY_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const PUBLIC_AD_INQUIRY_RATE_LIMIT_MAX = 8;
+const PUBLIC_AD_INQUIRY_MESSAGE_MAX_LENGTH = 2000;
 const publicAdInquiryRateBuckets = new Map();
 
 function _getAdsDbState() {
@@ -92,14 +93,20 @@ function _buildSearchFilter(searchRaw) {
   const rx = new RegExp(q, 'i');
   return {
     $or: [
+      { inquiryId: rx },
       { advertiserName: rx },
       { companyName: rx },
       { name: rx },
       { email: rx },
       { phone: rx },
       { message: rx },
+      { campaignType: rx },
+      { preferredAdSlot: rx },
+      { campaignGoal: rx },
+      { preferredDates: rx },
       { placement: rx },
       { budget: rx },
+      { source: rx },
     ],
   };
 }
@@ -123,6 +130,7 @@ function _toLoggableInquirySample(doc) {
   if (!doc || typeof doc !== 'object') return null;
   return {
     _id: doc._id ? String(doc._id) : null,
+    inquiryId: doc.inquiryId || null,
     advertiserName: doc.advertiserName || doc.name || null,
     email: doc.email || null,
     status: doc.status || null,
@@ -188,6 +196,22 @@ function _sanitizePublicText(value, { maxLength = 500, allowNewlines = false } =
   return text.slice(0, maxLength).trim();
 }
 
+function _normalizeInquirySource(value) {
+  const raw = _sanitizePublicText(value, { maxLength: 120 }).toLowerCase();
+  if (!raw) return 'advertise-with-us';
+  if (['advertise', 'advertise-page', 'advertise-with-us', 'advertise_with_us'].includes(raw)) {
+    return 'advertise-with-us';
+  }
+  return raw;
+}
+
+function _generateInquiryId(now = new Date()) {
+  const stamp = Number.isFinite(now?.getTime?.()) ? now : new Date();
+  const datePart = stamp.toISOString().slice(0, 10).replace(/-/g, '');
+  const randomPart = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `ADQ-${datePart}-${randomPart}`;
+}
+
 function _isPublicAdInquiryRateLimited(req) {
   const now = Date.now();
   const key = String(_getReqIp(req) || 'unknown');
@@ -236,15 +260,22 @@ function _toDto(doc) {
 
   return {
     id: String(doc._id),
+    inquiryId: doc.inquiryId || String(doc._id),
     advertiserName: doc.advertiserName || doc.name || null,
     companyName: doc.companyName ?? null,
+    company: doc.companyName ?? null,
     // Backward-compat: older callers used `name`
     name: doc.name || doc.advertiserName || null,
     email: doc.email,
     phone: doc.phone ?? null,
     message: doc.message,
     budget: doc.budget ?? null,
+    campaignType: doc.campaignType ?? null,
+    preferredAdSlot: doc.preferredAdSlot ?? doc.placement ?? null,
+    campaignGoal: doc.campaignGoal ?? doc.target ?? null,
+    preferredDates: doc.preferredDates ?? doc.startDate ?? null,
     placement: doc.placement ?? null,
+    source: doc.source ?? null,
     status: doc.status,
     isRead: typeof doc.isRead === 'boolean' ? doc.isRead : (doc.status === 'read'),
     ..._toReplyMetadata(doc),
@@ -295,11 +326,20 @@ function _toInquiryItemV2(doc, options = {}) {
 
   return {
     _id: String(doc._id),
+    inquiryId: doc.inquiryId || String(doc._id),
     advertiserName: doc.advertiserName || doc.name || null,
     companyName: doc.companyName ?? null,
+    company: doc.companyName ?? null,
     email: doc.email ?? null,
     phone: doc.phone ?? null,
     message: doc.message ?? null,
+    budget: doc.budget ?? null,
+    campaignType: doc.campaignType ?? null,
+    preferredAdSlot: doc.preferredAdSlot ?? doc.placement ?? null,
+    campaignGoal: doc.campaignGoal ?? doc.target ?? null,
+    preferredDates: doc.preferredDates ?? doc.startDate ?? null,
+    placement: doc.placement ?? null,
+    source: doc.source ?? null,
     status: doc.status,
     isRead: typeof doc.isRead === 'boolean' ? doc.isRead : (doc.status === 'read'),
     ..._toReplyMetadata(doc, options),
@@ -441,23 +481,49 @@ async function submitPublicAdInquiry(req, res) {
     // Prefer the primary email unless it matches a known internal inbox and a valid alternate is provided.
     const email = (primaryLooksInternal && alternateOk) ? emailAlternate : emailPrimary;
     const phone = _sanitizePublicText(body.phone, { maxLength: 60 });
-    const message = _sanitizePublicText(body.message, { maxLength: 5000, allowNewlines: true });
+    const message = _sanitizePublicText(body.message, { maxLength: PUBLIC_AD_INQUIRY_MESSAGE_MAX_LENGTH, allowNewlines: true });
     const budget = _sanitizePublicText(body.budget, { maxLength: 120 });
-    const rawPlacement = _sanitizePublicText(body.placement || body.slot || body.adSlot || body.ad_slot, { maxLength: 120 });
-    const placement = normalizeAdOpportunityKey(rawPlacement) || rawPlacement;
-    const target = _sanitizePublicText(body.target, { maxLength: 240 });
-    const startDate = _sanitizePublicText(body.startDate || body.start_date, { maxLength: 80 });
+    const campaignType = _sanitizePublicText(body.campaignType || body.campaign_type || body.campaign, { maxLength: 120 });
+    const rawPreferredAdSlot = _sanitizePublicText(
+      body.preferredAdSlot || body.preferred_ad_slot || body.placement || body.slot || body.adSlot || body.ad_slot,
+      { maxLength: 120 }
+    );
+    const preferredAdSlot = normalizeAdOpportunityKey(rawPreferredAdSlot) || rawPreferredAdSlot;
+    const campaignGoal = _sanitizePublicText(body.campaignGoal || body.campaign_goal || body.goal || body.target, { maxLength: 240 });
+    const preferredDates = _sanitizePublicText(body.preferredDates || body.preferred_dates || body.startDate || body.start_date, { maxLength: 160 });
     const pageUrl = _sanitizePublicText(body.pageUrl || body.page_url, { maxLength: 500 });
-    const source = _sanitizePublicText(body.source, { maxLength: 120 });
+    const source = _normalizeInquirySource(body.source);
+    const inquiryId = _generateInquiryId();
 
     if (!_isNonEmptyString(advertiserName)) {
       return res.status(400).json({ ok: false, success: false, message: 'Missing required field: name' });
+    }
+    if (!_isNonEmptyString(companyName)) {
+      return res.status(400).json({ ok: false, success: false, message: 'Missing required field: company' });
     }
     if (!_isNonEmptyString(email)) {
       return res.status(400).json({ ok: false, success: false, message: 'Missing required field: email' });
     }
     if (!_isValidEmail(email)) {
       return res.status(400).json({ ok: false, success: false, message: 'Invalid email' });
+    }
+    if (!_isNonEmptyString(phone)) {
+      return res.status(400).json({ ok: false, success: false, message: 'Missing required field: phone' });
+    }
+    if (!_isNonEmptyString(campaignType)) {
+      return res.status(400).json({ ok: false, success: false, message: 'Missing required field: campaignType' });
+    }
+    if (!_isNonEmptyString(preferredAdSlot)) {
+      return res.status(400).json({ ok: false, success: false, message: 'Missing required field: preferredAdSlot' });
+    }
+    if (!_isNonEmptyString(campaignGoal)) {
+      return res.status(400).json({ ok: false, success: false, message: 'Missing required field: campaignGoal' });
+    }
+    if (!_isNonEmptyString(preferredDates)) {
+      return res.status(400).json({ ok: false, success: false, message: 'Missing required field: preferredDates' });
+    }
+    if (!_isNonEmptyString(budget)) {
+      return res.status(400).json({ ok: false, success: false, message: 'Missing required field: budget' });
     }
     if (!_isNonEmptyString(message)) {
       return res.status(400).json({ ok: false, success: false, message: 'Missing required field: message' });
@@ -474,17 +540,22 @@ async function submitPublicAdInquiry(req, res) {
     const site = (req.headers && req.headers.origin) ? String(req.headers.origin) : null;
 
     const inquiry = await AdInquiry.create({
+      inquiryId,
       advertiserName,
-      companyName: companyName || null,
+      companyName,
       email,
-      phone: phone || null,
+      phone,
       message,
-      budget: budget || null,
-      placement: placement || null,
-      target: target || null,
-      startDate: startDate || null,
+      budget,
+      campaignType,
+      preferredAdSlot,
+      campaignGoal,
+      preferredDates,
+      placement: preferredAdSlot,
+      target: campaignGoal,
+      startDate: preferredDates,
       pageUrl: pageUrl || null,
-      source: source || null,
+      source,
       // keep legacy field populated for older clients/exports
       name: advertiserName,
       status: 'new',
@@ -508,18 +579,22 @@ async function submitPublicAdInquiry(req, res) {
       await adsMailer.sendAdsInquiryMail({
         name: advertiserName,
         advertiserName,
-        companyName: companyName || undefined,
+        companyName,
         email,
-        phone: phone || undefined,
+        phone,
         message,
-        budget: budget || undefined,
-        placement: placement || undefined,
-        target: target || undefined,
-        startDate: startDate || undefined,
+        budget,
+        campaignType,
+        preferredAdSlot,
+        campaignGoal,
+        preferredDates,
+        placement: preferredAdSlot,
+        target: campaignGoal,
+        startDate: preferredDates,
         pageUrl: pageUrl || undefined,
-        source: source || undefined,
+        source,
         createdAt: inquiry?.createdAt || new Date(),
-        inquiryId: id,
+        inquiryId,
         meta: {
           ip,
           userAgent,
@@ -535,7 +610,13 @@ async function submitPublicAdInquiry(req, res) {
     }
 
     // Keep response minimal/stable for the public website.
-    return res.status(201).json({ ok: true, success: true, id, ...(emailSent ? {} : { warning: 'email_failed' }) });
+    return res.status(201).json({
+      ok: true,
+      success: true,
+      id,
+      inquiryId,
+      ...(emailSent ? {} : { warning: 'email_failed' }),
+    });
   } catch (e) {
     console.error('[ads] submitPublicAdInquiry failed', { message: e?.message || String(e) });
     return res.status(500).json({ ok: false, success: false, message: 'Failed to submit inquiry' });
@@ -1146,13 +1227,8 @@ async function listAdminAdInquiries(req, res) {
     if (status !== 'all') filter.status = status;
 
     if (searchRaw) {
-      const q = _escapeRegex(searchRaw);
-      const rx = new RegExp(q, 'i');
-      filter.$or = [
-        { name: rx },
-        { email: rx },
-        { message: rx },
-      ];
+      const searchFilter = _buildSearchFilter(searchRaw);
+      if (searchFilter) Object.assign(filter, searchFilter);
     }
 
     const [items, total] = await Promise.all([

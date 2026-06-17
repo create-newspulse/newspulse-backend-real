@@ -40,13 +40,19 @@ test('GET /api/ads/inquiries returns {success, items, total} with admin JWT', as
   const fake = [
     {
       _id: '507f1f77bcf86cd799439099',
+      inquiryId: 'ADQ-20250102-ABC123',
       advertiserName: 'Buyer',
       companyName: 'ACME',
       email: 'buyer@example.com',
       phone: '+1 555 111 2222',
       message: 'Need pricing',
       budget: '1000',
+      campaignType: 'Display',
+      preferredAdSlot: 'HOME_728x90',
+      campaignGoal: 'Reach',
+      preferredDates: 'Next month',
       placement: 'homepage',
+      source: 'advertise-with-us',
       status: 'new',
       isRead: false,
       hasReply: true,
@@ -76,6 +82,12 @@ test('GET /api/ads/inquiries returns {success, items, total} with admin JWT', as
     assert.ok(Array.isArray(res.body.items));
     assert.equal(res.body.items.length, 1);
     assert.equal(res.body.items[0]._id, '507f1f77bcf86cd799439099');
+    assert.equal(res.body.items[0].inquiryId, 'ADQ-20250102-ABC123');
+    assert.equal(res.body.items[0].campaignType, 'Display');
+    assert.equal(res.body.items[0].preferredAdSlot, 'HOME_728x90');
+    assert.equal(res.body.items[0].campaignGoal, 'Reach');
+    assert.equal(res.body.items[0].preferredDates, 'Next month');
+    assert.equal(res.body.items[0].source, 'advertise-with-us');
     assert.equal(res.body.items[0].hasReply, true);
     assert.equal(res.body.items[0].replyCount, 2);
     assert.equal(res.body.items[0].lastRepliedBy, 'admin@newspulse.ai');
@@ -121,11 +133,18 @@ test('GET /api/ads/inquiries/:id returns full stable detail payload with no UI a
   const id = '507f1f77bcf86cd799439111';
   const fake = {
     _id: id,
+    inquiryId: 'ADQ-20250102-ABC123',
     advertiserName: 'Buyer',
     companyName: 'ACME',
     email: 'buyer@example.com',
     phone: '+1 555 111 2222',
     message: 'Need pricing',
+    budget: '1000',
+    campaignType: 'Display',
+    preferredAdSlot: 'HOME_728x90',
+    campaignGoal: 'Reach',
+    preferredDates: 'Next month',
+    source: 'advertise-with-us',
     status: 'read',
     isRead: true,
     hasReply: true,
@@ -162,11 +181,18 @@ test('GET /api/ads/inquiries/:id returns full stable detail payload with no UI a
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.success, true);
     assert.equal(res.body.item._id, id);
+    assert.equal(res.body.item.inquiryId, 'ADQ-20250102-ABC123');
     assert.equal(res.body.item.advertiserName, 'Buyer');
     assert.equal(res.body.item.companyName, 'ACME');
     assert.equal(res.body.item.email, 'buyer@example.com');
     assert.equal(res.body.item.phone, '+1 555 111 2222');
     assert.equal(res.body.item.message, 'Need pricing');
+    assert.equal(res.body.item.budget, '1000');
+    assert.equal(res.body.item.campaignType, 'Display');
+    assert.equal(res.body.item.preferredAdSlot, 'HOME_728x90');
+    assert.equal(res.body.item.campaignGoal, 'Reach');
+    assert.equal(res.body.item.preferredDates, 'Next month');
+    assert.equal(res.body.item.source, 'advertise-with-us');
     assert.equal(res.body.item.status, 'read');
     assert.equal(res.body.item.isRead, true);
     assert.equal(res.body.item.hasReply, true);

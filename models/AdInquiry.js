@@ -4,6 +4,7 @@ const STATUS_VALUES = ['new', 'read', 'deleted'];
 
 const adInquirySchema = new mongoose.Schema(
   {
+    inquiryId: { type: String, default: null, trim: true, index: true },
     // New canonical fields expected by the Admin Panel
     advertiserName: { type: String, default: null, trim: true },
     companyName: { type: String, default: null, trim: true },
@@ -11,6 +12,10 @@ const adInquirySchema = new mongoose.Schema(
     phone: { type: String, default: null, trim: true },
     message: { type: String, required: true, trim: true },
     budget: { type: String, default: null, trim: true },
+    campaignType: { type: String, default: null, trim: true },
+    preferredAdSlot: { type: String, default: null, trim: true },
+    campaignGoal: { type: String, default: null, trim: true },
+    preferredDates: { type: String, default: null, trim: true },
     placement: { type: String, default: null, trim: true },
     target: { type: String, default: null, trim: true },
     startDate: { type: String, default: null, trim: true },
@@ -56,6 +61,7 @@ const adInquirySchema = new mongoose.Schema(
   }
 );
 
+adInquirySchema.index({ inquiryId: 1 });
 adInquirySchema.index({ status: 1, createdAt: -1 });
 adInquirySchema.index({ createdAt: -1 });
 

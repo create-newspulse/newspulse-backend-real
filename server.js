@@ -597,6 +597,9 @@ app.use((req, res, next) => {
 const _PUBLIC_ADS_CORS_ORIGINS = new Set([
   'https://www.newspulse.co.in',
   'https://newspulse.co.in',
+  'https://admin.newspulse.co.in',
+  'http://localhost:5173',
+  'http://localhost:3000',
 ]);
 
 // Public Broadcast Center CORS
@@ -617,9 +620,27 @@ const _publicAdsCorsOptions = {
     return callback(null, false);
   },
   credentials: false,
-  methods: ['GET', 'OPTIONS'],
+  methods: ['GET', 'POST', 'OPTIONS'],
   optionsSuccessStatus: 204,
 };
+
+function _handlePublicAdsPreflight(req, res) {
+  const origin = req.get('Origin');
+  if (origin && _PUBLIC_ADS_CORS_ORIGINS.has(String(origin))) {
+    const requested = String(req.get('Access-Control-Request-Headers') || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    const base = ['Content-Type', 'Authorization'];
+    const allowHeaders = Array.from(new Set([...base, ...requested]));
+
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', allowHeaders.join(', '));
+  }
+  return res.sendStatus(204);
+}
 
 // Ensure OPTIONS preflight for public ads slot does not get handled by the global
 // CORS middleware (which enables credentials for admin UIs).
@@ -659,6 +680,10 @@ app.options('/api/public/ads', (req, res) => {
   }
   return res.sendStatus(204);
 });
+
+  app.options('/api/public/ads/inquiry', _handlePublicAdsPreflight);
+  app.options('/api/public/ads/inquiries', _handlePublicAdsPreflight);
+  app.options('/api/public/ad-inquiries', _handlePublicAdsPreflight);
 
 function _handlePublicBroadcastPreflight(req, res) {
   const origin = req.get('Origin');
@@ -717,14 +742,29 @@ app.use('/api/public/ads/slot', (req, res, next) => {
 
 // Same CORS override for the querystring variant: GET /api/public/ads?slot=...
 app.use('/api/public/ads', (req, res, next) => {
-  if (req.method !== 'GET' && req.method !== 'OPTIONS') return next();
+  if (req.path === '/slot' || String(req.path || '').startsWith('/slot/')) return next();
+  if (req.method !== 'GET' && req.method !== 'POST' && req.method !== 'OPTIONS') return next();
 
   const origin = req.get('Origin');
   if (!origin) return next();
   if (!_PUBLIC_ADS_CORS_ORIGINS.has(String(origin))) return next();
 
   res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  try { res.removeHeader('Access-Control-Allow-Credentials'); } catch (_) {}
+  return next();
+});
+
+app.use('/api/public/ad-inquiries', (req, res, next) => {
+  if (req.method !== 'POST' && req.method !== 'OPTIONS') return next();
+
+  const origin = req.get('Origin');
+  if (!origin) return next();
+  if (!_PUBLIC_ADS_CORS_ORIGINS.has(String(origin))) return next();
+
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   try { res.removeHeader('Access-Control-Allow-Credentials'); } catch (_) {}
   return next();

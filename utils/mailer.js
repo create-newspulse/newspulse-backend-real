@@ -73,6 +73,10 @@ async function sendAdsInquiryMail({
   phone,
   message,
   budget,
+  campaignType,
+  preferredAdSlot,
+  campaignGoal,
+  preferredDates,
   placement,
   target,
   startDate,
@@ -107,26 +111,30 @@ async function sendAdsInquiryMail({
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
+  const preferredAdSlotFinal = String(preferredAdSlot || placement || '').trim();
+  const campaignGoalFinal = String(campaignGoal || target || '').trim();
+  const preferredDatesFinal = String(preferredDates || startDate || '').trim();
+
   const text = [
-    `Name: ${displayName}`,
+    `Advertiser Name: ${displayName}`,
+    `Company: ${String(companyName || '').trim()}`,
     `Email: ${String(email || '').trim()}`,
-    ...(phone ? [`Phone: ${String(phone).trim()}`] : []),
-    ...(companyName ? [`Company: ${String(companyName).trim()}`] : []),
-    ...(placement ? [`Slot: ${String(placement).trim()}`] : []),
-    ...(budget ? [`Budget: ${String(budget).trim()}`] : []),
-    ...(target ? [`Target: ${String(target).trim()}`] : []),
-    ...(startDate ? [`Start Date: ${String(startDate).trim()}`] : []),
+    `Phone: ${String(phone || '').trim()}`,
+    `Campaign Type: ${String(campaignType || '').trim()}`,
+    `Preferred Ad Slot: ${preferredAdSlotFinal}`,
+    `Campaign Goal: ${campaignGoalFinal}`,
+    `Preferred Dates: ${preferredDatesFinal}`,
+    `Budget: ${String(budget || '').trim()}`,
+    'Message:',
+    cleanMessage,
+    `Source: ${String(source || '').trim()}`,
+    `InquiryId: ${String(inquiryId || '').trim()}`,
+    `CreatedAt: ${tsIso}`,
     ...(pageUrl ? [`Page URL: ${String(pageUrl).trim()}`] : []),
-    `Timestamp: ${tsIso}`,
-    ...(source ? [`Source: ${String(source).trim()}`] : []),
     ...(siteFinal ? [`Site: ${siteFinal}`] : []),
     ...(ip ? [`IP: ${ip}`] : []),
     ...(userAgent ? [`User-Agent: ${userAgent}`] : []),
-      ...(referrer ? [`Referer: ${referrer}`] : []),
-    ...(inquiryId ? [`InquiryId: ${String(inquiryId)}`] : []),
-    '',
-    'Message:',
-    cleanMessage,
+    ...(referrer ? [`Referer: ${referrer}`] : []),
   ].join('\n');
 
   const transport = createAdsTransport();

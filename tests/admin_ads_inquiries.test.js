@@ -40,9 +40,19 @@ test('GET /admin-api/ads/inquiries lists inquiries with JWT and supports status 
   const fake = [
     {
       _id: '507f1f77bcf86cd799439099',
+      inquiryId: 'ADQ-20250102-ABC123',
+      advertiserName: 'Buyer',
+      companyName: 'ACME Media',
       name: 'Buyer',
       email: 'buyer@example.com',
+      phone: '+91 9999999999',
       message: 'Need pricing',
+      budget: '25000',
+      campaignType: 'Display',
+      preferredAdSlot: 'HOME_728x90',
+      campaignGoal: 'Traffic',
+      preferredDates: 'Next month',
+      source: 'advertise-with-us',
       status: 'new',
       createdAt: new Date('2025-01-02T00:00:00.000Z'),
     },
@@ -72,6 +82,16 @@ test('GET /admin-api/ads/inquiries lists inquiries with JWT and supports status 
     assert.ok(Array.isArray(res.body.items));
     assert.equal(res.body.items.length, 1);
     assert.equal(res.body.items[0].id, '507f1f77bcf86cd799439099');
+    assert.equal(res.body.items[0].inquiryId, 'ADQ-20250102-ABC123');
+    assert.equal(res.body.items[0].advertiserName, 'Buyer');
+    assert.equal(res.body.items[0].companyName, 'ACME Media');
+    assert.equal(res.body.items[0].phone, '+91 9999999999');
+    assert.equal(res.body.items[0].budget, '25000');
+    assert.equal(res.body.items[0].campaignType, 'Display');
+    assert.equal(res.body.items[0].preferredAdSlot, 'HOME_728x90');
+    assert.equal(res.body.items[0].campaignGoal, 'Traffic');
+    assert.equal(res.body.items[0].preferredDates, 'Next month');
+    assert.equal(res.body.items[0].source, 'advertise-with-us');
     assert.equal(res.body.items[0].status, 'new');
     assert.equal(res.body.page, 1);
     assert.equal(res.body.limit, 20);
