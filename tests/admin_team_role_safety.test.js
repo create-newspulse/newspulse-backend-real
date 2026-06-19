@@ -20,6 +20,9 @@ function cloneUser(user) {
   return {
     ...user,
     permissions: Array.isArray(user.permissions) ? [...user.permissions] : [],
+    sections: Array.isArray(user.sections) ? [...user.sections] : [],
+    assignedSections: Array.isArray(user.assignedSections) ? [...user.assignedSections] : [],
+    coverageAreas: Array.isArray(user.coverageAreas) ? [...user.coverageAreas] : [],
   };
 }
 
@@ -164,6 +167,9 @@ test('GET /api/admin/team/users exposes requested team roles while preserving fo
   assert.ok(founder);
   assert.equal(founder.role, 'founder');
   assert.equal(founder.status, 'active');
+  assert.equal(founder.department, 'Founder / Ownership');
+  assert.deepEqual(founder.assignedSections, []);
+  assert.deepEqual(founder.coverageAreas, []);
 });
 
 test('POST /api/admin/team/users rejects blank email, founder email, and invalid roles', async () => {
@@ -219,6 +225,69 @@ test('POST /api/admin/team/users creates intern users by default with one-time t
   assert.equal(typeof res.body.data.temporaryPassword, 'string');
   assert.equal(typeof res.body.data.user.passwordHash, 'undefined');
   assert.equal(usersById.get('507f1f77bcf86cd799439099').role, 'intern');
+  assert.equal(res.body.data.user.department, 'Training / Internship');
+});
+
+test('team create-user defaults editor department and Gujarat coverage while cleaning assigned section city values', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const createEditor = await request(app)
+    .post('/api/team/create-user')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({
+      fullName: 'City Editor',
+      email: 'city-editor@example.com',
+      role: 'editor',
+      assignedSections: ['Gujarat'],
+      coverageAreas: [],
+    });
+
+  assert.equal(createEditor.status, 201);
+  assert.equal(createEditor.body.data.user.department, 'Editorial / Newsroom');
+  assert.deepEqual(createEditor.body.data.user.assignedSections, ['Gujarat']);
+  assert.deepEqual(createEditor.body.data.user.sections, ['Gujarat']);
+  assert.deepEqual(createEditor.body.data.user.coverageAreas, ['All Gujarat']);
+
+  const cleaned = await request(app)
+    .patch('/api/team/users/507f1f77bcf86cd799439099')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({
+      assignedSections: ['Business', 'Ahmedabad', 'Surat', 'Rajkot', 'Vadodara'],
+      coverageAreas: ['South Gujarat'],
+    });
+
+  assert.equal(cleaned.status, 200);
+  assert.deepEqual(cleaned.body.data.user.assignedSections, ['Business']);
+  assert.deepEqual(cleaned.body.data.user.sections, ['Business']);
+  assert.deepEqual(cleaned.body.data.user.coverageAreas, ['Ahmedabad', 'Surat', 'Rajkot', 'Vadodara', 'South Gujarat']);
+  assert.deepEqual(usersById.get('507f1f77bcf86cd799439099').assignedSections, ['Business']);
+  assert.deepEqual(usersById.get('507f1f77bcf86cd799439099').coverageAreas, ['Ahmedabad', 'Surat', 'Rajkot', 'Vadodara', 'South Gujarat']);
+});
+
+test('GET /api/team/options returns organizational dropdown metadata', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const res = await request(app)
+    .get('/api/team/options')
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(res.status, 200);
+  assert.ok(res.body.departments.includes('Editorial / Newsroom'));
+  assert.ok(res.body.assignedSections.includes('Gujarat'));
+  assert.ok(res.body.coverageAreas.includes('All Gujarat'));
+  assert.equal(res.body.roleDepartmentDefaults.editor, 'Editorial / Newsroom');
 });
 
 test('Founder can create Admin but delegated non-founder cannot create Admin', async () => {

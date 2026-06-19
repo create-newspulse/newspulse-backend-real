@@ -14,12 +14,18 @@ const {
   FOUNDER_ONLY_MODULES,
   FOUNDER_ONLY_RIGHTS,
   ROLE_DEFAULT_ACCESS,
+  ROLE_DEPARTMENT_DEFAULTS,
+  TEAM_ASSIGNED_SECTIONS,
+  TEAM_COVERAGE_AREAS,
+  TEAM_DEPARTMENTS,
   TEAM_ROLES,
+  defaultDepartmentForRole,
   hasPermission,
   isFounderRole,
   isProtectedFounderUser,
   legacyPermissionsFromRights,
   normalizeModuleAccess,
+  normalizeOrganizationFields,
   normalizePermissions,
   normalizeRole,
   normalizeSpecialRights,
@@ -237,6 +243,42 @@ function mergeLegacyPermissions(existingPermissions, rights) {
   return out;
 }
 
+function rawDepartmentProvided(value) {
+  return value !== undefined && value !== null && String(value || '').trim() !== '';
+}
+
+function normalizeUserOrganizationInput(body, role, currentUser = null) {
+  const roleValue = role || currentUser?.role || null;
+  const departmentInput = body.department !== undefined ? body.department : currentUser?.department;
+  const assignedInput = body.assignedSections !== undefined
+    ? body.assignedSections
+    : (body.sections !== undefined
+      ? body.sections
+      : ((Array.isArray(currentUser?.assignedSections) && currentUser.assignedSections.length)
+        ? currentUser.assignedSections
+        : currentUser?.sections));
+  const coverageInput = body.coverageAreas !== undefined ? body.coverageAreas : currentUser?.coverageAreas;
+
+  const organization = normalizeOrganizationFields({
+    role: roleValue,
+    department: departmentInput,
+    assignedSections: assignedInput,
+    coverageAreas: coverageInput,
+    sections: assignedInput,
+  });
+
+  if (rawDepartmentProvided(body.department) && !organization.department) {
+    return { error: { status: 400, message: 'Invalid department', code: 'INVALID_DEPARTMENT' } };
+  }
+
+  return {
+    department: organization.department || defaultDepartmentForRole(roleValue) || null,
+    assignedSections: organization.assignedSections,
+    coverageAreas: organization.coverageAreas,
+    sections: organization.sections,
+  };
+}
+
 async function listUsersHandler(_req, res) {
   if (!isDbReady()) {
     return ok(res, { data: { users: [], availableRoles: TEAM_ROLES }, users: [], availableRoles: TEAM_ROLES });
@@ -254,8 +296,6 @@ async function createUserHandler(req, res) {
   const fullName = String(body.fullName || body.name || '').trim();
   const email = String(body.email || '').trim().toLowerCase();
   const staffId = body.staffId != null ? String(body.staffId || '').trim() : null;
-  const department = body.department != null ? String(body.department || '').trim() : null;
-  const sections = normalizeStringList(body.sections, 50);
   const permissions = normalizePermissions(body.permissions);
   const generateTemporaryPassword = body.generateTemporaryPassword !== false;
   const providedPassword = String(body.password || body.initialPassword || '');
@@ -265,6 +305,8 @@ async function createUserHandler(req, res) {
   if (!email) return bad(res, 400, 'email is required', 'INVALID_EMAIL');
   const roleAssignment = await resolveRoleAssignment(req, body, 'intern');
   if (roleAssignment.error) return bad(res, roleAssignment.error.status, roleAssignment.error.message, roleAssignment.error.code);
+  const organization = normalizeUserOrganizationInput(body, roleAssignment.role);
+  if (organization.error) return bad(res, organization.error.status, organization.error.message, organization.error.code);
   const accessOverride = parseAccessOverride(req, body);
   if (accessOverride.error) return bad(res, accessOverride.error.status, accessOverride.error.message, accessOverride.error.code);
   if (accessExpiresAt === undefined && body.accessExpiresAt !== undefined) return bad(res, 400, 'Invalid accessExpiresAt', 'INVALID_DATE');
@@ -289,8 +331,10 @@ async function createUserHandler(req, res) {
     roleId: roleAssignment.roleId || null,
     roleName: roleAssignment.roleName || roleAssignment.role,
     role: roleAssignment.role,
-    department: department || null,
-    sections,
+    department: organization.department,
+    sections: organization.sections,
+    assignedSections: organization.assignedSections,
+    coverageAreas: organization.coverageAreas,
     designation: body.designation != null ? String(body.designation || '').trim() : null,
     permissions: accessOverride.patch.permissions || permissions,
     moduleAccessOverride: accessOverride.patch.moduleAccessOverride || [],
@@ -364,14 +408,6 @@ async function updateUserHandler(req, res) {
     patch.roleId = roleAssignment.roleId || null;
     audit.fields.push('role');
   }
-  if (body.department !== undefined) {
-    patch.department = body.department != null ? String(body.department || '').trim() : null;
-    audit.fields.push('department');
-  }
-  if (body.sections !== undefined) {
-    patch.sections = normalizeStringList(body.sections, 50);
-    audit.fields.push('sections');
-  }
   if (body.designation !== undefined) {
     patch.designation = body.designation != null ? String(body.designation || '').trim() : null;
     audit.fields.push('designation');
@@ -392,6 +428,26 @@ async function updateUserHandler(req, res) {
   if (accessOverride.error) return bad(res, accessOverride.error.status, accessOverride.error.message, accessOverride.error.code);
   Object.assign(patch, accessOverride.patch);
   audit.fields.push(...accessOverride.audit);
+
+  const roleChanged = Object.prototype.hasOwnProperty.call(patch, 'role');
+  const organizationTouched = body.department !== undefined
+    || body.sections !== undefined
+    || body.assignedSections !== undefined
+    || body.coverageAreas !== undefined
+    || roleChanged;
+
+  if (organizationTouched) {
+    const organization = normalizeUserOrganizationInput(body, patch.role || user.role, user);
+    if (organization.error) return bad(res, organization.error.status, organization.error.message, organization.error.code);
+    patch.department = organization.department;
+    patch.sections = organization.sections;
+    patch.assignedSections = organization.assignedSections;
+    patch.coverageAreas = organization.coverageAreas;
+    if (!audit.fields.includes('department')) audit.fields.push('department');
+    if (!audit.fields.includes('sections')) audit.fields.push('sections');
+    if (!audit.fields.includes('assignedSections')) audit.fields.push('assignedSections');
+    if (!audit.fields.includes('coverageAreas')) audit.fields.push('coverageAreas');
+  }
 
   const updated = await User.findByIdAndUpdate(req.params.id, { $set: patch }, { new: true });
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
@@ -557,6 +613,23 @@ async function auditLogsHandler(_req, res) {
   return ok(res, { data: { auditLogs: docs || [] }, auditLogs: docs || [] });
 }
 
+async function optionsHandler(_req, res) {
+  return ok(res, {
+    data: {
+      roles: TEAM_ROLES,
+      departments: TEAM_DEPARTMENTS,
+      assignedSections: TEAM_ASSIGNED_SECTIONS,
+      coverageAreas: TEAM_COVERAGE_AREAS,
+      roleDepartmentDefaults: ROLE_DEPARTMENT_DEFAULTS,
+    },
+    roles: TEAM_ROLES,
+    departments: TEAM_DEPARTMENTS,
+    assignedSections: TEAM_ASSIGNED_SECTIONS,
+    coverageAreas: TEAM_COVERAGE_AREAS,
+    roleDepartmentDefaults: ROLE_DEPARTMENT_DEFAULTS,
+  });
+}
+
 async function activateUserHandler(req, res) {
   if (!ensureDb(res)) return;
   const user = await findUserById(req.params.id, res);
@@ -597,5 +670,6 @@ router.post('/team/users/:id/activate', requireTeamAuth, requireTeamPermission('
 router.patch('/team/users/:id/activate', requireTeamAuth, requireTeamPermission('auth.suspend_user'), activateUserHandler);
 router.get('/audit-logs', requireTeamAuth, requireTeamPermission('auth.view_login_activity'), auditLogsHandler);
 router.get('/permissions', requireTeamAuth, (_req, res) => ok(res, { data: { permissions: AUTH_PERMISSIONS }, permissions: AUTH_PERMISSIONS }));
+router.get(['/options', '/team/options'], requireTeamAuth, requireTeamPermission('auth.create_user'), optionsHandler);
 
 module.exports = router;

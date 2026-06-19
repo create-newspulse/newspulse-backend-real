@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { normalizeOrganizationFields } = require('../lib/teamAccess');
 
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
@@ -14,6 +15,8 @@ const userSchema = new mongoose.Schema({
   },
   department: { type: String, default: null, trim: true },
   sections: { type: [String], default: [] },
+  assignedSections: { type: [String], default: [] },
+  coverageAreas: { type: [String], default: [] },
 
   // Team management fields (Settings Center > Team Management)
   designation: { type: String, default: null, trim: true },
@@ -53,6 +56,19 @@ const userSchema = new mongoose.Schema({
 userSchema.pre('save', function touchUpdatedAt(next) {
   this.updatedAt = new Date();
   if (!this.fullName && this.name) this.fullName = this.name;
+
+  const organization = normalizeOrganizationFields({
+    role: this.role,
+    department: this.department,
+    assignedSections: this.assignedSections,
+    coverageAreas: this.coverageAreas,
+    sections: this.sections,
+  });
+  this.department = organization.department;
+  this.assignedSections = organization.assignedSections;
+  this.coverageAreas = organization.coverageAreas;
+  this.sections = organization.sections;
+
   if (String(this.role || '').toLowerCase() === 'founder') {
     this.isFounder = true;
     this.isProtected = true;
