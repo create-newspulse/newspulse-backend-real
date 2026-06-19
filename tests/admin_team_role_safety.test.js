@@ -9,6 +9,7 @@ const mongoose = require('mongoose');
 
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
+const { TEAM_ROLES } = require('../lib/teamAccess');
 
 let usersById;
 let usersByEmail;
@@ -113,6 +114,7 @@ function buildApp() {
   const app = express();
   app.use(express.json());
   app.use('/api/admin', router);
+  app.use('/api/team', router);
   return app;
 }
 
@@ -141,7 +143,7 @@ test.afterEach(() => {
   mongoose.connection.readyState = originalReadyState;
 });
 
-test('GET /api/admin/team/users exposes only editor as selectable role while preserving founder record', async () => {
+test('GET /api/admin/team/users exposes requested team roles while preserving founder record', async () => {
   const app = buildApp();
   const founderToken = signToken({
     sub: '507f1f77bcf86cd799439011',
@@ -155,8 +157,8 @@ test('GET /api/admin/team/users exposes only editor as selectable role while pre
     .set('Authorization', `Bearer ${founderToken}`);
 
   assert.equal(res.status, 200);
-  assert.deepEqual(res.body.availableRoles, ['editor']);
-  assert.deepEqual(res.body.data.availableRoles, ['editor']);
+  assert.deepEqual(res.body.availableRoles, TEAM_ROLES);
+  assert.deepEqual(res.body.data.availableRoles, TEAM_ROLES);
   assert.ok(res.body.users.some((user) => user.email === 'editor@example.com'));
   const founder = res.body.users.find((user) => user.email === 'newspulse.team@gmail.com');
   assert.ok(founder);
@@ -187,18 +189,18 @@ test('POST /api/admin/team/users rejects blank email, founder email, and invalid
     .send({ fullName: 'Editor', email: 'newspulse.team@gmail.com', role: 'editor' });
 
   assert.equal(founderEmail.status, 409);
-  assert.equal(founderEmail.body.code, 'DUPLICATE_FOUNDER_EMAIL');
+  assert.equal(founderEmail.body.code, 'EMAIL_EXISTS');
 
   const invalidRole = await request(app)
     .post('/api/admin/team/users')
     .set('Authorization', `Bearer ${founderToken}`)
-    .send({ fullName: 'Editor', email: 'new-editor@example.com', role: 'admin' });
+    .send({ fullName: 'Editor', email: 'new-editor@example.com', role: 'unknown-role' });
 
   assert.equal(invalidRole.status, 400);
   assert.equal(invalidRole.body.code, 'INVALID_ROLE');
 });
 
-test('POST /api/admin/team/users creates only editor users by default', async () => {
+test('POST /api/admin/team/users creates intern users by default with one-time temporary password', async () => {
   const app = buildApp();
   const founderToken = signToken({
     sub: '507f1f77bcf86cd799439011',
@@ -213,8 +215,73 @@ test('POST /api/admin/team/users creates only editor users by default', async ()
     .send({ fullName: 'Fresh Editor', email: 'fresh-editor@example.com' });
 
   assert.equal(res.status, 201);
-  assert.equal(res.body.data.user.role, 'editor');
-  assert.equal(usersById.get('507f1f77bcf86cd799439099').role, 'editor');
+  assert.equal(res.body.data.user.role, 'intern');
+  assert.equal(typeof res.body.data.temporaryPassword, 'string');
+  assert.equal(typeof res.body.data.user.passwordHash, 'undefined');
+  assert.equal(usersById.get('507f1f77bcf86cd799439099').role, 'intern');
+});
+
+test('Founder can create Admin but delegated non-founder cannot create Admin', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const founderCreate = await request(app)
+    .post('/api/admin/team/users')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ fullName: 'Admin User', email: 'new-admin@example.com', role: 'admin' });
+
+  assert.equal(founderCreate.status, 201);
+  assert.equal(founderCreate.body.data.user.role, 'admin');
+
+  usersById.get('507f1f77bcf86cd799439012').permissions = ['auth.create_user'];
+  const editorToken = signToken({
+    sub: '507f1f77bcf86cd799439012',
+    email: 'editor@example.com',
+    role: 'editor',
+    name: 'Editor',
+  });
+
+  const delegatedCreate = await request(app)
+    .post('/api/admin/team/users')
+    .set('Authorization', `Bearer ${editorToken}`)
+    .send({ fullName: 'Blocked Admin', email: 'blocked-admin@example.com', role: 'admin' });
+
+  assert.equal(delegatedCreate.status, 403);
+  assert.equal(delegatedCreate.body.code, 'FOUNDER_REQUIRED');
+});
+
+test('/api/team create-user returns temporary password once and user reads never expose passwords', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const createRes = await request(app)
+    .post('/api/team/create-user')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ fullName: 'Field Reporter', email: 'field@example.com', role: 'reporter', generateTemporaryPassword: true });
+
+  assert.equal(createRes.status, 201);
+  assert.equal(typeof createRes.body.data.temporaryPassword, 'string');
+  assert.equal(typeof createRes.body.data.user.passwordHash, 'undefined');
+  assert.equal(usersById.get('507f1f77bcf86cd799439099').passwordHash.startsWith('$2'), true);
+
+  const readRes = await request(app)
+    .get('/api/team/users/507f1f77bcf86cd799439099')
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(readRes.status, 200);
+  assert.equal(typeof readRes.body.data.temporaryPassword, 'undefined');
+  assert.equal(typeof readRes.body.data.tempPassword, 'undefined');
+  assert.equal(typeof readRes.body.data.user.passwordHash, 'undefined');
 });
 
 test('normal team endpoints cannot suspend or force-reset the founder account', async () => {

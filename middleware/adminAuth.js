@@ -10,6 +10,7 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const User = require('../models/User');
 const { shouldLog } = require('../lib/logThrottle');
+const { effectivePermissions, normalizeRole } = require('../lib/teamAccess');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -26,11 +27,14 @@ function parseCookies(header) {
 }
 
 function getFounderEmails() {
+  const env = String(process.env.NODE_ENV || 'development').toLowerCase();
+  const productionLike = env === 'production' || !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
   return Array.from(new Set([
     process.env.FOUNDER_EMAIL,
     process.env.ADMIN_EMAIL,
     process.env.FOUNDER_ALT_EMAIL,
     process.env.ADMIN_ALT_EMAIL,
+    !productionLike ? 'founder@example.com' : null,
   ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
 }
 
@@ -70,8 +74,8 @@ async function requireAdminAuth(req, res, next) {
       }
       const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
       const payload = jwt.verify(effectiveToken, secret);
-      const role = String(payload && payload.role ? payload.role : '').toLowerCase();
-      if (role !== 'admin' && role !== 'founder' && role !== 'staff' && role !== 'editor' && role !== 'legal') {
+      const role = normalizeRole(payload && payload.role ? payload.role : '') || String(payload && payload.role ? payload.role : '').toLowerCase();
+      if (!role || (role === 'legal' ? false : !normalizeRole(role))) {
         console.warn('[ADMIN_AUTH][403][role] disallowed role', {
           path: req.originalUrl,
           method: req.method,
@@ -93,8 +97,16 @@ async function requireAdminAuth(req, res, next) {
         }
 
         if (user) {
-          if (user.status === 'suspended') {
-            return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Account suspended' });
+          const accountStatus = String(user.accountStatus || user.status || 'active').toLowerCase();
+          const userStatus = String(user.status || accountStatus || 'active').toLowerCase();
+          if (userStatus === 'suspended' || accountStatus === 'suspended') {
+            return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_SUSPENDED', message: 'Account suspended' });
+          }
+          if (userStatus === 'locked' || accountStatus === 'locked' || (user.lockedUntil && user.lockedUntil > new Date())) {
+            return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_LOCKED', message: 'Account locked' });
+          }
+          if (userStatus === 'expired' || accountStatus === 'expired' || (user.accessExpiresAt && user.accessExpiresAt <= new Date())) {
+            return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_EXPIRED', message: 'Account expired' });
           }
           const jwtTv = typeof payload.tokenVersion === 'number' ? payload.tokenVersion : 0;
           const userTv = typeof user.tokenVersion === 'number' ? user.tokenVersion : 0;
@@ -107,11 +119,15 @@ async function requireAdminAuth(req, res, next) {
             email: payload.email,
             role,
             name: payload.name,
-            permissions: Array.isArray(user.permissions) ? user.permissions : [],
+            permissions: effectivePermissions(user),
             status: user.status || 'active',
+            accountStatus: user.accountStatus || accountStatus,
+            onlineStatus: user.onlineStatus || 'offline',
             tokenVersion: userTv,
             lastLoginAt: user.lastLoginAt || null,
             mustChangePassword: Boolean(user.mustChangePassword || user.forceReset),
+            isFounder: Boolean(user.isFounder || normalizeRole(user.role) === 'founder'),
+            isProtected: Boolean(user.isProtected || normalizeRole(user.role) === 'founder'),
           };
           return next();
         }
@@ -196,13 +212,13 @@ async function requireAdminJwt(req, res, next) {
     }
 
     const role = payload && payload.role ? String(payload.role) : '';
-    const normalizedRole = String(role).toLowerCase();
+    const normalizedRole = normalizeRole(role) || String(role).toLowerCase();
     if (!normalizedRole) {
       return res.status(401).json({ ok: false, message: 'Unauthorized' });
     }
 
     // Keep this aligned with requireAdminAuth.
-    if (normalizedRole !== 'admin' && normalizedRole !== 'founder' && normalizedRole !== 'staff' && normalizedRole !== 'editor' && normalizedRole !== 'legal') {
+    if (normalizedRole !== 'legal' && !normalizeRole(normalizedRole)) {
       return res.status(403).json({ ok: false, message: 'Forbidden' });
     }
 
@@ -221,7 +237,12 @@ async function requireAdminJwt(req, res, next) {
       }
 
       if (user) {
-        if (user.status === 'suspended') {
+        const accountStatus = String(user.accountStatus || user.status || 'active').toLowerCase();
+        const userStatus = String(user.status || accountStatus || 'active').toLowerCase();
+        if (userStatus === 'suspended' || userStatus === 'locked' || userStatus === 'expired' || accountStatus === 'suspended' || accountStatus === 'locked' || accountStatus === 'expired') {
+          return res.status(403).json({ ok: false, message: 'Forbidden' });
+        }
+        if ((user.lockedUntil && user.lockedUntil > new Date()) || (user.accessExpiresAt && user.accessExpiresAt <= new Date())) {
           return res.status(403).json({ ok: false, message: 'Forbidden' });
         }
 
@@ -234,11 +255,15 @@ async function requireAdminJwt(req, res, next) {
         req.admin = {
           id: String(user._id),
           email: user.email,
-          role: user.role,
+          role: normalizeRole(user.role) || user.role,
           name: user.name,
-          permissions: Array.isArray(user.permissions) ? user.permissions : [],
+          permissions: effectivePermissions(user),
           status: user.status || 'active',
+          accountStatus: user.accountStatus || accountStatus,
+          onlineStatus: user.onlineStatus || 'offline',
           tokenVersion: userTv,
+          isFounder: Boolean(user.isFounder || normalizeRole(user.role) === 'founder'),
+          isProtected: Boolean(user.isProtected || normalizeRole(user.role) === 'founder'),
         };
         return next();
       }

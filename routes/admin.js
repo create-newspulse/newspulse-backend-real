@@ -8,6 +8,8 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 
 const User = require('../models/User');
+const { logAudit } = require('../lib/audit');
+const { recordLoginSession, recordLogoutSession } = require('../lib/teamManagement');
 const {
   getLocalFounderSafeDiagnostics,
   isLocalDevLike,
@@ -90,6 +92,7 @@ router.post('/login', async (req, res, next) => {
 
   if (isRateLimited(ip)) {
     console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=rate-limit`);
+    await logAudit(req, 'SUSPICIOUS_LOGIN_ATTEMPT', null, { email, reason: 'rate-limit' });
     return res
       .status(429)
       .json({ ok: false, message: 'Too many login attempts. Please try again later.' });
@@ -246,10 +249,22 @@ router.post('/login', async (req, res, next) => {
       localDebugUserFound = !!u;
       localDebugRoleFound = u ? String(u.role || '') || null : null;
       if (u) {
-        if (u.status === 'suspended') {
+        const blockedStatus = String(u.accountStatus || u.status || 'active').toLowerCase();
+        const legacyStatus = String(u.status || 'active').toLowerCase();
+        if (blockedStatus === 'suspended' || legacyStatus === 'suspended') {
           localDebugPasswordMatch = false;
           logLocalLoginDebug({ userFound: true, passwordMatch: false, roleFound: localDebugRoleFound, status: 'suspended' });
           return res.status(403).json({ ok: false, message: 'Account suspended' });
+        }
+        if (blockedStatus === 'locked' || legacyStatus === 'locked' || (u.lockedUntil && u.lockedUntil > new Date())) {
+          localDebugPasswordMatch = false;
+          logLocalLoginDebug({ userFound: true, passwordMatch: false, roleFound: localDebugRoleFound, status: 'locked' });
+          return res.status(403).json({ ok: false, message: 'Account locked' });
+        }
+        if (blockedStatus === 'expired' || legacyStatus === 'expired' || (u.accessExpiresAt && u.accessExpiresAt <= new Date())) {
+          localDebugPasswordMatch = false;
+          logLocalLoginDebug({ userFound: true, passwordMatch: false, roleFound: localDebugRoleFound, status: 'expired' });
+          return res.status(403).json({ ok: false, message: 'Account expired' });
         }
         if (u.passwordHash) {
           const okPw = await bcrypt.compare(password, u.passwordHash);
@@ -259,6 +274,7 @@ router.post('/login', async (req, res, next) => {
             logLocalLoginDebug({ userFound: true, passwordMatch: true, roleFound: localDebugRoleFound, authSource: 'db' });
             u.lastLoginAt = new Date();
             await u.save();
+            await recordLoginSession(req, u);
 
             const accessToken = signForUser(u);
             const refreshToken = signRefreshForUser(u);
@@ -331,6 +347,8 @@ router.post('/login', async (req, res, next) => {
           await ensured.save();
         }
 
+        await recordLoginSession(req, ensured);
+
         return {
           accessToken: signAccessFallbackToken({
             sub: String(ensured._id),
@@ -386,6 +404,7 @@ router.post('/login', async (req, res, next) => {
   }
 
   console.warn(`ADMIN LOGIN FAIL email=${email} ip=${ip} reason=invalid-credentials`);
+  await logAudit(req, 'SUSPICIOUS_LOGIN_ATTEMPT', null, { email, reason: 'invalid-credentials' });
   logLocalLoginDebug({
     userFound: localDebugUserFound,
     passwordMatch: localDebugPasswordMatch,
@@ -462,8 +481,20 @@ router.post('/refresh', async (req, res, next) => {
 });
 
 // POST /api/admin/logout
-router.post('/logout', (_req, res) => {
+router.post('/logout', async (req, res) => {
   try {
+    const token = String(req.headers.authorization || '').toLowerCase().startsWith('bearer ')
+      ? String(req.headers.authorization || '').slice(7).trim()
+      : String(req.cookies?.np_admin_token || req.cookies?.np_token || req.cookies?.token || '').trim();
+    if (token) {
+      try {
+        const payload = jwt.verify(token, String(process.env.JWT_SECRET || '').trim() || 'dev-secret-change-me');
+        const userId = payload?.sub || payload?.userId || null;
+        if (userId) await recordLogoutSession(req, userId, 'logout');
+      } catch (_e) {
+        await logAudit(req, 'SUSPICIOUS_LOGOUT_ATTEMPT', null, { reason: 'invalid-token' });
+      }
+    }
     const isProd = String(process.env.NODE_ENV || 'development').toLowerCase() === 'production'
       || !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
     const cookieDomain = isProd ? (process.env.ADMIN_COOKIE_DOMAIN || '.newspulse.co.in') : undefined;

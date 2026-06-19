@@ -328,6 +328,13 @@ const adminGlossaryRouter = require('./routes/adminGlossary.routes');
 const authRoutes = require('./routes/auth.routes');
 const auditRoutes = require('./routes/audit.routes');
 const adminTeamRoutes = require('./routes/adminTeam.routes');
+const teamPresenceRoutes = require('./routes/teamPresence.routes');
+const attendanceRoutes = require('./routes/attendance.routes');
+const leaveOffDaysRoutes = require('./routes/leaveOffDays.routes');
+const schedulesRoutes = require('./routes/schedules.routes');
+const rolesRoutes = require('./routes/roles.routes');
+const accessRoutes = require('./routes/access.routes');
+const financeRoutes = require('./routes/finance.routes');
 const adminAuthV2Routes = require('./routes/adminAuthV2.routes');
 const adminBootstrapRoutes = require('./routes/adminBootstrap.routes');
 let adminTeamRoutesV2 = null;
@@ -392,6 +399,7 @@ const News = require(`${BASE}/models/News`);
 const Story = require('./models/Article');
 const { requireAdminAuth, requireAdminJwt, requireFounderOrAdmin } = require('./middleware/adminAuth');
 const { optionalAdminAuth } = require('./middleware/optionalAdminAuth');
+const { seedFounderFromEnvIfNeeded } = require('./lib/founderSeed');
 let aiRoutes = null;
 let feedRoutes = null;
 try { aiRoutes = require(`${BASE}/routes/ai`); } catch (_) { console.warn('[init] optional routes/ai not found; skipping'); }
@@ -1187,6 +1195,11 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
     const dbFromUri = _resolvedMongoDbName();
     const db = dbFromUri || mongoose.connection.name || undefined;
     console.log('[startup] MongoDB connected', { db });
+    try {
+      await seedFounderFromEnvIfNeeded({ logger: console });
+    } catch (e) {
+      console.warn('[startup][founder-seed] failed', { message: e?.message || String(e) });
+    }
     await _runLocalFounderStartupCheck({ db });
     // Ensure TTL index for Broadcast Center is present.
     try {
@@ -1370,6 +1383,7 @@ app.use('/api/news', newsRoutes);
 app.get('/api/auth/login', (_req, res) => {
   return res.json({ ok: true, message: 'Auth route is live. Use POST to login.' });
 });
+app.post('/api/auth/login', authRoutes.loginHandler);
 // ✅ Founder/Admin Login (MVP)
 // Defined directly in server.js to avoid any router-mount confusion.
 app.post('/api/auth/login', (req, res) => {
@@ -1537,6 +1551,9 @@ for (const p of ['/api/admin/stories', '/admin-api/admin/stories', '/admin-api/a
 }
 // Auth bootstrap endpoint for admin panel
 app.use('/api/auth', authRoutes);
+app.use('/api/roles', rolesRoutes);
+app.use('/api/access', accessRoutes);
+app.use('/api/finance', financeRoutes);
 // Audit (founder-only)
 app.use('/api/audit', auditRoutes);
 // Broadcast Center (mount early so it cannot be shadowed by other /api routers)
@@ -1765,6 +1782,12 @@ app.use('/api/public', publicSponsoredFeaturesRouter);
 app.use('/api/public/ads', publicAdsInquiryRouter);
 app.post('/api/public/ad-inquiries', submitPublicAdInquiry);
 app.post('/api/public/grievance', submitPublicGrievance);
+
+// Team Management: presence/session logs, attendance, leave/off-days, and schedules.
+app.use('/api/team', teamPresenceRoutes);
+app.use('/api/attendance', attendanceRoutes);
+app.use('/api', leaveOffDaysRoutes);
+app.use('/api', schedulesRoutes);
 
 const ADS_INQUIRY_MUTATION_ENDPOINTS = [
   'PATCH /api/ads/inquiries/:id/read',
@@ -2050,6 +2073,7 @@ app.use('/admin/founder', founderRoutesRouter);
 app.use('/admin/founder', founderFeatureTogglesRouter);
 
 // New Admin Panel endpoints (Team/Security/Audit)
+app.use('/api/team', adminTeamRoutes);
 app.use('/api/admin', adminTeamRoutes);
 if (adminTeamRoutesV2) app.use('/api/admin/team', adminTeamRoutesV2);
 // Admin API proxy aliases (frontend often proxies /admin-api/*)
@@ -3059,6 +3083,8 @@ async function _adminLoginHandler(req, res) {
       || (isLocalDevLike() ? localFounderConfig.password : '')
       || ''
     );
+    const founderEnvEmail = String(process.env.FOUNDER_EMAIL || '').trim().toLowerCase();
+    const founderEnvPass = String(process.env.FOUNDER_PASSWORD || process.env.FOUNDER_PASS || '');
     if (!email || !password) return res.status(400).json({ success: false, message: 'Email and password required' });
 
     if (mongoose.connection && mongoose.connection.readyState === 1) {
@@ -3107,7 +3133,9 @@ async function _adminLoginHandler(req, res) {
       }
     }
 
-    if (email !== expectedEmail || password !== expectedPass) return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    const matchesPrimaryEnv = email === expectedEmail && password === expectedPass;
+    const matchesFounderEnv = Boolean(founderEnvEmail && founderEnvPass && email === founderEnvEmail && password === founderEnvPass);
+    if (!matchesPrimaryEnv && !matchesFounderEnv) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
     // In tests, keep the historical access.* tokens that /admin-auth/session accepts.
     if (_isTestEnv()) {
