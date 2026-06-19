@@ -226,6 +226,8 @@ test('POST /api/admin/team/users creates intern users by default with one-time t
   assert.equal(typeof res.body.data.user.passwordHash, 'undefined');
   assert.equal(usersById.get('507f1f77bcf86cd799439099').role, 'intern');
   assert.equal(res.body.data.user.department, 'Training / Internship');
+  assert.equal(res.body.data.user.staffId, 'NP-2026-0001');
+  assert.equal(res.body.data.user.staffIdLocked, true);
 });
 
 test('team create-user defaults editor department and Gujarat coverage while cleaning assigned section city values', async () => {
@@ -288,6 +290,86 @@ test('GET /api/team/options returns organizational dropdown metadata', async () 
   assert.ok(res.body.assignedSections.includes('Gujarat'));
   assert.ok(res.body.coverageAreas.includes('All Gujarat'));
   assert.equal(res.body.roleDepartmentDefaults.editor, 'Editorial / Newsroom');
+});
+
+test('founder uses NP-FND-0001 and next staff ID preview matches generated sequence', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const listRes = await request(app)
+    .get('/api/team/users')
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(listRes.status, 200);
+  const founder = listRes.body.users.find((user) => user.email === 'newspulse.team@gmail.com');
+  assert.equal(founder.staffId, 'NP-FND-0001');
+
+  const previewBefore = await request(app)
+    .get('/api/team/next-staff-id')
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(previewBefore.status, 200);
+  assert.match(previewBefore.body.nextStaffId, /^NP-2026-\d{4}$/);
+
+  const firstCreate = await request(app)
+    .post('/api/team/create-user')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ fullName: 'First Staff', email: 'first-staff@example.com', role: 'reporter' });
+
+  assert.equal(firstCreate.status, 201);
+  assert.equal(firstCreate.body.data.user.staffId, previewBefore.body.nextStaffId);
+
+  const previewAfter = await request(app)
+    .get('/api/team/next-staff-id')
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(previewAfter.status, 200);
+  const beforeSequence = Number(previewBefore.body.nextStaffId.slice(-4));
+  const afterSequence = Number(previewAfter.body.nextStaffId.slice(-4));
+  assert.equal(afterSequence, beforeSequence + 1);
+});
+
+test('staff ID remains immutable after creation even when role changes', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const createRes = await request(app)
+    .post('/api/team/create-user')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ fullName: 'Role Changer', email: 'role-change@example.com', role: 'reporter' });
+
+  assert.equal(createRes.status, 201);
+  const userId = createRes.body.data.user.id;
+  const originalStaffId = createRes.body.data.user.staffId;
+  assert.equal(originalStaffId, 'NP-2026-0001');
+
+  const roleUpdate = await request(app)
+    .patch(`/api/team/users/${userId}`)
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ role: 'editor' });
+
+  assert.equal(roleUpdate.status, 200);
+  assert.equal(roleUpdate.body.data.user.role, 'editor');
+  assert.equal(roleUpdate.body.data.user.staffId, originalStaffId);
+
+  const blockedStaffIdUpdate = await request(app)
+    .patch(`/api/team/users/${userId}`)
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ staffId: 'NP-2026-9999' });
+
+  assert.equal(blockedStaffIdUpdate.status, 400);
+  assert.equal(blockedStaffIdUpdate.body.code, 'STAFF_ID_IMMUTABLE');
+  assert.equal(usersById.get(userId).staffId, originalStaffId);
 });
 
 test('Founder can create Admin but delegated non-founder cannot create Admin', async () => {

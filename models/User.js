@@ -6,7 +6,9 @@ const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
   fullName: { type: String, default: null, trim: true },
   passwordHash: { type: String, required: true },
-  staffId: { type: String, default: null, trim: true, sparse: true, index: true },
+  staffId: { type: String, default: null, trim: true, sparse: true, unique: true, index: true },
+  staffIdGeneratedAt: { type: Date, default: null },
+  staffIdLocked: { type: Boolean, default: false, index: true },
   roleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Role', default: null, index: true },
   roleName: { type: String, default: null, trim: true },
   role: {
@@ -68,6 +70,12 @@ userSchema.pre('save', function touchUpdatedAt(next) {
   this.assignedSections = organization.assignedSections;
   this.coverageAreas = organization.coverageAreas;
   this.sections = organization.sections;
+
+  if (this.staffId) {
+    this.staffId = String(this.staffId).trim().toUpperCase();
+    this.staffIdLocked = true;
+    if (!this.staffIdGeneratedAt) this.staffIdGeneratedAt = this.createdAt || new Date();
+  }
 
   if (String(this.role || '').toLowerCase() === 'founder') {
     this.isFounder = true;

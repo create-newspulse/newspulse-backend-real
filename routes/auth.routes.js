@@ -91,9 +91,8 @@ function clearAuthCookies(res) {
 }
 
 async function findLoginUser(identifier) {
-  const value = String(identifier || '').trim();
-  const normalizedEmail = normalizeEmail(value);
-  const query = value.includes('@') ? User.findOne({ email: normalizedEmail }) : User.findOne({ staffId: value });
+  const normalizedEmail = normalizeEmail(identifier);
+  const query = User.findOne({ email: normalizedEmail });
   if (query && typeof query.select === 'function') return query.select('+passwordHash');
   return query;
 }
@@ -159,10 +158,10 @@ async function recordFailedLogin(req, user, reason) {
 
 async function loginHandler(req, res) {
   try {
-    const identifier = String(req.body?.email || req.body?.staffId || req.body?.username || '').trim();
+    const identifier = String(req.body?.email || req.body?.username || '').trim();
     const password = String(req.body?.password || '');
 
-    if (!identifier || !password) return bad(res, 400, 'Email/staff ID and password required', 'MISSING_CREDENTIALS');
+    if (!identifier || !password) return bad(res, 400, 'Email and password required', 'MISSING_CREDENTIALS');
     if (!jwtSecret()) return bad(res, 500, 'JWT_SECRET missing on server', 'SERVER_MISCONFIGURED');
     if (!isDbReady()) return bad(res, 503, 'Database unavailable', 'DB_UNAVAILABLE');
 

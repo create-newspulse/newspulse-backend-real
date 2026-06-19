@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 
 const User = require('../models/User');
+const { FOUNDER_STAFF_ID } = require('../lib/staffId');
 const {
   getLocalFounderSafeDiagnostics,
   isLocalDevLike,
@@ -54,6 +55,9 @@ async function ensureFounder({ email, password, fullName }) {
       email,
       name: fullName,
       passwordHash,
+      staffId: FOUNDER_STAFF_ID,
+      staffIdGeneratedAt: new Date(),
+      staffIdLocked: true,
       role: 'founder',
       status: 'active',
       permissions: ['team.manage', 'audit.read', 'settings.read'],
@@ -96,6 +100,9 @@ async function ensureFounder({ email, password, fullName }) {
 
   existing.name = nextName;
   existing.role = 'founder';
+  if (!existing.staffId) existing.staffId = FOUNDER_STAFF_ID;
+  existing.staffIdLocked = true;
+  if (!existing.staffIdGeneratedAt) existing.staffIdGeneratedAt = existing.createdAt || new Date();
   existing.status = 'active';
   existing.mustChangePassword = false;
   existing.mustResetPassword = false;

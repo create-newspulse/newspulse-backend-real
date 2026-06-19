@@ -10,6 +10,7 @@ const bcrypt = require('bcrypt');
 const User = require('../models/User');
 const { logAudit } = require('../lib/audit');
 const { recordLoginSession, recordLogoutSession } = require('../lib/teamManagement');
+const { FOUNDER_STAFF_ID } = require('../lib/staffId');
 const {
   getLocalFounderSafeDiagnostics,
   isLocalDevLike,
@@ -330,6 +331,9 @@ router.post('/login', async (req, res, next) => {
             email: lowerEmail,
             name: founderName,
             passwordHash: await bcrypt.hash(adminPassword, rounds),
+            staffId: FOUNDER_STAFF_ID,
+            staffIdGeneratedAt: new Date(),
+            staffIdLocked: true,
             role: 'founder',
             status: 'active',
             tokenVersion: 0,
@@ -341,6 +345,9 @@ router.post('/login', async (req, res, next) => {
           // Ensure required fields exist and enforce founder role.
           ensured.role = 'founder';
           ensured.status = 'active';
+          if (!ensured.staffId) ensured.staffId = FOUNDER_STAFF_ID;
+          ensured.staffIdLocked = true;
+          if (!ensured.staffIdGeneratedAt) ensured.staffIdGeneratedAt = ensured.createdAt || new Date();
           ensured.lastLoginAt = new Date();
           if (!ensured.name) ensured.name = founderName;
           if (!ensured.passwordHash) ensured.passwordHash = await bcrypt.hash(adminPassword, rounds);

@@ -10,6 +10,11 @@ const { requireAdminAuth } = require('../middleware/adminAuth');
 const { requireAuth } = require('../middleware/requireAuth');
 const { logAudit } = require('../lib/audit');
 const {
+  ensureUserStaffId,
+  previewNextStaffId,
+  resolveStaffIdForNewUser,
+} = require('../lib/staffId');
+const {
   AUTH_PERMISSIONS,
   FOUNDER_ONLY_MODULES,
   FOUNDER_ONLY_RIGHTS,
@@ -187,6 +192,12 @@ function actorIsFounder(req) {
   return Boolean(req.user?.isFounder || isFounderRole(req.user?.role));
 }
 
+function staffIdMigrationEnabled(req, body) {
+  return actorIsFounder(req)
+    && String(process.env.ALLOW_STAFF_ID_MIGRATION || '').trim() === '1'
+    && Boolean(body?.allowStaffIdMigration);
+}
+
 async function resolveRoleAssignment(req, body, fallbackRole) {
   const roleDoc = await loadRoleFromInput(body);
   if (roleDoc) {
@@ -285,7 +296,11 @@ async function listUsersHandler(_req, res) {
   }
 
   const docs = await User.find(userListQuery()).sort({ createdAt: -1 }).lean();
-  const users = (docs || []).map(safeUserDto);
+  const ensured = await Promise.all((docs || []).map(async (doc) => {
+    const result = await ensureUserStaffId(doc, { action: 'TEAM_STAFF_ID_BACKFILLED' });
+    return result.user || doc;
+  }));
+  const users = ensured.map(safeUserDto);
   return ok(res, { data: { users, availableRoles: TEAM_ROLES }, users, availableRoles: TEAM_ROLES });
 }
 
@@ -295,7 +310,6 @@ async function createUserHandler(req, res) {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const fullName = String(body.fullName || body.name || '').trim();
   const email = String(body.email || '').trim().toLowerCase();
-  const staffId = body.staffId != null ? String(body.staffId || '').trim() : null;
   const permissions = normalizePermissions(body.permissions);
   const generateTemporaryPassword = body.generateTemporaryPassword !== false;
   const providedPassword = String(body.password || body.initialPassword || '');
@@ -318,6 +332,21 @@ async function createUserHandler(req, res) {
   const existing = await User.findOne({ email }).lean();
   if (existing) return bad(res, 409, 'Email already exists', 'EMAIL_EXISTS');
 
+  let resolvedStaffId;
+  try {
+    resolvedStaffId = await resolveStaffIdForNewUser(
+      { role: roleAssignment.role, isFounder: roleAssignment.role === 'founder' },
+      { requestedStaffId: body.staffId },
+    );
+  } catch (error) {
+    if (error?.code === 'STAFF_ID_EXISTS') return bad(res, 409, error.message || 'Staff ID already exists', 'STAFF_ID_EXISTS');
+    return bad(res, 400, error?.message || 'Invalid Staff ID', 'INVALID_STAFF_ID');
+  }
+
+  if (!generateTemporaryPassword && resolvedStaffId.staffId === providedPassword) {
+    return bad(res, 400, 'Password cannot match Staff ID', 'STAFF_ID_PASSWORD_NOT_ALLOWED');
+  }
+
   const temporaryPassword = generateTemporaryPassword ? generateTempPassword() : null;
   const password = generateTemporaryPassword ? temporaryPassword : providedPassword;
   const passwordHash = await hashPassword(password);
@@ -327,7 +356,9 @@ async function createUserHandler(req, res) {
     email,
     name: fullName,
     fullName,
-    staffId: staffId || null,
+    staffId: resolvedStaffId.staffId,
+    staffIdGeneratedAt: resolvedStaffId.generatedAt,
+    staffIdLocked: true,
     roleId: roleAssignment.roleId || null,
     roleName: roleAssignment.roleName || roleAssignment.role,
     role: roleAssignment.role,
@@ -355,6 +386,13 @@ async function createUserHandler(req, res) {
   });
 
   await logAudit(req, 'TEAM_CREATE_USER', String(created._id), { email, role: roleAssignment.role, roleId: roleAssignment.roleId || null, generatedTemporaryPassword: generateTemporaryPassword });
+  if (resolvedStaffId.generated) {
+    await logAudit(req, 'TEAM_STAFF_ID_GENERATED', String(created._id), {
+      staffId: resolvedStaffId.staffId,
+      year: resolvedStaffId.year,
+      sequence: resolvedStaffId.sequence,
+    });
+  }
   if (roleAssignment.roleId) await logAudit(req, 'TEAM_ROLE_CHANGE', String(created._id), { to: roleAssignment.roleId, role: roleAssignment.role });
   if (accessOverride.audit.length) await logAudit(req, 'TEAM_ACCESS_CHANGE', String(created._id), { fields: accessOverride.audit });
   return ok(
@@ -373,7 +411,9 @@ async function getUserHandler(req, res) {
   if (!ensureDb(res)) return;
   const user = await findUserById(req.params.id, res);
   if (!user) return;
-  return ok(res, { data: { user: safeUserDto(user) }, user: safeUserDto(user) });
+  const ensured = await ensureUserStaffId(user, { action: 'TEAM_STAFF_ID_BACKFILLED' });
+  const finalUser = ensured.user || user;
+  return ok(res, { data: { user: safeUserDto(finalUser) }, user: safeUserDto(finalUser) });
 }
 
 async function updateUserHandler(req, res) {
@@ -394,8 +434,12 @@ async function updateUserHandler(req, res) {
     audit.fields.push('fullName');
   }
   if (body.staffId !== undefined) {
-    patch.staffId = body.staffId != null ? String(body.staffId || '').trim() : null;
-    audit.fields.push('staffId');
+    if (!staffIdMigrationEnabled(req, body) || user.staffIdLocked || user.staffId) {
+      await logAudit(req, 'TEAM_STAFF_ID_CHANGE_BLOCKED', String(user._id), {
+        attemptedStaffId: body.staffId != null ? String(body.staffId || '').trim() : null,
+      });
+      return bad(res, 400, 'Staff ID is immutable after creation', 'STAFF_ID_IMMUTABLE');
+    }
   }
   if (body.role !== undefined || body.roleId !== undefined || body.roleName !== undefined || body.roleSlug !== undefined) {
     const roleAssignment = await resolveRoleAssignment(req, body, user.role);
@@ -449,14 +493,29 @@ async function updateUserHandler(req, res) {
     if (!audit.fields.includes('coverageAreas')) audit.fields.push('coverageAreas');
   }
 
+  if (body.staffId !== undefined && staffIdMigrationEnabled(req, body) && !user.staffId) {
+    try {
+      const resolvedStaffId = await resolveStaffIdForNewUser(user, { requestedStaffId: body.staffId, excludeUserId: String(user._id) });
+      patch.staffId = resolvedStaffId.staffId;
+      patch.staffIdLocked = true;
+      patch.staffIdGeneratedAt = resolvedStaffId.generatedAt;
+      audit.fields.push('staffId');
+    } catch (error) {
+      if (error?.code === 'STAFF_ID_EXISTS') return bad(res, 409, error.message || 'Staff ID already exists', 'STAFF_ID_EXISTS');
+      return bad(res, 400, error?.message || 'Invalid Staff ID', 'INVALID_STAFF_ID');
+    }
+  }
+
   const updated = await User.findByIdAndUpdate(req.params.id, { $set: patch }, { new: true });
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  const ensured = await ensureUserStaffId(updated, { action: 'TEAM_STAFF_ID_BACKFILLED' });
+  const finalUser = ensured.user || updated;
 
-  if (audit.roleChanged) await logAudit(req, 'TEAM_ROLE_CHANGE', String(updated._id), audit.roleChanged);
+  if (audit.roleChanged) await logAudit(req, 'TEAM_ROLE_CHANGE', String(finalUser._id), audit.roleChanged);
   if (accessOverride.audit.includes('moduleAccessOverride')) await logAudit(req, 'TEAM_ACCESS_CHANGE', String(updated._id), { moduleAccessOverride: patch.moduleAccessOverride });
   if (accessOverride.audit.includes('specialRightsOverride')) await logAudit(req, 'TEAM_SPECIAL_RIGHTS_CHANGE', String(updated._id), { specialRightsOverride: patch.specialRightsOverride });
-  await logAudit(req, 'TEAM_UPDATE_USER', String(updated._id), audit);
-  return ok(res, { data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
+  await logAudit(req, 'TEAM_UPDATE_USER', String(finalUser._id), audit);
+  return ok(res, { data: { user: safeUserDto(finalUser) }, user: safeUserDto(finalUser) });
 }
 
 async function accessOverrideHandler(req, res) {
@@ -630,6 +689,12 @@ async function optionsHandler(_req, res) {
   });
 }
 
+async function nextStaffIdHandler(_req, res) {
+  if (!ensureDb(res)) return;
+  const preview = await previewNextStaffId();
+  return ok(res, { data: preview, nextStaffId: preview.staffId });
+}
+
 async function activateUserHandler(req, res) {
   if (!ensureDb(res)) return;
   const user = await findUserById(req.params.id, res);
@@ -671,5 +736,6 @@ router.patch('/team/users/:id/activate', requireTeamAuth, requireTeamPermission(
 router.get('/audit-logs', requireTeamAuth, requireTeamPermission('auth.view_login_activity'), auditLogsHandler);
 router.get('/permissions', requireTeamAuth, (_req, res) => ok(res, { data: { permissions: AUTH_PERMISSIONS }, permissions: AUTH_PERMISSIONS }));
 router.get(['/options', '/team/options'], requireTeamAuth, requireTeamPermission('auth.create_user'), optionsHandler);
+router.get(['/next-staff-id', '/team/next-staff-id'], requireTeamAuth, requireTeamPermission('auth.create_user'), nextStaffIdHandler);
 
 module.exports = router;
