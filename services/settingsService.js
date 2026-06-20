@@ -106,8 +106,11 @@ class SettingsService {
 
     const doc = await SystemSetting.findOneAndUpdate(
       { key: k },
-      { $set: { key: k, value, updatedBy: actor } },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
+      {
+        $set: { value, updatedBy: actor },
+        $setOnInsert: { key: k },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: false },
     );
 
     // Update cache
