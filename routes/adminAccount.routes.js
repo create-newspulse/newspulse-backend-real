@@ -4,6 +4,7 @@ const bcrypt = require('bcrypt');
 
 const User = require('../models/User');
 const SessionLog = require('../models/SessionLog');
+const OtpToken = require('../models/OtpToken');
 const { logAudit } = require('../lib/audit');
 const { requireTeamAuth } = require('../lib/teamManagement');
 const {
@@ -14,6 +15,8 @@ const {
 } = require('../lib/teamAccess');
 
 const router = express.Router();
+const FOUNDER_STAFF_ID = 'NP-FND-0001';
+const FOUNDER_RECOVERY_EMAIL = 'newspulse.team@gmail.com';
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -39,6 +42,30 @@ function actorId(req) {
 
 function isFounderUser(user) {
   return Boolean(user?.isFounder || isFounderRole(user?.role));
+}
+
+function legacyRecoveryEmail(user) {
+  const candidates = [
+    user?.recoveryEmail,
+    user?.recovery_email,
+    user?.backupEmail,
+    typeof user?.recovery === 'string' ? user.recovery : null,
+    user?.recovery?.email,
+  ];
+  return String(candidates.find((value) => String(value || '').trim()) || '').trim().toLowerCase();
+}
+
+function isPrimaryFounder(user) {
+  return isFounderUser(user) && String(user?.staffId || '').trim().toUpperCase() === FOUNDER_STAFF_ID;
+}
+
+async function ensureFounderRecoveryEmail(user) {
+  if (!isPrimaryFounder(user)) return user;
+  const currentRecoveryEmail = legacyRecoveryEmail(user);
+  if (currentRecoveryEmail) return user;
+  user.recoveryEmail = FOUNDER_RECOVERY_EMAIL;
+  await user.save();
+  return user;
 }
 
 async function loadCurrentUser(req, res) {
@@ -70,20 +97,24 @@ function publicRole(user) {
 
 function founderAccountDto(user) {
   const fullName = user?.fullName || user?.name || 'Founder';
+  const recoveryEmail = legacyRecoveryEmail(user) || (isPrimaryFounder(user) ? FOUNDER_RECOVERY_EMAIL : null);
   return {
     id: String(user._id),
     fullName,
     name: fullName,
     email: user.email,
+    recoveryEmail,
     staffId: user.staffId || 'NP-FND-0001',
     role: 'Founder',
     isFounder: true,
     isProtected: true,
+    fullAccess: Boolean(user.fullAccess || isFounderUser(user)),
     badges: ['Founder', 'Full Access', 'Protected'],
     accountStatus: accountStatus(user),
     sessionStatus: sessionStatus(user),
     lastLoginAt: user.lastLoginAt || null,
     lastPasswordChangedAt: user.lastPasswordChangedAt || null,
+    mustChangePassword: Boolean(user.mustChangePassword || user.mustResetPassword || user.forceReset),
     twoFactorStatus: user.twoFactorStatus || 'not_configured',
   };
 }
@@ -149,14 +180,15 @@ async function endOwnSessions(user, reason, options = {}) {
 
 async function meHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await loadCurrentUser(req, res);
+  let user = await loadCurrentUser(req, res);
   if (!user) return;
+  user = await ensureFounderRecoveryEmail(user);
   return ok(res, { user: currentAccountDto(user), data: { user: currentAccountDto(user) } });
 }
 
 async function founderMyAccountHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await loadCurrentUser(req, res);
+  let user = await loadCurrentUser(req, res);
   if (!user) return;
 
   if (!isFounderUser(user)) {
@@ -164,6 +196,7 @@ async function founderMyAccountHandler(req, res) {
     return bad(res, 403, 'Founder My Account is restricted to Founder', 'FOUNDER_ONLY');
   }
 
+  user = await ensureFounderRecoveryEmail(user);
   await logAudit(req, 'USER_VIEWED_MY_ACCOUNT', String(user._id), { area: 'founder' });
   return ok(res, { user: founderAccountDto(user), data: { user: founderAccountDto(user) } });
 }
@@ -187,13 +220,20 @@ async function changePasswordHandler(req, res) {
   if (!user) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  const currentPassword = String(body.currentPassword || '');
-  const newPassword = String(body.newPassword || '');
-  const confirmPassword = String(body.confirmPassword || '');
+  const currentPassword = String(body.currentPassword || body.oldPassword || body.password || '');
+  const newPassword = String(body.newPassword || body.newPass || '');
+  const confirmPassword = String(body.confirmPassword || body.confirmNewPassword || '');
 
   if (!currentPassword || !newPassword || !confirmPassword) {
     await logAudit(req, 'USER_CHANGE_OWN_PASSWORD_FAILED', String(user._id), { reason: 'missing_fields' });
-    return bad(res, 400, 'currentPassword, newPassword and confirmPassword are required', 'MISSING_FIELDS');
+    return res.status(400).json({
+      ok: false,
+      success: false,
+      status: 400,
+      code: 'MISSING_FIELDS',
+      message: 'currentPassword, newPassword and confirmPassword are required',
+      receivedKeys: Object.keys(body),
+    });
   }
 
   if (newPassword !== confirmPassword) {
@@ -234,18 +274,19 @@ async function changePasswordHandler(req, res) {
   user.updatedAt = now;
   user.tokenVersion = (typeof user.tokenVersion === 'number' ? user.tokenVersion : 0) + 1;
   await endOwnSessions(user, 'own_password_changed', { now, excludeCurrent: true });
+  await OtpToken.updateMany(
+    { email: user.email, used: false },
+    { $set: { used: true, status: 'replaced', replacedAt: now, resetToken: null, resetTokenExpiresAt: now } },
+  );
   await user.save();
 
+  await logAudit(req, 'PASSWORD_CHANGED', String(user._id), { revokedOtherSessions: true });
   await logAudit(req, 'USER_CHANGED_OWN_PASSWORD', String(user._id), { revokedOtherSessions: true });
   if (wasMustChangePassword) {
     await logAudit(req, 'MUST_CHANGE_PASSWORD_COMPLETED', String(user._id), null);
   }
 
-  return ok(res, {
-    message: 'Password changed successfully.',
-    user: currentAccountDto(user),
-    data: { user: currentAccountDto(user) },
-  });
+  return ok(res, { message: 'Password updated successfully' });
 }
 
 async function sessionsHandler(req, res) {

@@ -13,6 +13,7 @@
     "test-email": "node scripts/test-email.js",
     "test-routes": "node scripts/test-routes.js",
     "verify:sponsored-feature": "node scripts/verify-sponsored-feature.js",
+    "cleanup:founder-duplicates": "node scripts/cleanupFounderDuplicates.js",
     "migrate:normalize-community": "node scripts/migrate-normalize-community-submissions.js",
     "repair:community-reporters": "node scripts/repair-community-reporter-identities.js",
     "repair:founder": "node scripts/repairFounderAccount.js",

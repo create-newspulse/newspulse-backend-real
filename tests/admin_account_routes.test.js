@@ -11,6 +11,7 @@ const request = require('supertest');
 
 const User = require('../models/User');
 const SessionLog = require('../models/SessionLog');
+const OtpToken = require('../models/OtpToken');
 const AuditLog = require('../models/AuditLog');
 const adminAccountRoutes = require('../routes/adminAccount.routes');
 
@@ -18,6 +19,7 @@ let originalReadyState;
 let usersById;
 let sessions;
 let sessionUpdates;
+let otpTokenUpdates;
 let auditLogs;
 
 function buildApp() {
@@ -81,6 +83,7 @@ test.beforeEach(async () => {
   mongoose.connection.readyState = 1;
   auditLogs = [];
   sessionUpdates = [];
+  otpTokenUpdates = [];
 
   const founder = {
     _id: '507f1f77bcf86cd799439101',
@@ -189,6 +192,10 @@ test.beforeEach(async () => {
     }
     return { modifiedCount: sessions.length };
   };
+  OtpToken.updateMany = async (filter, update) => {
+    otpTokenUpdates.push({ filter, update });
+    return { modifiedCount: 1 };
+  };
   AuditLog.create = async (payload) => {
     auditLogs.push(payload);
     return payload;
@@ -209,12 +216,16 @@ test('Founder can access Founder My Account and response never exposes passwords
 
   assert.equal(res.status, 200);
   assert.equal(res.body.user.email, 'founder@example.com');
+  assert.equal(res.body.user.recoveryEmail, 'newspulse.team@gmail.com');
   assert.equal(res.body.user.staffId, 'NP-FND-0001');
   assert.equal(res.body.user.role, 'Founder');
   assert.equal(res.body.user.isFounder, true);
   assert.equal(res.body.user.isProtected, true);
+  assert.equal(res.body.user.fullAccess, true);
+  assert.equal(res.body.user.mustChangePassword, false);
   assert.deepEqual(res.body.user.badges, ['Founder', 'Full Access', 'Protected']);
   assert.equal(res.body.user.twoFactorStatus, 'not_configured');
+  assert.equal(findUser(founder._id).recoveryEmail, 'newspulse.team@gmail.com');
   assert.equal(JSON.stringify(res.body).includes('password'), false);
   assert.ok(auditLogs.some((entry) => entry.action === 'USER_VIEWED_MY_ACCOUNT'));
 });
@@ -285,6 +296,7 @@ test('Current user endpoint returns own account area for Founder and Staff', asy
 
   assert.equal(founderRes.status, 200);
   assert.equal(founderRes.body.user.isFounder, true);
+  assert.equal(founderRes.body.user.recoveryEmail, 'newspulse.team@gmail.com');
   assert.equal(staffRes.status, 200);
   assert.equal(staffRes.body.user.email, 'staff@example.com');
   assert.equal(staffRes.body.user.isFounder, false);
@@ -307,17 +319,35 @@ test('Own password change updates only the authenticated user and never returns 
     });
 
   assert.equal(res.status, 200);
-  assert.equal(res.body.user.email, 'staff@example.com');
-  assert.equal(res.body.user.mustChangePassword, false);
+  assert.equal(res.body.message, 'Password updated successfully');
   assert.equal(await bcrypt.compare('StaffNew123', findUser(staff._id).passwordHash), true);
+  assert.equal(findUser(staff._id).mustChangePassword, false);
   assert.equal(findUser(founder._id).passwordHash, founderHashBefore);
   assert.ok(findUser(staff._id).lastPasswordChangedAt);
   assert.equal(sessionUpdates[0].filter._id.$ne, staff.currentSessionId);
+  assert.equal(otpTokenUpdates[0].filter.email, 'staff@example.com');
+  assert.equal(otpTokenUpdates[0].update.$set.used, true);
   assert.equal(JSON.stringify(res.body).includes('StaffPass123'), false);
   assert.equal(JSON.stringify(res.body).includes('StaffNew123'), false);
   assert.equal(JSON.stringify(res.body).includes('passwordHash'), false);
+  assert.ok(auditLogs.some((entry) => entry.action === 'PASSWORD_CHANGED'));
   assert.ok(auditLogs.some((entry) => entry.action === 'USER_CHANGED_OWN_PASSWORD'));
   assert.ok(auditLogs.some((entry) => entry.action === 'MUST_CHANGE_PASSWORD_COMPLETED'));
+});
+
+test('Own password change accepts safe frontend alias fields', async () => {
+  const app = buildApp();
+  const staff = findUser('507f1f77bcf86cd799439103');
+
+  const res = await request(app)
+    .post('/admin-api/admin/account/change-password')
+    .set('Authorization', `Bearer ${signToken(staff)}`)
+    .send({ oldPassword: 'StaffPass123', newPass: 'StaffAlias123', confirmNewPassword: 'StaffAlias123' });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.success, true);
+  assert.equal(res.body.message, 'Password updated successfully');
+  assert.equal(await bcrypt.compare('StaffAlias123', findUser(staff._id).passwordHash), true);
 });
 
 test('Own password change requires current password and matching confirmation', async () => {
@@ -331,6 +361,16 @@ test('Own password change requires current password and matching confirmation', 
 
   assert.equal(mismatch.status, 400);
   assert.equal(mismatch.body.code, 'PASSWORD_MISMATCH');
+
+  const missing = await request(app)
+    .post('/admin-api/admin/account/change-password')
+    .set('Authorization', `Bearer ${signToken(staff)}`)
+    .send({ currentPassword: 'StaffPass123', newPassword: 'StaffNew123' });
+
+  assert.equal(missing.status, 400);
+  assert.equal(missing.body.code, 'MISSING_FIELDS');
+  assert.deepEqual(missing.body.receivedKeys.sort(), ['currentPassword', 'newPassword'].sort());
+  assert.equal(JSON.stringify(missing.body).includes('StaffPass123'), false);
 
   const wrongCurrent = await request(app)
     .post('/admin-api/admin/account/change-password')

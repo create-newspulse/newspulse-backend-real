@@ -41,6 +41,8 @@ const userSchema = new mongoose.Schema({
   specialRightsOverride: { type: [String], default: [] },
   status: { type: String, enum: ['pending', 'active', 'suspended', 'expired', 'locked'], default: 'pending', index: true },
   accountStatus: { type: String, enum: ['active', 'suspended', 'locked', 'expired'], default: 'active', index: true },
+  loginAllowed: { type: Boolean, default: true, index: true },
+  accountNote: { type: String, default: null, trim: true },
   onlineStatus: { type: String, enum: ['online', 'idle', 'offline', 'on_break'], default: 'offline', index: true },
   // Legacy flag used by older admin/staff endpoints
   forceReset: { type: Boolean, default: false },

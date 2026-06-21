@@ -17,6 +17,9 @@ const {
   resolveLocalFounderSeedConfig,
 } = require('../lib/localFounderAuth');
 
+const OFFICIAL_FOUNDER_EMAIL = 'kiran@newspulse.co.in';
+const FOUNDER_RECOVERY_EMAIL = 'newspulse.team@gmail.com';
+
 const router = express.Router();
 
 // ✅ Shared admin/founder auth middleware
@@ -74,6 +77,18 @@ function logLocalAdminRefresh(details) {
   console.log('[admin.refresh.local]', details);
 }
 
+function adminLoginEmailCandidates(localFounderConfig, localDev) {
+  return [
+    process.env.ADMIN_EMAIL,
+    process.env.FOUNDER_EMAIL,
+    process.env.ADMIN_SEED_FOUNDER_EMAIL,
+    OFFICIAL_FOUNDER_EMAIL,
+    localDev ? localFounderConfig.email : '',
+  ]
+    .map((value) => String(value || '').trim())
+    .filter((value) => value && value.toLowerCase() !== FOUNDER_RECOVERY_EMAIL);
+}
+
 // ─────────────────────────────────────────────
 // PUBLIC: login/logout/health
 // ─────────────────────────────────────────────
@@ -109,12 +124,7 @@ router.post('/login', async (req, res, next) => {
   // - FOUNDER_EMAIL / FOUNDER_PASSWORD (older deployments)
   const localFounderConfig = resolveLocalFounderSeedConfig();
   const localDev = isLocalDevLike();
-  const adminEmail = String(
-    process.env.ADMIN_EMAIL
-    || process.env.FOUNDER_EMAIL
-    || process.env.ADMIN_SEED_FOUNDER_EMAIL
-    || (localDev ? localFounderConfig.email : '')
-  ).trim();
+  const adminEmail = adminLoginEmailCandidates(localFounderConfig, localDev)[0] || '';
   const adminPassword = String(
     process.env.ADMIN_PASSWORD
     || process.env.ADMIN_PASS
@@ -245,6 +255,10 @@ router.post('/login', async (req, res, next) => {
   if (dbReady) {
     try {
       const normalizedEmail = email.toLowerCase();
+      if (normalizedEmail === FOUNDER_RECOVERY_EMAIL) {
+        await logAudit(req, 'AUTH_LOGIN_FAILED', null, { email: normalizedEmail, reason: 'founder_recovery_email_not_login' });
+        return res.status(401).json({ ok: false, message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
+      }
       const u = await User.findOne({ email: normalizedEmail });
       let passwordMatch = false;
       localDebugUserFound = !!u;
@@ -256,6 +270,11 @@ router.post('/login', async (req, res, next) => {
           localDebugPasswordMatch = false;
           logLocalLoginDebug({ userFound: true, passwordMatch: false, roleFound: localDebugRoleFound, status: 'suspended' });
           return res.status(403).json({ ok: false, message: 'Account suspended' });
+        }
+        if (u.loginAllowed === false) {
+          localDebugPasswordMatch = false;
+          logLocalLoginDebug({ userFound: true, passwordMatch: false, roleFound: localDebugRoleFound, status: 'login_disabled' });
+          return res.status(403).json({ ok: false, message: 'Login disabled', code: 'LOGIN_DISABLED' });
         }
         if (blockedStatus === 'locked' || legacyStatus === 'locked' || (u.lockedUntil && u.lockedUntil > new Date())) {
           localDebugPasswordMatch = false;

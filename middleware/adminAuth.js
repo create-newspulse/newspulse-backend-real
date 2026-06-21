@@ -17,6 +17,9 @@ const {
   normalizeRole,
 } = require('../lib/teamAccess');
 
+const OFFICIAL_FOUNDER_EMAIL = 'kiran@newspulse.co.in';
+const FOUNDER_RECOVERY_EMAIL = 'newspulse.team@gmail.com';
+
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
@@ -35,12 +38,13 @@ function getFounderEmails() {
   const env = String(process.env.NODE_ENV || 'development').toLowerCase();
   const productionLike = env === 'production' || !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
   return Array.from(new Set([
+    OFFICIAL_FOUNDER_EMAIL,
     process.env.FOUNDER_EMAIL,
     process.env.ADMIN_EMAIL,
     process.env.FOUNDER_ALT_EMAIL,
     process.env.ADMIN_ALT_EMAIL,
     !productionLike ? 'founder@example.com' : null,
-  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)));
+  ].map((value) => String(value || '').trim().toLowerCase()).filter((value) => value && value !== FOUNDER_RECOVERY_EMAIL)));
 }
 
 async function requireAdminAuth(req, res, next) {
@@ -106,6 +110,9 @@ async function requireAdminAuth(req, res, next) {
           const userStatus = String(user.status || accountStatus || 'active').toLowerCase();
           if (userStatus === 'suspended' || accountStatus === 'suspended') {
             return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_SUSPENDED', message: 'Account suspended' });
+          }
+          if (user.loginAllowed === false) {
+            return res.status(403).json({ ok: false, success: false, status: 403, code: 'LOGIN_DISABLED', message: 'Login disabled' });
           }
           if (userStatus === 'locked' || accountStatus === 'locked' || (user.lockedUntil && user.lockedUntil > new Date())) {
             return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_LOCKED', message: 'Account locked' });
@@ -247,6 +254,9 @@ async function requireAdminJwt(req, res, next) {
         const accountStatus = String(user.accountStatus || user.status || 'active').toLowerCase();
         const userStatus = String(user.status || accountStatus || 'active').toLowerCase();
         if (userStatus === 'suspended' || userStatus === 'locked' || userStatus === 'expired' || accountStatus === 'suspended' || accountStatus === 'locked' || accountStatus === 'expired') {
+          return res.status(403).json({ ok: false, message: 'Forbidden' });
+        }
+        if (user.loginAllowed === false) {
           return res.status(403).json({ ok: false, message: 'Forbidden' });
         }
         if ((user.lockedUntil && user.lockedUntil > new Date()) || (user.accessExpiresAt && user.accessExpiresAt <= new Date())) {

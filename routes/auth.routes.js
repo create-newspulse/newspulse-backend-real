@@ -102,6 +102,12 @@ async function enforceLoginAccountState(req, res, user) {
   const status = String(user.status || 'active').toLowerCase();
   const accountStatus = String(user.accountStatus || '').toLowerCase();
 
+  if (user.loginAllowed === false) {
+    await logAudit(req, 'AUTH_LOGIN_FAILED', String(user._id), { reason: 'login_disabled' });
+    bad(res, 403, 'Login disabled', 'LOGIN_DISABLED');
+    return false;
+  }
+
   if (status === 'locked' && user.lockedUntil && user.lockedUntil <= now) {
     user.status = 'active';
     if (accountStatus === 'locked') user.accountStatus = 'active';
