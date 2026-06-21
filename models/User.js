@@ -3,6 +3,20 @@ const { normalizeOrganizationFields } = require('../lib/teamAccess');
 
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  emailHistory: {
+    type: [{
+      oldEmail: { type: String, required: true, lowercase: true, trim: true },
+      newEmail: { type: String, required: true, lowercase: true, trim: true },
+      changedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      changedAt: { type: Date, default: Date.now },
+      reason: { type: String, default: '', trim: true },
+    }],
+    default: [],
+  },
+  emailVerified: { type: Boolean, default: false },
+  pendingEmail: { type: String, default: null, lowercase: true, trim: true },
+  lastEmailChangedAt: { type: Date, default: null },
+  recoveryEmail: { type: String, default: null, lowercase: true, trim: true },
   name: { type: String, required: true },
   fullName: { type: String, default: null, trim: true },
   passwordHash: { type: String, required: true },
@@ -37,6 +51,9 @@ const userSchema = new mongoose.Schema({
   mustChangePassword: { type: Boolean, default: false },
   tempPasswordExpiresAt: { type: Date, default: null },
   tokenVersion: { type: Number, default: 0 },
+  sessionsRevokedAt: { type: Date, default: null },
+  resetTokensRevokedAt: { type: Date, default: null },
+  lastPasswordChangedAt: { type: Date, default: null },
   lastLoginAt: { type: Date, default: null },
   lastLogoutAt: { type: Date, default: null },
   lastSeenAt: { type: Date, default: null },
@@ -47,7 +64,12 @@ const userSchema = new mongoose.Schema({
   lockedUntil: { type: Date, default: null },
   accessExpiresAt: { type: Date, default: null },
   isFounder: { type: Boolean, default: false, index: true },
+  isOwner: { type: Boolean, default: false, index: true },
   isProtected: { type: Boolean, default: false, index: true },
+  fullAccess: { type: Boolean, default: false },
+  canBeDeleted: { type: Boolean, default: true },
+  canBeSuspended: { type: Boolean, default: true },
+  canBeDemoted: { type: Boolean, default: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 
@@ -79,7 +101,12 @@ userSchema.pre('save', function touchUpdatedAt(next) {
 
   if (String(this.role || '').toLowerCase() === 'founder') {
     this.isFounder = true;
+    this.isOwner = true;
     this.isProtected = true;
+    this.fullAccess = true;
+    this.canBeDeleted = false;
+    this.canBeSuspended = false;
+    this.canBeDemoted = false;
     this.status = 'active';
     this.accountStatus = 'active';
   }

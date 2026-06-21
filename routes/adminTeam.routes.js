@@ -5,7 +5,9 @@ const crypto = require('crypto');
 
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
+const OtpToken = require('../models/OtpToken');
 const Role = require('../models/Role');
+const SessionLog = require('../models/SessionLog');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const { requireAuth } = require('../middleware/requireAuth');
 const { logAudit } = require('../lib/audit');
@@ -54,6 +56,12 @@ function bad(res, status, message, code) {
   return res.status(status).json({ ok: false, success: false, status, code: code || undefined, message });
 }
 
+function authBad(res, status, code) {
+  if (status === 401) return bad(res, 401, 'Unauthorized. Please login again.', code || 'UNAUTHORIZED');
+  if (status === 403) return bad(res, 403, 'Access denied. Founder permission required.', code || 'FORBIDDEN');
+  return bad(res, status, status === 403 ? 'Forbidden' : 'Unauthorized', code);
+}
+
 function syncReqUserFromAdmin(req) {
   if (!req.admin) return;
   req.user = {
@@ -61,7 +69,9 @@ function syncReqUserFromAdmin(req) {
     email: req.admin.email || null,
     name: req.admin.name || null,
     role: req.admin.role || null,
+    moduleAccess: Array.isArray(req.admin.moduleAccess) ? req.admin.moduleAccess : [],
     permissions: Array.isArray(req.admin.permissions) ? req.admin.permissions : [],
+    specialRights: Array.isArray(req.admin.specialRights) ? req.admin.specialRights : [],
     status: req.admin.status || 'active',
     mustChangePassword: Boolean(req.admin.mustChangePassword),
     tokenVersion: typeof req.admin.tokenVersion === 'number' ? req.admin.tokenVersion : 0,
@@ -70,9 +80,17 @@ function syncReqUserFromAdmin(req) {
   };
 }
 
+function hasAdminCredential(req) {
+  const authHeader = String(req.headers.authorization || '');
+  const cookieHeader = String(req.headers.cookie || '');
+  return authHeader.toLowerCase().startsWith('bearer ')
+    || /(?:^|;\s*)np_admin(?:=|_email=|_session=|_access=|_token=)/.test(cookieHeader);
+}
+
 function requireTeamAuth(req, res, next) {
   const authHeader = String(req.headers.authorization || '');
   if (authHeader.toLowerCase().startsWith('bearer ')) return requireAuth(req, res, next);
+  if (!hasAdminCredential(req)) return authBad(res, 401, 'UNAUTHORIZED');
 
   return requireAdminAuth(req, res, function onAuthed(err) {
     if (err) return next(err);
@@ -83,15 +101,15 @@ function requireTeamAuth(req, res, next) {
 
 function requireTeamPermission(permission) {
   return (req, res, next) => {
-    if (!req.user) return bad(res, 401, 'Unauthorized', 'UNAUTHORIZED');
-    if (!hasPermission(req.user, permission)) return bad(res, 403, 'Forbidden', 'FORBIDDEN');
+    if (!req.user) return authBad(res, 401, 'UNAUTHORIZED');
+    if (!hasPermission(req.user, permission)) return authBad(res, 403, 'FORBIDDEN');
     return next();
   };
 }
 
 function requireFounderActor(req, res, next) {
-  if (!req.user) return bad(res, 401, 'Unauthorized', 'UNAUTHORIZED');
-  if (!isFounderRole(req.user.role) && !req.user.isFounder) return bad(res, 403, 'Founder role required', 'FOUNDER_REQUIRED');
+  if (!req.user) return authBad(res, 401, 'UNAUTHORIZED');
+  if (!isFounderRole(req.user.role) && !req.user.isFounder) return authBad(res, 403, 'FOUNDER_REQUIRED');
   return next();
 }
 
@@ -137,6 +155,17 @@ function parseDateOrNull(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return undefined;
   return date;
+}
+
+function pickDateAlias(body, primary, alias) {
+  return body[primary] !== undefined ? body[primary] : body[alias];
+}
+
+function normalizeRequestedStaffId(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return undefined;
+  if (/next\s+new\s+staff\s+id/i.test(raw)) return undefined;
+  return raw;
 }
 
 async function assignTemporaryPassword(userOrId) {
@@ -190,6 +219,61 @@ function includesFounderOnlyAccess(moduleAccess, specialRights) {
 
 function actorIsFounder(req) {
   return Boolean(req.user?.isFounder || isFounderRole(req.user?.role));
+}
+
+const SHARED_SYSTEM_EMAILS = Object.freeze([
+  'newspulse.team@gmail.com',
+  'newspulse.admin@gmail.com',
+  'newspulse.ads@gmail.com',
+]);
+
+function normalizeEmailAddress(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function isValidEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || ''));
+}
+
+function actorCanChangeStaffEmail(req) {
+  if (actorIsFounder(req)) return true;
+  if (hasPermission(req.user, 'auth.change_staff_email')) return true;
+  return Array.isArray(req.user?.specialRights) && req.user.specialRights.includes('staff_email_change');
+}
+
+function sharedSystemMailboxAllowed(req, body) {
+  return actorIsFounder(req) && body?.allowSharedSystemMailbox === true;
+}
+
+async function markUserSessionsRevoked(userId, revokedAt) {
+  await SessionLog.updateMany(
+    { userId, status: 'active' },
+    { $set: { status: 'ended', logoutAt: revokedAt, lastSeenAt: revokedAt, logoutReason: 'staff_email_changed' } },
+  );
+}
+
+async function revokeResetTokensForEmail(email, revokedAt) {
+  await OtpToken.updateMany(
+    { email, used: false },
+    {
+      $set: {
+        used: true,
+        status: 'replaced',
+        replacedAt: revokedAt,
+        resetToken: null,
+        resetTokenExpiresAt: revokedAt,
+      },
+    },
+  );
+}
+
+async function auditStaffEmail(req, action, targetUserId, meta = {}) {
+  await logAudit(req, action, targetUserId, {
+    actorId: req.user?.id || null,
+    targetUserId: targetUserId ? String(targetUserId) : null,
+    timestamp: new Date().toISOString(),
+    ...meta,
+  });
 }
 
 function staffIdMigrationEnabled(req, body) {
@@ -261,6 +345,12 @@ function rawDepartmentProvided(value) {
 function normalizeUserOrganizationInput(body, role, currentUser = null) {
   const roleValue = role || currentUser?.role || null;
   const departmentInput = body.department !== undefined ? body.department : currentUser?.department;
+  if (body.assignedSections !== undefined && !Array.isArray(body.assignedSections)) {
+    return { error: { status: 400, message: 'assignedSections must be an array', code: 'INVALID_ASSIGNED_SECTIONS' } };
+  }
+  if (body.coverageAreas !== undefined && !Array.isArray(body.coverageAreas)) {
+    return { error: { status: 400, message: 'coverageAreas must be an array', code: 'INVALID_COVERAGE_AREAS' } };
+  }
   const assignedInput = body.assignedSections !== undefined
     ? body.assignedSections
     : (body.sections !== undefined
@@ -309,11 +399,12 @@ async function createUserHandler(req, res) {
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const fullName = String(body.fullName || body.name || '').trim();
-  const email = String(body.email || '').trim().toLowerCase();
+  const email = String(body.email || body.loginId || '').trim().toLowerCase();
   const permissions = normalizePermissions(body.permissions);
   const generateTemporaryPassword = body.generateTemporaryPassword !== false;
   const providedPassword = String(body.password || body.initialPassword || '');
-  const accessExpiresAt = parseDateOrNull(body.accessExpiresAt);
+  const accessExpiresAtRaw = pickDateAlias(body, 'accessExpiresAt', 'accessExpiryDate');
+  const accessExpiresAt = parseDateOrNull(accessExpiresAtRaw);
 
   if (!fullName) return bad(res, 400, 'fullName is required', 'MISSING_FULL_NAME');
   if (!email) return bad(res, 400, 'email is required', 'INVALID_EMAIL');
@@ -323,7 +414,9 @@ async function createUserHandler(req, res) {
   if (organization.error) return bad(res, organization.error.status, organization.error.message, organization.error.code);
   const accessOverride = parseAccessOverride(req, body);
   if (accessOverride.error) return bad(res, accessOverride.error.status, accessOverride.error.message, accessOverride.error.code);
-  if (accessExpiresAt === undefined && body.accessExpiresAt !== undefined) return bad(res, 400, 'Invalid accessExpiresAt', 'INVALID_DATE');
+  const accountStatus = normalizeStatus(body.accountStatus !== undefined ? body.accountStatus : body.status);
+  if ((body.accountStatus !== undefined || body.status !== undefined) && !accountStatus) return bad(res, 400, 'Invalid accountStatus', 'INVALID_STATUS');
+  if (accessExpiresAt === undefined && accessExpiresAtRaw !== undefined) return bad(res, 400, 'Invalid accessExpiryDate', 'INVALID_DATE');
   if (!generateTemporaryPassword) {
     const policy = requirePasswordPolicy(providedPassword);
     if (!policy.ok) return bad(res, 400, policy.message, 'WEAK_PASSWORD');
@@ -336,7 +429,7 @@ async function createUserHandler(req, res) {
   try {
     resolvedStaffId = await resolveStaffIdForNewUser(
       { role: roleAssignment.role, isFounder: roleAssignment.role === 'founder' },
-      { requestedStaffId: body.staffId },
+      { requestedStaffId: normalizeRequestedStaffId(body.staffId) },
     );
   } catch (error) {
     if (error?.code === 'STAFF_ID_EXISTS') return bad(res, 409, error.message || 'Staff ID already exists', 'STAFF_ID_EXISTS');
@@ -371,7 +464,8 @@ async function createUserHandler(req, res) {
     moduleAccessOverride: accessOverride.patch.moduleAccessOverride || [],
     specialRightsOverride: accessOverride.patch.specialRightsOverride || [],
     passwordHash,
-    status: normalizeStatus(body.status) || 'active',
+    status: accountStatus || 'active',
+    accountStatus: accountStatus || 'active',
     mustChangePassword: generateTemporaryPassword,
     mustResetPassword: generateTemporaryPassword,
     forceReset: generateTemporaryPassword,
@@ -462,10 +556,17 @@ async function updateUserHandler(req, res) {
     patch.accessExpiresAt = accessExpiresAt;
     audit.fields.push('accessExpiresAt');
   }
-  if (body.status !== undefined) {
-    const status = normalizeStatus(body.status);
+  if (body.accessExpiryDate !== undefined) {
+    const accessExpiresAt = parseDateOrNull(body.accessExpiryDate);
+    if (accessExpiresAt === undefined) return bad(res, 400, 'Invalid accessExpiryDate', 'INVALID_DATE');
+    patch.accessExpiresAt = accessExpiresAt;
+    audit.fields.push('accessExpiresAt');
+  }
+  if (body.status !== undefined || body.accountStatus !== undefined) {
+    const status = normalizeStatus(body.accountStatus !== undefined ? body.accountStatus : body.status);
     if (!status) return bad(res, 400, 'Invalid status', 'INVALID_STATUS');
     patch.status = status;
+    patch.accountStatus = status;
     audit.fields.push('status');
   }
   const accessOverride = parseAccessOverride(req, body);
@@ -495,7 +596,7 @@ async function updateUserHandler(req, res) {
 
   if (body.staffId !== undefined && staffIdMigrationEnabled(req, body) && !user.staffId) {
     try {
-      const resolvedStaffId = await resolveStaffIdForNewUser(user, { requestedStaffId: body.staffId, excludeUserId: String(user._id) });
+      const resolvedStaffId = await resolveStaffIdForNewUser(user, { requestedStaffId: normalizeRequestedStaffId(body.staffId), excludeUserId: String(user._id) });
       patch.staffId = resolvedStaffId.staffId;
       patch.staffIdLocked = true;
       patch.staffIdGeneratedAt = resolvedStaffId.generatedAt;
@@ -516,6 +617,121 @@ async function updateUserHandler(req, res) {
   if (accessOverride.audit.includes('specialRightsOverride')) await logAudit(req, 'TEAM_SPECIAL_RIGHTS_CHANGE', String(updated._id), { specialRightsOverride: patch.specialRightsOverride });
   await logAudit(req, 'TEAM_UPDATE_USER', String(finalUser._id), audit);
   return ok(res, { data: { user: safeUserDto(finalUser) }, user: safeUserDto(finalUser) });
+}
+
+async function changeUserEmailHandler(req, res) {
+  if (!ensureDb(res)) return;
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const newEmail = normalizeEmailAddress(body.newEmail || body.email || body.loginId);
+  const reason = String(body.reason || '').trim().slice(0, 500);
+
+  if (!actorCanChangeStaffEmail(req)) {
+    await auditStaffEmail(req, 'STAFF_EMAIL_CHANGE_BLOCKED', req.params.id, { reason: 'missing_permission', attemptedEmail: newEmail || null });
+    return bad(res, 403, 'Forbidden', 'FORBIDDEN');
+  }
+
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+
+  const oldEmail = normalizeEmailAddress(user.email);
+  if (isProtectedFounderUser(user)) {
+    await auditStaffEmail(req, 'STAFF_FOUNDER_EMAIL_CHANGE_BLOCKED', String(user._id), { oldEmail, newEmail: newEmail || null, reason });
+    return bad(res, 403, 'Founder email changes require Founder Safe Zone flow', 'FOUNDER_EMAIL_PROTECTED');
+  }
+
+  if (!newEmail) {
+    await auditStaffEmail(req, 'STAFF_EMAIL_CHANGE_BLOCKED', String(user._id), { oldEmail, reason: 'missing_new_email' });
+    return bad(res, 400, 'newEmail is required', 'MISSING_EMAIL');
+  }
+
+  if (!isValidEmail(newEmail)) {
+    await auditStaffEmail(req, 'STAFF_EMAIL_CHANGE_BLOCKED', String(user._id), { oldEmail, newEmail, reason: 'invalid_email' });
+    return bad(res, 400, 'Invalid email', 'INVALID_EMAIL');
+  }
+
+  if (newEmail === oldEmail) {
+    await auditStaffEmail(req, 'STAFF_EMAIL_CHANGE_BLOCKED', String(user._id), { oldEmail, newEmail, reason: 'email_unchanged' });
+    return bad(res, 400, 'New email must be different from current email', 'EMAIL_UNCHANGED');
+  }
+
+  if (SHARED_SYSTEM_EMAILS.includes(newEmail) && !sharedSystemMailboxAllowed(req, body)) {
+    await auditStaffEmail(req, 'STAFF_EMAIL_CHANGE_BLOCKED', String(user._id), { oldEmail, newEmail, reason: 'shared_system_mailbox' });
+    return bad(res, 400, 'Shared News Pulse system mailboxes cannot be used for normal staff login', 'SHARED_SYSTEM_EMAIL_BLOCKED');
+  }
+
+  const duplicate = await User.findOne({ email: newEmail }).lean();
+  if (duplicate) {
+    await auditStaffEmail(req, 'STAFF_EMAIL_CHANGE_DUPLICATE', String(user._id), { oldEmail, newEmail, duplicateUserId: String(duplicate._id || duplicate.id || '') || null, reason });
+    return bad(res, 409, 'Email already exists', 'EMAIL_EXISTS');
+  }
+
+  const now = new Date();
+  await revokeResetTokensForEmail(oldEmail, now);
+  await markUserSessionsRevoked(user._id, now);
+
+  const updated = await User.findByIdAndUpdate(
+    req.params.id,
+    {
+      $set: {
+        email: newEmail,
+        emailVerified: false,
+        pendingEmail: null,
+        lastEmailChangedAt: now,
+        mustChangePassword: true,
+        mustResetPassword: true,
+        forceReset: true,
+        sessionsRevokedAt: now,
+        resetTokensRevokedAt: now,
+        currentSessionId: null,
+        onlineStatus: 'offline',
+        lastLogoutAt: now,
+        updatedBy: actorId(req),
+        updatedAt: now,
+      },
+      $push: {
+        emailHistory: {
+          oldEmail,
+          newEmail,
+          changedBy: actorId(req),
+          changedAt: now,
+          reason,
+        },
+      },
+      $inc: { tokenVersion: 1 },
+    },
+    { new: true },
+  );
+
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+
+  await auditStaffEmail(req, 'STAFF_EMAIL_CHANGED', String(updated._id), {
+    oldEmail,
+    newEmail,
+    reason,
+    forcePasswordChange: true,
+    logoutAllDevices: true,
+    sessionsRevokedAt: now,
+    resetTokensRevokedAt: now,
+  });
+
+  return ok(res, {
+    message: 'Staff email updated. User must change password on next login.',
+    user: {
+      id: String(updated._id),
+      email: updated.email,
+      staffId: updated.staffId || null,
+      mustChangePassword: true,
+    },
+    data: {
+      user: {
+        id: String(updated._id),
+        email: updated.email,
+        staffId: updated.staffId || null,
+        mustChangePassword: true,
+      },
+    },
+  });
 }
 
 async function accessOverrideHandler(req, res) {
@@ -665,6 +881,10 @@ async function auditLogsHandler(_req, res) {
     'TEAM_ROLE_CHANGE',
     'TEAM_LIVE_TV_PERMISSION_CHANGE',
     'TEAM_LOGOUT_USER_SESSIONS',
+    'STAFF_EMAIL_CHANGED',
+    'STAFF_EMAIL_CHANGE_BLOCKED',
+    'STAFF_EMAIL_CHANGE_DUPLICATE',
+    'STAFF_FOUNDER_EMAIL_CHANGE_BLOCKED',
   ] } })
     .sort({ createdAt: -1 })
     .limit(200)
@@ -720,6 +940,7 @@ async function statusHandler(req, res) {
 router.get(['/users', '/team/users'], requireTeamAuth, requireTeamPermission('auth.create_user'), listUsersHandler);
 router.post(['/create-user', '/team/users'], requireTeamAuth, requireTeamPermission('auth.create_user'), createUserHandler);
 router.get(['/users/:id', '/team/users/:id'], requireTeamAuth, requireTeamPermission('auth.create_user'), getUserHandler);
+router.patch(['/users/:id/email', '/team/users/:id/email'], requireTeamAuth, changeUserEmailHandler);
 router.patch(['/users/:id', '/team/users/:id'], requireTeamAuth, requireTeamPermission('auth.create_user'), updateUserHandler);
 router.patch(['/users/:id/access', '/team/users/:id/access'], requireTeamAuth, requireFounderActor, accessOverrideHandler);
 router.patch(['/users/:id/suspend', '/team/users/:id/suspend'], requireTeamAuth, requireTeamPermission('auth.suspend_user'), suspendUserHandler);

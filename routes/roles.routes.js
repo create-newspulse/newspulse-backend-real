@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const Role = require('../models/Role');
 const User = require('../models/User');
 const { requireAuth, requireFounder } = require('../middleware/requireAuth');
+const { requireAdminAuth } = require('../middleware/adminAuth');
 const { logAudit } = require('../lib/audit');
 const {
   ADMIN_MODULE_KEYS,
@@ -25,6 +26,43 @@ function ok(res, data, status = 200) {
 
 function bad(res, status, message, code) {
   return res.status(status).json({ ok: false, success: false, status, code: code || undefined, message });
+}
+
+function syncReqUserFromAdmin(req) {
+  if (!req.admin) return;
+  req.user = {
+    id: req.admin.id || null,
+    email: req.admin.email || null,
+    name: req.admin.name || null,
+    role: req.admin.role || null,
+    permissions: Array.isArray(req.admin.permissions) ? req.admin.permissions : [],
+    status: req.admin.status || 'active',
+    isFounder: Boolean(req.admin.isFounder || String(req.admin.role || '').toLowerCase() === 'founder'),
+  };
+}
+
+function hasAdminCredential(req) {
+  const authHeader = String(req.headers.authorization || '');
+  const cookieHeader = String(req.headers.cookie || '');
+  return authHeader.toLowerCase().startsWith('bearer ')
+    || /(?:^|;\s*)np_admin(?:=|_email=|_session=|_access=|_token=)/.test(cookieHeader);
+}
+
+function requireRoleAuth(req, res, next) {
+  const authHeader = String(req.headers.authorization || '');
+  if (authHeader.toLowerCase().startsWith('bearer ')) return requireAuth(req, res, next);
+  if (!hasAdminCredential(req)) return bad(res, 401, 'Unauthorized. Please login again.', 'UNAUTHORIZED');
+
+  return requireAdminAuth(req, res, function onAuthed(err) {
+    if (err) return next(err);
+    syncReqUserFromAdmin(req);
+    return next();
+  });
+}
+
+function requireRoleFounder(req, res, next) {
+  if (req.user?.isFounder || String(req.user?.role || '').toLowerCase() === 'founder') return next();
+  return requireFounder(req, res, next);
 }
 
 function actorId(req) {
@@ -129,7 +167,7 @@ function parseRolePayload(body, existing) {
   return { patch };
 }
 
-router.use(requireAuth, requireFounder);
+router.use(requireRoleAuth, requireRoleFounder);
 
 router.get('/', async (req, res) => {
   try {

@@ -9,10 +9,15 @@ const mongoose = require('mongoose');
 
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
+const OtpToken = require('../models/OtpToken');
+const SessionLog = require('../models/SessionLog');
 const { TEAM_ROLES } = require('../lib/teamAccess');
 
 let usersById;
 let usersByEmail;
+let auditLogs;
+let otpTokenUpdates;
+let sessionUpdates;
 let originalReadyState;
 
 function cloneUser(user) {
@@ -23,6 +28,7 @@ function cloneUser(user) {
     sections: Array.isArray(user.sections) ? [...user.sections] : [],
     assignedSections: Array.isArray(user.assignedSections) ? [...user.assignedSections] : [],
     coverageAreas: Array.isArray(user.coverageAreas) ? [...user.coverageAreas] : [],
+    emailHistory: Array.isArray(user.emailHistory) ? user.emailHistory.map((entry) => ({ ...entry })) : [],
   };
 }
 
@@ -32,6 +38,7 @@ function seedUsers() {
     email: 'newspulse.team@gmail.com',
     name: 'Founder',
     role: 'founder',
+    staffId: 'NP-FND-0001',
     designation: null,
     permissions: [],
     status: 'active',
@@ -65,6 +72,9 @@ function seedUsers() {
     [founder.email, founder._id],
     [editor.email, editor._id],
   ]);
+  auditLogs = [];
+  otpTokenUpdates = [];
+  sessionUpdates = [];
 }
 
 function makeFindChain(users) {
@@ -99,17 +109,37 @@ User.create = async (payload) => {
 User.findByIdAndUpdate = async (id, update) => {
   const current = usersById.get(String(id));
   if (!current) return null;
+  const setPatch = update && update.$set ? update.$set : {};
   const next = {
     ...current,
-    ...(update && update.$set ? update.$set : {}),
+    ...setPatch,
     tokenVersion: current.tokenVersion + (update && update.$inc && typeof update.$inc.tokenVersion === 'number' ? update.$inc.tokenVersion : 0),
   };
+  if (update && update.$push) {
+    for (const [key, value] of Object.entries(update.$push)) {
+      next[key] = [...(Array.isArray(current[key]) ? current[key] : []), value];
+    }
+  }
   usersById.set(String(id), next);
+  if (setPatch.email && current.email && String(current.email).toLowerCase() !== String(setPatch.email).toLowerCase()) {
+    usersByEmail.delete(String(current.email).toLowerCase());
+  }
   if (next.email) usersByEmail.set(String(next.email).toLowerCase(), String(id));
   return cloneUser(next);
 };
 
-AuditLog.create = async () => ({ ok: true });
+AuditLog.create = async (payload) => {
+  auditLogs.push(payload);
+  return { ok: true };
+};
+OtpToken.updateMany = async (filter, update) => {
+  otpTokenUpdates.push({ filter, update });
+  return { modifiedCount: 1 };
+};
+SessionLog.updateMany = async (filter, update) => {
+  sessionUpdates.push({ filter, update });
+  return { modifiedCount: 1 };
+};
 
 const router = require('../routes/adminTeam.routes');
 
@@ -228,6 +258,60 @@ test('POST /api/admin/team/users creates intern users by default with one-time t
   assert.equal(res.body.data.user.department, 'Training / Internship');
   assert.equal(res.body.data.user.staffId, 'NP-2026-0001');
   assert.equal(res.body.data.user.staffIdLocked, true);
+});
+
+test('POST /api/admin/team/users accepts frontend payload aliases and ignores staff ID display text', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const res = await request(app)
+    .post('/api/admin/team/users')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({
+      fullName: 'Alias Staff',
+      loginId: 'alias-staff@example.com',
+      role: 'reporter',
+      accountStatus: 'active',
+      accessExpiryDate: '2026-12-31T00:00:00.000Z',
+      assignedSections: ['Gujarat'],
+      coverageAreas: ['All Gujarat'],
+      staffId: 'Next New Staff ID: NP-2026-0001',
+    });
+
+  assert.equal(res.status, 201);
+  assert.equal(res.body.data.user.email, 'alias-staff@example.com');
+  assert.equal(res.body.data.user.staffId, 'NP-2026-0001');
+  assert.equal(res.body.data.user.accountStatus, 'active');
+  assert.equal(usersById.get('507f1f77bcf86cd799439099').staffId, 'NP-2026-0001');
+});
+
+test('POST /api/admin/team/users returns useful array validation errors', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const res = await request(app)
+    .post('/api/admin/team/users')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({
+      fullName: 'Bad Sections',
+      email: 'bad-sections@example.com',
+      role: 'reporter',
+      assignedSections: 'Gujarat',
+    });
+
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'INVALID_ASSIGNED_SECTIONS');
+  assert.equal(res.body.message, 'assignedSections must be an array');
 });
 
 test('team create-user defaults editor department and Gujarat coverage while cleaning assigned section city values', async () => {
@@ -370,6 +454,141 @@ test('staff ID remains immutable after creation even when role changes', async (
   assert.equal(blockedStaffIdUpdate.status, 400);
   assert.equal(blockedStaffIdUpdate.body.code, 'STAFF_ID_IMMUTABLE');
   assert.equal(usersById.get(userId).staffId, originalStaffId);
+});
+
+test('PATCH /api/admin/team/users/:id/email changes login email while preserving Staff ID and revoking access', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  usersById.get('507f1f77bcf86cd799439012').staffId = 'NP-2026-0007';
+  usersById.get('507f1f77bcf86cd799439012').staffIdLocked = true;
+  const originalStaffId = usersById.get('507f1f77bcf86cd799439012').staffId;
+  const res = await request(app)
+    .patch('/api/admin/team/users/507f1f77bcf86cd799439012/email')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({
+      newEmail: '  Editor.Official@NewsPulse.Co.In  ',
+      reason: 'Staff moved to official News Pulse email',
+      forcePasswordChange: true,
+      logoutAllDevices: true,
+    });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.success, true);
+  assert.equal(res.body.user.email, 'editor.official@newspulse.co.in');
+  assert.equal(res.body.user.staffId, originalStaffId);
+  assert.equal(res.body.user.mustChangePassword, true);
+
+  const updated = usersById.get('507f1f77bcf86cd799439012');
+  assert.equal(updated.staffId, originalStaffId);
+  assert.equal(updated.role, 'editor');
+  assert.equal(updated.email, 'editor.official@newspulse.co.in');
+  assert.equal(updated.mustChangePassword, true);
+  assert.equal(updated.mustResetPassword, true);
+  assert.equal(updated.forceReset, true);
+  assert.equal(updated.tokenVersion, 1);
+  assert.equal(usersByEmail.has('editor@example.com'), false);
+  assert.equal(usersByEmail.get('editor.official@newspulse.co.in'), '507f1f77bcf86cd799439012');
+  assert.equal(updated.emailHistory.length, 1);
+  assert.equal(updated.emailHistory[0].oldEmail, 'editor@example.com');
+  assert.equal(updated.emailHistory[0].newEmail, 'editor.official@newspulse.co.in');
+
+  assert.equal(otpTokenUpdates.length, 1);
+  assert.equal(otpTokenUpdates[0].filter.email, 'editor@example.com');
+  assert.equal(otpTokenUpdates[0].update.$set.used, true);
+  assert.equal(sessionUpdates.length, 1);
+  assert.equal(String(sessionUpdates[0].filter.userId), '507f1f77bcf86cd799439012');
+  assert.equal(sessionUpdates[0].update.$set.status, 'ended');
+  assert.equal(sessionUpdates[0].update.$set.logoutReason, 'staff_email_changed');
+  assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_EMAIL_CHANGED'));
+});
+
+test('staff email endpoint blocks founder email changes, duplicate emails, and shared system mailboxes', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const founderChange = await request(app)
+    .patch('/api/admin/team/users/507f1f77bcf86cd799439011/email')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ newEmail: 'founder-new@example.com', reason: 'normal edit attempt' });
+
+  assert.equal(founderChange.status, 403);
+  assert.equal(founderChange.body.code, 'FOUNDER_EMAIL_PROTECTED');
+
+  const duplicate = await request(app)
+    .patch('/api/admin/team/users/507f1f77bcf86cd799439012/email')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ newEmail: 'newspulse.team@gmail.com', reason: 'duplicate check' });
+
+  assert.equal(duplicate.status, 400);
+  assert.equal(duplicate.body.code, 'SHARED_SYSTEM_EMAIL_BLOCKED');
+
+  usersById.set('507f1f77bcf86cd799439013', {
+    _id: '507f1f77bcf86cd799439013',
+    email: 'duplicate@example.com',
+    name: 'Duplicate',
+    role: 'reporter',
+    permissions: [],
+    status: 'active',
+    tokenVersion: 0,
+  });
+  usersByEmail.set('duplicate@example.com', '507f1f77bcf86cd799439013');
+
+  const duplicateNonSystem = await request(app)
+    .patch('/api/admin/team/users/507f1f77bcf86cd799439012/email')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ newEmail: 'duplicate@example.com', reason: 'duplicate check' });
+
+  assert.equal(duplicateNonSystem.status, 409);
+  assert.equal(duplicateNonSystem.body.code, 'EMAIL_EXISTS');
+  assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_FOUNDER_EMAIL_CHANGE_BLOCKED'));
+  assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_EMAIL_CHANGE_DUPLICATE'));
+});
+
+test('admin needs staff email change permission and staff cannot self-change login email', async () => {
+  const app = buildApp();
+
+  const editorToken = signToken({
+    sub: '507f1f77bcf86cd799439012',
+    email: 'editor@example.com',
+    role: 'editor',
+    name: 'Editor',
+  });
+
+  const selfChange = await request(app)
+    .patch('/api/admin/team/users/507f1f77bcf86cd799439012/email')
+    .set('Authorization', `Bearer ${editorToken}`)
+    .send({ newEmail: 'self-change@example.com', reason: 'self change' });
+
+  assert.equal(selfChange.status, 403);
+  assert.equal(selfChange.body.code, 'FORBIDDEN');
+
+  usersById.get('507f1f77bcf86cd799439012').role = 'admin';
+  usersById.get('507f1f77bcf86cd799439012').permissions = ['auth.change_staff_email'];
+  const delegatedAdminToken = signToken({
+    sub: '507f1f77bcf86cd799439012',
+    email: 'editor@example.com',
+    role: 'admin',
+    name: 'Editor Admin',
+  });
+
+  const delegatedChange = await request(app)
+    .patch('/api/admin/team/users/507f1f77bcf86cd799439012/email')
+    .set('Authorization', `Bearer ${delegatedAdminToken}`)
+    .send({ newEmail: 'delegated-admin@example.com', reason: 'Founder granted staff_email_change' });
+
+  assert.equal(delegatedChange.status, 200);
+  assert.equal(delegatedChange.body.user.email, 'delegated-admin@example.com');
 });
 
 test('Founder can create Admin but delegated non-founder cannot create Admin', async () => {

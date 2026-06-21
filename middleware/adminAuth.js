@@ -10,7 +10,12 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const User = require('../models/User');
 const { shouldLog } = require('../lib/logThrottle');
-const { effectivePermissions, normalizeRole } = require('../lib/teamAccess');
+const {
+  effectiveModuleAccess,
+  effectivePermissions,
+  effectiveSpecialRights,
+  normalizeRole,
+} = require('../lib/teamAccess');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -119,7 +124,9 @@ async function requireAdminAuth(req, res, next) {
             email: payload.email,
             role,
             name: payload.name,
+            moduleAccess: effectiveModuleAccess(user),
             permissions: effectivePermissions(user),
+            specialRights: effectiveSpecialRights(user),
             status: user.status || 'active',
             accountStatus: user.accountStatus || accountStatus,
             onlineStatus: user.onlineStatus || 'offline',

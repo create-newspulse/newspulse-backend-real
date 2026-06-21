@@ -326,6 +326,7 @@ const adminTickerAdsRouter = require('./routes/adminTickerAds.routes');
 const adminGlossaryRouter = require('./routes/adminGlossary.routes');
 
 const authRoutes = require('./routes/auth.routes');
+const adminAccountRoutes = require('./routes/adminAccount.routes');
 const auditRoutes = require('./routes/audit.routes');
 const adminTeamRoutes = require('./routes/adminTeam.routes');
 const teamPresenceRoutes = require('./routes/teamPresence.routes');
@@ -1551,7 +1552,16 @@ for (const p of ['/api/admin/stories', '/admin-api/admin/stories', '/admin-api/a
 }
 // Auth bootstrap endpoint for admin panel
 app.use('/api/auth', authRoutes);
+app.use('/api/admin', adminAccountRoutes);
+app.use('/admin-api/admin', adminAccountRoutes);
+app.use('/admin-api/api/admin', adminAccountRoutes);
 app.use('/api/roles', rolesRoutes);
+app.use('/api/admin/team', adminTeamRoutes);
+app.use('/admin-api/admin/team', adminTeamRoutes);
+app.use('/admin-api/api/admin/team', adminTeamRoutes);
+app.use('/api/admin/team/roles', rolesRoutes);
+app.use('/admin-api/admin/team/roles', rolesRoutes);
+app.use('/admin-api/api/admin/team/roles', rolesRoutes);
 app.use('/api/access', accessRoutes);
 app.use('/api/finance', financeRoutes);
 // Audit (founder-only)
@@ -1967,8 +1977,6 @@ app.use('/admin/staff', adminStaffRouter);
 // Admin panel proxy basePath support
 app.use('/admin-api/admin/staff', adminStaffRouter);
 app.use('/admin-api/api/admin/staff', adminStaffRouter);
-// Backward-compatible alias used by some admin panel builds
-app.use('/api/admin/team', adminStaffRouter);
 // Admin site settings (Founder-only)
 if (adminSiteSettingsHomeTopBarsRouter) app.use('/api/admin', adminSiteSettingsHomeTopBarsRouter);
 // Alias for admin analytics screen expecting /community/reporters at root
@@ -2083,6 +2091,8 @@ if (adminTeamRoutesV2) {
   app.use('/admin-api/admin/team', adminTeamRoutesV2);
   app.use('/admin-api/api/admin/team', adminTeamRoutesV2);
 }
+// Backward-compatible root alias used by older admin panel builds.
+app.use('/api/admin/team', adminStaffRouter);
 app.use('/api/admin', adminSecurityRoutes);
 app.use('/api/admin', adminAuditRoutes);
 if (adminMetaRoutes) app.use('/api/admin', adminMetaRoutes);

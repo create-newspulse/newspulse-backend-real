@@ -44,6 +44,31 @@ function maskEmail(e) {
   } catch (_) { return e; }
 }
 
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function resetBlockedStatus(user) {
+  const accountStatus = String(user?.accountStatus || user?.status || 'active').toLowerCase();
+  const status = String(user?.status || accountStatus || 'active').toLowerCase();
+  if (['suspended', 'locked', 'expired'].includes(status)) return status;
+  if (['suspended', 'locked', 'expired'].includes(accountStatus)) return accountStatus;
+  if (user?.lockedUntil && user.lockedUntil > new Date()) return 'locked';
+  if (user?.accessExpiresAt && user.accessExpiresAt <= new Date()) return 'expired';
+  return null;
+}
+
+async function findResetEligibleUser(email) {
+  const user = await User.findOne({ email: normalizeEmail(email) });
+  if (!user || resetBlockedStatus(user)) return null;
+  return user;
+}
+
+function resetTokenWasRevoked(user, otpRecord) {
+  if (!user?.resetTokensRevokedAt || !otpRecord?.createdAt) return false;
+  return new Date(otpRecord.createdAt).getTime() <= new Date(user.resetTokensRevokedAt).getTime();
+}
+
 async function handleRequest(req, res) {
   try {
     const { email } = req.body || {};
@@ -55,7 +80,7 @@ async function handleRequest(req, res) {
       return res.status(429).json({ ok: false, success: false, message: 'Too many OTP requests. Please try later.' });
     }
     otpRegister(ip);
-    const lowerEmail = email.toLowerCase();
+    const lowerEmail = normalizeEmail(email);
     const masked = maskEmail(lowerEmail);
     console.log('[OTP_REQUEST][start]', { emailMasked: masked, ip });
 
@@ -65,6 +90,12 @@ async function handleRequest(req, res) {
     const founderMatch = founderEmail && lowerEmail === founderEmail;
     const gatingAllowed = allowAny || founderMatch || !founderEmail;
     if (!gatingAllowed) {
+      return res.json({ ok: true, success: true, message: 'If this email is registered, an OTP has been sent.' });
+    }
+
+    const resetUser = await findResetEligibleUser(lowerEmail);
+    if (!resetUser) {
+      await ActivityLog.create({ type: 'otp_request_blocked', email: lowerEmail, meta: { reason: 'not_current_active_email' } });
       return res.json({ ok: true, success: true, message: 'If this email is registered, an OTP has been sent.' });
     }
 
@@ -136,9 +167,16 @@ async function handleVerify(req, res) {
       return res.status(400).json({ ok: false, message: 'Email and otp are required' });
     }
     console.log('[OTP_ROUTE_HIT][verify] email=', email);
-    const lowerEmail = email.toLowerCase();
+    const lowerEmail = normalizeEmail(email);
+    const resetUser = await findResetEligibleUser(lowerEmail);
+    if (!resetUser) {
+      return res.status(400).json({ ok: false, message: 'Invalid or expired OTP' });
+    }
     const otpRecord = await OtpToken.findOne({ email: lowerEmail, used: false }).sort({ createdAt: -1 });
     if (!otpRecord) {
+      return res.status(400).json({ ok: false, message: 'Invalid or expired OTP' });
+    }
+    if (resetTokenWasRevoked(resetUser, otpRecord)) {
       return res.status(400).json({ ok: false, message: 'Invalid or expired OTP' });
     }
     if (new Date() > otpRecord.expiresAt) {
@@ -173,13 +211,17 @@ router.post('/auth/reset-password', async (req, res) => {
 
     let otpRecord = null;
     if (resetToken) {
-      otpRecord = await OtpToken.findOne({ email: email.toLowerCase(), resetToken, used: false }).sort({ createdAt: -1 });
-      if (!otpRecord || !otpRecord.resetTokenExpiresAt || new Date() > otpRecord.resetTokenExpiresAt) {
+      const lowerEmail = normalizeEmail(email);
+      const resetUser = await findResetEligibleUser(lowerEmail);
+      otpRecord = await OtpToken.findOne({ email: lowerEmail, resetToken, used: false }).sort({ createdAt: -1 });
+      if (!resetUser || !otpRecord || resetTokenWasRevoked(resetUser, otpRecord) || !otpRecord.resetTokenExpiresAt || new Date() > otpRecord.resetTokenExpiresAt) {
         return res.status(400).json({ ok: false, message: 'Invalid or expired reset token' });
       }
     } else if (code) {
-      otpRecord = await OtpToken.findOne({ email: email.toLowerCase(), used: false }).sort({ createdAt: -1 });
-      if (!otpRecord) {
+      const lowerEmail = normalizeEmail(email);
+      const resetUser = await findResetEligibleUser(lowerEmail);
+      otpRecord = await OtpToken.findOne({ email: lowerEmail, used: false }).sort({ createdAt: -1 });
+      if (!resetUser || !otpRecord || resetTokenWasRevoked(resetUser, otpRecord)) {
         return res.status(400).json({ ok: false, message: 'Invalid or expired OTP' });
       }
       if (new Date() > otpRecord.expiresAt) {
@@ -195,7 +237,7 @@ router.post('/auth/reset-password', async (req, res) => {
 
     // Check if this is the founder email
     const founderEmail = (process.env.FOUNDER_EMAIL || '').toLowerCase();
-    if (email.toLowerCase() !== founderEmail) {
+    if (normalizeEmail(email) !== founderEmail) {
       return res.status(403).json({ ok: false, message: 'Cannot reset password for this account' });
     }
 
@@ -203,14 +245,17 @@ router.post('/auth/reset-password', async (req, res) => {
     otpRecord.used = true;
     await otpRecord.save();
     const rounds = parseInt(process.env.PASSWORD_HASH_ROUNDS || '10', 10);
-    let user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) {
-      user = await User.create({ email: email.toLowerCase(), name: process.env.FOUNDER_NAME || 'Founder', passwordHash: await bcrypt.hash(newPassword, rounds), role: 'founder' });
-    } else {
-      user.passwordHash = await bcrypt.hash(newPassword, rounds);
-      await user.save();
-    }
-    await ActivityLog.create({ type: 'password_reset', email: email.toLowerCase(), meta: { via: 'otp' } });
+    const lowerEmail = normalizeEmail(email);
+    const user = await findResetEligibleUser(lowerEmail);
+    if (!user) return res.status(400).json({ ok: false, message: 'Invalid or expired reset token' });
+    user.passwordHash = await bcrypt.hash(newPassword, rounds);
+    user.mustChangePassword = false;
+    user.mustResetPassword = false;
+    user.forceReset = false;
+    user.tempPasswordExpiresAt = null;
+    user.tokenVersion = (typeof user.tokenVersion === 'number' ? user.tokenVersion : 0) + 1;
+    await user.save();
+    await ActivityLog.create({ type: 'password_reset', email: lowerEmail, meta: { via: 'otp' } });
     return res.json({ ok: true, message: 'Password has been updated.' });
   } catch (err) {
     console.error('[auth/reset-password] error', err?.message || err);
@@ -226,21 +271,25 @@ async function handleReset(req, res) {
       return res.status(400).json({ ok: false, message: 'Email, resetToken and newPassword are required' });
     }
     console.log('[OTP_ROUTE_HIT][reset] email=', email);
-    const lowerEmail = email.toLowerCase();
+    const lowerEmail = normalizeEmail(email);
+    const resetUser = await findResetEligibleUser(lowerEmail);
+    if (!resetUser) {
+      return res.status(400).json({ ok: false, message: 'Invalid or expired reset token' });
+    }
     const otpRecord = await OtpToken.findOne({ email: lowerEmail, resetToken, used: false }).sort({ createdAt: -1 });
-    if (!otpRecord || !otpRecord.resetTokenExpiresAt || new Date() > otpRecord.resetTokenExpiresAt) {
+    if (!otpRecord || resetTokenWasRevoked(resetUser, otpRecord) || !otpRecord.resetTokenExpiresAt || new Date() > otpRecord.resetTokenExpiresAt) {
       return res.status(400).json({ ok: false, message: 'Invalid or expired reset token' });
     }
     otpRecord.used = true;
     await otpRecord.save();
     const rounds = parseInt(process.env.PASSWORD_HASH_ROUNDS || '10', 10);
-    let user = await User.findOne({ email: lowerEmail });
-    if (!user) {
-      user = await User.create({ email: lowerEmail, name: process.env.FOUNDER_NAME || 'Founder', passwordHash: await bcrypt.hash(newPassword, rounds), role: 'founder' });
-    } else {
-      user.passwordHash = await bcrypt.hash(newPassword, rounds);
-      await user.save();
-    }
+    resetUser.passwordHash = await bcrypt.hash(newPassword, rounds);
+    resetUser.mustChangePassword = false;
+    resetUser.mustResetPassword = false;
+    resetUser.forceReset = false;
+    resetUser.tempPasswordExpiresAt = null;
+    resetUser.tokenVersion = (typeof resetUser.tokenVersion === 'number' ? resetUser.tokenVersion : 0) + 1;
+    await resetUser.save();
     await ActivityLog.create({ type: 'password_reset', email: lowerEmail, meta: { via: 'resetToken' } });
     console.log('[OTP_RESET][success] email=', lowerEmail);
     return res.json({ ok: true, message: 'Password updated successfully' });
