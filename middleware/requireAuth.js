@@ -5,10 +5,15 @@ const Role = require('../models/Role');
 const { logAudit } = require('../lib/audit');
 const {
   effectiveModuleAccess,
+  effectiveAccountControlRights,
   effectivePermissions,
   effectiveSpecialRights,
+  effectiveTaskRights,
+  hasAccountControlRight,
   hasModuleAccess,
   hasSpecialRight,
+  hasTaskRight,
+  isProtectedFounderUser,
   normalizeRole,
 } = require('../lib/teamAccess');
 
@@ -46,6 +51,18 @@ function founderDenied(res) {
   });
 }
 
+function sessionExpired(res) {
+  return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Session expired. Please login again.' });
+}
+
+function moduleDenied(res) {
+  return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Access Denied. Founder permission is required.' });
+}
+
+function actionDenied(res) {
+  return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Action denied. Founder permission is required.' });
+}
+
 function isSafeZoneMasterLocked() {
   const value = String(process.env.SAFE_ZONE_MASTER_LOCK || process.env.SAFE_ZONE_LOCKED || '').trim().toLowerCase();
   return ['1', 'true', 'yes', 'on', 'locked'].includes(value);
@@ -68,7 +85,7 @@ async function requireAuth(req, res, next) {
   try {
     const token = getBearerToken(req);
     if (!token) {
-      return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+      return sessionExpired(res);
     }
 
     const secret = process.env.JWT_SECRET;
@@ -92,13 +109,22 @@ async function requireAuth(req, res, next) {
 
     const user = await loadUserFromPayload(payload);
     if (!user) {
-      return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+      return sessionExpired(res);
     }
 
     const accountStatus = String(user.accountStatus || user.status || 'active').toLowerCase();
     const userStatus = String(user.status || accountStatus || 'active').toLowerCase();
     if (userStatus === 'suspended' || accountStatus === 'suspended') {
       return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_SUSPENDED', message: 'Account suspended' });
+    }
+    if (user.loginAllowed === false) {
+      return res.status(403).json({ ok: false, success: false, status: 403, code: 'LOGIN_DISABLED', message: 'Login disabled' });
+    }
+    if (userStatus === 'archived' || accountStatus === 'archived') {
+      return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_ARCHIVED', message: 'Account archived' });
+    }
+    if (userStatus === 'deleted' || userStatus === 'deleted_test' || accountStatus === 'deleted' || accountStatus === 'deleted_test' || user.isDeleted || user.deletedAt) {
+      return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_DELETED', message: 'Account deleted' });
     }
     if (userStatus === 'locked' || accountStatus === 'locked') {
       return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_LOCKED', message: 'Account locked' });
@@ -114,12 +140,13 @@ async function requireAuth(req, res, next) {
     const userTokenVersion = typeof user.tokenVersion === 'number' ? user.tokenVersion : 0;
 
     if (jwtTokenVersion !== userTokenVersion) {
-      return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+      return sessionExpired(res);
     }
 
     req.user = {
       id: String(user._id),
       email: user.email,
+      staffId: user.staffId || null,
       name: user.fullName || user.name,
       fullName: user.fullName || user.name,
       role: normalizeRole(user.role) || 'intern',
@@ -129,8 +156,12 @@ async function requireAuth(req, res, next) {
       permissions: effectivePermissions(user),
       moduleAccess: effectiveModuleAccess(user),
       specialRights: effectiveSpecialRights(user),
+      taskRights: effectiveTaskRights(user),
+      accountControlRights: effectiveAccountControlRights(user),
       moduleAccessOverride: Array.isArray(user.moduleAccessOverride) ? user.moduleAccessOverride : [],
       specialRightsOverride: Array.isArray(user.specialRightsOverride) ? user.specialRightsOverride : [],
+      taskRightsOverride: Array.isArray(user.taskRightsOverride) ? user.taskRightsOverride : [],
+      accountControlRightsOverride: Array.isArray(user.accountControlRightsOverride) ? user.accountControlRightsOverride : [],
       status: user.status || 'active',
       accountStatus: user.accountStatus || accountStatus,
       onlineStatus: user.onlineStatus || 'offline',
@@ -143,7 +174,7 @@ async function requireAuth(req, res, next) {
     req._authUserDoc = user;
     return next();
   } catch (_e) {
-    return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+    return sessionExpired(res);
   }
 }
 
@@ -156,17 +187,17 @@ function requireFounder(req, res, next) {
 function requireModuleAccess(moduleKey) {
   return async (req, res, next) => {
     try {
-      if (!req.user) return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+      if (!req.user) return sessionExpired(res);
       if (req.user.isFounder || normalizeRole(req.user.role) === 'founder') return next();
 
       const authUser = req._authUserDoc || req.user;
       const roleDoc = await loadRoleForUser(authUser);
       if (hasModuleAccess(authUser, moduleKey, roleDoc, isSafeZoneMasterLocked())) return next();
 
-      await logAudit(req, 'ACCESS_BLOCKED', req.user.id || null, { moduleKey, reason: 'module_denied' });
-      return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' });
+      await logAudit(req, 'ACCESS_BLOCKED', req.user.id || null, { module: moduleKey, moduleKey, reason: 'module_denied', result: 'blocked', severity: 'warning', targetType: 'module', targetId: moduleKey });
+      return moduleDenied(res);
     } catch (_e) {
-      return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' });
+      return moduleDenied(res);
     }
   };
 }
@@ -174,19 +205,83 @@ function requireModuleAccess(moduleKey) {
 function requireSpecialRight(rightKey) {
   return async (req, res, next) => {
     try {
-      if (!req.user) return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+      if (!req.user) return sessionExpired(res);
       if (req.user.isFounder || normalizeRole(req.user.role) === 'founder') return next();
 
       const authUser = req._authUserDoc || req.user;
       const roleDoc = await loadRoleForUser(authUser);
       if (hasSpecialRight(authUser, rightKey, roleDoc, isSafeZoneMasterLocked())) return next();
 
-      await logAudit(req, 'ACCESS_BLOCKED', req.user.id || null, { rightKey, reason: 'right_denied' });
-      return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' });
+      await logAudit(req, 'ACCESS_BLOCKED', req.user.id || null, { rightKey, reason: 'right_denied', result: 'blocked', severity: 'warning', targetType: 'special_right', targetId: rightKey });
+      return actionDenied(res);
     } catch (_e) {
-      return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' });
+      return actionDenied(res);
     }
   };
 }
 
-module.exports = { requireAuth, requireFounder, requireModuleAccess, requireSpecialRight };
+function requireTaskRight(taskRightKey) {
+  return async (req, res, next) => {
+    try {
+      if (!req.user) return sessionExpired(res);
+      if (req.user.isFounder || normalizeRole(req.user.role) === 'founder') return next();
+
+      const authUser = req._authUserDoc || req.user;
+      const roleDoc = await loadRoleForUser(authUser);
+      if (hasTaskRight(authUser, taskRightKey, roleDoc, isSafeZoneMasterLocked())) return next();
+
+      await logAudit(req, 'ACCESS_BLOCKED', req.user.id || null, { rightKey: taskRightKey, reason: 'task_right_denied', result: 'blocked', severity: 'warning', targetType: 'task_right', targetId: taskRightKey });
+      return actionDenied(res);
+    } catch (_e) {
+      return actionDenied(res);
+    }
+  };
+}
+
+function requireAccountControlRight(accountRightKey) {
+  return async (req, res, next) => {
+    try {
+      if (!req.user) return sessionExpired(res);
+      if (req.user.isFounder || normalizeRole(req.user.role) === 'founder') return next();
+
+      const authUser = req._authUserDoc || req.user;
+      const roleDoc = await loadRoleForUser(authUser);
+      if (hasAccountControlRight(authUser, accountRightKey, roleDoc, isSafeZoneMasterLocked())) return next();
+
+      await logAudit(req, 'ACCESS_BLOCKED', req.user.id || null, { rightKey: accountRightKey, reason: 'account_control_right_denied', result: 'blocked', severity: 'warning', targetType: 'account_control_right', targetId: accountRightKey });
+      return actionDenied(res);
+    } catch (_e) {
+      return actionDenied(res);
+    }
+  };
+}
+
+function blockFounderAccountMutation(req, res, next) {
+  const target = req.targetUser || req.staffUser || req.userTarget || null;
+  const targetStaffId = String(target?.staffId || req.body?.staffId || req.params?.staffId || '').trim().toUpperCase();
+  if (!target && !targetStaffId) return next();
+  if (!isProtectedFounderUser(target) && targetStaffId !== 'NP-FND-0001') return next();
+  return logAudit(req, 'BLOCKED_FOUNDER_ACCOUNT_MUTATION_ATTEMPT', target?._id ? String(target._id) : null, { result: 'blocked', severity: 'critical', targetStaffId, reason: 'founder_account_protected' })
+    .finally(() => actionDenied(res));
+}
+
+function auditAction(action, metaBuilder = null) {
+  return async (req, _res, next) => {
+    try {
+      const meta = typeof metaBuilder === 'function' ? metaBuilder(req) : metaBuilder;
+      await logAudit(req, action, req.params?.id || null, meta || null);
+    } catch (_) {}
+    return next();
+  };
+}
+
+module.exports = {
+  requireAuth,
+  requireFounder,
+  requireModuleAccess,
+  requireSpecialRight,
+  requireTaskRight,
+  requireAccountControlRight,
+  blockFounderAccountMutation,
+  auditAction,
+};

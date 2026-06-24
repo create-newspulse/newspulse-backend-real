@@ -8,6 +8,8 @@ const express = require('express');
 const mongoose = require('mongoose');
 
 const User = require('../models/User');
+const News = require('../models/News');
+const FinanceRecord = require('../models/FinanceRecord');
 const AuditLog = require('../models/AuditLog');
 const OtpToken = require('../models/OtpToken');
 const SessionLog = require('../models/SessionLog');
@@ -87,6 +89,36 @@ function makeFindChain(users) {
   };
 }
 
+function matchesCondition(value, condition) {
+  if (!condition || typeof condition !== 'object' || condition instanceof Date || Array.isArray(condition)) return value === condition;
+  if (Object.prototype.hasOwnProperty.call(condition, '$ne') && value === condition.$ne) return false;
+  if (Object.prototype.hasOwnProperty.call(condition, '$nin') && condition.$nin.includes(value)) return false;
+  if (Object.prototype.hasOwnProperty.call(condition, '$in')) {
+    const normalized = value === undefined ? undefined : value;
+    return condition.$in.some((item) => item === normalized || (item === null && normalized === null));
+  }
+  if (Object.prototype.hasOwnProperty.call(condition, '$exists')) {
+    const exists = value !== undefined;
+    if (Boolean(condition.$exists) !== exists) return false;
+  }
+  return true;
+}
+
+function valueAtPath(obj, path) {
+  return String(path || '').split('.').reduce((current, key) => (current == null ? undefined : current[key]), obj);
+}
+
+function matchesQuery(user, query) {
+  if (!query || !Object.keys(query).length) return true;
+  if (Array.isArray(query.$and) && !query.$and.every((item) => matchesQuery(user, item))) return false;
+  if (Array.isArray(query.$or) && !query.$or.some((item) => matchesQuery(user, item))) return false;
+  for (const [key, condition] of Object.entries(query)) {
+    if (key === '$and' || key === '$or') continue;
+    if (!matchesCondition(valueAtPath(user, key), condition)) return false;
+  }
+  return true;
+}
+
 User.findById = async (id) => cloneUser(usersById.get(String(id)));
 User.findOne = (filter) => ({
   lean: async () => {
@@ -94,7 +126,7 @@ User.findOne = (filter) => ({
     return cloneUser(id ? usersById.get(id) : null);
   },
 });
-User.find = () => makeFindChain(Array.from(usersById.values()));
+User.find = (query) => makeFindChain(Array.from(usersById.values()).filter((user) => matchesQuery(user, query)));
 User.create = async (payload) => {
   const _id = '507f1f77bcf86cd799439099';
   const created = {
@@ -127,11 +159,26 @@ User.findByIdAndUpdate = async (id, update) => {
   if (next.email) usersByEmail.set(String(next.email).toLowerCase(), String(id));
   return cloneUser(next);
 };
+User.deleteOne = async (filter) => {
+  const id = String(filter && filter._id || '');
+  const current = usersById.get(id);
+  if (!current) return { deletedCount: 0 };
+  usersById.delete(id);
+  if (current.email) usersByEmail.delete(String(current.email).toLowerCase());
+  return { deletedCount: 1 };
+};
 
 AuditLog.create = async (payload) => {
   auditLogs.push(payload);
   return { ok: true };
 };
+AuditLog.countDocuments = async (filter) => auditLogs.filter((entry) => {
+  if (!filter || !filter.key || entry.key !== filter.key) return false;
+  if (!filter.action || !filter.action.$regex) return true;
+  return filter.action.$regex.test(String(entry.action || ''));
+}).length;
+News.countDocuments = async () => 0;
+FinanceRecord.countDocuments = async () => 0;
 OtpToken.updateMany = async (filter, update) => {
   otpTokenUpdates.push({ filter, update });
   return { modifiedCount: 1 };
@@ -523,7 +570,8 @@ test('staff email endpoint blocks founder email changes, duplicate emails, and s
     .send({ newEmail: 'founder-new@example.com', reason: 'normal edit attempt' });
 
   assert.equal(founderChange.status, 403);
-  assert.equal(founderChange.body.code, 'FOUNDER_EMAIL_PROTECTED');
+  assert.equal(founderChange.body.code, 'FOUNDER_PROTECTED');
+  assert.equal(founderChange.body.message, 'Founder account is protected. Use Founder My Account / Safe Zone.');
 
   const duplicate = await request(app)
     .patch('/api/admin/team/users/507f1f77bcf86cd799439012/email')
@@ -551,7 +599,7 @@ test('staff email endpoint blocks founder email changes, duplicate emails, and s
 
   assert.equal(duplicateNonSystem.status, 409);
   assert.equal(duplicateNonSystem.body.code, 'EMAIL_EXISTS');
-  assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_FOUNDER_EMAIL_CHANGE_BLOCKED'));
+  assert.ok(auditLogs.some((entry) => entry.action === 'BLOCKED_FOUNDER_STAFF_ACTION'));
   assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_EMAIL_CHANGE_DUPLICATE'));
 });
 
@@ -654,6 +702,236 @@ test('/api/team create-user returns temporary password once and user reads never
   assert.equal(typeof readRes.body.data.user.passwordHash, 'undefined');
 });
 
+test('temporary password and force-change endpoints never expose password hashes', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const tempRes = await request(app)
+    .post('/api/admin/team/users/507f1f77bcf86cd799439012/generate-temporary-password')
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(tempRes.status, 200);
+  assert.equal(typeof tempRes.body.temporaryPassword, 'string');
+  assert.equal(typeof tempRes.body.user.passwordHash, 'undefined');
+  assert.equal(usersById.get('507f1f77bcf86cd799439012').mustChangePassword, true);
+  assert.equal(usersById.get('507f1f77bcf86cd799439012').tokenVersion, 1);
+  assert.equal(sessionUpdates[0].update.$set.logoutReason, 'staff_temp_password_generated');
+  assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_TEMP_PASSWORD_GENERATED'));
+
+  const forceRes = await request(app)
+    .post('/api/admin/team/users/507f1f77bcf86cd799439012/force-change-password')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ logoutAllDevices: true });
+
+  assert.equal(forceRes.status, 200);
+  assert.equal(forceRes.body.message, 'Password change already required.');
+  assert.equal(typeof forceRes.body.user.passwordHash, 'undefined');
+  assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_FORCE_CHANGE_PASSWORD'));
+});
+
+test('extend, archive, reactivate, and logout-all-devices update status safely', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+  const editor = usersById.get('507f1f77bcf86cd799439012');
+  editor.status = 'expired';
+  editor.accountStatus = 'expired';
+  editor.accessExpiresAt = new Date('2026-01-01T00:00:00.000Z');
+
+  const extendRes = await request(app)
+    .post('/api/admin/team/users/507f1f77bcf86cd799439012/extend-access')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ accessExpiryDate: '2026-12-31T00:00:00.000Z' });
+
+  assert.equal(extendRes.status, 200);
+  assert.equal(extendRes.body.user.accountStatus, 'active');
+  assert.equal(usersById.get('507f1f77bcf86cd799439012').loginAllowed, true);
+  assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_ACCESS_EXTENDED'));
+
+  const archiveRes = await request(app)
+    .post('/api/admin/team/users/507f1f77bcf86cd799439012/archive')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ reason: 'left organization' });
+
+  assert.equal(archiveRes.status, 200);
+  assert.equal(archiveRes.body.user.accountStatus, 'archived');
+  assert.equal(usersById.get('507f1f77bcf86cd799439012').loginAllowed, false);
+  assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_ARCHIVED'));
+  assert.equal(usersById.has('507f1f77bcf86cd799439012'), true);
+
+  const reactivateRes = await request(app)
+    .post('/api/admin/team/users/507f1f77bcf86cd799439012/reactivate')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ accessExpiryDate: '2027-01-31T00:00:00.000Z' });
+
+  assert.equal(reactivateRes.status, 200);
+  assert.equal(reactivateRes.body.user.accountStatus, 'active');
+  assert.equal(usersById.get('507f1f77bcf86cd799439012').loginAllowed, true);
+  assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_REACTIVATED'));
+
+  const logoutRes = await request(app)
+    .post('/api/admin/team/users/507f1f77bcf86cd799439012/logout-all-devices')
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(logoutRes.status, 200);
+  assert.equal(sessionUpdates.at(-1).update.$set.logoutReason, 'staff_logout_all_devices');
+  assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_LOGOUT_ALL_DEVICES'));
+});
+
+test('mark-test-account flags non-founder test accounts and blocks founder', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const blockedFounder = await request(app)
+    .post('/api/admin/team/users/507f1f77bcf86cd799439011/mark-test-account')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ reason: 'never allowed' });
+
+  assert.equal(blockedFounder.status, 403);
+  assert.equal(blockedFounder.body.code, 'FOUNDER_PROTECTED');
+
+  const marked = await request(app)
+    .post('/api/admin/team/users/507f1f77bcf86cd799439012/mark-test-account')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ reason: 'old unwanted test record' });
+
+  assert.equal(marked.status, 200);
+  assert.equal(marked.body.user.isTestAccount, true);
+  assert.equal(usersById.get('507f1f77bcf86cd799439012').isTestAccount, true);
+  assert.equal(usersById.get('507f1f77bcf86cd799439012').testAccountReason, 'old unwanted test record');
+  assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_MARKED_TEST'));
+});
+
+test('staff list hides archived deleted and test accounts unless include flags are set', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+  usersById.set('507f1f77bcf86cd799439020', {
+    _id: '507f1f77bcf86cd799439020',
+    email: 'archived@example.com',
+    name: 'Archived Staff',
+    role: 'reporter',
+    permissions: [],
+    status: 'archived',
+    accountStatus: 'archived',
+    isArchived: true,
+    tokenVersion: 0,
+  });
+  usersById.set('507f1f77bcf86cd799439021', {
+    _id: '507f1f77bcf86cd799439021',
+    email: 'deleted@example.com',
+    name: 'Deleted Test Staff',
+    role: 'reporter',
+    permissions: [],
+    status: 'deleted',
+    accountStatus: 'deleted',
+    deletedAt: new Date('2026-06-01T00:00:00.000Z'),
+    tokenVersion: 0,
+  });
+  usersById.set('507f1f77bcf86cd799439022', {
+    _id: '507f1f77bcf86cd799439022',
+    email: 'test-visible@example.com',
+    name: 'Test Editor',
+    role: 'editor',
+    permissions: [],
+    status: 'active',
+    accountStatus: 'active',
+    isTestAccount: true,
+    tokenVersion: 0,
+  });
+
+  const defaultList = await request(app)
+    .get('/api/admin/team/users')
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(defaultList.status, 200);
+  assert.equal(defaultList.body.users.some((user) => user.email === 'archived@example.com'), false);
+  assert.equal(defaultList.body.users.some((user) => user.email === 'deleted@example.com'), false);
+  assert.equal(defaultList.body.users.some((user) => user.email === 'test-visible@example.com'), false);
+
+  const includeList = await request(app)
+    .get('/api/admin/team/users?includeArchived=true&includeDeleted=true&includeTest=true')
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(includeList.status, 200);
+  assert.equal(includeList.body.users.some((user) => user.email === 'archived@example.com'), true);
+  assert.equal(includeList.body.users.some((user) => user.email === 'deleted@example.com'), true);
+  assert.equal(includeList.body.users.some((user) => user.email === 'test-visible@example.com'), true);
+});
+
+test('test-only delete rejects real staff and deletes only safe confirmed test accounts', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const realDelete = await request(app)
+    .delete('/api/admin/team/users/507f1f77bcf86cd799439012/test-only')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ founderConfirmation: 'DELETE_TEST_ACCOUNT' });
+
+  assert.equal(realDelete.status, 400);
+  assert.equal(realDelete.body.code, 'TEST_DELETE_BLOCKED');
+  assert.equal(realDelete.body.message, 'Real staff accounts cannot be deleted. Archive account instead.');
+  assert.equal(usersById.has('507f1f77bcf86cd799439012'), true);
+
+  const testId = '507f1f77bcf86cd799439088';
+  usersById.set(testId, {
+    _id: testId,
+    email: 'delete.test@example.com',
+    name: 'Delete TEST Account',
+    role: 'reporter',
+    designation: 'TEST Reporter',
+    permissions: [],
+    status: 'active',
+    accountStatus: 'active',
+    tokenVersion: 0,
+    canBeDeleted: true,
+  });
+  usersByEmail.set('delete.test@example.com', testId);
+
+  const missingConfirmation = await request(app)
+    .delete(`/api/admin/team/users/${testId}/test-only`)
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(missingConfirmation.status, 400);
+  assert.equal(missingConfirmation.body.code, 'MISSING_FOUNDER_CONFIRMATION');
+  assert.equal(usersById.has(testId), true);
+
+  const deleteRes = await request(app)
+    .delete(`/api/admin/team/users/${testId}/test-only`)
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ founderConfirmation: 'DELETE_TEST_ACCOUNT' });
+
+  assert.equal(deleteRes.status, 200);
+  assert.equal(usersById.has(testId), true);
+  assert.equal(usersById.get(testId).accountStatus, 'deleted');
+  assert.ok(usersById.get(testId).deletedAt instanceof Date);
+  assert.equal(usersByEmail.has('delete.test@example.com'), true);
+  assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_TEST_DELETED'));
+});
+
 test('normal team endpoints cannot suspend or force-reset the founder account', async () => {
   const app = buildApp();
   const founderToken = signToken({
@@ -669,6 +947,7 @@ test('normal team endpoints cannot suspend or force-reset the founder account', 
 
   assert.equal(suspendRes.status, 403);
   assert.equal(suspendRes.body.code, 'FOUNDER_PROTECTED');
+  assert.equal(suspendRes.body.message, 'Founder account is protected. Use Founder My Account / Safe Zone.');
 
   const resetRes = await request(app)
     .post('/api/admin/team/users/507f1f77bcf86cd799439011/force-reset')
@@ -676,6 +955,9 @@ test('normal team endpoints cannot suspend or force-reset the founder account', 
 
   assert.equal(resetRes.status, 403);
   assert.equal(resetRes.body.code, 'FOUNDER_PROTECTED');
+  assert.equal(usersById.get('507f1f77bcf86cd799439011').staffId, 'NP-FND-0001');
+  assert.equal(usersById.get('507f1f77bcf86cd799439011').role, 'founder');
+  assert.ok(auditLogs.some((entry) => entry.action === 'BLOCKED_FOUNDER_STAFF_ACTION'));
 });
 
 test('legacy non-founder team managers cannot use mutating team endpoints', async () => {

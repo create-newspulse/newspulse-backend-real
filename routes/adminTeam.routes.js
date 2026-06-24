@@ -4,45 +4,67 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 
 const User = require('../models/User');
+const News = require('../models/News');
+const FinanceRecord = require('../models/FinanceRecord');
 const AuditLog = require('../models/AuditLog');
 const OtpToken = require('../models/OtpToken');
 const Role = require('../models/Role');
 const SessionLog = require('../models/SessionLog');
+const StaffTask = require('../models/StaffTask');
 const { requireAdminAuth } = require('../middleware/adminAuth');
-const { requireAuth } = require('../middleware/requireAuth');
+const { requireAuth, requireModuleAccess, requireTaskRight } = require('../middleware/requireAuth');
 const { logAudit } = require('../lib/audit');
 const {
+  FOUNDER_STAFF_ID,
   ensureUserStaffId,
   previewNextStaffId,
   resolveStaffIdForNewUser,
 } = require('../lib/staffId');
 const {
   AUTH_PERMISSIONS,
+  ADMIN_MODULE_KEYS,
+  ACCOUNT_CONTROL_RIGHT_KEYS,
+  DEFAULT_TASK_TEMPLATES,
+  SPECIAL_RIGHT_KEYS,
+  SPECIAL_RIGHT_GROUPS,
+  FOUNDER_ONLY_ACCOUNT_CONTROL_RIGHTS,
   FOUNDER_ONLY_MODULES,
   FOUNDER_ONLY_RIGHTS,
   ROLE_DEFAULT_ACCESS,
   ROLE_DEPARTMENT_DEFAULTS,
+  STAFF_CONTROL_CENTER,
+  TASK_CATEGORIES,
+  TASK_LEVELS,
+  TASK_RIGHT_KEYS,
+  TASK_STATUSES,
   TEAM_ASSIGNED_SECTIONS,
   TEAM_COVERAGE_AREAS,
   TEAM_DEPARTMENTS,
   TEAM_ROLES,
+  buildRolesWorkflow,
+  computeEffectiveAccess,
   defaultDepartmentForRole,
   hasPermission,
   isFounderRole,
   isProtectedFounderUser,
   legacyPermissionsFromRights,
   normalizeModuleAccess,
+  normalizeAccountControlRights,
   normalizeOrganizationFields,
   normalizePermissions,
   normalizeRole,
   normalizeSpecialRights,
   normalizeStatus,
   normalizeStringList,
+  normalizeTaskRights,
+  normalizeTemporaryAccessList,
   requirePasswordPolicy,
   safeUserDto,
 } = require('../lib/teamAccess');
 
 const router = express.Router();
+const FOUNDER_PROTECTED_MESSAGE = 'Founder account is protected. Use Founder My Account / Safe Zone.';
+const STAFF_MANAGE_GRANTS = Object.freeze(['staff_manage', 'staff.manage', 'team.manage']);
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -69,9 +91,12 @@ function syncReqUserFromAdmin(req) {
     email: req.admin.email || null,
     name: req.admin.name || null,
     role: req.admin.role || null,
+    staffId: req.admin.staffId || null,
     moduleAccess: Array.isArray(req.admin.moduleAccess) ? req.admin.moduleAccess : [],
     permissions: Array.isArray(req.admin.permissions) ? req.admin.permissions : [],
     specialRights: Array.isArray(req.admin.specialRights) ? req.admin.specialRights : [],
+    taskRights: Array.isArray(req.admin.taskRights) ? req.admin.taskRights : [],
+    accountControlRights: Array.isArray(req.admin.accountControlRights) ? req.admin.accountControlRights : [],
     status: req.admin.status || 'active',
     mustChangePassword: Boolean(req.admin.mustChangePassword),
     tokenVersion: typeof req.admin.tokenVersion === 'number' ? req.admin.tokenVersion : 0,
@@ -102,9 +127,32 @@ function requireTeamAuth(req, res, next) {
 function requireTeamPermission(permission) {
   return (req, res, next) => {
     if (!req.user) return authBad(res, 401, 'UNAUTHORIZED');
-    if (!hasPermission(req.user, permission)) return authBad(res, 403, 'FORBIDDEN');
+    if (!hasStaffActionPermission(req.user, permission)) return authBad(res, 403, 'FORBIDDEN');
     return next();
   };
+}
+
+function hasStaffActionPermission(user, permission) {
+  if (!user) return false;
+  if (isFounderRole(user.role) || user.isFounder) return true;
+  if (hasPermission(user, permission) || hasPermission(user, 'team.manage')) return true;
+  const accountRights = new Set(Array.isArray(user.accountControlRights) ? user.accountControlRights : []);
+  const permissionToAccountRight = {
+    'auth.change_staff_email': 'staff_change_email',
+    'auth.reset_password': 'staff_reset_password',
+    'auth.generate_temp_password': 'staff_generate_temp_password',
+    'auth.force_password_change': 'staff_force_password_change',
+    'auth.suspend_user': 'staff_suspend',
+    'auth.lock_user': 'staff_lock',
+    'auth.logout_user_sessions': 'staff_logout_devices',
+    'auth.view_login_activity': 'staff_view_details',
+  };
+  if (permissionToAccountRight[permission] && accountRights.has(permissionToAccountRight[permission])) return true;
+  const granted = new Set([
+    ...(Array.isArray(user.permissions) ? user.permissions : []),
+    ...(Array.isArray(user.specialRights) ? user.specialRights : []),
+  ].map((value) => String(value || '').trim()).filter(Boolean));
+  return STAFF_MANAGE_GRANTS.some((grant) => granted.has(grant));
 }
 
 function requireFounderActor(req, res, next) {
@@ -141,12 +189,33 @@ async function findUserById(id, res) {
   return user;
 }
 
+async function blockFounderStaffAction(req, res, user, attemptedAction) {
+  await logAudit(req, 'BLOCKED_FOUNDER_STAFF_ACTION', user?._id ? String(user._id) : req.params?.id || null, {
+    attemptedAction,
+    staffId: user?.staffId || null,
+    targetRole: user?.role || null,
+  });
+  return bad(res, 403, FOUNDER_PROTECTED_MESSAGE, 'FOUNDER_PROTECTED');
+}
+
+async function ensureMutableStaffTarget(req, res, user, attemptedAction) {
+  const staffId = String(user?.staffId || '').trim().toUpperCase();
+  if (!isProtectedFounderUser(user) && staffId !== FOUNDER_STAFF_ID) return true;
+  await blockFounderStaffAction(req, res, user, attemptedAction);
+  return false;
+}
+
 function actorId(req) {
   return mongoose.isValidObjectId(req.user?.id) ? req.user.id : null;
 }
 
-function userListQuery() {
-  return { $or: [{ role: { $in: TEAM_ROLES } }, { roleId: { $exists: true, $ne: null } }, { staffId: { $exists: true, $ne: null } }] };
+function userListQuery(options = {}) {
+  const base = { $or: [{ role: { $in: TEAM_ROLES } }, { roleId: { $exists: true, $ne: null } }, { staffId: { $exists: true, $ne: null } }] };
+  const filters = [base];
+  if (!options.includeArchived) filters.push({ status: { $ne: 'archived' } }, { accountStatus: { $ne: 'archived' } }, { isArchived: { $ne: true } });
+  if (!options.includeDeleted) filters.push({ status: { $nin: ['deleted', 'deleted_test'] } }, { accountStatus: { $nin: ['deleted', 'deleted_test'] } }, { isDeleted: { $ne: true } }, { deletedAt: { $in: [null, undefined] } });
+  if (!options.includeTest) filters.push({ isTestAccount: { $ne: true } });
+  return filters.length === 1 ? base : { $and: filters };
 }
 
 function parseDateOrNull(value) {
@@ -168,10 +237,13 @@ function normalizeRequestedStaffId(value) {
   return raw;
 }
 
-async function assignTemporaryPassword(userOrId) {
-  const tempPassword = generateTempPassword();
+async function assignTemporaryPassword(userOrId, options = {}) {
+  const tempPassword = options.temporaryPassword || generateTempPassword();
   const passwordHash = await hashPassword(tempPassword);
+  const now = new Date();
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const id = typeof userOrId === 'object' && userOrId?._id ? userOrId._id : userOrId;
+  await markUserSessionsRevoked(id, now, options.sessionReason || 'staff_password_changed');
   const update = {
     $set: {
       passwordHash,
@@ -179,15 +251,28 @@ async function assignTemporaryPassword(userOrId) {
       mustResetPassword: true,
       forceReset: true,
       tempPasswordExpiresAt: expiresAt,
-      status: 'active',
-      updatedAt: new Date(),
+      sessionsRevokedAt: now,
+      currentSessionId: null,
+      onlineStatus: 'offline',
+      lastLogoutAt: now,
+      updatedAt: now,
     },
     $inc: { tokenVersion: 1 },
   };
 
-  const id = typeof userOrId === 'object' && userOrId?._id ? userOrId._id : userOrId;
   const updated = await User.findByIdAndUpdate(id, update, { new: true });
   return { updated, tempPassword, tempPasswordExpiresAt: expiresAt };
+}
+
+function resolveTemporaryPasswordInput(body) {
+  const supplied = body && body.temporaryPassword !== undefined ? String(body.temporaryPassword || '') : '';
+  if (!supplied) return { temporaryPassword: null, provided: false };
+  if (body.allowProvidedTemporaryPassword !== true) {
+    return { error: { status: 400, message: 'Provided temporaryPassword requires allowProvidedTemporaryPassword=true', code: 'TEMP_PASSWORD_NOT_CONFIRMED_SAFE' } };
+  }
+  const policy = requirePasswordPolicy(supplied);
+  if (!policy.ok) return { error: { status: 400, message: policy.message, code: 'WEAK_PASSWORD' } };
+  return { temporaryPassword: supplied, provided: true };
 }
 
 function roleSlugFromName(value) {
@@ -197,6 +282,50 @@ function roleSlugFromName(value) {
     .replace(/\s*&\s*/g, '-')
     .replace(/\s*\/\s*/g, '-')
     .replace(/\s+/g, '-');
+}
+
+function roleFallbackForPosition(position) {
+  const normalized = String(position || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const map = {
+    founder: 'founder',
+    manager: 'manager',
+    'hr & admin': 'manager',
+    'finance & accounts': 'finance & accounts manager',
+    'ads & revenue growth': 'ads & revenue growth manager',
+    'chief editor': 'editor',
+    'tech support': 'tech support',
+    'grievance officer': 'fact checker',
+    'seo executive': 'copy editor',
+    'marketing manager': 'social media manager',
+    'bureau chief': 'manager',
+    'state coordinator': 'reporter',
+    'district reporter': 'reporter',
+    'community reporter coordinator': 'reporter',
+    'editorial head': 'editor',
+    'copy editor': 'copy editor',
+    reporter: 'reporter',
+    'live tv controller': 'live tv controller',
+    'video editor': 'video editor',
+    'social media': 'social media manager',
+    'ads marketing': 'ads & revenue growth manager',
+    intern: 'intern',
+  };
+  return map[normalized] || null;
+}
+
+function defaultTasksForPosition(position) {
+  const key = STAFF_CONTROL_CENTER.positions.find((item) => item.toLowerCase() === String(position || '').trim().toLowerCase());
+  return key && DEFAULT_TASK_TEMPLATES[key] ? DEFAULT_TASK_TEMPLATES[key].slice() : [];
+}
+
+function normalizeAccountGroup(value) {
+  const raw = String(value || '').trim();
+  return STAFF_CONTROL_CENTER.accountGroups.find((group) => group.toLowerCase() === raw.toLowerCase()) || null;
+}
+
+function normalizePosition(value) {
+  const raw = String(value || '').trim();
+  return STAFF_CONTROL_CENTER.positions.find((position) => position.toLowerCase() === raw.toLowerCase()) || null;
 }
 
 async function loadRoleFromInput(body) {
@@ -236,19 +365,29 @@ function isValidEmail(value) {
 }
 
 function actorCanChangeStaffEmail(req) {
-  if (actorIsFounder(req)) return true;
-  if (hasPermission(req.user, 'auth.change_staff_email')) return true;
+  if (hasStaffActionPermission(req.user, 'auth.change_staff_email')) return true;
   return Array.isArray(req.user?.specialRights) && req.user.specialRights.includes('staff_email_change');
+}
+
+function requireTeamAccountControlRight(rightKey, fallbackPermission = null) {
+  return (req, res, next) => {
+    if (!req.user) return authBad(res, 401, 'UNAUTHORIZED');
+    if (actorIsFounder(req)) return next();
+    const accountRights = new Set(Array.isArray(req.user.accountControlRights) ? req.user.accountControlRights : []);
+    if (accountRights.has(rightKey)) return next();
+    if (fallbackPermission && hasStaffActionPermission(req.user, fallbackPermission)) return next();
+    return bad(res, 403, 'Action denied. Founder permission is required.', 'FORBIDDEN');
+  };
 }
 
 function sharedSystemMailboxAllowed(req, body) {
   return actorIsFounder(req) && body?.allowSharedSystemMailbox === true;
 }
 
-async function markUserSessionsRevoked(userId, revokedAt) {
+async function markUserSessionsRevoked(userId, revokedAt, reason = 'staff_action') {
   await SessionLog.updateMany(
     { userId, status: 'active' },
-    { $set: { status: 'ended', logoutAt: revokedAt, lastSeenAt: revokedAt, logoutReason: 'staff_email_changed' } },
+    { $set: { status: 'ended', logoutAt: revokedAt, lastSeenAt: revokedAt, logoutReason: String(reason || 'staff_action').slice(0, 120) } },
   );
 }
 
@@ -314,17 +453,48 @@ function parseAccessOverride(req, body) {
   if (!actorIsFounder(req)) return { error: { status: 403, message: 'Founder role required', code: 'FOUNDER_REQUIRED' } };
 
   const moduleAccessOverride = hasModules ? normalizeModuleAccess(body.moduleAccessOverride || body.moduleAccess) : undefined;
-  const specialRightsOverride = hasRights ? normalizeSpecialRights(body.specialRightsOverride || body.specialRights) : undefined;
+  const requestedRights = hasRights ? normalizeSpecialRights(body.specialRightsOverride || body.specialRights) : undefined;
+  const specialRightsOverride = hasRights ? requestedRights.filter((key) => !FOUNDER_ONLY_RIGHTS.includes(key)) : undefined;
+  const blockedFounderOnly = hasRights ? requestedRights.filter((key) => FOUNDER_ONLY_RIGHTS.includes(key)) : [];
   return {
     patch: {
       ...(hasModules ? { moduleAccessOverride } : {}),
       ...(hasRights ? { specialRightsOverride, permissions: mergeLegacyPermissions(body.permissions, specialRightsOverride) } : {}),
     },
+    blockedFounderOnly,
     audit: [
       ...(hasModules ? ['moduleAccessOverride'] : []),
       ...(hasRights ? ['specialRightsOverride'] : []),
     ],
   };
+}
+
+function normalizeTemporaryAccessInput(req, value) {
+  if (value === undefined) return { entries: [] };
+  if (!Array.isArray(value)) return { error: { status: 400, message: 'temporaryAccess must be an array', code: 'INVALID_TEMPORARY_ACCESS' } };
+  const entries = [];
+  const now = new Date();
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') return { error: { status: 400, message: 'Invalid temporaryAccess entry', code: 'INVALID_TEMPORARY_ACCESS' } };
+    const moduleKey = raw.moduleKey && ADMIN_MODULE_KEYS.includes(String(raw.moduleKey).trim()) ? String(raw.moduleKey).trim() : null;
+    const rightKey = raw.rightKey && SPECIAL_RIGHT_KEYS.includes(String(raw.rightKey).trim()) ? String(raw.rightKey).trim() : null;
+    if (!moduleKey && !rightKey) return { error: { status: 400, message: 'Each temporaryAccess entry requires a valid moduleKey or rightKey', code: 'INVALID_TEMPORARY_TARGET' } };
+    if (rightKey && FOUNDER_ONLY_RIGHTS.includes(rightKey)) return { error: { status: 403, message: 'Founder-only rights cannot be granted temporarily', code: 'FOUNDER_ONLY_RIGHT' } };
+    const expiresAt = parseDateOrNull(raw.expiresAt);
+    if (expiresAt === undefined) return { error: { status: 400, message: 'Invalid temporaryAccess expiresAt', code: 'INVALID_DATE' } };
+    if (expiresAt && expiresAt <= now) return { error: { status: 400, message: 'temporaryAccess expiresAt must be in the future', code: 'INVALID_DATE' } };
+    entries.push({
+      _id: new mongoose.Types.ObjectId(),
+      moduleKey,
+      rightKey,
+      enabled: raw.enabled !== false,
+      expiresAt: expiresAt || null,
+      reason: String(raw.reason || '').trim().slice(0, 500) || null,
+      grantedBy: actorId(req),
+      grantedAt: now,
+    });
+  }
+  return { entries };
 }
 
 function mergeLegacyPermissions(existingPermissions, rights) {
@@ -358,7 +528,11 @@ function normalizeUserOrganizationInput(body, role, currentUser = null) {
       : ((Array.isArray(currentUser?.assignedSections) && currentUser.assignedSections.length)
         ? currentUser.assignedSections
         : currentUser?.sections));
-  const coverageInput = body.coverageAreas !== undefined ? body.coverageAreas : currentUser?.coverageAreas;
+  const coverageInput = body.coverageAreas !== undefined
+    ? body.coverageAreas
+    : (body.coverageArea !== undefined
+      ? (Array.isArray(body.coverageArea) ? body.coverageArea : [body.coverageArea])
+      : currentUser?.coverageAreas);
 
   const organization = normalizeOrganizationFields({
     role: roleValue,
@@ -380,12 +554,15 @@ function normalizeUserOrganizationInput(body, role, currentUser = null) {
   };
 }
 
-async function listUsersHandler(_req, res) {
+async function listUsersHandler(req, res) {
   if (!isDbReady()) {
     return ok(res, { data: { users: [], availableRoles: TEAM_ROLES }, users: [], availableRoles: TEAM_ROLES });
   }
 
-  const docs = await User.find(userListQuery()).sort({ createdAt: -1 }).lean();
+  const includeArchived = String(req.query?.includeArchived || '').toLowerCase() === 'true' || req.query?.includeArchived === '1';
+  const includeDeleted = String(req.query?.includeDeleted || '').toLowerCase() === 'true' || req.query?.includeDeleted === '1';
+  const includeTest = String(req.query?.includeTest || '').toLowerCase() === 'true' || req.query?.includeTest === '1';
+  const docs = await User.find(userListQuery({ includeArchived, includeDeleted, includeTest })).sort({ createdAt: -1 }).lean();
   const ensured = await Promise.all((docs || []).map(async (doc) => {
     const result = await ensureUserStaffId(doc, { action: 'TEAM_STAFF_ID_BACKFILLED' });
     return result.user || doc;
@@ -400,20 +577,26 @@ async function createUserHandler(req, res) {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const fullName = String(body.fullName || body.name || '').trim();
   const email = String(body.email || body.loginId || '').trim().toLowerCase();
+  const accountGroup = normalizeAccountGroup(body.accountGroup);
   const permissions = normalizePermissions(body.permissions);
   const generateTemporaryPassword = body.generateTemporaryPassword !== false;
+  const mustChangePassword = generateTemporaryPassword || body.mustChangePassword !== false;
   const providedPassword = String(body.password || body.initialPassword || '');
   const accessExpiresAtRaw = pickDateAlias(body, 'accessExpiresAt', 'accessExpiryDate');
   const accessExpiresAt = parseDateOrNull(accessExpiresAtRaw);
 
   if (!fullName) return bad(res, 400, 'fullName is required', 'MISSING_FULL_NAME');
   if (!email) return bad(res, 400, 'email is required', 'INVALID_EMAIL');
-  const roleAssignment = await resolveRoleAssignment(req, body, 'intern');
+  if (body.accountGroup && !accountGroup) return bad(res, 400, 'Invalid accountGroup', 'INVALID_ACCOUNT_GROUP');
+  if (accountGroup === 'Founder Account') return bad(res, 403, 'Founder account is protected', 'FOUNDER_PROTECTED');
+  const roleAssignment = await resolveRoleAssignment(req, body, roleFallbackForPosition(body.position || body.officialTitle) || 'intern');
   if (roleAssignment.error) return bad(res, roleAssignment.error.status, roleAssignment.error.message, roleAssignment.error.code);
   const organization = normalizeUserOrganizationInput(body, roleAssignment.role);
   if (organization.error) return bad(res, organization.error.status, organization.error.message, organization.error.code);
   const accessOverride = parseAccessOverride(req, body);
   if (accessOverride.error) return bad(res, accessOverride.error.status, accessOverride.error.message, accessOverride.error.code);
+  const temporaryAccess = normalizeTemporaryAccessInput(req, body.temporaryAccess);
+  if (temporaryAccess.error) return bad(res, temporaryAccess.error.status, temporaryAccess.error.message, temporaryAccess.error.code);
   const accountStatus = normalizeStatus(body.accountStatus !== undefined ? body.accountStatus : body.status);
   if ((body.accountStatus !== undefined || body.status !== undefined) && !accountStatus) return bad(res, 400, 'Invalid accountStatus', 'INVALID_STATUS');
   if (accessExpiresAt === undefined && accessExpiresAtRaw !== undefined) return bad(res, 400, 'Invalid accessExpiryDate', 'INVALID_DATE');
@@ -460,15 +643,26 @@ async function createUserHandler(req, res) {
     assignedSections: organization.assignedSections,
     coverageAreas: organization.coverageAreas,
     designation: body.designation != null ? String(body.designation || '').trim() : null,
+    reportingManager: body.reportingManager != null ? String(body.reportingManager || '').trim() || null : null,
+    employmentType: body.employmentType != null ? String(body.employmentType || '').trim() || null : null,
+    accountGroup: accountGroup || null,
+    position: normalizePosition(body.position || body.officialTitle) || null,
+    officialTitle: body.officialTitle != null ? String(body.officialTitle || '').trim() || null : (normalizePosition(body.position) || null),
+    responsibility: body.responsibility != null ? String(body.responsibility || '').trim() || null : null,
+    coverageArea: body.coverageArea != null && !Array.isArray(body.coverageArea) ? String(body.coverageArea || '').trim() || null : null,
+    defaultTasks: body.defaultTasks !== undefined ? normalizeStringList(body.defaultTasks, 100) : defaultTasksForPosition(body.position || body.officialTitle),
+    customTasks: normalizeStringList(body.customTasks, 100),
+    recoveryEmail: body.recoveryEmail != null ? String(body.recoveryEmail || '').trim().toLowerCase() || null : null,
     permissions: accessOverride.patch.permissions || permissions,
     moduleAccessOverride: accessOverride.patch.moduleAccessOverride || [],
     specialRightsOverride: accessOverride.patch.specialRightsOverride || [],
+    temporaryAccess: temporaryAccess.entries,
     passwordHash,
     status: accountStatus || 'active',
     accountStatus: accountStatus || 'active',
-    mustChangePassword: generateTemporaryPassword,
-    mustResetPassword: generateTemporaryPassword,
-    forceReset: generateTemporaryPassword,
+    mustChangePassword,
+    mustResetPassword: mustChangePassword,
+    forceReset: mustChangePassword,
     tempPasswordExpiresAt,
     createdBy: actorId(req),
     updatedBy: actorId(req),
@@ -479,7 +673,17 @@ async function createUserHandler(req, res) {
     updatedAt: new Date(),
   });
 
-  await logAudit(req, 'TEAM_CREATE_USER', String(created._id), { email, role: roleAssignment.role, roleId: roleAssignment.roleId || null, generatedTemporaryPassword: generateTemporaryPassword });
+  await logAudit(req, 'TEAM_CREATE_USER', String(created._id), {
+    email,
+    role: roleAssignment.role,
+    roleId: roleAssignment.roleId || null,
+    designation: created.designation || null,
+    department: created.department || null,
+    coverageAreas: created.coverageAreas || [],
+    accessExpiresAt,
+    generatedTemporaryPassword: generateTemporaryPassword,
+    reason: String(body.reason || '').trim().slice(0, 500) || null,
+  });
   if (resolvedStaffId.generated) {
     await logAudit(req, 'TEAM_STAFF_ID_GENERATED', String(created._id), {
       staffId: resolvedStaffId.staffId,
@@ -488,7 +692,8 @@ async function createUserHandler(req, res) {
     });
   }
   if (roleAssignment.roleId) await logAudit(req, 'TEAM_ROLE_CHANGE', String(created._id), { to: roleAssignment.roleId, role: roleAssignment.role });
-  if (accessOverride.audit.length) await logAudit(req, 'TEAM_ACCESS_CHANGE', String(created._id), { fields: accessOverride.audit });
+  if (accessOverride.audit.length) await logAudit(req, 'TEAM_ACCESS_CHANGE', String(created._id), { fields: accessOverride.audit, blockedFounderOnly: accessOverride.blockedFounderOnly || [], reason: String(body.reason || '').trim().slice(0, 500) || null });
+  if (temporaryAccess.entries.length) await logAudit(req, 'TEAM_TEMP_ACCESS_GRANTED', String(created._id), { count: temporaryAccess.entries.length, reason: String(body.reason || '').trim().slice(0, 500) || null });
   return ok(
     res,
     {
@@ -505,8 +710,10 @@ async function getUserHandler(req, res) {
   if (!ensureDb(res)) return;
   const user = await findUserById(req.params.id, res);
   if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_VIEWED'))) return;
   const ensured = await ensureUserStaffId(user, { action: 'TEAM_STAFF_ID_BACKFILLED' });
   const finalUser = ensured.user || user;
+  await logAudit(req, 'STAFF_VIEWED', String(finalUser._id), null);
   return ok(res, { data: { user: safeUserDto(finalUser) }, user: safeUserDto(finalUser) });
 }
 
@@ -514,7 +721,7 @@ async function updateUserHandler(req, res) {
   if (!ensureDb(res)) return;
   const user = await findUserById(req.params.id, res);
   if (!user) return;
-  if (isProtectedFounderUser(user)) return bad(res, 403, 'Founder account is protected', 'FOUNDER_PROTECTED');
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_UPDATED'))) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const patch = { updatedBy: actorId(req), updatedAt: new Date() };
@@ -550,6 +757,44 @@ async function updateUserHandler(req, res) {
     patch.designation = body.designation != null ? String(body.designation || '').trim() : null;
     audit.fields.push('designation');
   }
+  if (body.reportingManager !== undefined) {
+    patch.reportingManager = body.reportingManager != null ? String(body.reportingManager || '').trim() || null : null;
+    audit.fields.push('reportingManager');
+  }
+  if (body.employmentType !== undefined) {
+    patch.employmentType = body.employmentType != null ? String(body.employmentType || '').trim() || null : null;
+    audit.fields.push('employmentType');
+  }
+  if (body.accountGroup !== undefined) {
+    const accountGroup = normalizeAccountGroup(body.accountGroup);
+    if (body.accountGroup && !accountGroup) return bad(res, 400, 'Invalid accountGroup', 'INVALID_ACCOUNT_GROUP');
+    if (accountGroup === 'Founder Account') return bad(res, 403, 'Founder account is protected', 'FOUNDER_PROTECTED');
+    patch.accountGroup = accountGroup;
+    audit.fields.push('accountGroup');
+  }
+  if (body.position !== undefined) {
+    const position = normalizePosition(body.position);
+    if (body.position && !position) return bad(res, 400, 'Invalid position', 'INVALID_POSITION');
+    patch.position = position;
+    if (!body.defaultTasks && position) patch.defaultTasks = defaultTasksForPosition(position);
+    audit.fields.push('position');
+  }
+  if (body.officialTitle !== undefined) {
+    patch.officialTitle = body.officialTitle != null ? String(body.officialTitle || '').trim() || null : null;
+    audit.fields.push('officialTitle');
+  }
+  if (body.responsibility !== undefined) {
+    patch.responsibility = body.responsibility != null ? String(body.responsibility || '').trim() || null : null;
+    audit.fields.push('responsibility');
+  }
+  if (body.defaultTasks !== undefined) {
+    patch.defaultTasks = normalizeStringList(body.defaultTasks, 100);
+    audit.fields.push('defaultTasks');
+  }
+  if (body.customTasks !== undefined) {
+    patch.customTasks = normalizeStringList(body.customTasks, 100);
+    audit.fields.push('customTasks');
+  }
   if (body.accessExpiresAt !== undefined) {
     const accessExpiresAt = parseDateOrNull(body.accessExpiresAt);
     if (accessExpiresAt === undefined) return bad(res, 400, 'Invalid accessExpiresAt', 'INVALID_DATE');
@@ -579,6 +824,7 @@ async function updateUserHandler(req, res) {
     || body.sections !== undefined
     || body.assignedSections !== undefined
     || body.coverageAreas !== undefined
+    || body.coverageArea !== undefined
     || roleChanged;
 
   if (organizationTouched) {
@@ -613,9 +859,9 @@ async function updateUserHandler(req, res) {
   const finalUser = ensured.user || updated;
 
   if (audit.roleChanged) await logAudit(req, 'TEAM_ROLE_CHANGE', String(finalUser._id), audit.roleChanged);
-  if (accessOverride.audit.includes('moduleAccessOverride')) await logAudit(req, 'TEAM_ACCESS_CHANGE', String(updated._id), { moduleAccessOverride: patch.moduleAccessOverride });
-  if (accessOverride.audit.includes('specialRightsOverride')) await logAudit(req, 'TEAM_SPECIAL_RIGHTS_CHANGE', String(updated._id), { specialRightsOverride: patch.specialRightsOverride });
-  await logAudit(req, 'TEAM_UPDATE_USER', String(finalUser._id), audit);
+  if (accessOverride.audit.includes('moduleAccessOverride')) await logAudit(req, 'TEAM_ACCESS_CHANGE', String(updated._id), { moduleAccessOverride: patch.moduleAccessOverride, oldValue: user.moduleAccessOverride || [], newValue: patch.moduleAccessOverride || [], blockedFounderOnly: accessOverride.blockedFounderOnly || [] });
+  if (accessOverride.audit.includes('specialRightsOverride')) await logAudit(req, 'TEAM_SPECIAL_RIGHTS_CHANGE', String(updated._id), { specialRightsOverride: patch.specialRightsOverride, oldValue: user.specialRightsOverride || [], newValue: patch.specialRightsOverride || [], blockedFounderOnly: accessOverride.blockedFounderOnly || [] });
+  await logAudit(req, 'STAFF_UPDATED', String(finalUser._id), audit);
   return ok(res, { data: { user: safeUserDto(finalUser) }, user: safeUserDto(finalUser) });
 }
 
@@ -635,10 +881,7 @@ async function changeUserEmailHandler(req, res) {
   if (!user) return;
 
   const oldEmail = normalizeEmailAddress(user.email);
-  if (isProtectedFounderUser(user)) {
-    await auditStaffEmail(req, 'STAFF_FOUNDER_EMAIL_CHANGE_BLOCKED', String(user._id), { oldEmail, newEmail: newEmail || null, reason });
-    return bad(res, 403, 'Founder email changes require Founder Safe Zone flow', 'FOUNDER_EMAIL_PROTECTED');
-  }
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_EMAIL_CHANGED'))) return;
 
   if (!newEmail) {
     await auditStaffEmail(req, 'STAFF_EMAIL_CHANGE_BLOCKED', String(user._id), { oldEmail, reason: 'missing_new_email' });
@@ -667,8 +910,9 @@ async function changeUserEmailHandler(req, res) {
   }
 
   const now = new Date();
+  const forcePasswordChange = body.forcePasswordChange === true;
   await revokeResetTokensForEmail(oldEmail, now);
-  await markUserSessionsRevoked(user._id, now);
+  await markUserSessionsRevoked(user._id, now, 'staff_email_changed');
 
   const updated = await User.findByIdAndUpdate(
     req.params.id,
@@ -678,9 +922,7 @@ async function changeUserEmailHandler(req, res) {
         emailVerified: false,
         pendingEmail: null,
         lastEmailChangedAt: now,
-        mustChangePassword: true,
-        mustResetPassword: true,
-        forceReset: true,
+        ...(forcePasswordChange ? { mustChangePassword: true, mustResetPassword: true, forceReset: true } : {}),
         sessionsRevokedAt: now,
         resetTokensRevokedAt: now,
         currentSessionId: null,
@@ -709,26 +951,26 @@ async function changeUserEmailHandler(req, res) {
     oldEmail,
     newEmail,
     reason,
-    forcePasswordChange: true,
+    forcePasswordChange,
     logoutAllDevices: true,
     sessionsRevokedAt: now,
     resetTokensRevokedAt: now,
   });
 
   return ok(res, {
-    message: 'Staff email updated. User must change password on next login.',
+    message: forcePasswordChange ? 'Staff email updated. User must change password on next login.' : 'Staff email updated.',
     user: {
       id: String(updated._id),
       email: updated.email,
       staffId: updated.staffId || null,
-      mustChangePassword: true,
+      mustChangePassword: Boolean(updated.mustChangePassword || updated.mustResetPassword || updated.forceReset),
     },
     data: {
       user: {
         id: String(updated._id),
         email: updated.email,
         staffId: updated.staffId || null,
-        mustChangePassword: true,
+        mustChangePassword: Boolean(updated.mustChangePassword || updated.mustResetPassword || updated.forceReset),
       },
     },
   });
@@ -738,7 +980,7 @@ async function accessOverrideHandler(req, res) {
   if (!ensureDb(res)) return;
   const user = await findUserById(req.params.id, res);
   if (!user) return;
-  if (isProtectedFounderUser(user)) return bad(res, 403, 'Founder permissions are protected', 'FOUNDER_PROTECTED');
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_UPDATED'))) return;
 
   const accessOverride = parseAccessOverride(req, req.body && typeof req.body === 'object' ? req.body : {});
   if (accessOverride.error) return bad(res, accessOverride.error.status, accessOverride.error.message, accessOverride.error.code);
@@ -759,54 +1001,82 @@ async function suspendUserHandler(req, res) {
   if (!ensureDb(res)) return;
   const user = await findUserById(req.params.id, res);
   if (!user) return;
-  if (isProtectedFounderUser(user)) return bad(res, 403, 'Founder account is protected', 'FOUNDER_PROTECTED');
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_SUSPENDED'))) return;
+  const now = new Date();
+  await markUserSessionsRevoked(user._id, now, 'staff_suspended');
 
   const updated = await User.findByIdAndUpdate(
     req.params.id,
-    { $set: { status: 'suspended', updatedBy: actorId(req), updatedAt: new Date() }, $inc: { tokenVersion: 1 } },
+    { $set: { status: 'suspended', accountStatus: 'suspended', loginAllowed: false, sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now, updatedBy: actorId(req), updatedAt: now }, $inc: { tokenVersion: 1 } },
     { new: true },
   );
-  await logAudit(req, 'TEAM_SUSPEND_USER', req.params.id, null);
-  return ok(res, { data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
+  await logAudit(req, 'STAFF_SUSPENDED', req.params.id, null);
+  return ok(res, { message: 'Staff account suspended.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
 }
 
 async function lockUserHandler(req, res) {
   if (!ensureDb(res)) return;
   const user = await findUserById(req.params.id, res);
   if (!user) return;
-  if (isProtectedFounderUser(user)) return bad(res, 403, 'Founder account is protected', 'FOUNDER_PROTECTED');
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_LOCKED'))) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const lockedUntil = parseDateOrNull(body.lockedUntil);
   if (lockedUntil === undefined && body.lockedUntil !== undefined) return bad(res, 400, 'Invalid lockedUntil', 'INVALID_DATE');
   const finalLockedUntil = lockedUntil === undefined ? new Date(Date.now() + 24 * 60 * 60 * 1000) : lockedUntil;
+  const now = new Date();
+  await markUserSessionsRevoked(user._id, now, 'staff_locked');
   const updated = await User.findByIdAndUpdate(
     req.params.id,
-    { $set: { status: 'locked', lockedUntil: finalLockedUntil, updatedBy: actorId(req), updatedAt: new Date() }, $inc: { tokenVersion: 1 } },
+    { $set: { status: 'locked', accountStatus: 'locked', lockedUntil: finalLockedUntil, sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now, updatedBy: actorId(req), updatedAt: now }, $inc: { tokenVersion: 1 } },
     { new: true },
   );
-  await logAudit(req, 'TEAM_LOCK_USER', req.params.id, { lockedUntil: finalLockedUntil });
-  return ok(res, { data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
+  await logAudit(req, 'STAFF_LOCKED', req.params.id, { lockedUntil: finalLockedUntil });
+  return ok(res, { message: 'Staff account locked.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
 }
 
 async function resetPasswordHandler(req, res) {
   if (!ensureDb(res)) return;
   const user = await findUserById(req.params.id, res);
   if (!user) return;
-  if (isProtectedFounderUser(user)) return bad(res, 403, 'Founder account is protected', 'FOUNDER_PROTECTED');
-  if (!hasPermission(req.user, 'auth.generate_temp_password')) return bad(res, 403, 'Forbidden', 'FORBIDDEN');
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_PASSWORD_RESET'))) return;
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const resolved = resolveTemporaryPasswordInput(body);
+  if (resolved.error) return bad(res, resolved.error.status, resolved.error.message, resolved.error.code);
 
-  const { updated, tempPassword, tempPasswordExpiresAt } = await assignTemporaryPassword(req.params.id);
+  const { updated, tempPassword, tempPasswordExpiresAt } = await assignTemporaryPassword(req.params.id, {
+    temporaryPassword: resolved.temporaryPassword,
+    sessionReason: 'staff_password_reset',
+  });
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
-  await logAudit(req, 'TEAM_RESET_PASSWORD', req.params.id, { temporaryPasswordExpiresAt: tempPasswordExpiresAt });
-  return ok(res, { data: { user: safeUserDto(updated), temporaryPassword: tempPassword, tempPassword, tempPasswordExpiresAt } });
+  await logAudit(req, 'STAFF_PASSWORD_RESET', req.params.id, { temporaryPasswordExpiresAt: tempPasswordExpiresAt, providedTemporaryPassword: resolved.provided });
+  return ok(res, { message: 'Temporary password generated. It is shown only once.', data: { user: safeUserDto(updated), temporaryPassword: tempPassword, tempPassword, tempPasswordExpiresAt }, user: safeUserDto(updated), temporaryPassword: tempPassword, tempPasswordExpiresAt });
+}
+
+async function generateTemporaryPasswordHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_TEMP_PASSWORD_GENERATED'))) return;
+  const { updated, tempPassword, tempPasswordExpiresAt } = await assignTemporaryPassword(req.params.id, { sessionReason: 'staff_temp_password_generated' });
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'STAFF_TEMP_PASSWORD_GENERATED', req.params.id, { temporaryPasswordExpiresAt: tempPasswordExpiresAt });
+  return ok(res, { message: 'Temporary password generated. It is shown only once.', data: { user: safeUserDto(updated), temporaryPassword: tempPassword, tempPasswordExpiresAt }, user: safeUserDto(updated), temporaryPassword: tempPassword, tempPasswordExpiresAt });
 }
 
 async function forcePasswordChangeHandler(req, res) {
   if (!ensureDb(res)) return;
   const user = await findUserById(req.params.id, res);
   if (!user) return;
-  if (isProtectedFounderUser(user)) return bad(res, 403, 'Founder account is protected', 'FOUNDER_PROTECTED');
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_FORCE_CHANGE_PASSWORD'))) return;
+  if (user.mustChangePassword || user.mustResetPassword || user.forceReset) {
+    await logAudit(req, 'STAFF_FORCE_CHANGE_PASSWORD', req.params.id, { alreadyRequired: true });
+    return ok(res, { message: 'Password change already required.', data: { user: safeUserDto(user) }, user: safeUserDto(user) });
+  }
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const now = new Date();
+  if (body.logoutAllDevices === true) await markUserSessionsRevoked(user._id, now, 'staff_force_change_password');
 
   const updated = await User.findByIdAndUpdate(
     req.params.id,
@@ -815,22 +1085,23 @@ async function forcePasswordChangeHandler(req, res) {
         mustChangePassword: true,
         mustResetPassword: true,
         forceReset: true,
+        ...(body.logoutAllDevices === true ? { sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now } : {}),
         updatedBy: actorId(req),
-        updatedAt: new Date(),
+        updatedAt: now,
       },
-      $inc: { tokenVersion: 1 },
+      ...(body.logoutAllDevices === true ? { $inc: { tokenVersion: 1 } } : {}),
     },
     { new: true },
   );
-  await logAudit(req, 'TEAM_FORCE_PASSWORD_CHANGE', req.params.id, null);
-  return ok(res, { data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
+  await logAudit(req, 'STAFF_FORCE_CHANGE_PASSWORD', req.params.id, { logoutAllDevices: body.logoutAllDevices === true });
+  return ok(res, { message: 'Password change required on next login.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
 }
 
 async function permissionsHandler(req, res) {
   if (!ensureDb(res)) return;
   const user = await findUserById(req.params.id, res);
   if (!user) return;
-  if (isProtectedFounderUser(user)) return bad(res, 403, 'Founder permissions are protected', 'FOUNDER_PROTECTED');
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_UPDATED'))) return;
 
   const permissions = normalizePermissions(req.body?.permissions);
   const oldPermissions = Array.isArray(user.permissions) ? user.permissions.slice() : [];
@@ -850,13 +1121,186 @@ async function logoutAllHandler(req, res) {
   if (!ensureDb(res)) return;
   const user = await findUserById(req.params.id, res);
   if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_LOGOUT_ALL_DEVICES'))) return;
+  const now = new Date();
+  await markUserSessionsRevoked(user._id, now, 'staff_logout_all_devices');
   const updated = await User.findByIdAndUpdate(
     req.params.id,
-    { $inc: { tokenVersion: 1 }, $set: { updatedBy: actorId(req), updatedAt: new Date() } },
+    { $inc: { tokenVersion: 1 }, $set: { sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now, updatedBy: actorId(req), updatedAt: now } },
     { new: true },
   );
-  await logAudit(req, 'TEAM_LOGOUT_USER_SESSIONS', req.params.id, null);
-  return ok(res, { data: { user: safeUserDto(updated), tokenVersion: updated.tokenVersion }, user: safeUserDto(updated), tokenVersion: updated.tokenVersion });
+  await logAudit(req, 'STAFF_LOGOUT_ALL_DEVICES', req.params.id, null);
+  return ok(res, { message: 'All staff sessions revoked.', data: { user: safeUserDto(updated), tokenVersion: updated.tokenVersion }, user: safeUserDto(updated), tokenVersion: updated.tokenVersion });
+}
+
+async function extendAccessHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_ACCESS_EXTENDED'))) return;
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const rawDate = pickDateAlias(body, 'accessExpiresAt', 'accessExpiryDate');
+  const accessExpiresAt = parseDateOrNull(rawDate);
+  if (accessExpiresAt === undefined || accessExpiresAt === null) return bad(res, 400, 'Valid accessExpiryDate is required', 'INVALID_DATE');
+  const now = new Date();
+  const wasExpired = String(user.accountStatus || user.status || '').toLowerCase() === 'expired' || (user.accessExpiresAt && user.accessExpiresAt <= now);
+  const patch = { accessExpiresAt, updatedBy: actorId(req), updatedAt: now };
+  if (wasExpired) Object.assign(patch, { status: 'active', accountStatus: 'active', loginAllowed: true, lockedUntil: null });
+  const updated = await User.findByIdAndUpdate(req.params.id, { $set: patch }, { new: true });
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'STAFF_ACCESS_EXTENDED', req.params.id, { accessExpiresAt, reactivatedExpiredAccount: wasExpired });
+  return ok(res, { message: 'Staff access extended.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
+}
+
+async function reactivateUserHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_REACTIVATED'))) return;
+  const current = String(user.accountStatus || user.status || 'active').toLowerCase();
+  if (!['expired', 'suspended', 'archived', 'locked', 'active'].includes(current)) return bad(res, 400, 'Account cannot be reactivated from current status', 'INVALID_STATUS');
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const rawDate = pickDateAlias(body, 'accessExpiresAt', 'accessExpiryDate');
+  const accessExpiresAt = rawDate === undefined ? user.accessExpiresAt || null : parseDateOrNull(rawDate);
+  if (accessExpiresAt === undefined) return bad(res, 400, 'Invalid accessExpiryDate', 'INVALID_DATE');
+  const now = new Date();
+  const updated = await User.findByIdAndUpdate(
+    req.params.id,
+    { $set: { status: 'active', accountStatus: 'active', loginAllowed: true, lockedUntil: null, accessExpiresAt, updatedBy: actorId(req), updatedAt: now }, $inc: { tokenVersion: 1 } },
+    { new: true },
+  );
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'STAFF_REACTIVATED', req.params.id, { fromStatus: current, accessExpiresAt });
+  return ok(res, { message: 'Staff account reactivated.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
+}
+
+async function archiveUserHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_ARCHIVED'))) return;
+  const now = new Date();
+  await markUserSessionsRevoked(user._id, now, 'staff_archived');
+  const updated = await User.findByIdAndUpdate(
+    req.params.id,
+    { $set: { status: 'archived', accountStatus: 'archived', isArchived: true, archivedAt: now, archivedBy: actorId(req), loginAllowed: false, sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now, updatedBy: actorId(req), updatedAt: now }, $inc: { tokenVersion: 1 } },
+    { new: true },
+  );
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'STAFF_ARCHIVED', req.params.id, { reason: String(req.body?.reason || '').trim().slice(0, 500) || null });
+  return ok(res, { message: 'Staff account archived. Audit history was kept.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
+}
+
+function hasTestAccountMarker(user) {
+  const direct = Boolean(user?.isTest || user?.test || user?.testOnly || user?.isTestAccount || (typeof user.get === 'function' && (user.get('isTest') || user.get('test') || user.get('testOnly') || user.get('isTestAccount'))));
+  if (direct) return true;
+  return /\b(test|demo|fake|unwanted)\b|unnamed/i.test([user?.name, user?.fullName, user?.email, user?.designation].map((value) => String(value || '')).join(' '));
+}
+
+async function getTestDeleteBlockers(user) {
+  const blockers = [];
+  const userId = String(user._id);
+  const staffId = String(user.staffId || '').trim().toUpperCase();
+  if (staffId === FOUNDER_STAFF_ID) blockers.push('Founder account cannot be deleted.');
+  if (isProtectedFounderUser(user)) blockers.push('Founder/protected accounts cannot be deleted.');
+  if (!hasTestAccountMarker(user)) blockers.push('Real staff accounts cannot be deleted. Archive account instead.');
+  if (normalizeRole(user.role) === 'admin' || user.isOwner || user.fullAccess || user.canBeDeleted === false || user.isProtected) blockers.push('Real staff accounts cannot be deleted. Archive account instead.');
+
+  const publishedNewsCount = await News.countDocuments({
+    status: 'published',
+    $or: [
+      { 'workflowHistory.byUserId': user._id },
+      { 'internalComments.byUserId': user._id },
+    ],
+  });
+  if (publishedNewsCount > 0) blockers.push('Real staff accounts cannot be deleted. Archive account instead.');
+
+  const financeCount = await FinanceRecord.countDocuments({ $or: [{ createdBy: user._id }, { updatedBy: user._id }] });
+  if (financeCount > 0) blockers.push('Real staff accounts cannot be deleted. Archive account instead.');
+
+  const criticalAuditCount = await AuditLog.countDocuments({
+    key: `user:${userId}`,
+    action: { $regex: /(FOUNDER|OWNER|SAFE|SECURITY|FINANCE|PAYMENT|PUBLISH|PERMISSION|ACCESS|ROLE_CHANGE|PASSWORD_RESET|EMAIL_CHANGED)/i },
+  });
+  if (criticalAuditCount > 0) blockers.push('Real staff accounts cannot be deleted. Archive account instead.');
+  return blockers;
+}
+
+function deleteReasonFromBody(req, fallback) {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  return String(body.reason || body.deleteReason || fallback || '').trim().slice(0, 500) || null;
+}
+
+function founderDeleteConfirmationProvided(req) {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  return body.founderConfirmation === 'DELETE_TEST_ACCOUNT' || body.confirmation === 'DELETE_TEST_ACCOUNT' || body.confirmDeleteTestAccount === true;
+}
+
+async function deleteTestOnlyHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  if (isProtectedFounderUser(user) || String(user.staffId || '').trim().toUpperCase() === FOUNDER_STAFF_ID) {
+    await logAudit(req, 'FOUNDER_DELETE_BLOCKED', String(user._id), { staffId: user.staffId || null });
+    return bad(res, 403, FOUNDER_PROTECTED_MESSAGE, 'FOUNDER_PROTECTED');
+  }
+  if (!actorIsFounder(req)) return bad(res, 403, 'Founder confirmation required. Archive Account instead.', 'FOUNDER_CONFIRMATION_REQUIRED');
+  if (!founderDeleteConfirmationProvided(req)) return bad(res, 400, 'Founder confirmation is required. Archive Account instead.', 'MISSING_FOUNDER_CONFIRMATION');
+
+  const blockers = await getTestDeleteBlockers(user);
+  if (blockers.length) {
+    await logAudit(req, 'STAFF_DELETE_BLOCKED', String(user._id), { reasons: blockers, staffId: user.staffId || null });
+    return bad(res, 400, 'Real staff accounts cannot be deleted. Archive account instead.', 'TEST_DELETE_BLOCKED');
+  }
+
+  const deletedUser = safeUserDto(user);
+  const now = new Date();
+  const deleteReason = deleteReasonFromBody(req, 'safe test account cleanup');
+  await markUserSessionsRevoked(user._id, now, 'staff_test_deleted');
+  const updated = await User.findByIdAndUpdate(
+    req.params.id,
+    {
+      $set: {
+        status: 'deleted',
+        accountStatus: 'deleted',
+        isDeleted: true,
+        deletedAt: now,
+        deletedBy: actorId(req),
+        deleteReason,
+        loginAllowed: false,
+        sessionsRevokedAt: now,
+        currentSessionId: null,
+        onlineStatus: 'offline',
+        lastLogoutAt: now,
+        updatedBy: actorId(req),
+        updatedAt: now,
+      },
+      $inc: { tokenVersion: 1 },
+    },
+    { new: true },
+  );
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'STAFF_TEST_DELETED', req.params.id, { email: user.email, staffId: user.staffId || null, deleteReason });
+  return ok(res, { message: 'Test staff account deleted.', data: { user: safeUserDto(updated), previousUser: deletedUser }, user: safeUserDto(updated) });
+}
+
+async function markTestAccountHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_MARKED_TEST'))) return;
+  if (!actorIsFounder(req)) return bad(res, 403, 'Founder confirmation required.', 'FOUNDER_REQUIRED');
+  const now = new Date();
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const reason = String(body.reason || body.testAccountReason || 'Marked as test/demo/unwanted account').trim().slice(0, 500);
+  const updated = await User.findByIdAndUpdate(
+    req.params.id,
+    { $set: { isTestAccount: true, testAccountReason: reason, testAccountMarkedAt: now, testAccountMarkedBy: actorId(req), updatedBy: actorId(req), updatedAt: now } },
+    { new: true },
+  );
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'STAFF_MARKED_TEST', req.params.id, { reason });
+  return ok(res, { message: 'Staff account marked as test/demo/unwanted.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
 }
 
 async function auditLogsHandler(_req, res) {
@@ -881,7 +1325,23 @@ async function auditLogsHandler(_req, res) {
     'TEAM_ROLE_CHANGE',
     'TEAM_LIVE_TV_PERMISSION_CHANGE',
     'TEAM_LOGOUT_USER_SESSIONS',
+    'STAFF_VIEWED',
+    'STAFF_UPDATED',
     'STAFF_EMAIL_CHANGED',
+    'STAFF_TEMP_PASSWORD_GENERATED',
+    'STAFF_PASSWORD_RESET',
+    'STAFF_FORCE_CHANGE_PASSWORD',
+    'STAFF_ACCESS_EXTENDED',
+    'STAFF_REACTIVATED',
+    'STAFF_SUSPENDED',
+    'STAFF_LOCKED',
+    'STAFF_LOGOUT_ALL_DEVICES',
+    'STAFF_ARCHIVED',
+    'STAFF_TEST_DELETED',
+    'STAFF_MARKED_TEST',
+    'STAFF_DELETE_BLOCKED',
+    'FOUNDER_DELETE_BLOCKED',
+    'BLOCKED_FOUNDER_STAFF_ACTION',
     'STAFF_EMAIL_CHANGE_BLOCKED',
     'STAFF_EMAIL_CHANGE_DUPLICATE',
     'STAFF_FOUNDER_EMAIL_CHANGE_BLOCKED',
@@ -900,12 +1360,14 @@ async function optionsHandler(_req, res) {
       assignedSections: TEAM_ASSIGNED_SECTIONS,
       coverageAreas: TEAM_COVERAGE_AREAS,
       roleDepartmentDefaults: ROLE_DEPARTMENT_DEFAULTS,
+      staffControlCenter: { ...STAFF_CONTROL_CENTER, departments: STAFF_CONTROL_CENTER.departments.slice(), sections: STAFF_CONTROL_CENTER.sections.slice() },
     },
     roles: TEAM_ROLES,
     departments: TEAM_DEPARTMENTS,
     assignedSections: TEAM_ASSIGNED_SECTIONS,
     coverageAreas: TEAM_COVERAGE_AREAS,
     roleDepartmentDefaults: ROLE_DEPARTMENT_DEFAULTS,
+    staffControlCenter: { ...STAFF_CONTROL_CENTER, departments: STAFF_CONTROL_CENTER.departments.slice(), sections: STAFF_CONTROL_CENTER.sections.slice() },
   });
 }
 
@@ -919,14 +1381,14 @@ async function activateUserHandler(req, res) {
   if (!ensureDb(res)) return;
   const user = await findUserById(req.params.id, res);
   if (!user) return;
-  if (isProtectedFounderUser(user)) return bad(res, 403, 'Founder account is protected', 'FOUNDER_PROTECTED');
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_REACTIVATED'))) return;
   const updated = await User.findByIdAndUpdate(
     req.params.id,
-    { $set: { status: 'active', lockedUntil: null, updatedBy: actorId(req), updatedAt: new Date() }, $inc: { tokenVersion: 1 } },
+    { $set: { status: 'active', accountStatus: 'active', loginAllowed: true, lockedUntil: null, updatedBy: actorId(req), updatedAt: new Date() }, $inc: { tokenVersion: 1 } },
     { new: true },
   );
-  await logAudit(req, 'TEAM_ACTIVATE_USER', req.params.id, null);
-  return ok(res, { data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
+  await logAudit(req, 'STAFF_REACTIVATED', req.params.id, null);
+  return ok(res, { message: 'Staff account reactivated.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
 }
 
 async function statusHandler(req, res) {
@@ -935,6 +1397,572 @@ async function statusHandler(req, res) {
   if (status === 'locked') return lockUserHandler(req, res);
   if (status === 'active') return activateUserHandler(req, res);
   return bad(res, 400, 'Invalid status', 'INVALID_STATUS');
+}
+
+// ---------------------------------------------------------------------------
+// Staff Control Center — Founder Access Studio
+// ---------------------------------------------------------------------------
+
+function isSafeZoneMasterLocked() {
+  const value = String(process.env.SAFE_ZONE_MASTER_LOCK || process.env.SAFE_ZONE_LOCKED || '').trim().toLowerCase();
+  return ['1', 'true', 'yes', 'on', 'locked'].includes(value);
+}
+
+async function loadRoleDocForUser(user) {
+  if (!isDbReady() || !user) return null;
+  if (user.isFounder || normalizeRole(user.role) === 'founder') return null;
+  if (user.roleId && mongoose.isValidObjectId(String(user.roleId))) {
+    const byId = await Role.findById(user.roleId).lean();
+    if (byId) return byId;
+  }
+  const slug = roleSlugFromName(user.role || user.roleName);
+  if (!slug) return null;
+  return Role.findOne({ slug }).lean();
+}
+
+// Accept either an array of keys or an object map { key: true/false }.
+function parseKeyMap(...candidates) {
+  for (const value of candidates) {
+    if (Array.isArray(value)) return { provided: true, keys: value.map((item) => String(item || '').trim()).filter(Boolean) };
+    if (value && typeof value === 'object') {
+      const keys = Object.keys(value).filter((key) => value[key] === true || value[key] === 'on' || value[key] === 'ON' || value[key] === 1);
+      return { provided: true, keys };
+    }
+  }
+  return { provided: false, keys: [] };
+}
+
+async function accessStaffListHandler(req, res) {
+  if (!isDbReady()) return ok(res, { data: { staff: [], availableRoles: TEAM_ROLES }, staff: [], users: [] });
+  const docs = await User.find(userListQuery({})).sort({ createdAt: -1 }).lean();
+  const ensured = await Promise.all((docs || []).map(async (doc) => {
+    const result = await ensureUserStaffId(doc, { action: 'TEAM_STAFF_ID_BACKFILLED' });
+    return result.user || doc;
+  }));
+  const staff = ensured.map(safeUserDto);
+  return ok(res, { data: { staff, users: staff, availableRoles: TEAM_ROLES }, staff, users: staff });
+}
+
+async function accessStaffDetailHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  const roleDoc = await loadRoleDocForUser(user);
+  const effectiveAccess = computeEffectiveAccess(user, roleDoc, isSafeZoneMasterLocked());
+  return ok(res, { data: { user: safeUserDto(user), effectiveAccess }, user: safeUserDto(user), effectiveAccess });
+}
+
+async function effectiveAccessHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  const roleDoc = await loadRoleDocForUser(user);
+  const effectiveAccess = computeEffectiveAccess(user, roleDoc, isSafeZoneMasterLocked());
+  return ok(res, { data: { effectiveAccess }, effectiveAccess });
+}
+
+async function setModuleAccessHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_MODULE_ACCESS_CHANGED'))) return;
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const parsed = parseKeyMap(body.modules, body.moduleAccess, body.moduleAccessOverride);
+  if (!parsed.provided) return bad(res, 400, 'modules is required', 'NO_MODULE_CHANGES');
+  const moduleAccessOverride = normalizeModuleAccess(parsed.keys);
+
+  const updated = await User.findByIdAndUpdate(
+    req.params.id,
+    { $set: { moduleAccessOverride, updatedBy: actorId(req), updatedAt: new Date() } },
+    { new: true },
+  );
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'TEAM_ACCESS_CHANGE', String(updated._id), { moduleAccessOverride });
+  const roleDoc = await loadRoleDocForUser(updated);
+  return ok(res, { message: 'Module access updated.', data: { user: safeUserDto(updated), effectiveAccess: computeEffectiveAccess(updated, roleDoc, isSafeZoneMasterLocked()) }, user: safeUserDto(updated) });
+}
+
+async function setSpecialRightsHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_SPECIAL_RIGHTS_CHANGED'))) return;
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const parsed = parseKeyMap(body.rights, body.specialRights, body.specialRightsOverride);
+  if (!parsed.provided) return bad(res, 400, 'rights is required', 'NO_RIGHT_CHANGES');
+  // Founder-only rights can never be granted to non-founder staff via the studio.
+  const founderOnly = new Set(FOUNDER_ONLY_RIGHTS);
+  const requested = normalizeSpecialRights(parsed.keys);
+  const specialRightsOverride = requested.filter((key) => !founderOnly.has(key));
+  const blockedFounderOnly = requested.filter((key) => founderOnly.has(key));
+  const permissions = mergeLegacyPermissions(user.permissions, specialRightsOverride);
+
+  const updated = await User.findByIdAndUpdate(
+    req.params.id,
+    { $set: { specialRightsOverride, permissions, updatedBy: actorId(req), updatedAt: new Date() } },
+    { new: true },
+  );
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'TEAM_SPECIAL_RIGHTS_CHANGE', String(updated._id), { specialRightsOverride, blockedFounderOnly });
+  const roleDoc = await loadRoleDocForUser(updated);
+  return ok(res, {
+    message: blockedFounderOnly.length ? 'Special rights updated. Founder-only rights were ignored.' : 'Special rights updated.',
+    data: { user: safeUserDto(updated), blockedFounderOnly, effectiveAccess: computeEffectiveAccess(updated, roleDoc, isSafeZoneMasterLocked()) },
+    user: safeUserDto(updated),
+    blockedFounderOnly,
+  });
+}
+
+async function setTaskRightsHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_TASK_RIGHTS_CHANGED'))) return;
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const parsed = parseKeyMap(body.taskRights, body.rights, body.taskRightsOverride);
+  if (!parsed.provided) return bad(res, 400, 'taskRights is required', 'NO_TASK_RIGHT_CHANGES');
+  const taskRightsOverride = normalizeTaskRights(parsed.keys);
+
+  const updated = await User.findByIdAndUpdate(
+    req.params.id,
+    { $set: { taskRightsOverride, updatedBy: actorId(req), updatedAt: new Date() } },
+    { new: true },
+  );
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'TEAM_TASK_RIGHTS_CHANGE', String(updated._id), { oldValue: user.taskRightsOverride || [], newValue: taskRightsOverride });
+  const roleDoc = await loadRoleDocForUser(updated);
+  return ok(res, { message: 'Task rights updated.', data: { user: safeUserDto(updated), effectiveAccess: computeEffectiveAccess(updated, roleDoc, isSafeZoneMasterLocked()) }, user: safeUserDto(updated) });
+}
+
+async function setAccountControlRightsHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_ACCOUNT_CONTROL_RIGHTS_CHANGED'))) return;
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const parsed = parseKeyMap(body.accountControlRights, body.rights, body.accountControlRightsOverride);
+  if (!parsed.provided) return bad(res, 400, 'accountControlRights is required', 'NO_ACCOUNT_CONTROL_RIGHT_CHANGES');
+  const requested = normalizeAccountControlRights(parsed.keys);
+  const accountControlRightsOverride = requested.filter((key) => !FOUNDER_ONLY_ACCOUNT_CONTROL_RIGHTS.includes(key));
+  const blockedFounderOnly = requested.filter((key) => FOUNDER_ONLY_ACCOUNT_CONTROL_RIGHTS.includes(key));
+
+  const updated = await User.findByIdAndUpdate(
+    req.params.id,
+    { $set: { accountControlRightsOverride, updatedBy: actorId(req), updatedAt: new Date() } },
+    { new: true },
+  );
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'TEAM_ACCOUNT_CONTROL_RIGHTS_CHANGE', String(updated._id), { oldValue: user.accountControlRightsOverride || [], newValue: accountControlRightsOverride, blockedFounderOnly });
+  const roleDoc = await loadRoleDocForUser(updated);
+  return ok(res, {
+    message: blockedFounderOnly.length ? 'Account control rights updated. Founder-only rights were ignored.' : 'Account control rights updated.',
+    data: { user: safeUserDto(updated), blockedFounderOnly, effectiveAccess: computeEffectiveAccess(updated, roleDoc, isSafeZoneMasterLocked()) },
+    user: safeUserDto(updated),
+    blockedFounderOnly,
+  });
+}
+
+async function grantTemporaryAccessHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_TEMP_ACCESS_GRANTED'))) return;
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const moduleKey = body.moduleKey && ADMIN_MODULE_KEYS.includes(String(body.moduleKey).trim()) ? String(body.moduleKey).trim() : null;
+  const rightKey = body.rightKey && SPECIAL_RIGHT_KEYS.includes(String(body.rightKey).trim()) ? String(body.rightKey).trim() : null;
+  if (!moduleKey && !rightKey) return bad(res, 400, 'A valid moduleKey or rightKey is required', 'INVALID_TEMPORARY_TARGET');
+  if (rightKey && FOUNDER_ONLY_RIGHTS.includes(rightKey)) return bad(res, 403, 'Founder-only rights cannot be granted temporarily', 'FOUNDER_ONLY_RIGHT');
+
+  const expiresAt = parseDateOrNull(body.expiresAt);
+  if (expiresAt === undefined) return bad(res, 400, 'Invalid expiresAt', 'INVALID_DATE');
+  if (expiresAt && expiresAt <= new Date()) return bad(res, 400, 'expiresAt must be in the future', 'INVALID_DATE');
+
+  const entry = {
+    _id: new mongoose.Types.ObjectId(),
+    moduleKey,
+    rightKey,
+    enabled: body.enabled !== false,
+    expiresAt: expiresAt || null,
+    reason: String(body.reason || '').trim().slice(0, 500) || null,
+    grantedBy: actorId(req),
+    grantedAt: new Date(),
+  };
+
+  const updated = await User.findByIdAndUpdate(
+    req.params.id,
+    { $push: { temporaryAccess: entry }, $set: { updatedBy: actorId(req), updatedAt: new Date() } },
+    { new: true },
+  );
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'TEAM_TEMP_ACCESS_GRANTED', String(updated._id), { moduleKey, rightKey, enabled: entry.enabled, expiresAt: entry.expiresAt, temporaryAccessId: String(entry._id) });
+  const roleDoc = await loadRoleDocForUser(updated);
+  return ok(res, { message: 'Temporary access granted.', data: { user: safeUserDto(updated), temporaryAccess: normalizeTemporaryAccessList(updated.temporaryAccess), effectiveAccess: computeEffectiveAccess(updated, roleDoc, isSafeZoneMasterLocked()) }, user: safeUserDto(updated) }, 201);
+}
+
+async function removeTemporaryAccessHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_TEMP_ACCESS_REMOVED'))) return;
+  const temporaryAccessId = String(req.params.temporaryAccessId || '').trim();
+  if (!mongoose.isValidObjectId(temporaryAccessId)) return bad(res, 400, 'Invalid temporaryAccessId', 'INVALID_ID');
+  const exists = (Array.isArray(user.temporaryAccess) ? user.temporaryAccess : []).some((entry) => String(entry?._id) === temporaryAccessId);
+  if (!exists) return bad(res, 404, 'Temporary access entry not found', 'NOT_FOUND');
+
+  const updated = await User.findByIdAndUpdate(
+    req.params.id,
+    { $pull: { temporaryAccess: { _id: new mongoose.Types.ObjectId(temporaryAccessId) } }, $set: { updatedBy: actorId(req), updatedAt: new Date() } },
+    { new: true },
+  );
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'TEAM_TEMP_ACCESS_REMOVED', String(updated._id), { temporaryAccessId });
+  const roleDoc = await loadRoleDocForUser(updated);
+  return ok(res, { message: 'Temporary access removed.', data: { user: safeUserDto(updated), temporaryAccess: normalizeTemporaryAccessList(updated.temporaryAccess), effectiveAccess: computeEffectiveAccess(updated, roleDoc, isSafeZoneMasterLocked()) }, user: safeUserDto(updated) });
+}
+
+// ---------------------------------------------------------------------------
+// Staff Control Center — Archived / Test Accounts
+// ---------------------------------------------------------------------------
+
+async function archivedListHandler(_req, res) {
+  if (!isDbReady()) return ok(res, { data: { staff: [] }, staff: [], users: [] });
+  const docs = await User.find({
+    $and: [
+      { $or: [{ role: { $in: TEAM_ROLES } }, { roleId: { $exists: true, $ne: null } }, { staffId: { $exists: true, $ne: null } }] },
+      { $or: [{ isArchived: true }, { status: 'archived' }, { accountStatus: 'archived' }, { isTestAccount: true }] },
+    ],
+  }).sort({ archivedAt: -1, updatedAt: -1 }).lean();
+  const staff = (docs || []).map(safeUserDto);
+  return ok(res, { data: { staff, users: staff }, staff, users: staff });
+}
+
+async function restoreUserHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+  if (isProtectedFounderUser(user) || String(user.staffId || '').trim().toUpperCase() === FOUNDER_STAFF_ID) {
+    return blockFounderStaffAction(req, res, user, 'STAFF_RESTORED');
+  }
+  const now = new Date();
+  const updated = await User.findByIdAndUpdate(
+    req.params.id,
+    {
+      $set: {
+        status: 'active',
+        accountStatus: 'active',
+        isArchived: false,
+        archivedAt: null,
+        archivedBy: null,
+        loginAllowed: true,
+        lockedUntil: null,
+        updatedBy: actorId(req),
+        updatedAt: now,
+      },
+    },
+    { new: true },
+  );
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'STAFF_RESTORED', req.params.id, { fromStatus: String(user.accountStatus || user.status || '') || null });
+  return ok(res, { message: 'Staff account restored.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
+}
+
+function permanentDeleteConfirmed(req) {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const first = body.confirmation === 'DELETE_PERMANENTLY' || body.confirm === 'DELETE_PERMANENTLY';
+  const second = body.confirmPermanentDelete === true || body.doubleConfirm === true || body.confirmationCheckbox === true;
+  return first && second;
+}
+
+async function deletePermanentlyHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = await findUserById(req.params.id, res);
+  if (!user) return;
+
+  // Never delete Founder / NP-FND-0001 / protected accounts.
+  if (isProtectedFounderUser(user) || String(user.staffId || '').trim().toUpperCase() === FOUNDER_STAFF_ID) {
+    await logAudit(req, 'FOUNDER_DELETE_BLOCKED', String(user._id), { staffId: user.staffId || null });
+    return bad(res, 403, FOUNDER_PROTECTED_MESSAGE, 'FOUNDER_PROTECTED');
+  }
+  // Founder-only action.
+  if (!actorIsFounder(req)) return bad(res, 403, 'Founder permission required.', 'FOUNDER_REQUIRED');
+  // Double confirmation + reason required.
+  if (!permanentDeleteConfirmed(req)) return bad(res, 400, 'Double confirmation required for permanent delete.', 'MISSING_CONFIRMATION');
+  const deleteReason = deleteReasonFromBody(req, null);
+  if (!deleteReason) return bad(res, 400, 'A reason is required for permanent delete.', 'MISSING_REASON');
+
+  const isArchived = Boolean(user.isArchived || ['archived'].includes(String(user.accountStatus || user.status || '').toLowerCase()));
+  const isTest = hasTestAccountMarker(user) || Boolean(user.isTestAccount);
+
+  // Real staff accounts require explicit force delete AND must pass safety checks.
+  if (!isArchived && !isTest) {
+    if (req.body?.forceDelete !== true) {
+      return bad(res, 400, 'Real staff accounts cannot be deleted. Archive the account or confirm force delete.', 'FORCE_DELETE_REQUIRED');
+    }
+  }
+  const blockers = await getTestDeleteBlockers(user);
+  if (blockers.length && !isArchived) {
+    await logAudit(req, 'STAFF_DELETE_BLOCKED', String(user._id), { reasons: blockers, staffId: user.staffId || null });
+    return bad(res, 400, 'Account has linked records and cannot be permanently deleted. Archive instead.', 'PERMANENT_DELETE_BLOCKED');
+  }
+
+  const removedSnapshot = safeUserDto(user);
+  const now = new Date();
+  await markUserSessionsRevoked(user._id, now, 'staff_permanent_delete');
+  await User.deleteOne({ _id: user._id });
+  await logAudit(req, 'STAFF_DELETED_PERMANENTLY', String(user._id), { email: user.email, staffId: user.staffId || null, deleteReason });
+  return ok(res, { message: 'Staff account permanently deleted.', data: { deleted: true, previousUser: removedSnapshot }, deleted: true });
+}
+
+// ---------------------------------------------------------------------------
+// Staff Control Center — Roles & Workflow
+// ---------------------------------------------------------------------------
+
+async function rolesWorkflowHandler(_req, res) {
+  let roleDocs = [];
+  if (isDbReady()) {
+    try { roleDocs = await Role.find({}).sort({ sortOrder: 1, name: 1 }).lean(); } catch (_) { roleDocs = []; }
+  }
+  const workflow = buildRolesWorkflow(roleDocs);
+  return ok(res, { data: workflow, ...workflow });
+}
+
+function taskDto(task) {
+  if (!task) return null;
+  const id = task._id ? String(task._id) : (task.id ? String(task.id) : null);
+  return {
+    ...(id ? { id, _id: id } : {}),
+    title: task.title || '',
+    description: task.description || '',
+    accountGroup: task.accountGroup || null,
+    taskCategory: task.taskCategory || null,
+    taskLevel: task.taskLevel || null,
+    assignedToStaffId: task.assignedToStaffId || null,
+    assignedByStaffId: task.assignedByStaffId || null,
+    department: task.department || null,
+    coverageArea: task.coverageArea || null,
+    priority: task.priority || 'Normal',
+    status: task.status || 'Assigned',
+    dueDate: task.dueDate || null,
+    relatedModule: task.relatedModule || null,
+    relatedNewsId: task.relatedNewsId || null,
+    attachments: Array.isArray(task.attachments) ? task.attachments : [],
+    comments: Array.isArray(task.comments) ? task.comments : [],
+    createdBy: task.createdBy || null,
+    updatedBy: task.updatedBy || null,
+    createdAt: task.createdAt || null,
+    updatedAt: task.updatedAt || null,
+    completedAt: task.completedAt || null,
+    closedAt: task.closedAt || null,
+    auditId: task.auditId || null,
+  };
+}
+
+function actorStaffIdValue(req) {
+  return String(req.user?.staffId || req.user?.id || '').trim() || null;
+}
+
+function parseTaskDate(value, fieldName) {
+  if (value === undefined || value === null || value === '') return { value: null };
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return { error: { status: 400, message: `Invalid ${fieldName}`, code: 'INVALID_DATE' } };
+  return { value: date };
+}
+
+function normalizeTaskPayload(body, options = {}) {
+  const input = body && typeof body === 'object' ? body : {};
+  const patch = {};
+  if (options.requireTitle || input.title !== undefined) {
+    const title = String(input.title || '').trim();
+    if (!title) return { error: { status: 400, message: 'title is required', code: 'MISSING_TITLE' } };
+    patch.title = title;
+  }
+  if (input.description !== undefined) patch.description = String(input.description || '').trim();
+  if (input.accountGroup !== undefined) {
+    const accountGroup = normalizeAccountGroup(input.accountGroup);
+    if (input.accountGroup && !accountGroup) return { error: { status: 400, message: 'Invalid accountGroup', code: 'INVALID_ACCOUNT_GROUP' } };
+    patch.accountGroup = accountGroup;
+  }
+  if (options.requireCategory || input.taskCategory !== undefined) {
+    const taskCategory = TASK_CATEGORIES.find((item) => item.toLowerCase() === String(input.taskCategory || '').trim().toLowerCase());
+    if (!taskCategory) return { error: { status: 400, message: 'Invalid taskCategory', code: 'INVALID_TASK_CATEGORY' } };
+    patch.taskCategory = taskCategory;
+  }
+  if (options.requireLevel || input.taskLevel !== undefined) {
+    const taskLevel = TASK_LEVELS.find((item) => item.toLowerCase() === String(input.taskLevel || '').trim().toLowerCase());
+    if (!taskLevel) return { error: { status: 400, message: 'Invalid taskLevel', code: 'INVALID_TASK_LEVEL' } };
+    patch.taskLevel = taskLevel;
+  }
+  if (input.assignedToStaffId !== undefined) patch.assignedToStaffId = String(input.assignedToStaffId || '').trim().toUpperCase() || null;
+  if (input.assignedByStaffId !== undefined) patch.assignedByStaffId = String(input.assignedByStaffId || '').trim().toUpperCase() || null;
+  if (input.department !== undefined) patch.department = String(input.department || '').trim() || null;
+  if (input.coverageArea !== undefined) patch.coverageArea = String(input.coverageArea || '').trim() || null;
+  if (input.priority !== undefined) {
+    const priority = ['Low', 'Normal', 'High', 'Urgent'].find((item) => item.toLowerCase() === String(input.priority || '').trim().toLowerCase());
+    if (!priority) return { error: { status: 400, message: 'Invalid priority', code: 'INVALID_PRIORITY' } };
+    patch.priority = priority;
+  }
+  if (input.status !== undefined) {
+    const status = TASK_STATUSES.find((item) => item.toLowerCase() === String(input.status || '').trim().toLowerCase());
+    if (!status) return { error: { status: 400, message: 'Invalid status', code: 'INVALID_TASK_STATUS' } };
+    patch.status = status;
+  }
+  if (input.dueDate !== undefined) {
+    const dueDate = parseTaskDate(input.dueDate, 'dueDate');
+    if (dueDate.error) return dueDate;
+    patch.dueDate = dueDate.value;
+  }
+  if (input.relatedModule !== undefined) patch.relatedModule = input.relatedModule ? String(input.relatedModule || '').trim() : null;
+  if (input.relatedNewsId !== undefined) {
+    if (input.relatedNewsId && !mongoose.isValidObjectId(String(input.relatedNewsId))) return { error: { status: 400, message: 'Invalid relatedNewsId', code: 'INVALID_RELATED_NEWS_ID' } };
+    patch.relatedNewsId = input.relatedNewsId || null;
+  }
+  if (input.attachments !== undefined) patch.attachments = Array.isArray(input.attachments) ? input.attachments.slice(0, 20).map((item) => ({ name: String(item?.name || '').trim() || null, url: String(item?.url || '').trim() || null, type: String(item?.type || '').trim() || null })) : [];
+  return { patch };
+}
+
+function taskVisibilityQuery(req) {
+  if (actorIsFounder(req)) return {};
+  const actorStaffId = actorStaffIdValue(req);
+  if (Array.isArray(req.user?.taskRights) && req.user.taskRights.includes('task_view_team')) return {};
+  return { $or: [{ assignedToStaffId: actorStaffId }, { assignedByStaffId: actorStaffId }, { createdBy: actorId(req) }] };
+}
+
+async function findTaskById(req, res) {
+  if (!mongoose.isValidObjectId(String(req.params.id))) {
+    bad(res, 400, 'Invalid task id', 'INVALID_ID');
+    return null;
+  }
+  const task = await StaffTask.findById(String(req.params.id));
+  if (!task) {
+    bad(res, 404, 'Task not found', 'TASK_NOT_FOUND');
+    return null;
+  }
+  return task;
+}
+
+async function listTasksHandler(req, res) {
+  if (!isDbReady()) return ok(res, { data: { tasks: [] }, tasks: [] });
+  const docs = await StaffTask.find(taskVisibilityQuery(req)).sort({ createdAt: -1 }).limit(300).lean();
+  const tasks = (docs || []).map(taskDto);
+  return ok(res, { data: { tasks, categories: TASK_CATEGORIES, levels: TASK_LEVELS, statuses: TASK_STATUSES }, tasks });
+}
+
+async function getTaskHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const task = await findTaskById(req, res);
+  if (!task) return;
+  const visibleQuery = taskVisibilityQuery(req);
+  if (Object.keys(visibleQuery).length && !(await StaffTask.exists({ _id: task._id, ...visibleQuery }))) return bad(res, 403, 'Access Denied. Founder permission is required.', 'FORBIDDEN');
+  return ok(res, { data: { task: taskDto(task) }, task: taskDto(task) });
+}
+
+async function createTaskHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const parsed = normalizeTaskPayload(req.body, { requireTitle: true, requireCategory: true, requireLevel: true });
+  if (parsed.error) return bad(res, parsed.error.status, parsed.error.message, parsed.error.code);
+  const now = new Date();
+  const created = await StaffTask.create({
+    ...parsed.patch,
+    assignedByStaffId: parsed.patch.assignedByStaffId || actorStaffIdValue(req),
+    status: parsed.patch.status || 'Assigned',
+    createdBy: actorId(req),
+    updatedBy: actorId(req),
+    createdAt: now,
+    updatedAt: now,
+  });
+  await logAudit(req, 'TASK_CREATED', String(created._id), { targetType: 'staff_task', targetId: String(created._id), module: 'staff_tasks', newValue: taskDto(created) });
+  return ok(res, { message: 'Task created.', data: { task: taskDto(created) }, task: taskDto(created) }, 201);
+}
+
+async function updateTaskHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const task = await findTaskById(req, res);
+  if (!task) return;
+  const parsed = normalizeTaskPayload(req.body, {});
+  if (parsed.error) return bad(res, parsed.error.status, parsed.error.message, parsed.error.code);
+  const oldValue = taskDto(task);
+  Object.assign(task, parsed.patch, { updatedBy: actorId(req), updatedAt: new Date() });
+  if (task.status === 'Completed' && !task.completedAt) task.completedAt = new Date();
+  if (task.status === 'Closed' && !task.closedAt) task.closedAt = new Date();
+  await task.save();
+  await logAudit(req, 'TASK_EDITED', String(task._id), { targetType: 'staff_task', targetId: String(task._id), module: 'staff_tasks', oldValue, newValue: taskDto(task) });
+  return ok(res, { message: 'Task updated.', data: { task: taskDto(task) }, task: taskDto(task) });
+}
+
+async function assignTaskHandler(req, res, action = 'TASK_ASSIGNED') {
+  if (!ensureDb(res)) return;
+  const task = await findTaskById(req, res);
+  if (!task) return;
+  const assignedToStaffId = String(req.body?.assignedToStaffId || '').trim().toUpperCase();
+  if (!assignedToStaffId) return bad(res, 400, 'assignedToStaffId is required', 'MISSING_ASSIGNEE');
+  const oldValue = { assignedToStaffId: task.assignedToStaffId || null };
+  task.assignedToStaffId = assignedToStaffId;
+  task.assignedByStaffId = actorStaffIdValue(req);
+  task.updatedBy = actorId(req);
+  task.updatedAt = new Date();
+  await task.save();
+  await logAudit(req, action, String(task._id), { targetType: 'staff_task', targetId: String(task._id), module: 'staff_tasks', oldValue, newValue: { assignedToStaffId } });
+  return ok(res, { message: action === 'TASK_REASSIGNED' ? 'Task reassigned.' : 'Task assigned.', data: { task: taskDto(task) }, task: taskDto(task) });
+}
+
+async function statusTaskHandler(req, res, forcedStatus = null) {
+  if (!ensureDb(res)) return;
+  const task = await findTaskById(req, res);
+  if (!task) return;
+  const status = forcedStatus || TASK_STATUSES.find((item) => item.toLowerCase() === String(req.body?.status || '').trim().toLowerCase());
+  if (!status) return bad(res, 400, 'Invalid status', 'INVALID_TASK_STATUS');
+  const oldValue = { status: task.status || null };
+  task.status = status;
+  task.updatedBy = actorId(req);
+  task.updatedAt = new Date();
+  if (status === 'Completed') task.completedAt = new Date();
+  if (status === 'Closed') task.closedAt = new Date();
+  await task.save();
+  const action = status === 'Completed' ? 'TASK_COMPLETED' : (status === 'Closed' ? 'TASK_CLOSED' : 'TASK_STATUS_CHANGED');
+  await logAudit(req, action, String(task._id), { targetType: 'staff_task', targetId: String(task._id), module: 'staff_tasks', oldValue, newValue: { status } });
+  return ok(res, { message: 'Task status updated.', data: { task: taskDto(task) }, task: taskDto(task) });
+}
+
+async function commentTaskHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const task = await findTaskById(req, res);
+  if (!task) return;
+  const message = String(req.body?.message || req.body?.comment || '').trim();
+  if (!message) return bad(res, 400, 'comment is required', 'MISSING_COMMENT');
+  task.comments.push({ staffId: actorStaffIdValue(req), userId: actorId(req), message, createdAt: new Date() });
+  task.updatedBy = actorId(req);
+  task.updatedAt = new Date();
+  await task.save();
+  await logAudit(req, 'TASK_COMMENTED', String(task._id), { targetType: 'staff_task', targetId: String(task._id), module: 'staff_tasks' });
+  return ok(res, { message: 'Comment added.', data: { task: taskDto(task) }, task: taskDto(task) });
+}
+
+async function deleteTaskHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const task = await findTaskById(req, res);
+  if (!task) return;
+  const oldValue = taskDto(task);
+  await StaffTask.deleteOne({ _id: task._id });
+  await logAudit(req, 'TASK_DELETED', String(task._id), { targetType: 'staff_task', targetId: String(task._id), module: 'staff_tasks', oldValue });
+  return ok(res, { message: 'Task deleted.', data: { deleted: true }, deleted: true });
+}
+
+async function accountGroupsHandler(_req, res) {
+  return ok(res, { data: { accountGroups: STAFF_CONTROL_CENTER.accountGroups.slice() }, accountGroups: STAFF_CONTROL_CENTER.accountGroups.slice() });
+}
+
+async function positionsHandler(_req, res) {
+  return ok(res, { data: { positions: STAFF_CONTROL_CENTER.positions.slice() }, positions: STAFF_CONTROL_CENTER.positions.slice() });
+}
+
+async function defaultTaskTemplatesHandler(_req, res) {
+  const templates = Object.fromEntries(Object.entries(DEFAULT_TASK_TEMPLATES).map(([key, value]) => [key, value.slice()]));
+  return ok(res, { data: { defaultTaskTemplates: templates, categories: TASK_CATEGORIES, levels: TASK_LEVELS, statuses: TASK_STATUSES }, defaultTaskTemplates: templates });
 }
 
 router.get(['/users', '/team/users'], requireTeamAuth, requireTeamPermission('auth.create_user'), listUsersHandler);
@@ -947,16 +1975,80 @@ router.patch(['/users/:id/suspend', '/team/users/:id/suspend'], requireTeamAuth,
 router.post('/team/users/:id/suspend', requireTeamAuth, requireTeamPermission('auth.suspend_user'), suspendUserHandler);
 router.patch('/team/users/:id/status', requireTeamAuth, requireTeamPermission('auth.suspend_user'), statusHandler);
 router.patch(['/users/:id/lock', '/team/users/:id/lock'], requireTeamAuth, requireTeamPermission('auth.lock_user'), lockUserHandler);
+router.post(['/users/:id/lock', '/team/users/:id/lock'], requireTeamAuth, requireTeamPermission('auth.lock_user'), lockUserHandler);
+router.post(['/users/:id/generate-temporary-password', '/team/users/:id/generate-temporary-password'], requireTeamAuth, requireTeamPermission('auth.generate_temp_password'), generateTemporaryPasswordHandler);
 router.patch(['/users/:id/reset-password', '/team/users/:id/reset-password'], requireTeamAuth, requireTeamPermission('auth.reset_password'), resetPasswordHandler);
+router.post(['/users/:id/reset-password', '/team/users/:id/reset-password'], requireTeamAuth, requireTeamPermission('auth.reset_password'), resetPasswordHandler);
 router.post('/team/users/:id/force-reset', requireTeamAuth, requireTeamPermission('auth.reset_password'), resetPasswordHandler);
 router.patch(['/users/:id/force-password-change', '/team/users/:id/force-password-change'], requireTeamAuth, requireTeamPermission('auth.force_password_change'), forcePasswordChangeHandler);
+router.post(['/users/:id/force-change-password', '/team/users/:id/force-change-password'], requireTeamAuth, requireTeamPermission('auth.force_password_change'), forcePasswordChangeHandler);
+router.post(['/users/:id/force-password-change', '/team/users/:id/force-password-change'], requireTeamAuth, requireTeamPermission('auth.force_password_change'), forcePasswordChangeHandler);
 router.patch(['/users/:id/permissions', '/team/users/:id/permissions'], requireTeamAuth, requireFounderActor, permissionsHandler);
 router.post(['/users/:id/logout-all', '/team/users/:id/logout-all'], requireTeamAuth, requireTeamPermission('auth.logout_user_sessions'), logoutAllHandler);
+router.post(['/users/:id/logout-all-devices', '/team/users/:id/logout-all-devices'], requireTeamAuth, requireTeamPermission('auth.logout_user_sessions'), logoutAllHandler);
+router.post(['/users/:id/extend-access', '/team/users/:id/extend-access'], requireTeamAuth, requireTeamPermission('auth.suspend_user'), extendAccessHandler);
+router.post(['/users/:id/reactivate', '/team/users/:id/reactivate'], requireTeamAuth, requireTeamPermission('auth.suspend_user'), reactivateUserHandler);
+router.post(['/users/:id/archive', '/team/users/:id/archive'], requireTeamAuth, requireTeamPermission('auth.suspend_user'), archiveUserHandler);
+router.delete(['/users/:id/test-only', '/team/users/:id/test-only'], requireTeamAuth, requireTeamPermission('auth.suspend_user'), deleteTestOnlyHandler);
+router.post(['/users/:id/mark-test-account', '/team/users/:id/mark-test-account'], requireTeamAuth, requireTeamPermission('auth.suspend_user'), markTestAccountHandler);
 router.post('/team/users/:id/activate', requireTeamAuth, requireTeamPermission('auth.suspend_user'), activateUserHandler);
 router.patch('/team/users/:id/activate', requireTeamAuth, requireTeamPermission('auth.suspend_user'), activateUserHandler);
 router.get('/audit-logs', requireTeamAuth, requireTeamPermission('auth.view_login_activity'), auditLogsHandler);
 router.get('/permissions', requireTeamAuth, (_req, res) => ok(res, { data: { permissions: AUTH_PERMISSIONS }, permissions: AUTH_PERMISSIONS }));
 router.get(['/options', '/team/options'], requireTeamAuth, requireTeamPermission('auth.create_user'), optionsHandler);
 router.get(['/next-staff-id', '/team/next-staff-id'], requireTeamAuth, requireTeamPermission('auth.create_user'), nextStaffIdHandler);
+
+// --- Staff Control Center: Founder Access Studio ---
+router.get(['/access/staff', '/team/access/staff'], requireTeamAuth, requireFounderActor, accessStaffListHandler);
+router.get(['/access/staff/:id/effective-access', '/team/access/staff/:id/effective-access'], requireTeamAuth, requireFounderActor, effectiveAccessHandler);
+router.get(['/access/staff/:id', '/team/access/staff/:id'], requireTeamAuth, requireFounderActor, accessStaffDetailHandler);
+router.patch(['/access/staff/:id/modules', '/team/access/staff/:id/modules'], requireTeamAuth, requireFounderActor, setModuleAccessHandler);
+router.patch(['/access/staff/:id/rights', '/team/access/staff/:id/rights'], requireTeamAuth, requireFounderActor, setSpecialRightsHandler);
+router.patch(['/access/staff/:id/task-rights', '/team/access/staff/:id/task-rights'], requireTeamAuth, requireFounderActor, setTaskRightsHandler);
+router.patch(['/access/staff/:id/account-control-rights', '/team/access/staff/:id/account-control-rights'], requireTeamAuth, requireFounderActor, setAccountControlRightsHandler);
+router.post(['/access/staff/:id/temporary', '/team/access/staff/:id/temporary'], requireTeamAuth, requireFounderActor, grantTemporaryAccessHandler);
+router.delete(['/access/staff/:id/temporary/:temporaryAccessId', '/team/access/staff/:id/temporary/:temporaryAccessId'], requireTeamAuth, requireFounderActor, removeTemporaryAccessHandler);
+
+// --- Staff Control Center: Task Board / Assignment Desk ---
+router.get(['/tasks', '/team/tasks'], requireTeamAuth, requireModuleAccess('staff_tasks'), listTasksHandler);
+router.post(['/tasks', '/team/tasks'], requireTeamAuth, requireModuleAccess('staff_tasks'), requireTaskRight('task_create'), createTaskHandler);
+router.get(['/tasks/:id', '/team/tasks/:id'], requireTeamAuth, requireModuleAccess('staff_tasks'), getTaskHandler);
+router.patch(['/tasks/:id', '/team/tasks/:id'], requireTeamAuth, requireModuleAccess('staff_tasks'), requireTaskRight('task_edit'), updateTaskHandler);
+router.post(['/tasks/:id/assign', '/team/tasks/:id/assign'], requireTeamAuth, requireModuleAccess('staff_tasks'), requireTaskRight('task_assign'), (req, res) => assignTaskHandler(req, res, 'TASK_ASSIGNED'));
+router.post(['/tasks/:id/reassign', '/team/tasks/:id/reassign'], requireTeamAuth, requireModuleAccess('staff_tasks'), requireTaskRight('task_assign'), (req, res) => assignTaskHandler(req, res, 'TASK_REASSIGNED'));
+router.post(['/tasks/:id/status', '/team/tasks/:id/status'], requireTeamAuth, requireModuleAccess('staff_tasks'), requireTaskRight('task_update_status'), (req, res) => statusTaskHandler(req, res));
+router.post(['/tasks/:id/comment', '/team/tasks/:id/comment'], requireTeamAuth, requireModuleAccess('staff_tasks'), requireTaskRight('task_comment'), commentTaskHandler);
+router.post(['/tasks/:id/complete', '/team/tasks/:id/complete'], requireTeamAuth, requireModuleAccess('staff_tasks'), requireTaskRight('task_complete'), (req, res) => statusTaskHandler(req, res, 'Completed'));
+router.post(['/tasks/:id/close', '/team/tasks/:id/close'], requireTeamAuth, requireModuleAccess('staff_tasks'), requireTaskRight('task_close'), (req, res) => statusTaskHandler(req, res, 'Closed'));
+router.delete(['/tasks/:id', '/team/tasks/:id'], requireTeamAuth, requireModuleAccess('staff_tasks'), requireTaskRight('task_delete'), deleteTaskHandler);
+
+// --- Staff Control Center: Staff Registry ---
+router.get(['/staff', '/team/staff'], requireTeamAuth, requireTeamAccountControlRight('staff_view_details', 'auth.create_user'), listUsersHandler);
+router.post(['/staff', '/team/staff'], requireTeamAuth, requireTeamPermission('auth.create_user'), createUserHandler);
+router.get(['/staff/:id', '/team/staff/:id'], requireTeamAuth, requireTeamAccountControlRight('staff_view_details', 'auth.create_user'), getUserHandler);
+router.patch(['/staff/:id/email', '/team/staff/:id/email'], requireTeamAuth, changeUserEmailHandler);
+router.patch(['/staff/:id', '/team/staff/:id'], requireTeamAuth, requireTeamAccountControlRight('staff_edit_basic', 'auth.create_user'), updateUserHandler);
+
+// --- Staff Control Center: Security & Sessions ---
+router.post(['/staff/:id/generate-temporary-password', '/team/staff/:id/generate-temporary-password'], requireTeamAuth, requireTeamAccountControlRight('staff_generate_temp_password', 'auth.generate_temp_password'), generateTemporaryPasswordHandler);
+router.post(['/staff/:id/reset-password', '/team/staff/:id/reset-password'], requireTeamAuth, requireTeamAccountControlRight('staff_reset_password', 'auth.reset_password'), resetPasswordHandler);
+router.post(['/staff/:id/force-change-password', '/team/staff/:id/force-change-password'], requireTeamAuth, requireTeamAccountControlRight('staff_force_password_change', 'auth.force_password_change'), forcePasswordChangeHandler);
+router.post(['/staff/:id/logout-all-devices', '/team/staff/:id/logout-all-devices'], requireTeamAuth, requireTeamAccountControlRight('staff_logout_devices', 'auth.logout_user_sessions'), logoutAllHandler);
+router.post(['/staff/:id/suspend', '/team/staff/:id/suspend'], requireTeamAuth, requireTeamAccountControlRight('staff_suspend', 'auth.suspend_user'), suspendUserHandler);
+router.post(['/staff/:id/lock', '/team/staff/:id/lock'], requireTeamAuth, requireTeamAccountControlRight('staff_lock', 'auth.lock_user'), lockUserHandler);
+router.post(['/staff/:id/reactivate', '/team/staff/:id/reactivate'], requireTeamAuth, requireTeamAccountControlRight('staff_reactivate', 'auth.suspend_user'), reactivateUserHandler);
+router.post(['/staff/:id/extend-access', '/team/staff/:id/extend-access'], requireTeamAuth, requireTeamAccountControlRight('staff_extend_access', 'auth.suspend_user'), extendAccessHandler);
+
+// --- Staff Control Center: Archived / Test Accounts ---
+router.get(['/archived', '/team/archived'], requireTeamAuth, requireTeamAccountControlRight('staff_archive', 'auth.suspend_user'), archivedListHandler);
+router.post(['/staff/:id/archive', '/team/staff/:id/archive'], requireTeamAuth, requireTeamAccountControlRight('staff_archive', 'auth.suspend_user'), archiveUserHandler);
+router.post(['/staff/:id/restore', '/team/staff/:id/restore'], requireTeamAuth, requireTeamAccountControlRight('staff_reactivate', 'auth.suspend_user'), restoreUserHandler);
+router.delete(['/staff/:id/delete-permanently', '/team/staff/:id/delete-permanently'], requireTeamAuth, requireFounderActor, deletePermanentlyHandler);
+
+// --- Staff Control Center: Roles & Workflow ---
+router.get(['/account-groups', '/team/account-groups'], requireTeamAuth, accountGroupsHandler);
+router.get(['/positions', '/team/positions'], requireTeamAuth, positionsHandler);
+router.get(['/default-task-templates', '/team/default-task-templates'], requireTeamAuth, defaultTaskTemplatesHandler);
+router.get(['/roles-workflow', '/team/roles-workflow'], requireTeamAuth, requireTeamPermission('auth.create_user'), rolesWorkflowHandler);
 
 module.exports = router;

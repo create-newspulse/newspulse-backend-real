@@ -114,6 +114,12 @@ async function requireAdminAuth(req, res, next) {
           if (user.loginAllowed === false) {
             return res.status(403).json({ ok: false, success: false, status: 403, code: 'LOGIN_DISABLED', message: 'Login disabled' });
           }
+          if (userStatus === 'archived' || accountStatus === 'archived') {
+            return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_ARCHIVED', message: 'Account archived' });
+          }
+          if (userStatus === 'deleted' || userStatus === 'deleted_test' || accountStatus === 'deleted' || accountStatus === 'deleted_test' || user.isDeleted || user.deletedAt) {
+            return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_DELETED', message: 'Account deleted' });
+          }
           if (userStatus === 'locked' || accountStatus === 'locked' || (user.lockedUntil && user.lockedUntil > new Date())) {
             return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_LOCKED', message: 'Account locked' });
           }
@@ -253,7 +259,7 @@ async function requireAdminJwt(req, res, next) {
       if (user) {
         const accountStatus = String(user.accountStatus || user.status || 'active').toLowerCase();
         const userStatus = String(user.status || accountStatus || 'active').toLowerCase();
-        if (userStatus === 'suspended' || userStatus === 'locked' || userStatus === 'expired' || accountStatus === 'suspended' || accountStatus === 'locked' || accountStatus === 'expired') {
+        if (userStatus === 'suspended' || userStatus === 'locked' || userStatus === 'expired' || userStatus === 'archived' || userStatus === 'deleted' || userStatus === 'deleted_test' || accountStatus === 'suspended' || accountStatus === 'locked' || accountStatus === 'expired' || accountStatus === 'archived' || accountStatus === 'deleted' || accountStatus === 'deleted_test' || user.isDeleted || user.deletedAt) {
           return res.status(403).json({ ok: false, message: 'Forbidden' });
         }
         if (user.loginAllowed === false) {
