@@ -388,6 +388,7 @@ const publicWeatherRouter = require('./routes/publicWeather.routes');
 const debugRouter = require('./routes/_debug.routes');
 const articleAnalyticsRouter = require('./routes/articleAnalytics.routes');
 const adminAnalyticsRouter = require('./routes/adminAnalytics.routes');
+const privacyRoutes = require('./routes/privacy.routes');
 let adminWorkflowApiRouter = null;
 let adminPushHistoryApiRouter = null;
 let adminWorkflowLegacyRouter = null;
@@ -1792,6 +1793,12 @@ app.use('/api/public', publicSponsoredFeaturesRouter);
 app.use('/api/public/ads', publicAdsInquiryRouter);
 app.post('/api/public/ad-inquiries', submitPublicAdInquiry);
 app.post('/api/public/grievance', submitPublicGrievance);
+
+// DPDP privacy request APIs (new isolated public/admin surface)
+app.use('/api/privacy', privacyRoutes.publicRouter);
+app.use('/api/admin/dpdp', privacyRoutes.adminRouter);
+app.use('/admin-api/admin/dpdp', privacyRoutes.adminRouter);
+app.use('/admin-api/api/admin/dpdp', privacyRoutes.adminRouter);
 
 // Team Management: presence/session logs, attendance, leave/off-days, and schedules.
 app.use('/api/team', teamPresenceRoutes);
