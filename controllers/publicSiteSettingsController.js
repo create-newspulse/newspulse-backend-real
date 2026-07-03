@@ -66,6 +66,19 @@ const DAILY_WONDERS_TEXT_FIELDS = [
   'publishDate',
 ];
 
+const LIVE_TV_MODE_VALUES = Object.freeze([
+  'News Pulse Live',
+  'AIRA Bulletin',
+  'Offline Replay',
+  'Scheduled Show',
+  'Breaking Mode',
+  'Maintenance / Coming Soon',
+]);
+
+const LIVE_TV_PROVIDER_VALUES = Object.freeze(['YouTube', 'Custom Embed']);
+const LIVE_TV_LANGUAGE_VALUES = Object.freeze(['English', 'Hindi', 'Gujarati']);
+const LIVE_TV_TEXT_FIELDS = Object.freeze(['embedUrl', 'fallbackVideoUrl', 'title', 'subtitle']);
+
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
@@ -346,6 +359,79 @@ function getDefaultDailyWonders() {
   return cloneJsonValue(defaults.dailyWonders || {});
 }
 
+function getDefaultLiveTv() {
+  const defaults = PublicSiteSettings.getDefaultSettings();
+  return cloneJsonValue(defaults.liveTv || {});
+}
+
+function validateLiveTvPayload(payload) {
+  const liveTv = getNested(payload, 'liveTv');
+  if (!liveTv.exists) return null;
+
+  if (liveTv.value === null) return null;
+
+  if (!isPlainObject(liveTv.value)) {
+    return { ok: false, message: 'Invalid value for liveTv: expected object' };
+  }
+
+  if (hasOwn(liveTv.value, 'enabled') && liveTv.value.enabled !== undefined && typeof liveTv.value.enabled !== 'boolean') {
+    return { ok: false, message: 'Invalid type for liveTv.enabled: expected boolean' };
+  }
+
+  if (hasOwn(liveTv.value, 'showOnHomepage') && liveTv.value.showOnHomepage !== undefined && typeof liveTv.value.showOnHomepage !== 'boolean') {
+    return { ok: false, message: 'Invalid type for liveTv.showOnHomepage: expected boolean' };
+  }
+
+  if (hasOwn(liveTv.value, 'mode') && liveTv.value.mode !== undefined) {
+    const mode = normalizeOptionalString(liveTv.value.mode);
+    if (!LIVE_TV_MODE_VALUES.includes(mode)) {
+      return { ok: false, message: `Invalid value for liveTv.mode: expected one of ${LIVE_TV_MODE_VALUES.join(' | ')}` };
+    }
+  }
+
+  if (hasOwn(liveTv.value, 'provider') && liveTv.value.provider !== undefined) {
+    const provider = normalizeOptionalString(liveTv.value.provider);
+    if (!LIVE_TV_PROVIDER_VALUES.includes(provider)) {
+      return { ok: false, message: `Invalid value for liveTv.provider: expected one of ${LIVE_TV_PROVIDER_VALUES.join(' | ')}` };
+    }
+  }
+
+  if (hasOwn(liveTv.value, 'language') && liveTv.value.language !== undefined) {
+    const language = normalizeOptionalString(liveTv.value.language);
+    if (!LIVE_TV_LANGUAGE_VALUES.includes(language)) {
+      return { ok: false, message: `Invalid value for liveTv.language: expected one of ${LIVE_TV_LANGUAGE_VALUES.join(' | ')}` };
+    }
+  }
+
+  for (const field of LIVE_TV_TEXT_FIELDS) {
+    if (hasOwn(liveTv.value, field) && liveTv.value[field] !== undefined && liveTv.value[field] !== null && typeof liveTv.value[field] !== 'string') {
+      return { ok: false, message: `Invalid type for liveTv.${field}: expected string` };
+    }
+  }
+
+  return null;
+}
+
+function normalizeLiveTv(settingsObj) {
+  const base = (settingsObj && typeof settingsObj === 'object') ? settingsObj : {};
+  const defaults = getDefaultLiveTv();
+  const source = isPlainObject(base.liveTv) ? base.liveTv : {};
+
+  base.liveTv = {
+    enabled: typeof source.enabled === 'boolean' ? source.enabled : Boolean(defaults.enabled),
+    mode: LIVE_TV_MODE_VALUES.includes(normalizeOptionalString(source.mode)) ? normalizeOptionalString(source.mode) : defaults.mode,
+    provider: LIVE_TV_PROVIDER_VALUES.includes(normalizeOptionalString(source.provider)) ? normalizeOptionalString(source.provider) : defaults.provider,
+    embedUrl: hasOwn(source, 'embedUrl') ? normalizeOptionalString(source.embedUrl) : normalizeOptionalString(defaults.embedUrl),
+    fallbackVideoUrl: hasOwn(source, 'fallbackVideoUrl') ? normalizeOptionalString(source.fallbackVideoUrl) : normalizeOptionalString(defaults.fallbackVideoUrl),
+    title: hasOwn(source, 'title') ? normalizeOptionalString(source.title) : normalizeOptionalString(defaults.title),
+    subtitle: hasOwn(source, 'subtitle') ? normalizeOptionalString(source.subtitle) : normalizeOptionalString(defaults.subtitle),
+    language: LIVE_TV_LANGUAGE_VALUES.includes(normalizeOptionalString(source.language)) ? normalizeOptionalString(source.language) : defaults.language,
+    showOnHomepage: typeof source.showOnHomepage === 'boolean' ? source.showOnHomepage : Boolean(defaults.showOnHomepage),
+  };
+
+  return base;
+}
+
 function validateDailyWondersPayload(payload) {
   const dailyWonders = getNested(payload, 'dailyWonders');
   if (!dailyWonders.exists) return null;
@@ -454,6 +540,7 @@ function ensureCategoryStripEnabled(settingsObj) {
 
   normalizeInspirationHub(base);
   normalizeDailyWonders(base);
+  normalizeLiveTv(base);
 
   return base;
 }
@@ -583,6 +670,11 @@ async function updateDraftSettings(req, res) {
     const dailyWondersValidationErr = validateDailyWondersPayload(draftData);
     if (dailyWondersValidationErr) {
       return res.status(400).json(dailyWondersValidationErr);
+    }
+
+    const liveTvValidationErr = validateLiveTvPayload(draftData);
+    if (liveTvValidationErr) {
+      return res.status(400).json(liveTvValidationErr);
     }
 
     const settings = await PublicSiteSettings.getOrCreate();
@@ -715,6 +807,9 @@ async function savePublicSettings(req, res) {
 
     const dailyWondersValidationErr = validateDailyWondersPayload(newData);
     if (dailyWondersValidationErr) return res.status(400).json(dailyWondersValidationErr);
+
+    const liveTvValidationErr = validateLiveTvPayload(newData);
+    if (liveTvValidationErr) return res.status(400).json(liveTvValidationErr);
 
     if (String(req.method || '').toUpperCase() === 'PUT') {
       // Replace draft entirely

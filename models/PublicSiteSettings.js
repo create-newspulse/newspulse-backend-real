@@ -38,7 +38,14 @@ const defaultSettings = {
   // Live TV configuration
   liveTv: {
     enabled: true,
+    mode: 'Offline Replay',
+    provider: 'YouTube',
     embedUrl: '',
+    fallbackVideoUrl: '',
+    title: 'News Pulse Live',
+    subtitle: '',
+    language: 'English',
+    showOnHomepage: true,
   },
   dailyWonders: {
     enabled: true,
