@@ -977,3 +977,146 @@ test('legacy non-founder team managers cannot use mutating team endpoints', asyn
   assert.equal(res.status, 403);
   assert.equal(res.body.code, 'FORBIDDEN');
 });
+
+test('Founder permanently deletes unwanted staff only after DELETE confirmation and burns Staff ID', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+  const editorToken = signToken({
+    sub: '507f1f77bcf86cd799439012',
+    email: 'editor@example.com',
+    role: 'editor',
+    name: 'Editor',
+  });
+
+  const editor = usersById.get('507f1f77bcf86cd799439012');
+  Object.assign(editor, {
+    staffId: 'NP-2026-0001',
+    staffIdLocked: true,
+    isTestAccount: true,
+    name: 'Duplicate Test Staff',
+    fullName: 'Duplicate Test Staff',
+    passwordHash: 'hash-that-must-not-enter-audit',
+    resetToken: 'token-that-must-not-enter-audit',
+  });
+
+  const expiredSession = await request(app)
+    .delete('/api/admin/team/staff/507f1f77bcf86cd799439012/delete-permanently')
+    .send({ confirmText: 'DELETE', reason: 'Testing duplicate account cleanup' });
+
+  assert.equal(expiredSession.status, 401);
+  assert.equal(expiredSession.body.message, 'Session expired. Please login again.');
+
+  const nonFounderDelete = await request(app)
+    .delete('/api/admin/team/staff/507f1f77bcf86cd799439012/delete-permanently')
+    .set('Authorization', `Bearer ${editorToken}`)
+    .send({ confirmText: 'DELETE', reason: 'Testing duplicate account cleanup' });
+
+  assert.equal(nonFounderDelete.status, 403);
+  assert.equal(nonFounderDelete.body.message, 'Founder permission required.');
+  assert.equal(usersById.has('507f1f77bcf86cd799439012'), true);
+
+  const missingConfirmation = await request(app)
+    .delete('/api/admin/team/staff/507f1f77bcf86cd799439012/delete-permanently')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ confirmText: 'delete', reason: 'Testing duplicate account cleanup' });
+
+  assert.equal(missingConfirmation.status, 400);
+  assert.equal(missingConfirmation.body.message, 'Confirmation text and reason are required.');
+  assert.equal(usersById.has('507f1f77bcf86cd799439012'), true);
+
+  const founderDelete = await request(app)
+    .delete('/api/admin/team/staff/507f1f77bcf86cd799439011/delete-permanently')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ confirmText: 'DELETE', reason: 'Never allowed' });
+
+  assert.equal(founderDelete.status, 403);
+  assert.equal(founderDelete.body.code, 'FOUNDER_PROTECTED');
+  assert.equal(founderDelete.body.message, 'Founder account cannot be deleted.');
+  assert.equal(usersById.get('507f1f77bcf86cd799439011').staffId, 'NP-FND-0001');
+  assert.equal(usersById.get('507f1f77bcf86cd799439011').role, 'founder');
+
+  const protectedEmailId = '507f1f77bcf86cd799439077';
+  usersById.set(protectedEmailId, {
+    _id: protectedEmailId,
+    email: 'kiran@newspulse.co.in',
+    name: 'Protected Founder Email',
+    role: 'reporter',
+    staffId: null,
+    permissions: [],
+    status: 'active',
+    accountStatus: 'active',
+    isTestAccount: true,
+    tokenVersion: 0,
+  });
+  usersByEmail.set('kiran@newspulse.co.in', protectedEmailId);
+
+  const protectedEmailDelete = await request(app)
+    .delete(`/api/admin/team/staff/${protectedEmailId}/delete-permanently`)
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ confirmText: 'DELETE', reason: 'Never allowed' });
+
+  assert.equal(protectedEmailDelete.status, 403);
+  assert.equal(protectedEmailDelete.body.code, 'FOUNDER_PROTECTED');
+  assert.equal(usersById.has(protectedEmailId), true);
+
+  const missingStaff = await request(app)
+    .delete('/api/admin/team/staff/507f1f77bcf86cd799439066/delete-permanently')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ confirmText: 'DELETE', reason: 'Testing duplicate account cleanup' });
+
+  assert.equal(missingStaff.status, 404);
+  assert.equal(missingStaff.body.message, 'Staff not found.');
+
+  const deleteRes = await request(app)
+    .delete('/api/admin/team/staff/507f1f77bcf86cd799439012/delete-permanently')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ confirmText: 'DELETE', reason: 'Testing duplicate account cleanup' });
+
+  assert.equal(deleteRes.status, 200);
+  assert.equal(deleteRes.body.success, true);
+  assert.equal(deleteRes.body.message, 'Staff account permanently deleted.');
+  assert.equal(deleteRes.body.deletedStaffId, 'NP-2026-0001');
+  assert.equal(usersById.has('507f1f77bcf86cd799439012'), false);
+  assert.equal(usersByEmail.has('editor@example.com'), false);
+
+  const defaultList = await request(app)
+    .get('/api/admin/team/staff')
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(defaultList.status, 200);
+  assert.equal(defaultList.body.users.some((user) => user.staffId === 'NP-2026-0001'), false);
+
+  const deleteAudit = auditLogs.find((entry) => entry.action === 'staff_deleted_permanently');
+  assert.ok(deleteAudit);
+  assert.equal(deleteAudit.actor.role, 'founder');
+  assert.equal(deleteAudit.meta.targetStaffId, 'NP-2026-0001');
+  assert.equal(deleteAudit.meta.targetEmail, 'editor@example.com');
+  assert.equal(deleteAudit.reason, 'Testing duplicate account cleanup');
+  assert.equal(deleteAudit.result, 'success');
+  const auditJson = JSON.stringify(deleteAudit);
+  assert.equal(auditJson.includes('hash-that-must-not-enter-audit'), false);
+  assert.equal(auditJson.includes('token-that-must-not-enter-audit'), false);
+  assert.equal(auditJson.includes('passwordHash'), false);
+  assert.equal(auditJson.includes('resetToken'), false);
+
+  const reuseDeletedStaffId = await request(app)
+    .post('/api/admin/team/staff')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ fullName: 'Reuse Deleted Staff ID', email: 'reuse-deleted@example.com', role: 'reporter', staffId: 'NP-2026-0001' });
+
+  assert.equal(reuseDeletedStaffId.status, 409);
+  assert.equal(reuseDeletedStaffId.body.code, 'STAFF_ID_RETIRED');
+
+  const nextCreate = await request(app)
+    .post('/api/admin/team/staff')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ fullName: 'Next Staff', email: 'next-staff@example.com', role: 'reporter' });
+
+  assert.equal(nextCreate.status, 201);
+  assert.equal(nextCreate.body.data.user.staffId, 'NP-2026-0002');
+});

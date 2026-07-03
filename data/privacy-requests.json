@@ -1,1 +1,14 @@
-[]
+[
+  {
+    "requestId": "DPDP-20260703-ACTION01",
+    "fullName": "Delete User",
+    "email": "delete.user@example.com",
+    "mobile": "+919900000001",
+    "requestType": "deletion",
+    "message": "Delete my business inquiry.",
+    "source": "Frontend Form",
+    "status": "Verified",
+    "createdAt": "2026-07-03T12:30:00.000Z",
+    "updatedAt": "2026-07-03T12:30:00.000Z"
+  }
+]

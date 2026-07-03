@@ -18,6 +18,7 @@ const {
   FOUNDER_STAFF_ID,
   ensureUserStaffId,
   previewNextStaffId,
+  retireStaffId,
   resolveStaffIdForNewUser,
 } = require('../lib/staffId');
 const {
@@ -64,6 +65,7 @@ const {
 
 const router = express.Router();
 const FOUNDER_PROTECTED_MESSAGE = 'Founder account is protected. Use Founder My Account / Safe Zone.';
+const PROTECTED_FOUNDER_EMAIL = 'kiran@newspulse.co.in';
 const STAFF_MANAGE_GRANTS = Object.freeze(['staff_manage', 'staff.manage', 'team.manage']);
 
 function isDbReady() {
@@ -120,6 +122,39 @@ function requireTeamAuth(req, res, next) {
   return requireAdminAuth(req, res, function onAuthed(err) {
     if (err) return next(err);
     syncReqUserFromAdmin(req);
+    return next();
+  });
+}
+
+function requirePermanentDeleteAuth(req, res, next) {
+  const originalStatus = res.status.bind(res);
+  const originalJson = res.json.bind(res);
+  let currentStatus = 200;
+
+  res.status = (status) => {
+    currentStatus = status;
+    return originalStatus(status);
+  };
+  res.json = (payload) => {
+    const payloadStatus = payload && typeof payload === 'object' ? Number(payload.status || 0) : 0;
+    if (currentStatus === 401 || payloadStatus === 401) {
+      const body = payload && typeof payload === 'object' ? payload : {};
+      return originalJson({
+        ...body,
+        ok: false,
+        success: false,
+        status: 401,
+        code: body.code || 'UNAUTHORIZED',
+        message: 'Session expired. Please login again.',
+      });
+    }
+    return originalJson(payload);
+  };
+
+  return requireTeamAuth(req, res, (err) => {
+    res.status = originalStatus;
+    res.json = originalJson;
+    if (err) return next(err);
     return next();
   });
 }
@@ -616,6 +651,7 @@ async function createUserHandler(req, res) {
     );
   } catch (error) {
     if (error?.code === 'STAFF_ID_EXISTS') return bad(res, 409, error.message || 'Staff ID already exists', 'STAFF_ID_EXISTS');
+    if (error?.code === 'STAFF_ID_RETIRED') return bad(res, 409, error.message || 'Staff ID cannot be reused', 'STAFF_ID_RETIRED');
     return bad(res, 400, error?.message || 'Invalid Staff ID', 'INVALID_STAFF_ID');
   }
 
@@ -849,6 +885,7 @@ async function updateUserHandler(req, res) {
       audit.fields.push('staffId');
     } catch (error) {
       if (error?.code === 'STAFF_ID_EXISTS') return bad(res, 409, error.message || 'Staff ID already exists', 'STAFF_ID_EXISTS');
+      if (error?.code === 'STAFF_ID_RETIRED') return bad(res, 409, error.message || 'Staff ID cannot be reused', 'STAFF_ID_RETIRED');
       return bad(res, 400, error?.message || 'Invalid Staff ID', 'INVALID_STAFF_ID');
     }
   }
@@ -1340,6 +1377,7 @@ async function auditLogsHandler(_req, res) {
     'STAFF_TEST_DELETED',
     'STAFF_MARKED_TEST',
     'STAFF_DELETE_BLOCKED',
+    'staff_deleted_permanently',
     'FOUNDER_DELETE_BLOCKED',
     'BLOCKED_FOUNDER_STAFF_ACTION',
     'STAFF_EMAIL_CHANGE_BLOCKED',
@@ -1673,27 +1711,36 @@ async function restoreUserHandler(req, res) {
 
 function permanentDeleteConfirmed(req) {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  const first = body.confirmation === 'DELETE_PERMANENTLY' || body.confirm === 'DELETE_PERMANENTLY';
-  const second = body.confirmPermanentDelete === true || body.doubleConfirm === true || body.confirmationCheckbox === true;
-  return first && second;
+  return String(body.confirmText || '').trim() === 'DELETE';
+}
+
+function isProtectedFounderDeleteTarget(user) {
+  const staffId = String(user?.staffId || '').trim().toUpperCase();
+  const email = normalizeEmailAddress(user?.email);
+  return isProtectedFounderUser(user) || staffId === FOUNDER_STAFF_ID || email === PROTECTED_FOUNDER_EMAIL;
 }
 
 async function deletePermanentlyHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await findUserById(req.params.id, res);
-  if (!user) return;
+  if (!actorIsFounder(req)) return bad(res, 403, 'Founder permission required.', 'FOUNDER_REQUIRED');
+  if (!mongoose.isValidObjectId(String(req.params.id))) return bad(res, 400, 'Invalid id', 'INVALID_ID');
+  const user = await User.findById(String(req.params.id));
+  if (!user) return bad(res, 404, 'Staff not found.', 'NOT_FOUND');
 
   // Never delete Founder / NP-FND-0001 / protected accounts.
-  if (isProtectedFounderUser(user) || String(user.staffId || '').trim().toUpperCase() === FOUNDER_STAFF_ID) {
-    await logAudit(req, 'FOUNDER_DELETE_BLOCKED', String(user._id), { staffId: user.staffId || null });
-    return bad(res, 403, FOUNDER_PROTECTED_MESSAGE, 'FOUNDER_PROTECTED');
+  if (isProtectedFounderDeleteTarget(user)) {
+    await logAudit(req, 'FOUNDER_DELETE_BLOCKED', String(user._id), {
+      staffId: user.staffId || null,
+      targetStaffId: user.staffId || null,
+      targetEmail: user.email || null,
+      result: 'blocked',
+      reason: 'founder_account_protected',
+    });
+    return bad(res, 403, 'Founder account cannot be deleted.', 'FOUNDER_PROTECTED');
   }
-  // Founder-only action.
-  if (!actorIsFounder(req)) return bad(res, 403, 'Founder permission required.', 'FOUNDER_REQUIRED');
-  // Double confirmation + reason required.
-  if (!permanentDeleteConfirmed(req)) return bad(res, 400, 'Double confirmation required for permanent delete.', 'MISSING_CONFIRMATION');
+
   const deleteReason = deleteReasonFromBody(req, null);
-  if (!deleteReason) return bad(res, 400, 'A reason is required for permanent delete.', 'MISSING_REASON');
+  if (!permanentDeleteConfirmed(req) || !deleteReason) return bad(res, 400, 'Confirmation text and reason are required.', 'MISSING_CONFIRMATION_OR_REASON');
 
   const isArchived = Boolean(user.isArchived || ['archived'].includes(String(user.accountStatus || user.status || '').toLowerCase()));
   const isTest = hasTestAccountMarker(user) || Boolean(user.isTestAccount);
@@ -1711,11 +1758,22 @@ async function deletePermanentlyHandler(req, res) {
   }
 
   const removedSnapshot = safeUserDto(user);
+  const deletedStaffId = user.staffId || null;
   const now = new Date();
   await markUserSessionsRevoked(user._id, now, 'staff_permanent_delete');
-  await User.deleteOne({ _id: user._id });
-  await logAudit(req, 'STAFF_DELETED_PERMANENTLY', String(user._id), { email: user.email, staffId: user.staffId || null, deleteReason });
-  return ok(res, { message: 'Staff account permanently deleted.', data: { deleted: true, previousUser: removedSnapshot }, deleted: true });
+  const deleteResult = await User.deleteOne({ _id: user._id });
+  if (!deleteResult || deleteResult.deletedCount !== 1) return bad(res, 404, 'Staff not found.', 'NOT_FOUND');
+  retireStaffId(deletedStaffId);
+  await logAudit(req, 'staff_deleted_permanently', String(user._id), {
+    actor: 'Founder',
+    targetStaffId: deletedStaffId,
+    targetEmail: user.email || null,
+    deletedStaffId,
+    reason: deleteReason,
+    result: 'success',
+    time: now.toISOString(),
+  });
+  return ok(res, { message: 'Staff account permanently deleted.', deletedStaffId, data: { deleted: true, deletedStaffId, previousUser: removedSnapshot }, deleted: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -2043,7 +2101,7 @@ router.post(['/staff/:id/extend-access', '/team/staff/:id/extend-access'], requi
 router.get(['/archived', '/team/archived'], requireTeamAuth, requireTeamAccountControlRight('staff_archive', 'auth.suspend_user'), archivedListHandler);
 router.post(['/staff/:id/archive', '/team/staff/:id/archive'], requireTeamAuth, requireTeamAccountControlRight('staff_archive', 'auth.suspend_user'), archiveUserHandler);
 router.post(['/staff/:id/restore', '/team/staff/:id/restore'], requireTeamAuth, requireTeamAccountControlRight('staff_reactivate', 'auth.suspend_user'), restoreUserHandler);
-router.delete(['/staff/:id/delete-permanently', '/team/staff/:id/delete-permanently'], requireTeamAuth, requireFounderActor, deletePermanentlyHandler);
+router.delete(['/staff/:id/delete-permanently', '/team/staff/:id/delete-permanently'], requirePermanentDeleteAuth, deletePermanentlyHandler);
 
 // --- Staff Control Center: Roles & Workflow ---
 router.get(['/account-groups', '/team/account-groups'], requireTeamAuth, accountGroupsHandler);
