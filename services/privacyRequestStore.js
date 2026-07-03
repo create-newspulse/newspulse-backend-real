@@ -47,13 +47,14 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function normalizeStoredRequest(doc) {
+function normalizeStoredRequest(doc, { includeInternal = false } = {}) {
   if (!doc) return null;
   const source = typeof doc.toObject === 'function' ? doc.toObject() : doc;
   const out = cloneJson(source);
   if (out._id) out.id = String(out._id);
   delete out.__v;
   delete out.verificationTokenHash;
+  if (!includeInternal) delete out.verificationResendHistory;
   return out;
 }
 
@@ -109,8 +110,10 @@ async function createPrivacyRequest(payload) {
     source: payload.source || 'Frontend Form',
     status: payload.status || PENDING_EMAIL_VERIFICATION_STATUS,
     verifiedAt: payload.verifiedAt || null,
+    verificationResendHistory: Array.isArray(payload.verificationResendHistory) ? payload.verificationResendHistory : [],
     adminNote: payload.adminNote || null,
     handledBy: payload.handledBy || null,
+    actionTakenSummary: payload.actionTakenSummary || null,
     replySentAt: payload.replySentAt || null,
     createdAt: payload.createdAt || nowIso,
     updatedAt: payload.updatedAt || nowIso,
@@ -144,10 +147,10 @@ async function listPrivacyRequests({ status } = {}) {
   return sortNewestFirst(applyFileFilter(readJsonArray(PRIVACY_REQUESTS_FILE), status).map(normalizeStoredRequest));
 }
 
-async function getPrivacyRequestById(id) {
+async function getPrivacyRequestById(id, options = {}) {
   if (isDbReady()) {
     try {
-      return normalizeStoredRequest(await PrivacyRequest.findOne(buildMongoIdFilter(id)).lean());
+      return normalizeStoredRequest(await PrivacyRequest.findOne(buildMongoIdFilter(id)).lean(), options);
     } catch (error) {
       console.warn('[dpdp][privacy-request][store] mongo get failed; falling back to file', error?.message || error);
     }
@@ -155,7 +158,7 @@ async function getPrivacyRequestById(id) {
 
   const items = readJsonArray(PRIVACY_REQUESTS_FILE);
   const index = findFileRequestIndex(items, id);
-  return index >= 0 ? normalizeStoredRequest(items[index]) : null;
+  return index >= 0 ? normalizeStoredRequest(items[index], options) : null;
 }
 
 async function verifyPrivacyRequestByTokenHash(tokenHash, now = new Date()) {
@@ -237,6 +240,8 @@ async function createDpdpAuditLog(payload) {
   const doc = {
     requestId: String(payload.requestId || ''),
     action: String(payload.action || 'privacy_request_updated'),
+    source: payload.source ? String(payload.source) : null,
+    recordId: payload.recordId ? String(payload.recordId) : null,
     oldStatus: payload.oldStatus || null,
     newStatus: payload.newStatus || null,
     adminNote: payload.adminNote || null,
