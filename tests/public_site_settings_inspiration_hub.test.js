@@ -51,7 +51,14 @@ function baseSettings() {
     },
     liveTv: {
       enabled: true,
+      mode: 'Offline Replay',
+      provider: 'YouTube',
       embedUrl: '',
+      fallbackVideoUrl: '',
+      title: 'News Pulse Live',
+      subtitle: '',
+      language: 'English',
+      showOnHomepage: true,
     },
     languageTheme: {
       languages: ['en', 'hi', 'gu'],
@@ -594,4 +601,136 @@ test('savePublicSettings rejects invalid multilingual inspirationHub content typ
 
   assert.equal(res.statusCode, 400);
   assert.match(String(res.body.message || ''), /inspirationHub\.content\.hi\.quotes/i);
+});
+
+test('getPublishedSettings normalizes liveTv defaults when config is empty', async (t) => {
+  const prevReadyState = mongoose.connection.readyState;
+  const prevGetOrCreate = PublicSiteSettings.getOrCreate;
+
+  mongoose.connection.readyState = 1;
+
+  PublicSiteSettings.getOrCreate = async () => ({
+    scope: 'production',
+    version: 13,
+    published: {
+      ...baseSettings(),
+      liveTv: {},
+    },
+    publishedUpdatedAt: new Date('2026-07-03T09:30:00.000Z'),
+    updatedAt: new Date('2026-07-03T09:00:00.000Z'),
+  });
+
+  t.after(() => {
+    mongoose.connection.readyState = prevReadyState;
+    PublicSiteSettings.getOrCreate = prevGetOrCreate;
+  });
+
+  const res = createRes();
+  await controller.getPublishedSettings({}, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.published.liveTv.enabled, true);
+  assert.equal(res.body.published.liveTv.mode, 'Offline Replay');
+  assert.equal(res.body.published.liveTv.provider, 'YouTube');
+  assert.equal(res.body.published.liveTv.fallbackVideoUrl, '');
+  assert.equal(res.body.published.liveTv.title, 'News Pulse Live');
+  assert.equal(res.body.published.liveTv.language, 'English');
+  assert.equal(res.body.published.liveTv.showOnHomepage, true);
+});
+
+test('savePublicSettings validates and persists liveTv settings', async (t) => {
+  const prevReadyState = mongoose.connection.readyState;
+  const prevGetOrCreate = PublicSiteSettings.getOrCreate;
+
+  mongoose.connection.readyState = 1;
+
+  const draft = baseSettings();
+  const published = baseSettings();
+  let saveCalls = 0;
+
+  PublicSiteSettings.getOrCreate = async () => ({
+    scope: 'production',
+    version: 1,
+    draft,
+    published,
+    async save() {
+      saveCalls += 1;
+    },
+  });
+
+  t.after(() => {
+    mongoose.connection.readyState = prevReadyState;
+    PublicSiteSettings.getOrCreate = prevGetOrCreate;
+  });
+
+  const req = {
+    method: 'PATCH',
+    body: {
+      liveTv: {
+        enabled: false,
+        mode: 'Breaking Mode',
+        provider: 'Custom Embed',
+        embedUrl: 'https://player.example.com/embed/live',
+        fallbackVideoUrl: 'https://cdn.example.com/fallback.mp4',
+        title: 'Breaking Live',
+        subtitle: 'Emergency coverage',
+        language: 'Hindi',
+        showOnHomepage: false,
+      },
+    },
+  };
+  const res = createRes();
+
+  await controller.savePublicSettings(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(saveCalls, 1);
+  assert.deepEqual(res.body.draft.liveTv, {
+    enabled: false,
+    mode: 'Breaking Mode',
+    provider: 'Custom Embed',
+    embedUrl: 'https://player.example.com/embed/live',
+    fallbackVideoUrl: 'https://cdn.example.com/fallback.mp4',
+    title: 'Breaking Live',
+    subtitle: 'Emergency coverage',
+    language: 'Hindi',
+    showOnHomepage: false,
+  });
+});
+
+test('savePublicSettings rejects invalid liveTv mode/provider/language values', async (t) => {
+  const prevReadyState = mongoose.connection.readyState;
+  const prevGetOrCreate = PublicSiteSettings.getOrCreate;
+
+  mongoose.connection.readyState = 1;
+
+  let saveCalls = 0;
+  PublicSiteSettings.getOrCreate = async () => ({
+    draft: baseSettings(),
+    published: baseSettings(),
+    async save() {
+      saveCalls += 1;
+    },
+  });
+
+  t.after(() => {
+    mongoose.connection.readyState = prevReadyState;
+    PublicSiteSettings.getOrCreate = prevGetOrCreate;
+  });
+
+  const req = {
+    method: 'PATCH',
+    body: {
+      liveTv: {
+        mode: 'Media Partner Live',
+      },
+    },
+  };
+  const res = createRes();
+
+  await controller.savePublicSettings(req, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.equal(saveCalls, 0);
+  assert.match(String(res.body.message || ''), /liveTv\.mode/i);
 });
