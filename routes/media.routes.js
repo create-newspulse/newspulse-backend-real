@@ -10,6 +10,10 @@ const {
 } = require('../lib/mediaLibraryStorage');
 const {
   createIndexedMediaRecord,
+  bulkPermanentDeleteMedia,
+  bulkRestoreMedia,
+  bulkTrashMedia,
+  bulkUsageCheck,
   findMediaRecordByIdOrStorageId,
   getIndexedMediaStats,
   listIndexedMediaRecords,
@@ -54,7 +58,7 @@ function normalizeMediaIds(rawIds) {
 }
 
 function isMediaTrashed(doc) {
-  return !!doc && (doc.isDeleted === true || String(doc.status || '').toLowerCase() === 'trash' || String(doc.status || '').toLowerCase() === 'deleted');
+  return !!doc && (doc.isDeleted === true || String(doc.status || '').toLowerCase() === 'trash' || String(doc.status || '').toLowerCase() === 'trashed');
 }
 
 async function restoreMediaItemById(itemId, req) {
@@ -225,7 +229,7 @@ router.get('/items', requireAdminAuth, (req, res) => {
     });
     const includeDeleted = String(req.query.includeDeleted || '').trim() === '1' || String(req.query.deleted || '').trim() === '1';
     const providerStatus = getMediaLibraryProviderStatus();
-    const items = await listIndexedMediaRecords({ includeDeleted, mediaType: req.query.mediaType || null, req });
+    const items = await listIndexedMediaRecords({ includeDeleted, mediaType: req.query.mediaType || null, status: req.query.status || null, req });
     const counts = await getIndexedMediaStats();
 
     logLocalMediaRoute('[media.list.local]', {
@@ -264,6 +268,50 @@ router.get('/items', requireAdminAuth, (req, res) => {
     });
     return res.status(500).json({ ok: false, success: false, message: e?.message || 'Failed to load media items' });
   });
+});
+
+router.post('/bulk-usage-check', requireAdminAuth, async (req, res) => {
+  try {
+    const ids = normalizeMediaIds(req.body?.ids);
+    if (!ids.length) return res.status(400).json({ ok: false, success: false, message: 'ids is required', results: [] });
+    const results = await bulkUsageCheck(ids);
+    return res.status(200).json({ ok: true, success: true, results });
+  } catch (e) {
+    return res.status(e?.status || 500).json({ ok: false, success: false, message: e?.message || 'Failed to check media usage', code: e?.code || undefined });
+  }
+});
+
+router.post('/bulk-trash', requireAdminAuth, async (req, res) => {
+  try {
+    const ids = normalizeMediaIds(req.body?.ids);
+    if (!ids.length) return res.status(400).json({ ok: false, success: false, message: 'ids is required', results: [], trashedIds: [], skippedIds: [] });
+    const result = await bulkTrashMedia(ids, { forceFounderConfirm: req.body?.forceFounderConfirm === true, actor: req.admin || null });
+    return res.status(200).json({ ok: true, success: true, affectedCount: result.trashedIds.length, results: result.usageResults, trashedIds: result.trashedIds, skippedIds: result.skippedIds, message: result.trashedIds.length ? 'Media moved to trash' : 'No media moved to trash' });
+  } catch (e) {
+    return res.status(e?.status || 500).json({ ok: false, success: false, message: e?.message || 'Failed to move media to trash', code: e?.code || undefined, results: e?.results || undefined });
+  }
+});
+
+router.post('/bulk-restore', requireAdminAuth, async (req, res) => {
+  try {
+    const ids = normalizeMediaIds(req.body?.ids);
+    if (!ids.length) return res.status(400).json({ ok: false, success: false, message: 'ids is required', restoredIds: [], skippedIds: [] });
+    const result = await bulkRestoreMedia(ids);
+    return res.status(200).json({ ok: true, success: true, affectedCount: result.restoredIds.length, restoredIds: result.restoredIds, skippedIds: result.skippedIds, message: result.restoredIds.length ? 'Media restored' : 'No media restored' });
+  } catch (e) {
+    return res.status(e?.status || 500).json({ ok: false, success: false, message: e?.message || 'Failed to restore media', code: e?.code || undefined });
+  }
+});
+
+router.delete('/bulk-permanent-delete', requireAdminAuth, async (req, res) => {
+  try {
+    const ids = normalizeMediaIds(req.body?.ids);
+    if (!ids.length) return res.status(400).json({ ok: false, success: false, message: 'ids is required', permanentlyDeletedIds: [], skippedIds: [] });
+    const result = await bulkPermanentDeleteMedia(ids, { confirm: req.body?.confirm });
+    return res.status(200).json({ ok: true, success: true, affectedCount: result.permanentlyDeletedIds.length, results: result.usageResults, permanentlyDeletedIds: result.permanentlyDeletedIds, skippedIds: result.skippedIds, deleteResults: result.deleteResults, message: result.permanentlyDeletedIds.length ? 'Media permanently deleted' : 'No media permanently deleted' });
+  } catch (e) {
+    return res.status(e?.status || 500).json({ ok: false, success: false, message: e?.message || 'Failed to permanently delete media', code: e?.code || undefined, results: e?.results || undefined });
+  }
 });
 
 router.get('/items/:itemId', requireAdminAuth, async (req, res) => {

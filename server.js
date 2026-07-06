@@ -857,6 +857,7 @@ app.use('/admin-api/api/uploads', uploadRoutes);
 // Media status routes (admin capability checks)
 const mediaRoutes = require('./routes/media.routes');
 app.use('/api/media', mediaRoutes);
+app.use('/api/admin/media', mediaRoutes);
 app.use('/admin-api/media', mediaRoutes);
 app.use('/admin-api/api/media', mediaRoutes);
 
