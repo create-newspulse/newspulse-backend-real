@@ -7,10 +7,24 @@ const fs = require('fs/promises');
 const ViralVideo = require('../models/ViralVideo');
 const { handleCoverImageUpload } = require('../routes/uploads.routes');
 const cloudinaryUploads = require('../lib/cloudinary');
+const { slugifyUnicode } = require('../lib/slug');
 const {
   getViralVideosSettings: readViralVideosSettings,
   saveViralVideosSettings,
 } = require('../lib/viralVideosSettings');
+const {
+  listAllViralVideosFromFile,
+  createViralVideoInFile,
+  updateViralVideoInFile,
+  softDeleteViralVideoInFile,
+  countPublishedViralVideosInRange,
+  countPublishedViralVideosFromFileInRange,
+  getIstTodayDateString,
+  getIstDateRange,
+  getPublishedAtRangeFromQuery,
+  IST_TIMEZONE,
+  VIRAL_VIDEO_DAILY_PUBLISH_LIMIT,
+} = require('../services/viralVideos.service');
 
 const CLOUD_VIDEO_UPLOAD_NOT_CONNECTED_MESSAGE = 'Cloud video upload is not connected yet. Use Video URL for now.';
 const CLOUD_VIDEO_UPLOAD_DISABLED_MESSAGE = 'Cloud video upload is available but disabled. Use Video URL unless enabled.';
@@ -32,6 +46,7 @@ const VIRAL_VIDEO_ACCEPTED_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', 
 const VIRAL_VIDEO_LOCAL_UPLOAD_MESSAGE = 'Viral video uploaded successfully.';
 const VIRAL_VIDEO_THUMBNAIL_LOCAL_UPLOAD_MESSAGE = 'Viral video thumbnail uploaded successfully';
 const VIRAL_VIDEO_LANDSCAPE_WARNING = 'Landscape video may be cropped in the vertical reel player.';
+const DAILY_VIRAL_VIDEO_LIMIT_MESSAGE = 'Daily viral video limit reached. You can save this video as Draft or schedule it for tomorrow.';
 
 function normalizeSourceType(value) {
   const raw = String(value || '').trim().toLowerCase();
@@ -50,6 +65,10 @@ function isDbReady() {
   const env = String(process.env.NODE_ENV || '').toLowerCase();
   if (env === 'test') return true;
   return mongoose.connection && mongoose.connection.readyState === 1;
+}
+
+function isNativeDbReady() {
+  return mongoose.connection && mongoose.connection.readyState === 1 && mongoose.connection.db;
 }
 
 function normalizeBoolean(value, fallback = false) {
@@ -162,6 +181,74 @@ function normalizeOptionalNumber(value) {
   if (value === undefined || value === null || value === '') return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function badRequest(message) {
+  const error = new Error(message);
+  error.status = 400;
+  return error;
+}
+
+function normalizeViralStatus(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'draft' || raw === 'published' || raw === 'unpublished' || raw === 'archived') return raw;
+  if (raw === 'scheduled') return 'draft';
+  throw badRequest('status must be draft, published, unpublished, or archived');
+}
+
+function parseOptionalDate(value, fieldName) {
+  if (value === undefined || value === null || value === '') return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw badRequest(`${fieldName} must be a valid date`);
+  return date;
+}
+
+function buildDailyCountResponse(publishedCount, date = getIstTodayDateString()) {
+  const remaining = Math.max(VIRAL_VIDEO_DAILY_PUBLISH_LIMIT - publishedCount, 0);
+  return {
+    date,
+    timezone: IST_TIMEZONE,
+    publishedCount,
+    limit: VIRAL_VIDEO_DAILY_PUBLISH_LIMIT,
+    remaining,
+  };
+}
+
+async function getTodayPublishedCount(excludeIdOrSlug = null) {
+  const date = getIstTodayDateString();
+  const range = getIstDateRange(date);
+  if (isNativeDbReady()) {
+    return buildDailyCountResponse(await countPublishedViralVideosInRange(range, excludeIdOrSlug), date);
+  }
+  return buildDailyCountResponse(await countPublishedViralVideosFromFileInRange(range, excludeIdOrSlug), date);
+}
+
+async function assertDailyPublishLimitAvailable(excludeIdOrSlug = null) {
+  const stats = await getTodayPublishedCount(excludeIdOrSlug);
+  if (stats.publishedCount >= stats.limit) {
+    const error = badRequest(DAILY_VIRAL_VIDEO_LIMIT_MESSAGE);
+    error.code = 'DAILY_VIRAL_VIDEO_LIMIT_REACHED';
+    error.dailyLimit = stats;
+    throw error;
+  }
+  return stats;
+}
+
+function getAdminDisplayName(req) {
+  const admin = req && req.admin && typeof req.admin === 'object' ? req.admin : {};
+  return normalizeOptionalString(admin.name) || normalizeOptionalString(admin.email) || normalizeOptionalString(admin.role) || 'Admin';
+}
+
+async function buildUniqueViralSlug(title, requestedSlug = null, excludeId = null) {
+  const base = slugifyUnicode(requestedSlug || title) || `viral-video-${crypto.randomBytes(3).toString('hex')}`;
+  if (!mongoose.connection || !mongoose.connection.db) return base;
+  let slug = base;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const existing = await ViralVideo.findOne({ slug }).select('_id').lean();
+    if (!existing || (excludeId && String(existing._id) === String(excludeId))) return slug;
+    slug = `${base}-${crypto.randomBytes(3).toString('hex')}`;
+  }
+  return `${base}-${crypto.randomBytes(4).toString('hex')}`;
 }
 
 function logViralVideosCreateFailure(error) {
@@ -328,8 +415,9 @@ function toAdminViralVideoDto(doc) {
     _id: source._id || source.id || null,
     title: source.title || null,
     slug: source.slug || null,
-    summary: source.summary || null,
-    shortCaption: source.summary || null,
+    description: source.description || source.summary || null,
+    summary: source.summary || source.description || null,
+    shortCaption: source.summary || source.description || null,
     sourceName: source.sourceName || null,
     sourceUrl: source.sourceUrl || null,
     thumbnailUrl: source.thumbnailUrl || source.posterImageUrl || source.posterImage?.url || null,
@@ -348,19 +436,24 @@ function toAdminViralVideoDto(doc) {
     videoMimeType: source.videoMimeType || null,
     videoSizeBytes: typeof source.videoSizeBytes === 'number' ? source.videoSizeBytes : null,
     videoDuration: typeof source.videoDuration === 'number' ? source.videoDuration : null,
+    duration: source.duration || null,
     language: source.language || 'en',
-    category: source.category || null,
+    category: source.category || 'viral',
+    source: source.source || 'News Pulse',
+    uploadedBy: source.uploadedBy || null,
     tags: Array.isArray(source.tags) ? source.tags : [],
     isActive: source.isActive !== false,
     globalFrontend: source.globalFrontend !== false,
     isPublished: source.isPublished === true,
     status: source.status || (source.isPublished === true ? 'published' : 'draft'),
-    isHomepageVisible: source.isHomepageVisible !== false,
-    showOnHomepage: source.isHomepageVisible !== false,
-    homepageFeatured: source.homepageFeatured === true || source.isFeatured === true,
-    isFeatured: source.isFeatured === true,
-    isFeaturedHomepage: source.isFeatured === true,
+    isHomepageVisible: source.isHomepageVisible === true || source.showOnHomepage === true,
+    showOnHomepage: source.isHomepageVisible === true || source.showOnHomepage === true,
+    homepageFeatured: source.homepageFeatured === true || source.isFeatured === true || source.featured === true,
+    isFeatured: source.isFeatured === true || source.featured === true,
+    featured: source.isFeatured === true || source.featured === true,
+    isFeaturedHomepage: source.isFeatured === true || source.featured === true,
     publishedAt: source.publishedAt || null,
+    scheduledAt: source.scheduledAt || null,
     sortOrder: typeof source.sortOrder === 'number' ? source.sortOrder : 0,
     priority: typeof source.sortOrder === 'number' ? source.sortOrder : 0,
     createdAt: source.createdAt || null,
@@ -370,13 +463,17 @@ function toAdminViralVideoDto(doc) {
 
 function buildListFilter(query = {}) {
   const filter = {};
-  if (query.status === 'published') filter.isPublished = true;
-  if (query.status === 'draft') filter.isPublished = false;
+  const status = String(query.status || '').trim().toLowerCase();
+  if (status === 'published' || status === 'draft' || status === 'unpublished' || status === 'archived') filter.status = status;
   if (query.published === 'true' || query.isPublished === 'true') filter.isPublished = true;
   if (query.published === 'false' || query.isPublished === 'false') filter.isPublished = false;
   if (query.lang || query.language) filter.language = String(query.lang || query.language).trim().toLowerCase();
-  if (query.category) filter.category = String(query.category).trim();
+  filter.category = String(query.category || '').trim().toLowerCase() && String(query.category || '').trim().toLowerCase() !== 'viral'
+    ? '__no_matching_viral_category__'
+    : 'viral';
   if (query.tag) filter.tags = String(query.tag).trim();
+  const publishedAtRange = getPublishedAtRangeFromQuery(query);
+  if (publishedAtRange) filter.publishedAt = { $gte: publishedAtRange.start, $lt: publishedAtRange.end };
   return filter;
 }
 
@@ -395,8 +492,12 @@ function buildViralVideoPayload(body = {}, { partial = false } = {}) {
 
   assignString('title');
   assignString('slug');
+  assignString('description');
   assignString('summary');
   assignString('shortCaption', 'summary');
+  assignString('duration');
+  assignString('uploadedBy');
+  assignString('source');
   assignString('sourceName');
   assignString('sourceUrl');
   assignString('thumbnailUrl');
@@ -405,7 +506,8 @@ function buildViralVideoPayload(body = {}, { partial = false } = {}) {
   assignString('videoFileUrl');
   assignString('embedUrl');
   assignString('language');
-  assignString('category');
+  payload.category = 'viral';
+  if (!payload.source) payload.source = 'News Pulse';
   if (Object.prototype.hasOwnProperty.call(body, 'sourceType')) payload.sourceType = normalizeSourceType(body.sourceType);
   if (Object.prototype.hasOwnProperty.call(body, 'videoType')) payload.videoType = normalizeOptionalString(body.videoType);
   if (Object.prototype.hasOwnProperty.call(body, 'playbackMode')) payload.playbackMode = normalizeOptionalString(body.playbackMode);
@@ -417,6 +519,7 @@ function buildViralVideoPayload(body = {}, { partial = false } = {}) {
   if (Object.prototype.hasOwnProperty.call(body, 'videoDuration')) payload.videoDuration = normalizeOptionalNumber(body.videoDuration);
   if (Object.prototype.hasOwnProperty.call(body, 'tags')) payload.tags = normalizeStringArray(body.tags);
   if (Object.prototype.hasOwnProperty.call(body, 'isActive')) payload.isActive = normalizeBoolean(body.isActive, true);
+  if (Object.prototype.hasOwnProperty.call(body, 'scheduledAt')) payload.scheduledAt = parseOptionalDate(body.scheduledAt, 'scheduledAt');
   if (Object.prototype.hasOwnProperty.call(body, 'posterImage')) payload.posterImage = normalizePosterImage(body.posterImage);
   if (Object.prototype.hasOwnProperty.call(body, 'thumbnail')) payload.posterImage = normalizePosterImage(body.thumbnail);
   if (Object.prototype.hasOwnProperty.call(body, 'thumbnailUrl')) {
@@ -435,7 +538,7 @@ function buildViralVideoPayload(body = {}, { partial = false } = {}) {
   if (payload.posterImage && payload.posterImage.url && !payload.posterImageUrl) payload.posterImageUrl = payload.posterImage.url;
   if (Object.prototype.hasOwnProperty.call(body, 'globalFrontend')) payload.globalFrontend = normalizeBoolean(body.globalFrontend, true);
   if (Object.prototype.hasOwnProperty.call(body, 'status')) {
-    const status = String(body.status || '').trim().toLowerCase() === 'published' ? 'published' : 'draft';
+    const status = normalizeViralStatus(body.status);
     payload.status = status;
     payload.isPublished = status === 'published';
   }
@@ -444,14 +547,24 @@ function buildViralVideoPayload(body = {}, { partial = false } = {}) {
   if (payload.isPublished === false && !payload.status) payload.status = 'draft';
   if (Object.prototype.hasOwnProperty.call(body, 'isHomepageVisible')) payload.isHomepageVisible = normalizeBoolean(body.isHomepageVisible, true);
   if (Object.prototype.hasOwnProperty.call(body, 'showOnHomepage')) payload.isHomepageVisible = normalizeBoolean(body.showOnHomepage, true);
+  if (!partial && !Object.prototype.hasOwnProperty.call(payload, 'isHomepageVisible')) payload.isHomepageVisible = false;
   if (Object.prototype.hasOwnProperty.call(body, 'homepageFeatured')) {
     payload.homepageFeatured = normalizeBoolean(body.homepageFeatured);
     payload.isFeatured = payload.homepageFeatured;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'featured')) {
+    payload.featured = normalizeBoolean(body.featured);
+    payload.isFeatured = payload.featured;
   }
   if (Object.prototype.hasOwnProperty.call(body, 'isFeatured')) payload.isFeatured = normalizeBoolean(body.isFeatured);
   if (Object.prototype.hasOwnProperty.call(body, 'isFeaturedHomepage')) payload.isFeatured = normalizeBoolean(body.isFeaturedHomepage);
   if (payload.isFeatured === true && !Object.prototype.hasOwnProperty.call(payload, 'homepageFeatured')) payload.homepageFeatured = true;
   if (payload.isFeatured === false && !Object.prototype.hasOwnProperty.call(payload, 'homepageFeatured')) payload.homepageFeatured = false;
+  if (!partial && !Object.prototype.hasOwnProperty.call(payload, 'isFeatured')) {
+    payload.isFeatured = false;
+    payload.homepageFeatured = false;
+    payload.featured = false;
+  }
   if (Object.prototype.hasOwnProperty.call(body, 'sortOrder')) {
     const parsed = Number(body.sortOrder);
     payload.sortOrder = Number.isFinite(parsed) ? parsed : 0;
@@ -462,6 +575,23 @@ function buildViralVideoPayload(body = {}, { partial = false } = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(body, 'publishedAt')) payload.publishedAt = body.publishedAt ? new Date(body.publishedAt) : null;
   if (payload.isPublished === true && !Object.prototype.hasOwnProperty.call(payload, 'publishedAt')) payload.publishedAt = new Date();
+
+  if (!partial && !payload.status) {
+    payload.status = 'draft';
+    payload.isPublished = false;
+  }
+
+  if (payload.scheduledAt && payload.scheduledAt > new Date() && payload.status === 'published') {
+    payload.status = 'draft';
+    payload.isPublished = false;
+    payload.publishedAt = null;
+  }
+
+  if (payload.status && payload.status !== 'published') {
+    payload.isPublished = false;
+    if (payload.status === 'archived') payload.isActive = false;
+    if (!Object.prototype.hasOwnProperty.call(body, 'publishedAt')) payload.publishedAt = null;
+  }
 
   const hasVideoContractInput = [
     'videoUrl',
@@ -474,10 +604,16 @@ function buildViralVideoPayload(body = {}, { partial = false } = {}) {
   ].some((key) => Object.prototype.hasOwnProperty.call(body, key));
   if (!partial || hasVideoContractInput) resolveVideoContract(payload);
 
+  if (payload.description && !payload.summary) payload.summary = payload.description;
+  if (payload.summary && !payload.description) payload.description = payload.summary;
+  if (!payload.sourceName) payload.sourceName = payload.source || 'News Pulse';
+
   if (!partial && !payload.title) {
-    const error = new Error('title is required');
-    error.status = 400;
-    throw error;
+    throw badRequest('title is required');
+  }
+
+  if (!partial && !payload.videoUrl) {
+    throw badRequest('videoUrl is required');
   }
 
   return payload;
@@ -531,25 +667,55 @@ async function updateViralVideosSettings(req, res, next) {
 
 async function listAdminViralVideos(req, res, next) {
   try {
-    if (!isDbReady()) return res.status(200).json({ ok: true, items: [], page: 1, limit: 0, total: 0, totalPages: 1 });
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+    if (!isDbReady()) {
+      const result = await listAllViralVideosFromFile({ ...req.query, page, limit });
+      const items = (result.items || []).map(toAdminViralVideoDto);
+      return res.status(200).json({ ok: true, success: true, items, videos: items, page: result.page, limit: result.limit, total: result.total, totalPages: result.totalPages });
+    }
     const filter = buildListFilter(req.query);
     const [items, total] = await Promise.all([
       ViralVideo.find(filter).sort(buildListSort(req.query)).skip((page - 1) * limit).limit(limit).lean(),
       ViralVideo.countDocuments(filter),
     ]);
-    return res.status(200).json({ ok: true, items: (items || []).map(toAdminViralVideoDto), page, limit, total, totalPages: Math.max(Math.ceil(total / limit), 1) });
+    const responseItems = (items || []).map(toAdminViralVideoDto);
+    return res.status(200).json({ ok: true, success: true, items: responseItems, videos: responseItems, page, limit, total, totalPages: Math.max(Math.ceil(total / limit), 1) });
   } catch (error) {
     return next(error);
   }
 }
 
+async function getAdminViralVideosDailyCount(_req, res) {
+  try {
+    const stats = await getTodayPublishedCount();
+    return res.status(200).json({ ok: true, success: true, ...stats });
+  } catch (error) {
+    return res.status(typeof error.status === 'number' ? error.status : 500).json({ ok: false, success: false, message: error.message || 'Failed to read daily viral video count' });
+  }
+}
+
 async function createAdminViralVideo(req, res) {
   try {
-    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database not connected' });
-    const doc = await ViralVideo.create(buildViralVideoPayload(req.body));
-    return res.status(201).json({ ok: true, item: toAdminViralVideoDto(doc) });
+    const payload = buildViralVideoPayload(req.body);
+    if (!payload.uploadedBy) payload.uploadedBy = getAdminDisplayName(req);
+    payload.category = 'viral';
+    payload.source = 'News Pulse';
+    payload.sourceName = payload.sourceName || 'News Pulse';
+
+    if (payload.status === 'published') {
+      await assertDailyPublishLimitAvailable();
+    }
+
+    if (!isDbReady()) {
+      const item = toAdminViralVideoDto(await createViralVideoInFile(payload));
+      return res.status(201).json({ ok: true, success: true, item, video: item });
+    }
+
+    payload.slug = await buildUniqueViralSlug(payload.title);
+    const doc = await ViralVideo.create(payload);
+    const item = toAdminViralVideoDto(doc);
+    return res.status(201).json({ ok: true, success: true, item, video: item });
   } catch (error) {
     logViralVideosCreateFailure(error);
     return res.status(typeof error.status === 'number' ? error.status : 500).json({ ok: false, message: error.message || 'Failed to create viral video' });
@@ -563,10 +729,18 @@ async function findAdminViralVideoByIdParam(id) {
 
 async function getAdminViralVideoById(req, res, next) {
   try {
-    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database not connected' });
+    if (!isDbReady()) {
+      const result = await listAllViralVideosFromFile({ limit: 100 });
+      const lookup = String(req.params.id || '').trim().toLowerCase();
+      const found = (result.items || []).find((item) => String(item.id || item._id).toLowerCase() === lookup || String(item.slug || '').toLowerCase() === lookup);
+      if (!found) return res.status(404).json({ ok: false, success: false, message: 'Viral video not found' });
+      const item = toAdminViralVideoDto(found);
+      return res.status(200).json({ ok: true, success: true, item, video: item });
+    }
     const item = await findAdminViralVideoByIdParam(req.params.id);
     if (!item) return res.status(404).json({ ok: false, message: 'Viral video not found' });
-    return res.status(200).json({ ok: true, item: toAdminViralVideoDto(item) });
+    const responseItem = toAdminViralVideoDto(item);
+    return res.status(200).json({ ok: true, success: true, item: responseItem, video: responseItem });
   } catch (error) {
     return next(error);
   }
@@ -574,11 +748,27 @@ async function getAdminViralVideoById(req, res, next) {
 
 async function updateAdminViralVideo(req, res) {
   try {
-    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database not connected' });
+    const payload = buildViralVideoPayload(req.body, { partial: true });
+    payload.category = 'viral';
+    payload.source = 'News Pulse';
+    if (!payload.sourceName) payload.sourceName = 'News Pulse';
+
+    if (payload.status === 'published') {
+      await assertDailyPublishLimitAvailable(req.params.id);
+    }
+
+    if (!isDbReady()) {
+      const item = toAdminViralVideoDto(await updateViralVideoInFile(req.params.id, payload));
+      if (!item) return res.status(404).json({ ok: false, success: false, message: 'Viral video not found' });
+      return res.status(200).json({ ok: true, success: true, item, video: item });
+    }
+
     const query = mongoose.Types.ObjectId.isValid(String(req.params.id)) ? { _id: req.params.id } : { slug: String(req.params.id || '').trim().toLowerCase() };
-    const doc = await ViralVideo.findOneAndUpdate(query, { $set: buildViralVideoPayload(req.body, { partial: true }) }, { new: true, runValidators: true });
+    if (payload.slug) payload.slug = await buildUniqueViralSlug(payload.slug, payload.slug, req.params.id);
+    const doc = await ViralVideo.findOneAndUpdate(query, { $set: payload }, { new: true, runValidators: true });
     if (!doc) return res.status(404).json({ ok: false, message: 'Viral video not found' });
-    return res.status(200).json({ ok: true, item: toAdminViralVideoDto(doc) });
+    const item = toAdminViralVideoDto(doc);
+    return res.status(200).json({ ok: true, success: true, item, video: item });
   } catch (error) {
     return res.status(typeof error.status === 'number' ? error.status : 500).json({ ok: false, message: error.message || 'Failed to update viral video' });
   }
@@ -586,11 +776,16 @@ async function updateAdminViralVideo(req, res) {
 
 async function deleteAdminViralVideo(req, res, next) {
   try {
-    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database not connected' });
+    if (!isDbReady()) {
+      const item = toAdminViralVideoDto(await softDeleteViralVideoInFile(req.params.id));
+      if (!item) return res.status(404).json({ ok: false, success: false, message: 'Viral video not found' });
+      return res.status(200).json({ ok: true, success: true, deleted: true, archived: true, item, video: item });
+    }
     const query = mongoose.Types.ObjectId.isValid(String(req.params.id)) ? { _id: req.params.id } : { slug: String(req.params.id || '').trim().toLowerCase() };
-    const doc = await ViralVideo.findOneAndDelete(query).lean();
+    const doc = await ViralVideo.findOneAndUpdate(query, { $set: { isActive: false, isPublished: false, status: 'archived', publishedAt: null } }, { new: true, runValidators: true }).lean();
     if (!doc) return res.status(404).json({ ok: false, message: 'Viral video not found' });
-    return res.status(200).json({ ok: true, deleted: true, item: toAdminViralVideoDto(doc) });
+    const item = toAdminViralVideoDto(doc);
+    return res.status(200).json({ ok: true, success: true, deleted: true, archived: true, item, video: item });
   } catch (error) {
     return next(error);
   }
@@ -614,7 +809,7 @@ async function publishAdminViralVideo(req, res) {
 async function unpublishAdminViralVideo(req, res) {
   const nextBody = {
     ...(req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {}),
-    status: 'draft',
+    status: 'unpublished',
     isPublished: false,
   };
   req.body = nextBody;
@@ -1047,6 +1242,7 @@ module.exports = {
   getViralVideosSettings,
   updateViralVideosSettings,
   listAdminViralVideos,
+  getAdminViralVideosDailyCount,
   createAdminViralVideo,
   getAdminViralVideoById,
   updateAdminViralVideo,

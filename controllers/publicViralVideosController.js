@@ -6,8 +6,10 @@ const {
 
 const {
   listPublishedViralVideos,
+  listPublishedViralVideosFromFile,
   listFeaturedViralVideos,
   getPublishedViralVideoBySlug,
+  getPublishedViralVideoBySlugFromFile,
   listRelatedPublishedViralVideos,
 } = require('../services/viralVideos.service');
 
@@ -20,9 +22,11 @@ function isDbReady() {
 function buildEmptyArchiveResponse() {
   return {
     ok: true,
+    success: true,
     enabled: false,
     viralVideosFrontendEnabled: false,
     items: [],
+    videos: [],
     page: 1,
     limit: 0,
     total: 0,
@@ -73,7 +77,8 @@ async function listPublicViralVideos(req, res, next) {
     res.set('Cache-Control', 'no-store');
 
     if (!isDbReady()) {
-      return res.status(200).json(buildEmptyArchiveResponse());
+      const result = await listPublishedViralVideosFromFile(req.query);
+      return res.status(200).json({ ok: true, success: true, enabled: true, ...result, videos: result.items });
     }
 
     if (!(await isViralVideosFrontendEnabled())) {
@@ -81,7 +86,7 @@ async function listPublicViralVideos(req, res, next) {
     }
 
     const result = await listPublishedViralVideos(req.query);
-    return res.status(200).json({ ok: true, enabled: true, ...result });
+    return res.status(200).json({ ok: true, success: true, enabled: true, ...result, videos: result.items });
   } catch (error) {
     logViralVideosFetchFailure('archive', error);
     return next(error);
@@ -96,15 +101,15 @@ async function listFeaturedPublicViralVideos(req, res, next) {
     const responseSettings = { frontendEnabled, viralVideosFrontendEnabled: frontendEnabled };
 
     if (!isDbReady()) {
-      return res.status(200).json({ ok: true, enabled: frontendEnabled, settings: responseSettings, video: null, items: [], videos: [] });
+      return res.status(200).json({ ok: true, success: true, enabled: frontendEnabled, settings: responseSettings, video: null, items: [], videos: [] });
     }
 
     if (!frontendEnabled) {
-      return res.status(200).json({ ok: true, enabled: false, settings: responseSettings, video: null, items: [], videos: [] });
+      return res.status(200).json({ ok: true, success: true, enabled: false, settings: responseSettings, video: null, items: [], videos: [] });
     }
 
     const items = await listFeaturedViralVideos(req.query);
-    return res.status(200).json({ ok: true, enabled: true, settings: responseSettings, video: items[0] || null, items, videos: items });
+    return res.status(200).json({ ok: true, success: true, enabled: true, settings: responseSettings, video: items[0] || null, items, videos: items });
   } catch (error) {
     logViralVideosFetchFailure('featured', error);
     return next(error);
@@ -116,7 +121,9 @@ async function getPublicViralVideoBySlug(req, res, next) {
     res.set('Cache-Control', 'no-store');
 
     if (!isDbReady()) {
-      return res.status(503).json({ ok: false, message: 'Database not connected' });
+      const item = await getPublishedViralVideoBySlugFromFile(req.params.slug);
+      if (!item) return res.status(404).json({ ok: false, success: false, message: 'Viral video not found' });
+      return res.status(200).json({ ok: true, success: true, item, video: item });
     }
 
     if (!(await isViralVideosFrontendEnabled())) {
@@ -125,10 +132,10 @@ async function getPublicViralVideoBySlug(req, res, next) {
 
     const item = await getPublishedViralVideoBySlug(req.params.slug);
     if (!item) {
-      return res.status(404).json({ ok: false, message: 'Viral video not found' });
+      return res.status(404).json({ ok: false, success: false, message: 'Viral video not found' });
     }
 
-    return res.status(200).json({ ok: true, item });
+    return res.status(200).json({ ok: true, success: true, item, video: item });
   } catch (error) {
     logViralVideosFetchFailure('detail', error);
     return next(error);

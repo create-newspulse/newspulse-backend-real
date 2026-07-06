@@ -43,14 +43,9 @@ function expectedPublishedArchiveBaseFilter() {
     $and: [
       expectedActiveClause(),
       expectedGlobalFrontendClause(),
-      {
-        $or: [
-          { isPublished: true },
-          { status: 'published' },
-        ],
-      },
     ],
-    publishedAt: { $ne: null },
+    status: 'published',
+    category: 'viral',
   };
 }
 
@@ -103,7 +98,7 @@ function createVideo(overrides = {}) {
     embedUrl: overrides.embedUrl !== undefined ? overrides.embedUrl : 'https://www.youtube.com/embed/demo',
     sourceType: overrides.sourceType || 'url',
     language: overrides.language || 'en',
-    category: overrides.category || 'funny',
+    category: overrides.category || 'viral',
     tags: overrides.tags || ['cats'],
     sourceName: overrides.sourceName || 'News Pulse',
     sourceUrl: overrides.sourceUrl !== undefined ? overrides.sourceUrl : null,
@@ -143,6 +138,7 @@ function expectedFeaturedHomepageFilter() {
         ],
       },
     ],
+    category: 'viral',
   };
 }
 
@@ -164,7 +160,7 @@ test('GET /api/public/viral-videos returns paginated published archive items', a
       return 2;
     };
 
-    const res = await request(app).get('/api/public/viral-videos?limit=2&page=1&lang=en&category=funny&tag=cats');
+    const res = await request(app).get('/api/public/viral-videos?limit=2&page=1&lang=en&category=viral&tag=cats');
 
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.ok, true);
@@ -177,12 +173,10 @@ test('GET /api/public/viral-videos returns paginated published archive items', a
     assert.equal(res.body.limit, 2);
     assert.equal(res.body.total, 2);
     assert.equal(res.body.totalPages, 1);
-    assert.deepEqual(res.body.filters, { lang: 'en', category: 'funny', year: null, month: null, tag: 'cats' });
+    assert.deepEqual(res.body.filters, { lang: 'en', category: 'viral', year: null, month: null, tag: 'cats' });
     assert.deepEqual(capturedFilter, {
       ...expectedPublishedArchiveBaseFilter(),
-      publishedAt: { $ne: null },
       language: 'en',
-      category: 'funny',
       tags: 'cats',
     });
   } finally {
@@ -352,7 +346,7 @@ test('GET /api/public/viral-videos/featured returns record saved with homepageFe
           videoUrl: 'https://cdn.example/homepage-featured.mp4',
           embedUrl: null,
           language: 'gu',
-          category: 'news',
+          category: 'viral',
           isPublished: false,
           status: 'published',
           isHomepageVisible: false,
@@ -374,7 +368,7 @@ test('GET /api/public/viral-videos/featured returns record saved with homepageFe
     assert.equal(res.body.video.title, 'Homepage Featured Fields');
     assert.equal(res.body.video.summary, 'Short summary');
     assert.equal(res.body.video.language, 'gu');
-    assert.equal(res.body.video.category, 'news');
+    assert.equal(res.body.video.category, 'viral');
     assert.equal(res.body.video.thumbnailUrl, 'https://img.example/homepage-featured.jpg');
     assert.equal(res.body.video.videoUrl, 'https://cdn.example/homepage-featured.mp4');
     assert.equal(res.body.video.status, 'published');
@@ -635,6 +629,7 @@ test('GET /api/public/viral-videos/featured returns latest viralVideosFrontendEn
     assert.equal(offRes.headers.expires, '0');
     assert.deepEqual(offRes.body, {
       ok: true,
+      success: true,
       enabled: false,
       settings: expectedFeaturedSettings(false),
       video: null,
@@ -652,6 +647,7 @@ test('GET /api/public/viral-videos/featured returns latest viralVideosFrontendEn
     assert.equal(onRes.headers.expires, '0');
     assert.deepEqual(onRes.body, {
       ok: true,
+      success: true,
       enabled: true,
       settings: expectedFeaturedSettings(true),
       video: null,
@@ -666,6 +662,7 @@ test('GET /api/public/viral-videos/featured returns latest viralVideosFrontendEn
     assert.equal(offAgainRes.statusCode, 200);
     assert.deepEqual(offAgainRes.body, {
       ok: true,
+      success: true,
       enabled: false,
       settings: expectedFeaturedSettings(false),
       video: null,
@@ -837,7 +834,7 @@ test('GET /api/public/viral-videos/:slug/related returns related published archi
         createVideo({
           _id: '507f1f77bcf86cd799439305',
           slug: 'viral-base',
-          category: 'sports',
+          category: 'viral',
           tags: ['cricket', 'highlight'],
           language: 'hi',
         })
@@ -849,7 +846,7 @@ test('GET /api/public/viral-videos/:slug/related returns related published archi
         createVideo({
           _id: '507f1f77bcf86cd799439306',
           slug: 'viral-related',
-          category: 'sports',
+          category: 'viral',
           tags: ['cricket'],
           language: 'hi',
         }),
@@ -867,13 +864,13 @@ test('GET /api/public/viral-videos/:slug/related returns related published archi
       $and: [
         expectedActiveClause(),
         expectedGlobalFrontendClause(),
-        { isPublished: true },
       ],
-      publishedAt: { $ne: null },
+      status: 'published',
+      category: 'viral',
       _id: { $ne: '507f1f77bcf86cd799439305' },
       $or: [
         { language: 'hi' },
-        { category: 'sports' },
+        { category: 'viral' },
         { tags: { $in: ['cricket', 'highlight'] } },
       ],
     });

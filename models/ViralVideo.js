@@ -60,7 +60,11 @@ const viralVideoSchema = new mongoose.Schema(
   {
     title: { type: String, required: true, trim: true },
     slug: { type: String, required: true, trim: true, lowercase: true, unique: true, index: true },
+    description: { type: String, default: null, trim: true },
     summary: { type: String, default: null, trim: true, alias: 'shortCaption' },
+    duration: { type: String, default: null, trim: true },
+    uploadedBy: { type: String, default: null, trim: true },
+    source: { type: String, default: 'News Pulse', trim: true },
     sourceName: { type: String, default: null, trim: true },
     sourceUrl: { type: String, default: null, trim: true },
     thumbnailUrl: { type: String, default: null, trim: true },
@@ -85,7 +89,7 @@ const viralVideoSchema = new mongoose.Schema(
     videoSizeBytes: { type: Number, default: null },
     videoDuration: { type: Number, default: null },
     language: { type: String, enum: LANGUAGE_VALUES, default: 'en', index: true },
-    category: { type: String, default: null, trim: true, index: true },
+    category: { type: String, enum: ['viral'], default: 'viral', trim: true, index: true },
     tags: {
       type: [String],
       default: [],
@@ -93,12 +97,14 @@ const viralVideoSchema = new mongoose.Schema(
     },
     isActive: { type: Boolean, default: true, index: true },
     isPublished: { type: Boolean, default: false, index: true },
-    status: { type: String, enum: ['draft', 'published'], default: 'draft', index: true },
+    status: { type: String, enum: ['draft', 'published', 'unpublished', 'archived'], default: 'draft', index: true },
     globalFrontend: { type: Boolean, default: true, index: true },
-    isHomepageVisible: { type: Boolean, default: true, index: true, alias: 'showOnHomepage' },
+    isHomepageVisible: { type: Boolean, default: false, index: true, alias: 'showOnHomepage' },
     homepageFeatured: { type: Boolean, default: false, index: true },
     isFeatured: { type: Boolean, default: false, index: true, alias: 'isFeaturedHomepage' },
+    featured: { type: Boolean, default: false, index: true },
     publishedAt: { type: Date, default: null, index: true },
+    scheduledAt: { type: Date, default: null, index: true },
     sortOrder: { type: Number, default: 0, index: true, alias: 'priority' },
   },
   { timestamps: true }
@@ -110,6 +116,18 @@ viralVideoSchema.pre('validate', function ensureCanonicalFields(next) {
   }
 
   this.slug = String(this.slug || '').trim().toLowerCase();
+
+  this.category = 'viral';
+  if (!this.source) this.source = 'News Pulse';
+  if (!this.sourceName) this.sourceName = this.source;
+
+  if (this.description && !this.summary) {
+    this.summary = this.description;
+  }
+
+  if (this.summary && !this.description) {
+    this.description = this.summary;
+  }
 
   if (!this.posterImage || typeof this.posterImage !== 'object') {
     this.posterImage = { url: null, publicId: null, alt: null };
@@ -185,13 +203,17 @@ viralVideoSchema.pre('validate', function ensureCanonicalFields(next) {
     if (!this.sourceUrl && videoCandidate) this.sourceUrl = videoCandidate;
   }
 
+  if (this.status === 'archived') {
+    this.isActive = false;
+  }
+
   if (this.status === 'published') {
     this.isPublished = true;
   }
 
   if (this.isPublished) {
     this.status = 'published';
-  } else if (this.status !== 'published') {
+  } else if (this.status !== 'unpublished' && this.status !== 'archived') {
     this.status = 'draft';
   }
 
@@ -199,12 +221,13 @@ viralVideoSchema.pre('validate', function ensureCanonicalFields(next) {
     this.publishedAt = new Date();
   }
 
-  if (this.homepageFeatured === true || this.isFeaturedHomepage === true) {
+  if (this.homepageFeatured === true || this.isFeaturedHomepage === true || this.featured === true) {
     this.isFeatured = true;
   }
 
   if (this.isFeatured === true) {
     this.homepageFeatured = true;
+    this.featured = true;
   }
 
   if (!this.videoUrl) {

@@ -1485,7 +1485,7 @@ test('PATCH /api/admin/viral-videos/:id/unpublish and publish aliases update sta
     .send({});
   assert.equal(unpublishRes.statusCode, 200);
   assert.equal(unpublishRes.body.ok, true);
-  assert.equal(unpublishRes.body.item.status, 'draft');
+  assert.equal(unpublishRes.body.item.status, 'unpublished');
   assert.equal(unpublishRes.body.item.isPublished, false);
 
   const publishRes = await request(app)
@@ -1498,7 +1498,7 @@ test('PATCH /api/admin/viral-videos/:id/unpublish and publish aliases update sta
   assert.equal(publishRes.body.item.isPublished, true);
 
   assert.equal(payloads.length, 2);
-  assert.equal(payloads[0].status, 'draft');
+  assert.equal(payloads[0].status, 'unpublished');
   assert.equal(payloads[0].isPublished, false);
   assert.equal(payloads[1].status, 'published');
   assert.equal(payloads[1].isPublished, true);

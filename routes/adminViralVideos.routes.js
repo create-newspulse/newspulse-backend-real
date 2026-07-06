@@ -7,6 +7,7 @@ const {
 	getViralVideosSettings,
 	updateViralVideosSettings,
 	listAdminViralVideos,
+	getAdminViralVideosDailyCount,
 	createAdminViralVideo,
 	getAdminViralVideoById,
 	updateAdminViralVideo,
@@ -77,6 +78,7 @@ router.use('/viral-videos', requireViralVideosAdminAuth);
 
 router.get('/viral-videos/settings', getViralVideosSettings);
 router.put('/viral-videos/settings', updateViralVideosSettings);
+router.get('/viral-videos/daily-count', getAdminViralVideosDailyCount);
 router.get('/viral-videos', listAdminViralVideos);
 router.post('/viral-videos', createAdminViralVideo);
 router.post('/viral-videos/upload', uploadViralVideoMediaFile);
