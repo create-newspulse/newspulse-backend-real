@@ -38,6 +38,7 @@ const defaultSettings = {
   // Live TV configuration
   liveTv: {
     enabled: true,
+    status: 'replay',
     mode: 'Offline Replay',
     provider: 'YouTube',
     embedUrl: '',
@@ -46,6 +47,10 @@ const defaultSettings = {
     subtitle: '',
     language: 'English',
     showOnHomepage: true,
+    startTime: '',
+    endTime: '',
+    nextLiveTime: '',
+    updatedAt: '',
   },
   dailyWonders: {
     enabled: true,

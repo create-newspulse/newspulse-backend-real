@@ -668,6 +668,7 @@ test('savePublicSettings validates and persists liveTv settings', async (t) => {
     body: {
       liveTv: {
         enabled: false,
+        status: 'live',
         mode: 'Breaking Mode',
         provider: 'Custom Embed',
         embedUrl: 'https://player.example.com/embed/live',
@@ -676,6 +677,10 @@ test('savePublicSettings validates and persists liveTv settings', async (t) => {
         subtitle: 'Emergency coverage',
         language: 'Hindi',
         showOnHomepage: false,
+        startTime: '2026-07-09T10:00:00.000Z',
+        endTime: '2026-07-09T11:00:00.000Z',
+        nextLiveTime: '2026-07-10T10:00:00.000Z',
+        updatedAt: '2026-07-09T09:30:00.000Z',
       },
     },
   };
@@ -687,6 +692,7 @@ test('savePublicSettings validates and persists liveTv settings', async (t) => {
   assert.equal(saveCalls, 1);
   assert.deepEqual(res.body.draft.liveTv, {
     enabled: false,
+    status: 'live',
     mode: 'Breaking Mode',
     provider: 'Custom Embed',
     embedUrl: 'https://player.example.com/embed/live',
@@ -695,10 +701,14 @@ test('savePublicSettings validates and persists liveTv settings', async (t) => {
     subtitle: 'Emergency coverage',
     language: 'Hindi',
     showOnHomepage: false,
+    startTime: '2026-07-09T10:00:00.000Z',
+    endTime: '2026-07-09T11:00:00.000Z',
+    nextLiveTime: '2026-07-10T10:00:00.000Z',
+    updatedAt: '2026-07-09T09:30:00.000Z',
   });
 });
 
-test('savePublicSettings rejects invalid liveTv mode/provider/language values', async (t) => {
+test('savePublicSettings rejects invalid liveTv status values', async (t) => {
   const prevReadyState = mongoose.connection.readyState;
   const prevGetOrCreate = PublicSiteSettings.getOrCreate;
 
@@ -722,7 +732,7 @@ test('savePublicSettings rejects invalid liveTv mode/provider/language values', 
     method: 'PATCH',
     body: {
       liveTv: {
-        mode: 'Media Partner Live',
+        status: 'paused',
       },
     },
   };
@@ -732,5 +742,5 @@ test('savePublicSettings rejects invalid liveTv mode/provider/language values', 
 
   assert.equal(res.statusCode, 400);
   assert.equal(saveCalls, 0);
-  assert.match(String(res.body.message || ''), /liveTv\.mode/i);
+  assert.match(String(res.body.message || ''), /liveTv\.status/i);
 });

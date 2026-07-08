@@ -2072,6 +2072,7 @@ app.use('/admin', adminSettingsRoutes);
 app.use('/api/admin', adminPublicSettingsRouter);
 app.use('/admin-api/admin', adminPublicSettingsRouter);
 app.use('/admin-api/api/admin', adminPublicSettingsRouter);
+app.use('/admin', adminPublicSettingsRouter);
 // Community Reporter Settings router (same mount /api/admin)
 app.use('/api/admin', communityReporterSettingsRouter);
 // Founder feature toggles (admin/founder protected)

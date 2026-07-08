@@ -75,9 +75,22 @@ const LIVE_TV_MODE_VALUES = Object.freeze([
   'Maintenance / Coming Soon',
 ]);
 
+const LIVE_TV_STATUS_VALUES = Object.freeze(['live', 'replay', 'offline', 'scheduled', 'maintenance']);
 const LIVE_TV_PROVIDER_VALUES = Object.freeze(['YouTube', 'Custom Embed']);
 const LIVE_TV_LANGUAGE_VALUES = Object.freeze(['English', 'Hindi', 'Gujarati']);
-const LIVE_TV_TEXT_FIELDS = Object.freeze(['embedUrl', 'fallbackVideoUrl', 'title', 'subtitle']);
+const LIVE_TV_TEXT_FIELDS = Object.freeze([
+  'mode',
+  'provider',
+  'embedUrl',
+  'fallbackVideoUrl',
+  'title',
+  'subtitle',
+  'language',
+  'startTime',
+  'endTime',
+  'nextLiveTime',
+  'updatedAt',
+]);
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -90,6 +103,21 @@ function hasOwn(obj, key) {
 function normalizeOptionalString(value) {
   if (value === undefined || value === null) return '';
   return String(value).trim();
+}
+
+function normalizeLiveTvStatus(value, fallback = 'offline') {
+  const status = normalizeOptionalString(value).toLowerCase();
+  return LIVE_TV_STATUS_VALUES.includes(status) ? status : fallback;
+}
+
+function inferLiveTvStatusFromMode(mode) {
+  const normalizedMode = normalizeOptionalString(mode).toLowerCase();
+  if (!normalizedMode) return 'offline';
+  if (normalizedMode.includes('maintenance') || normalizedMode.includes('coming soon')) return 'maintenance';
+  if (normalizedMode.includes('scheduled')) return 'scheduled';
+  if (normalizedMode.includes('replay')) return 'replay';
+  if (normalizedMode.includes('live') || normalizedMode.includes('breaking') || normalizedMode.includes('bulletin')) return 'live';
+  return 'offline';
 }
 
 function firstDefined(source, keys) {
@@ -382,24 +410,10 @@ function validateLiveTvPayload(payload) {
     return { ok: false, message: 'Invalid type for liveTv.showOnHomepage: expected boolean' };
   }
 
-  if (hasOwn(liveTv.value, 'mode') && liveTv.value.mode !== undefined) {
-    const mode = normalizeOptionalString(liveTv.value.mode);
-    if (!LIVE_TV_MODE_VALUES.includes(mode)) {
-      return { ok: false, message: `Invalid value for liveTv.mode: expected one of ${LIVE_TV_MODE_VALUES.join(' | ')}` };
-    }
-  }
-
-  if (hasOwn(liveTv.value, 'provider') && liveTv.value.provider !== undefined) {
-    const provider = normalizeOptionalString(liveTv.value.provider);
-    if (!LIVE_TV_PROVIDER_VALUES.includes(provider)) {
-      return { ok: false, message: `Invalid value for liveTv.provider: expected one of ${LIVE_TV_PROVIDER_VALUES.join(' | ')}` };
-    }
-  }
-
-  if (hasOwn(liveTv.value, 'language') && liveTv.value.language !== undefined) {
-    const language = normalizeOptionalString(liveTv.value.language);
-    if (!LIVE_TV_LANGUAGE_VALUES.includes(language)) {
-      return { ok: false, message: `Invalid value for liveTv.language: expected one of ${LIVE_TV_LANGUAGE_VALUES.join(' | ')}` };
+  if (hasOwn(liveTv.value, 'status') && liveTv.value.status !== undefined) {
+    const status = normalizeOptionalString(liveTv.value.status).toLowerCase();
+    if (!LIVE_TV_STATUS_VALUES.includes(status)) {
+      return { ok: false, message: `Invalid value for liveTv.status: expected one of ${LIVE_TV_STATUS_VALUES.join(' | ')}` };
     }
   }
 
@@ -416,20 +430,151 @@ function normalizeLiveTv(settingsObj) {
   const base = (settingsObj && typeof settingsObj === 'object') ? settingsObj : {};
   const defaults = getDefaultLiveTv();
   const source = isPlainObject(base.liveTv) ? base.liveTv : {};
+  const defaultMode = normalizeOptionalString(defaults.mode) || 'Offline Replay';
+  const mode = hasOwn(source, 'mode') ? normalizeOptionalString(source.mode) : defaultMode;
+  const defaultStatus = normalizeLiveTvStatus(defaults.status, inferLiveTvStatusFromMode(defaultMode));
 
   base.liveTv = {
+    ...source,
     enabled: typeof source.enabled === 'boolean' ? source.enabled : Boolean(defaults.enabled),
-    mode: LIVE_TV_MODE_VALUES.includes(normalizeOptionalString(source.mode)) ? normalizeOptionalString(source.mode) : defaults.mode,
-    provider: LIVE_TV_PROVIDER_VALUES.includes(normalizeOptionalString(source.provider)) ? normalizeOptionalString(source.provider) : defaults.provider,
+    status: normalizeLiveTvStatus(source.status, defaultStatus || inferLiveTvStatusFromMode(mode)),
+    mode,
+    provider: hasOwn(source, 'provider') ? normalizeOptionalString(source.provider) : normalizeOptionalString(defaults.provider),
     embedUrl: hasOwn(source, 'embedUrl') ? normalizeOptionalString(source.embedUrl) : normalizeOptionalString(defaults.embedUrl),
     fallbackVideoUrl: hasOwn(source, 'fallbackVideoUrl') ? normalizeOptionalString(source.fallbackVideoUrl) : normalizeOptionalString(defaults.fallbackVideoUrl),
     title: hasOwn(source, 'title') ? normalizeOptionalString(source.title) : normalizeOptionalString(defaults.title),
     subtitle: hasOwn(source, 'subtitle') ? normalizeOptionalString(source.subtitle) : normalizeOptionalString(defaults.subtitle),
-    language: LIVE_TV_LANGUAGE_VALUES.includes(normalizeOptionalString(source.language)) ? normalizeOptionalString(source.language) : defaults.language,
+    language: hasOwn(source, 'language') ? normalizeOptionalString(source.language) : normalizeOptionalString(defaults.language),
     showOnHomepage: typeof source.showOnHomepage === 'boolean' ? source.showOnHomepage : Boolean(defaults.showOnHomepage),
+    startTime: hasOwn(source, 'startTime') ? normalizeOptionalString(source.startTime) : normalizeOptionalString(defaults.startTime),
+    endTime: hasOwn(source, 'endTime') ? normalizeOptionalString(source.endTime) : normalizeOptionalString(defaults.endTime),
+    nextLiveTime: hasOwn(source, 'nextLiveTime') ? normalizeOptionalString(source.nextLiveTime) : normalizeOptionalString(defaults.nextLiveTime),
+    updatedAt: hasOwn(source, 'updatedAt') ? normalizeOptionalString(source.updatedAt) : normalizeOptionalString(defaults.updatedAt),
   };
 
   return base;
+}
+
+function extractLiveTvPayload(payload) {
+  if (!isPlainObject(payload)) return null;
+  if (hasOwn(payload, 'liveTv')) return isPlainObject(payload.liveTv) ? payload.liveTv : null;
+  return payload;
+}
+
+function normalizeLiveTvOnly(liveTv) {
+  return ensureCategoryStripEnabled({ liveTv }).liveTv;
+}
+
+function getAdminLiveTvAction(req) {
+  const raw = firstNonEmptyString(
+    { body: req.body?.action, query: req.query?.action, operation: req.body?.operation },
+    ['body', 'query', 'operation'],
+  ).toLowerCase();
+  return raw;
+}
+
+async function saveAdminLiveTvPayload(req, res, options = {}) {
+  try {
+    if (!isDbReady()) {
+      return res.status(503).json({ ok: false, message: 'Database unavailable' });
+    }
+
+    const settings = await PublicSiteSettings.getOrCreate();
+    const baseDraft = ensureCategoryStripEnabled(settings.draft || PublicSiteSettings.getDefaultSettings());
+    const basePublished = ensureCategoryStripEnabled(settings.published || PublicSiteSettings.getDefaultSettings());
+    const providedLiveTv = extractLiveTvPayload(req.body || {});
+    const action = options.action || getAdminLiveTvAction(req);
+    const shouldDeactivate = action === 'deactivate';
+    const shouldPublish = options.publish === true || action === 'publish' || action === 'published' || shouldDeactivate;
+
+    let liveTvPatch = providedLiveTv || {};
+    if (!isPlainObject(liveTvPatch)) {
+      return res.status(400).json({ ok: false, message: 'Invalid liveTv payload: expected object' });
+    }
+
+    liveTvPatch = { ...liveTvPatch };
+    delete liveTvPatch.action;
+    delete liveTvPatch.operation;
+
+    if (shouldDeactivate) {
+      liveTvPatch.enabled = false;
+      liveTvPatch.status = 'offline';
+    }
+
+    if (!hasOwn(liveTvPatch, 'updatedAt')) {
+      liveTvPatch.updatedAt = new Date().toISOString();
+    }
+
+    const liveTvValidationErr = validateLiveTvPayload({ liveTv: liveTvPatch });
+    if (liveTvValidationErr) return res.status(400).json(liveTvValidationErr);
+
+    const mergedDraftLiveTv = normalizeLiveTvOnly(deepMerge(baseDraft.liveTv || {}, liveTvPatch));
+    const draft = ensureCategoryStripEnabled(deepMerge(baseDraft, { liveTv: mergedDraftLiveTv }));
+    settings.draft = draft;
+
+    if (shouldPublish) {
+      const publishedLiveTv = normalizeLiveTvOnly(deepMerge(basePublished.liveTv || {}, mergedDraftLiveTv));
+      settings.published = ensureCategoryStripEnabled(deepMerge(basePublished, { liveTv: publishedLiveTv }));
+      if (typeof settings.version !== 'number') settings.version = 1;
+      settings.version += 1;
+      settings.publishedUpdatedAt = new Date();
+    }
+
+    await settings.save();
+    invalidatePublicSettingsCaches().catch(() => {});
+    if (shouldPublish) bumpPublicConfigVersion().catch(() => {});
+
+    return res.status(200).json({
+      ok: true,
+      scope: settings.scope || undefined,
+      version: typeof settings.version === 'number' ? settings.version : 1,
+      updatedAt: settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString(),
+      liveTv: settings.draft.liveTv,
+      draft: settings.draft.liveTv,
+      published: ensureCategoryStripEnabled(settings.published || PublicSiteSettings.getDefaultSettings()).liveTv,
+      message: shouldPublish ? 'Live TV settings published successfully' : 'Live TV settings saved successfully',
+    });
+  } catch (error) {
+    console.error('[saveAdminLiveTvPayload] error:', error);
+    return res.status(500).json({ ok: false, message: 'Failed to save Live TV settings', error: error.message });
+  }
+}
+
+async function getAdminLiveTvSettings(req, res) {
+  try {
+    if (!isDbReady()) {
+      return res.status(503).json({ ok: false, message: 'Database unavailable' });
+    }
+
+    const settings = await PublicSiteSettings.getOrCreate();
+    const draft = ensureCategoryStripEnabled(settings.draft || PublicSiteSettings.getDefaultSettings());
+    const published = ensureCategoryStripEnabled(settings.published || PublicSiteSettings.getDefaultSettings());
+
+    return res.status(200).json({
+      ok: true,
+      scope: settings.scope || undefined,
+      version: typeof settings.version === 'number' ? settings.version : 1,
+      updatedAt: settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString(),
+      liveTv: draft.liveTv,
+      draft: draft.liveTv,
+      published: published.liveTv,
+    });
+  } catch (error) {
+    console.error('[getAdminLiveTvSettings] error:', error);
+    return res.status(500).json({ ok: false, message: 'Failed to fetch Live TV settings', error: error.message });
+  }
+}
+
+async function updateAdminLiveTvSettings(req, res) {
+  return saveAdminLiveTvPayload(req, res);
+}
+
+async function publishAdminLiveTvSettings(req, res) {
+  return saveAdminLiveTvPayload(req, res, { publish: true });
+}
+
+async function deactivateAdminLiveTvSettings(req, res) {
+  return saveAdminLiveTvPayload(req, res, { action: 'deactivate', publish: true });
 }
 
 function validateDailyWondersPayload(payload) {
@@ -554,6 +699,19 @@ function ensurePublicSettingsResponse(settingsObj) {
   return base;
 }
 
+function sanitizePublicSettingsResponse(settingsObj) {
+  const base = cloneJsonValue(settingsObj || {});
+  delete base.viralVideos;
+  delete base.viralVideosEnabled;
+
+  if (base.homepage && typeof base.homepage === 'object' && base.homepage.modules && typeof base.homepage.modules === 'object') {
+    delete base.homepage.modules.viralVideos;
+    delete base.homepage.modules.shortVideoDesk;
+  }
+
+  return base;
+}
+
 function deepMerge(target, source) {
   const t = (target && typeof target === 'object') ? target : {};
   const s = (source && typeof source === 'object') ? source : {};
@@ -587,8 +745,8 @@ async function getPublicSettings(req, res) {
       return res.status(503).json({ ok: false, message: 'Database unavailable' });
     }
     const settings = await PublicSiteSettings.getOrCreate();
-    const draft = ensureCategoryStripEnabled(settings.draft || PublicSiteSettings.getDefaultSettings());
-    const published = ensureCategoryStripEnabled(settings.published || PublicSiteSettings.getDefaultSettings());
+    const draft = sanitizePublicSettingsResponse(ensureCategoryStripEnabled(settings.draft || PublicSiteSettings.getDefaultSettings()));
+    const published = sanitizePublicSettingsResponse(ensureCategoryStripEnabled(settings.published || PublicSiteSettings.getDefaultSettings()));
 
     return res.status(200).json({
       ok: true,
@@ -618,7 +776,7 @@ async function getDraftSettings(req, res) {
       return res.status(503).json({ ok: false, message: 'Database unavailable' });
     }
     const settings = await PublicSiteSettings.getOrCreate();
-    const draft = ensureCategoryStripEnabled(settings.draft || PublicSiteSettings.getDefaultSettings());
+    const draft = sanitizePublicSettingsResponse(ensureCategoryStripEnabled(settings.draft || PublicSiteSettings.getDefaultSettings()));
 
     return res.status(200).json({
       ok: true,
@@ -689,7 +847,7 @@ async function updateDraftSettings(req, res) {
     return res.status(200).json({
       ok: true,
       scope: settings.scope || undefined,
-      draft: settings.draft,
+      draft: sanitizePublicSettingsResponse(settings.draft),
       message: 'Draft settings saved successfully',
     });
   } catch (error) {
@@ -712,6 +870,29 @@ async function publishSettings(req, res) {
       return res.status(503).json({ ok: false, message: 'Database unavailable' });
     }
     const settings = await PublicSiteSettings.getOrCreate();
+    const publishPayload = req.body;
+
+    if (publishPayload && isPlainObject(publishPayload) && Object.keys(publishPayload).length > 0) {
+      const cs = getNested(publishPayload, 'publicSite.homepage.categoryStripEnabled');
+      if (cs.exists && typeof cs.value !== 'boolean') {
+        return res.status(400).json({
+          ok: false,
+          message: 'Invalid value for publicSite.homepage.categoryStripEnabled: expected boolean',
+        });
+      }
+
+      const inspirationHubValidationErr = validateInspirationHubPayload(publishPayload);
+      if (inspirationHubValidationErr) return res.status(400).json(inspirationHubValidationErr);
+
+      const dailyWondersValidationErr = validateDailyWondersPayload(publishPayload);
+      if (dailyWondersValidationErr) return res.status(400).json(dailyWondersValidationErr);
+
+      const liveTvValidationErr = validateLiveTvPayload(publishPayload);
+      if (liveTvValidationErr) return res.status(400).json(liveTvValidationErr);
+
+      const baseDraft = ensureCategoryStripEnabled(settings.draft || PublicSiteSettings.getDefaultSettings());
+      settings.draft = ensureCategoryStripEnabled(deepMerge(baseDraft, publishPayload));
+    }
 
     // Ensure a numeric version exists
     if (typeof settings.version !== 'number') settings.version = 1;
@@ -740,7 +921,7 @@ async function publishSettings(req, res) {
       updatedAt: settings.publishedUpdatedAt
         ? new Date(settings.publishedUpdatedAt).toISOString()
         : (settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString()),
-      published: settings.published,
+      published: sanitizePublicSettingsResponse(settings.published),
       message: 'Settings published successfully',
     });
   } catch (error) {
@@ -828,8 +1009,8 @@ async function savePublicSettings(req, res) {
       scope: settings.scope || undefined,
       version: typeof settings.version === 'number' ? settings.version : 1,
       updatedAt: settings.updatedAt ? new Date(settings.updatedAt).toISOString() : new Date().toISOString(),
-      draft: settings.draft,
-      published: settings.published,
+      draft: sanitizePublicSettingsResponse(settings.draft),
+      published: sanitizePublicSettingsResponse(settings.published),
     });
   } catch (error) {
     console.error('[savePublicSettings] error:', error);
@@ -845,7 +1026,7 @@ async function getPublishedSettings(req, res) {
   try {
     // Public endpoint should stay stable even if DB is down.
     if (!isDbReady()) {
-      const fallback = ensurePublicSettingsResponse(PublicSiteSettings.getDefaultSettings());
+      const fallback = sanitizePublicSettingsResponse(ensurePublicSettingsResponse(PublicSiteSettings.getDefaultSettings()));
       res.set('Cache-Control', 'no-store, max-age=0');
       return res.status(200).json({
         ok: true,
@@ -856,7 +1037,7 @@ async function getPublishedSettings(req, res) {
       });
     }
     const settings = await PublicSiteSettings.getOrCreate();
-    const published = ensurePublicSettingsResponse(settings.published || PublicSiteSettings.getDefaultSettings());
+    const published = sanitizePublicSettingsResponse(ensurePublicSettingsResponse(settings.published || PublicSiteSettings.getDefaultSettings()));
 
     res.set('Cache-Control', 'no-store, max-age=0');
 
@@ -882,10 +1063,14 @@ async function getPublishedSettings(req, res) {
 module.exports = {
   ensureCategoryStripEnabled,
   ensurePublicSettingsResponse,
+  getAdminLiveTvSettings,
   getPublicSettings,
   getDraftSettings,
   updateDraftSettings,
   publishSettings,
+  updateAdminLiveTvSettings,
+  publishAdminLiveTvSettings,
+  deactivateAdminLiveTvSettings,
   savePublicSettings,
   getPublishedSettings,
 };
