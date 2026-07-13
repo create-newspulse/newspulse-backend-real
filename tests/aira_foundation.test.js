@@ -623,3 +623,32 @@ test('GET /api/live-tv/current-source returns maintenance fallback when active v
   assert.equal(res.body.offlineLoopVideoUrl, '/uploads/media-library/fallback-loop.webm');
   assert.equal(res.body.offlineMessage, 'Fallback offline message');
 });
+
+test('GET /api/live-tv/current-source returns offline media fields when Live TV is disabled', async (t) => {
+  stubDbReady(t);
+  stubPublicSiteSettings(t, {
+    scope: 'production',
+    version: 1,
+    draft: baseSettings(),
+    published: baseSettings({
+      enabled: false,
+      status: 'offline',
+      sourceType: 'maintenance',
+      title: 'Offline Live TV',
+      offlinePosterImageUrl: '/uploads/media-library/offline-disabled-poster.webp',
+      offlineLoopVideoUrl: '/uploads/media-library/offline-disabled-loop.webm',
+      offlineMessage: 'Live stream is offline. Please watch the loop.',
+    }),
+    async save() { return this; },
+  });
+
+  const res = await request(app).get('/api/live-tv/current-source');
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.enabled, false);
+  assert.equal(res.body.sourceType, 'maintenance');
+  assert.equal(res.body.status, 'maintenance');
+  assert.equal(res.body.offlinePosterImageUrl, '/uploads/media-library/offline-disabled-poster.webp');
+  assert.equal(res.body.offlineLoopVideoUrl, '/uploads/media-library/offline-disabled-loop.webm');
+  assert.equal(res.body.offlineMessage, 'Live stream is offline. Please watch the loop.');
+});
