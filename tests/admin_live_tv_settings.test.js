@@ -88,6 +88,9 @@ test('GET /admin/settings/public-site/live-tv returns current Live TV settings f
       status: 'scheduled',
       mode: 'scheduled-show',
       provider: 'youtube',
+      offlinePosterImageUrl: '/uploads/media-library/settings-poster.webp',
+      offlineLoopVideoUrl: '/uploads/media-library/settings-loop.webm',
+      offlineMessage: 'Offline settings message',
       startTime: '2026-07-09T10:00:00.000Z',
       nextLiveTime: '2026-07-09T10:00:00.000Z',
     }),
@@ -104,6 +107,9 @@ test('GET /admin/settings/public-site/live-tv returns current Live TV settings f
   assert.equal(res.body.liveTv.status, 'scheduled');
   assert.equal(res.body.liveTv.mode, 'scheduled-show');
   assert.equal(res.body.liveTv.provider, 'youtube');
+  assert.equal(res.body.liveTv.offlinePosterImageUrl, '/uploads/media-library/settings-poster.webp');
+  assert.equal(res.body.liveTv.offlineLoopVideoUrl, '/uploads/media-library/settings-loop.webm');
+  assert.equal(res.body.liveTv.offlineMessage, 'Offline settings message');
   assert.equal(res.body.liveTv.startTime, '2026-07-09T10:00:00.000Z');
   assert.equal(res.body.published.status, 'replay');
 });

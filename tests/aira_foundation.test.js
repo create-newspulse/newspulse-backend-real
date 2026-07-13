@@ -472,6 +472,9 @@ test('GET /api/live-tv/current-source returns MP4 source with video provider and
       currentVideoUrl: 'https://cdn.example.com/live/aira.mp4',
       currentProgramTitle: 'AIRA International Update',
       currentProgramLabel: 'AIRA BULLETIN • ON AIR',
+      offlinePosterImageUrl: '/uploads/media-library/current-poster.webp',
+      offlineLoopVideoUrl: '/uploads/media-library/current-loop.webm',
+      offlineMessage: 'Offline current source message',
       showOnHomepage: true,
       updatedAt: '2026-07-13T10:00:00.000Z',
     }),
@@ -493,6 +496,9 @@ test('GET /api/live-tv/current-source returns MP4 source with video provider and
   assert.equal(res.body.currentVideoUrl, 'https://cdn.example.com/live/aira.mp4');
   assert.equal(res.body.currentProgramTitle, 'AIRA International Update');
   assert.equal(res.body.currentProgramLabel, 'AIRA BULLETIN • ON AIR');
+  assert.equal(res.body.offlinePosterImageUrl, '/uploads/media-library/current-poster.webp');
+  assert.equal(res.body.offlineLoopVideoUrl, '/uploads/media-library/current-loop.webm');
+  assert.equal(res.body.offlineMessage, 'Offline current source message');
   assert.equal(res.body.showOnHomepage, true);
   assert.equal(res.body.updatedAt, '2026-07-13T10:00:00.000Z');
 });
@@ -598,6 +604,9 @@ test('GET /api/live-tv/current-source returns maintenance fallback when active v
       embedUrl: '',
       fallbackVideoUrl: '',
       currentVideoUrl: '',
+      offlinePosterImageUrl: '/uploads/media-library/fallback-poster.webp',
+      offlineLoopVideoUrl: '/uploads/media-library/fallback-loop.webm',
+      offlineMessage: 'Fallback offline message',
     }),
     async save() { return this; },
   });
@@ -610,4 +619,7 @@ test('GET /api/live-tv/current-source returns maintenance fallback when active v
   assert.equal(res.body.label, 'COMING SOON');
   assert.equal(res.body.status, 'maintenance');
   assert.equal(res.body.message, 'Live TV video is not available right now.');
+  assert.equal(res.body.offlinePosterImageUrl, '/uploads/media-library/fallback-poster.webp');
+  assert.equal(res.body.offlineLoopVideoUrl, '/uploads/media-library/fallback-loop.webm');
+  assert.equal(res.body.offlineMessage, 'Fallback offline message');
 });
