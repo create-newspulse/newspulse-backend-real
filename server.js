@@ -366,6 +366,8 @@ const publicComplianceSettingsRouter = require('./routes/publicComplianceSetting
 const publicVersionRouter = require('./routes/publicVersion.routes');
 const publicTranslationRouter = require('./routes/publicTranslation.routes');
 const publicUiLabelsRouter = require('./routes/publicUiLabels.routes');
+const airaRouter = require('./routes/aira.routes');
+const liveTvRouter = require('./routes/liveTv.routes');
 const adminPublicSettingsRouter = require('./routes/adminPublicSettings.routes');
 const adminComplianceReportsRouter = require('./routes/adminComplianceReports.routes');
 const adminComplianceSettingsRouter = require('./routes/adminComplianceSettings.routes');
@@ -1880,6 +1882,9 @@ app.use('/admin-api/public', publicSettingsRouter);
 app.use('/admin-api/public', publicComplianceSettingsRouter);
 app.use('/admin-api/api/public', publicSettingsRouter);
 app.use('/admin-api/api/public', publicComplianceSettingsRouter);
+app.use('/api/live-tv', liveTvRouter);
+app.use('/admin-api/live-tv', liveTvRouter);
+app.use('/admin-api/api/live-tv', liveTvRouter);
 
 // Startup confirmation (production): settings endpoints mounted under /api
 if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
@@ -2068,6 +2073,10 @@ app.use('/admin-api/admin', adminSettingsRoutes);
 app.use('/admin-api/api/admin', adminSettingsRoutes);
 // Legacy alias: expose admin settings under /admin as well
 app.use('/admin', adminSettingsRoutes);
+// AIRA Phase 2 manual bulletin workflow only; no AI providers or Live TV publishing yet.
+app.use('/api/aira', airaRouter);
+app.use('/admin-api/aira', airaRouter);
+app.use('/admin-api/api/aira', airaRouter);
 // Admin Public Site Settings (draft/publish)
 app.use('/api/admin', adminPublicSettingsRouter);
 app.use('/admin-api/admin', adminPublicSettingsRouter);

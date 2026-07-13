@@ -136,6 +136,9 @@ test('PATCH /api/admin/live-tv updates draft Live TV settings without a separate
     subtitle: 'Breaking updates',
     language: 'en',
     showOnHomepage: false,
+    offlinePosterImageUrl: '/uploads/media-library/offline-poster.webp',
+    offlineLoopVideoUrl: '/uploads/media-library/offline-loop.webm',
+    offlineMessage: 'We will be back shortly.',
     startTime: '2026-07-09T10:00:00.000Z',
     endTime: '2026-07-09T11:00:00.000Z',
     nextLiveTime: '2026-07-10T10:00:00.000Z',
@@ -154,6 +157,9 @@ test('PATCH /api/admin/live-tv updates draft Live TV settings without a separate
   assert.equal(res.body.liveTv.provider, 'youtube');
   assert.equal(res.body.liveTv.language, 'en');
   assert.equal(res.body.liveTv.showOnHomepage, false);
+  assert.equal(res.body.liveTv.offlinePosterImageUrl, '/uploads/media-library/offline-poster.webp');
+  assert.equal(res.body.liveTv.offlineLoopVideoUrl, '/uploads/media-library/offline-loop.webm');
+  assert.equal(res.body.liveTv.offlineMessage, 'We will be back shortly.');
   assert.equal(res.body.liveTv.updatedAt, '2026-07-09T09:30:00.000Z');
   assert.equal(settingsDoc.published.liveTv.status, 'replay');
 });
