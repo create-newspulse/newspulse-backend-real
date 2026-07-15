@@ -170,6 +170,43 @@ test('PATCH /api/admin/live-tv updates draft Live TV settings without a separate
   assert.equal(settingsDoc.published.liveTv.status, 'replay');
 });
 
+test('PATCH /api/admin/live-tv preserves sourceType when only offline media changes', async (t) => {
+  stubDbReady(t);
+
+  const settingsDoc = {
+    scope: 'production',
+    version: 7,
+    updatedAt: new Date('2026-07-09T08:00:00.000Z'),
+    draft: baseSettings({
+      status: 'live',
+      mode: 'AIRA Bulletin',
+      sourceType: 'aira_bulletin',
+      fallbackVideoUrl: 'https://cdn.example.com/live/aira.mp4',
+    }),
+    published: baseSettings({ status: 'replay', mode: 'Offline Replay' }),
+    async save() {
+      return this;
+    },
+  };
+  stubPublicSiteSettings(t, settingsDoc);
+
+  const res = await request(app)
+    .patch('/api/admin/live-tv')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .send({
+      offlinePosterImageUrl: '/uploads/media-library/offline-poster.webp',
+      offlineLoopVideoUrl: '/uploads/media-library/offline-loop.webm',
+      offlineMessage: 'Back shortly.',
+    });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.liveTv.sourceType, 'aira_bulletin');
+  assert.equal(res.body.liveTv.offlinePosterImageUrl, '/uploads/media-library/offline-poster.webp');
+  assert.equal(res.body.liveTv.offlineLoopVideoUrl, '/uploads/media-library/offline-loop.webm');
+  assert.equal(res.body.liveTv.offlineMessage, 'Back shortly.');
+  assert.equal(settingsDoc.published.liveTv.status, 'replay');
+});
+
 test('POST /api/admin/live-tv/publish publishes only the Live TV settings object', async (t) => {
   stubDbReady(t);
 

@@ -51,7 +51,9 @@ function baseSettings() {
     },
     liveTv: {
       enabled: true,
+      status: 'replay',
       mode: 'Offline Replay',
+      sourceType: 'offline_replay',
       provider: 'YouTube',
       embedUrl: '',
       fallbackVideoUrl: '',
@@ -59,6 +61,9 @@ function baseSettings() {
       subtitle: '',
       language: 'English',
       showOnHomepage: true,
+      offlinePosterImageUrl: '',
+      offlineLoopVideoUrl: '',
+      offlineMessage: '',
     },
     languageTheme: {
       languages: ['en', 'hi', 'gu'],
@@ -638,6 +643,76 @@ test('getPublishedSettings normalizes liveTv defaults when config is empty', asy
   assert.equal(res.body.published.liveTv.showOnHomepage, true);
 });
 
+test('GET /api/public/settings returns public Live TV offline media fields', async (t) => {
+  const prevReadyState = mongoose.connection.readyState;
+  const prevGetOrCreate = PublicSiteSettings.getOrCreate;
+
+  mongoose.connection.readyState = 1;
+
+  PublicSiteSettings.getOrCreate = async () => ({
+    scope: 'production',
+    version: 21,
+    published: {
+      ...baseSettings(),
+      liveTv: {
+        ...baseSettings().liveTv,
+        enabled: true,
+        status: 'offline',
+        sourceType: 'offline_replay',
+        mode: 'Offline Replay',
+        title: 'News Pulse Live',
+        subtitle: 'Replay desk',
+        embedUrl: 'https://www.youtube.com/embed/SLDHOwReM-Q',
+        fallbackVideoUrl: 'https://cdn.example.com/live/fallback.mp4',
+        offlineLoopVideoUrl: '/uploads/media-library/offline-loop.webm',
+        offlinePosterImageUrl: '/uploads/media-library/offline-poster.webp',
+        offlineMessage: 'Live stream is offline. Playing the latest loop.',
+        showOnHomepage: true,
+      },
+    },
+    publishedUpdatedAt: new Date('2026-07-16T09:30:00.000Z'),
+    updatedAt: new Date('2026-07-16T09:00:00.000Z'),
+  });
+
+  t.after(() => {
+    mongoose.connection.readyState = prevReadyState;
+    PublicSiteSettings.getOrCreate = prevGetOrCreate;
+  });
+
+  const res = await request(app).get('/api/public/settings');
+  const liveTv = res.body.published.liveTv;
+
+  assert.equal(res.status, 200);
+  for (const field of [
+    'offlineLoopVideoUrl',
+    'offlinePosterImageUrl',
+    'offlineMessage',
+    'fallbackVideoUrl',
+    'embedUrl',
+    'enabled',
+    'status',
+    'sourceType',
+    'mode',
+    'title',
+    'subtitle',
+    'showOnHomepage',
+  ]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(liveTv, field), true, `missing ${field}`);
+  }
+  assert.equal(liveTv.offlineLoopVideoUrl, '/uploads/media-library/offline-loop.webm');
+  assert.equal(liveTv.offlinePosterImageUrl, '/uploads/media-library/offline-poster.webp');
+  assert.equal(liveTv.offlineMessage, 'Live stream is offline. Playing the latest loop.');
+  assert.equal(liveTv.fallbackVideoUrl, 'https://cdn.example.com/live/fallback.mp4');
+  assert.equal(liveTv.embedUrl, 'https://www.youtube.com/embed/SLDHOwReM-Q');
+  assert.equal(liveTv.enabled, true);
+  assert.equal(liveTv.status, 'offline');
+  assert.equal(liveTv.sourceType, 'offline_replay');
+  assert.equal(liveTv.mode, 'Offline Replay');
+  assert.equal(liveTv.title, 'News Pulse Live');
+  assert.equal(liveTv.subtitle, 'Replay desk');
+  assert.equal(liveTv.showOnHomepage, true);
+});
+
 test('savePublicSettings validates and persists liveTv settings', async (t) => {
   const prevReadyState = mongoose.connection.readyState;
   const prevGetOrCreate = PublicSiteSettings.getOrCreate;
@@ -694,6 +769,7 @@ test('savePublicSettings validates and persists liveTv settings', async (t) => {
     enabled: false,
     status: 'live',
     mode: 'Breaking Mode',
+    sourceType: 'breaking_bulletin',
     provider: 'Custom Embed',
     embedUrl: 'https://player.example.com/embed/live',
     fallbackVideoUrl: 'https://cdn.example.com/fallback.mp4',
@@ -701,6 +777,9 @@ test('savePublicSettings validates and persists liveTv settings', async (t) => {
     subtitle: 'Emergency coverage',
     language: 'Hindi',
     showOnHomepage: false,
+    offlinePosterImageUrl: '',
+    offlineLoopVideoUrl: '',
+    offlineMessage: '',
     startTime: '2026-07-09T10:00:00.000Z',
     endTime: '2026-07-09T11:00:00.000Z',
     nextLiveTime: '2026-07-10T10:00:00.000Z',

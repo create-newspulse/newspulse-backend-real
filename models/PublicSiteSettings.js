@@ -40,6 +40,7 @@ const defaultSettings = {
     enabled: true,
     status: 'replay',
     mode: 'Offline Replay',
+    sourceType: 'offline_replay',
     provider: 'YouTube',
     embedUrl: '',
     fallbackVideoUrl: '',

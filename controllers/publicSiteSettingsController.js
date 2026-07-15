@@ -80,6 +80,7 @@ const LIVE_TV_PROVIDER_VALUES = Object.freeze(['YouTube', 'Custom Embed']);
 const LIVE_TV_LANGUAGE_VALUES = Object.freeze(['English', 'Hindi', 'Gujarati']);
 const LIVE_TV_TEXT_FIELDS = Object.freeze([
   'mode',
+  'sourceType',
   'provider',
   'embedUrl',
   'fallbackVideoUrl',
@@ -121,6 +122,27 @@ function inferLiveTvStatusFromMode(mode) {
   if (normalizedMode.includes('replay')) return 'replay';
   if (normalizedMode.includes('live') || normalizedMode.includes('breaking') || normalizedMode.includes('bulletin')) return 'live';
   return 'offline';
+}
+
+function inferLiveTvSourceType(source, mode, status, fallback = '') {
+  const explicit = normalizeOptionalString(source && source.sourceType);
+  if (explicit) return explicit;
+
+  const normalizedStatus = normalizeOptionalString(status).toLowerCase();
+  const normalizedMode = normalizeOptionalString(mode).toLowerCase();
+  const normalizedProvider = normalizeOptionalString(source && source.provider).toLowerCase();
+  const hasEmbed = !!normalizeOptionalString(source && source.embedUrl);
+  const hasFallbackVideo = !!normalizeOptionalString(source && source.fallbackVideoUrl);
+
+  if (normalizedStatus === 'maintenance' || normalizedMode.includes('maintenance') || normalizedMode.includes('coming soon')) return 'maintenance';
+  if (normalizedMode.includes('breaking')) return 'breaking_bulletin';
+  if (normalizedMode.includes('aira') || normalizedMode.includes('bulletin')) return 'aira_bulletin';
+  if (normalizedStatus === 'scheduled' || normalizedMode.includes('scheduled')) return 'scheduled_program';
+  if (normalizedStatus === 'replay' || normalizedStatus === 'offline' || normalizedMode.includes('replay')) return 'offline_replay';
+  if (normalizedProvider.includes('youtube')) return 'youtube_live';
+  if (normalizedProvider.includes('embed') || normalizedProvider.includes('custom') || normalizedProvider.includes('video') || hasEmbed || hasFallbackVideo) return 'custom_embed';
+
+  return normalizeOptionalString(fallback);
 }
 
 function firstDefined(source, keys) {
@@ -436,12 +458,14 @@ function normalizeLiveTv(settingsObj) {
   const defaultMode = normalizeOptionalString(defaults.mode) || 'Offline Replay';
   const mode = hasOwn(source, 'mode') ? normalizeOptionalString(source.mode) : defaultMode;
   const defaultStatus = normalizeLiveTvStatus(defaults.status, inferLiveTvStatusFromMode(defaultMode));
+  const status = normalizeLiveTvStatus(source.status, defaultStatus || inferLiveTvStatusFromMode(mode));
 
   base.liveTv = {
     ...source,
     enabled: typeof source.enabled === 'boolean' ? source.enabled : Boolean(defaults.enabled),
-    status: normalizeLiveTvStatus(source.status, defaultStatus || inferLiveTvStatusFromMode(mode)),
+    status,
     mode,
+    sourceType: inferLiveTvSourceType(source, mode, status, defaults.sourceType),
     provider: hasOwn(source, 'provider') ? normalizeOptionalString(source.provider) : normalizeOptionalString(defaults.provider),
     embedUrl: hasOwn(source, 'embedUrl') ? normalizeOptionalString(source.embedUrl) : normalizeOptionalString(defaults.embedUrl),
     fallbackVideoUrl: hasOwn(source, 'fallbackVideoUrl') ? normalizeOptionalString(source.fallbackVideoUrl) : normalizeOptionalString(defaults.fallbackVideoUrl),
@@ -471,6 +495,30 @@ function normalizeLiveTvOnly(liveTv) {
   return ensureCategoryStripEnabled({ liveTv }).liveTv;
 }
 
+function withInferredLiveTvPatchSourceType(liveTvPatch) {
+  if (!isPlainObject(liveTvPatch) || hasOwn(liveTvPatch, 'sourceType')) return liveTvPatch;
+
+  const hasSourceSelector = ['mode', 'status', 'provider', 'embedUrl', 'fallbackVideoUrl'].some((field) => hasOwn(liveTvPatch, field));
+  if (!hasSourceSelector) return liveTvPatch;
+
+  const patch = { ...liveTvPatch };
+  const mode = normalizeOptionalString(patch.mode);
+  const status = hasOwn(patch, 'status')
+    ? normalizeLiveTvStatus(patch.status, inferLiveTvStatusFromMode(mode))
+    : inferLiveTvStatusFromMode(mode);
+  const sourceType = inferLiveTvSourceType(patch, mode, status, '');
+  if (sourceType) patch.sourceType = sourceType;
+  return patch;
+}
+
+function withInferredNestedLiveTvPatchSourceType(payload) {
+  if (!isPlainObject(payload) || !isPlainObject(payload.liveTv)) return payload;
+  return {
+    ...payload,
+    liveTv: withInferredLiveTvPatchSourceType(payload.liveTv),
+  };
+}
+
 function getAdminLiveTvAction(req) {
   const raw = firstNonEmptyString(
     { body: req.body?.action, query: req.query?.action, operation: req.body?.operation },
@@ -498,7 +546,7 @@ async function saveAdminLiveTvPayload(req, res, options = {}) {
       return res.status(400).json({ ok: false, message: 'Invalid liveTv payload: expected object' });
     }
 
-    liveTvPatch = { ...liveTvPatch };
+    liveTvPatch = withInferredLiveTvPatchSourceType(liveTvPatch);
     delete liveTvPatch.action;
     delete liveTvPatch.operation;
 
@@ -808,7 +856,7 @@ async function updateDraftSettings(req, res) {
     if (!isDbReady()) {
       return res.status(503).json({ ok: false, message: 'Database unavailable' });
     }
-    const draftData = req.body;
+    let draftData = req.body;
 
     if (!draftData || typeof draftData !== 'object') {
       return res.status(400).json({
@@ -840,6 +888,8 @@ async function updateDraftSettings(req, res) {
     if (liveTvValidationErr) {
       return res.status(400).json(liveTvValidationErr);
     }
+
+    draftData = withInferredNestedLiveTvPatchSourceType(draftData);
 
     const settings = await PublicSiteSettings.getOrCreate();
 
@@ -876,7 +926,7 @@ async function publishSettings(req, res) {
       return res.status(503).json({ ok: false, message: 'Database unavailable' });
     }
     const settings = await PublicSiteSettings.getOrCreate();
-    const publishPayload = req.body;
+    let publishPayload = req.body;
 
     if (publishPayload && isPlainObject(publishPayload) && Object.keys(publishPayload).length > 0) {
       const cs = getNested(publishPayload, 'publicSite.homepage.categoryStripEnabled');
@@ -895,6 +945,8 @@ async function publishSettings(req, res) {
 
       const liveTvValidationErr = validateLiveTvPayload(publishPayload);
       if (liveTvValidationErr) return res.status(400).json(liveTvValidationErr);
+
+      publishPayload = withInferredNestedLiveTvPatchSourceType(publishPayload);
 
       const baseDraft = ensureCategoryStripEnabled(settings.draft || PublicSiteSettings.getDefaultSettings());
       settings.draft = ensureCategoryStripEnabled(deepMerge(baseDraft, publishPayload));
@@ -950,7 +1002,7 @@ async function savePublicSettings(req, res) {
     if (!isDbReady()) {
       return res.status(503).json({ ok: false, message: 'Database unavailable' });
     }
-    const newData = req.body;
+    let newData = req.body;
     if (!newData || typeof newData !== 'object') {
       return res.status(400).json({ ok: false, message: 'Invalid settings payload: expected object' });
     }
@@ -997,6 +1049,8 @@ async function savePublicSettings(req, res) {
 
     const liveTvValidationErr = validateLiveTvPayload(newData);
     if (liveTvValidationErr) return res.status(400).json(liveTvValidationErr);
+
+    newData = withInferredNestedLiveTvPatchSourceType(newData);
 
     if (String(req.method || '').toUpperCase() === 'PUT') {
       // Replace draft entirely
