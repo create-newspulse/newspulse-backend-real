@@ -28,7 +28,7 @@ function normalizeLang(v) {
   const lettersOnly = lower.replace(/[^a-z]/g, '');
   if (lettersOnly === 'english' || lettersOnly === 'eng') return 'en';
   if (lettersOnly === 'hindi' || lettersOnly === 'hin') return 'hi';
-  if (lettersOnly === 'gujarati' || lettersOnly === 'gujrati' || lettersOnly === 'guj') return 'gu';
+  if (lettersOnly === 'gujarati' || lettersOnly === 'gujrati' || lettersOnly === 'guj' || lettersOnly === 'gj') return 'gu';
 
   return null;
 }

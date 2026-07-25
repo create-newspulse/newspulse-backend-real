@@ -67,6 +67,14 @@ function shouldDeferToAdminArticlesRouter(req) {
   return false;
 }
 
+function withEditorialTypeFallback(doc) {
+  if (!doc || typeof doc !== 'object') return doc;
+  if (String(doc.category || '').trim().toLowerCase() === 'editorial' && !doc.editorialType) {
+    return { ...doc, editorialType: 'editorial' };
+  }
+  return doc;
+}
+
 async function listArticles(req, res, next) {
   try {
     res.set('Cache-Control', 'no-store');
@@ -181,7 +189,7 @@ async function listArticles(req, res, next) {
       Article.countDocuments(filter),
     ]);
 
-    let items = itemsRaw || [];
+    let items = (itemsRaw || []).map(withEditorialTypeFallback);
     if (lang) {
       items = items
         .map((doc) => {
@@ -235,7 +243,7 @@ async function getArticleBySlug(req, res, next) {
       ],
     };
 
-    const doc = await Article.findOne(filter).lean();
+    const doc = withEditorialTypeFallback(await Article.findOne(filter).lean());
     if (!doc) {
       return res.status(404).json({ message: 'Article not found' });
     }

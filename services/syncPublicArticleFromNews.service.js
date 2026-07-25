@@ -72,6 +72,7 @@ function _mergeLocationTags(tagsArr, loc) {
 function normalizeLang(v) {
   const s0 = String(v ?? '').trim().toLowerCase();
   if (!s0) return null;
+  if (s0 === 'gujarati' || s0 === 'guj' || s0 === 'gj') return 'gu';
   const s = s0.split(/[-_]/)[0];
   return SUPPORTED_LANGS.includes(s) ? s : null;
 }
@@ -106,6 +107,14 @@ function _normalizeStatus(v) {
   const s = String(v ?? '').trim().toLowerCase();
   if (s === 'ready' || s === 'failed' || s === 'pending') return s;
   return 'pending';
+}
+
+function _normalizeEditorialTypeForCategory(category, value) {
+  const categoryNorm = String(category || '').trim().toLowerCase();
+  if (categoryNorm !== 'editorial') return undefined;
+  const s = String(value ?? '').trim().toLowerCase();
+  if (s === 'editorial' || s === 'special_story') return s;
+  return 'editorial';
 }
 
 function _pickPerLangObj(src, normalizeFn, fallback) {
@@ -262,6 +271,7 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     translationUpdatedAt: _pickPerLangObj(newsDoc.translationUpdatedAt, (v) => _normalizeNullableDate(v), null),
 
     category: newsDoc.category,
+    editorialType: _normalizeEditorialTypeForCategory(newsDoc.category, newsDoc.editorialType),
     track,
     status: normalizedStatus || (isPublished ? 'published' : 'draft'),
     scheduledAt: newsDoc.scheduledAt || null,

@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const STATUS_VALUES = ['queued', 'running', 'done'];
+const STATUS_VALUES = ['queued', 'running', 'done', 'translating', 'completed', 'partially_completed', 'failed', 'review_required'];
 
 const translationJobSchema = new mongoose.Schema(
   {
@@ -14,7 +14,17 @@ const translationJobSchema = new mongoose.Schema(
     lockedBy: { type: String, default: null },
 
     attempts: { type: Number, default: 0 },
+    retryCount: { type: Number, default: 0 },
     lastError: { type: String, default: null },
+    failureReason: { type: String, default: null },
+    provider: { type: String, default: null, index: true },
+    sourceLanguage: { type: String, default: null, index: true },
+    targetLanguages: { type: [String], default: [] },
+    sourceHash: { type: String, default: null, index: true },
+    startedAt: { type: Date, default: null },
+    completedAt: { type: Date, default: null },
+    requestedBy: { type: String, default: null },
+    result: { type: mongoose.Schema.Types.Mixed, default: null },
     finishedAt: { type: Date, default: null },
   },
   { timestamps: true }

@@ -84,7 +84,7 @@ function normalizeLanguage(v) {
   const lettersOnly = lower.replace(/[^a-z]/g, '');
   if (lettersOnly === 'english' || lettersOnly === 'eng') return 'en';
   if (lettersOnly === 'hindi' || lettersOnly === 'hin') return 'hi';
-  if (lettersOnly === 'gujarati' || lettersOnly === 'gujrati' || lettersOnly === 'guj') return 'gu';
+  if (lettersOnly === 'gujarati' || lettersOnly === 'gujrati' || lettersOnly === 'guj' || lettersOnly === 'gj') return 'gu';
 
   return null;
 }
@@ -141,6 +141,79 @@ function applyLangFilter(filter, lang) {
   } else {
     filter.$and.push({ $or: [{ lang: { $in: [lower, upper] } }, { language: { $in: [lower, upper] } }] });
   }
+}
+
+function buildExactStoredLangMatch(lang) {
+  const desired = normalizeLanguage(lang) || normalizeLang(lang);
+  if (!desired) return null;
+  const upper = desired.toUpperCase();
+  return { $or: [{ language: { $in: [desired, upper] } }, { lang: { $in: [desired, upper] } }] };
+}
+
+function defaultRealTranslationAvailability() {
+  return { en: false, hi: false, gu: false };
+}
+
+function getStoredLanguageForDoc(doc) {
+  return normalizeLanguage(doc?.language) || normalizeLanguage(doc?.lang) || normalizeLanguage(doc?.originalLang) || null;
+}
+
+function buildRealTranslationAvailabilityFromDocs(docs) {
+  const translations = defaultRealTranslationAvailability();
+  for (const doc of Array.isArray(docs) ? docs : []) {
+    const lang = getStoredLanguageForDoc(doc);
+    if (lang && Object.prototype.hasOwnProperty.call(translations, lang)) translations[lang] = true;
+  }
+  return translations;
+}
+
+async function getPublishedRealTranslationAvailability(doc) {
+  const ownLang = getStoredLanguageForDoc(doc);
+  const ownStatus = String(doc?.status || '').trim().toLowerCase();
+  const groupKey = String(doc?.translationGroupId || doc?.translationKey || '').trim();
+
+  if (!groupKey) {
+    const translations = defaultRealTranslationAvailability();
+    if (ownLang && ownStatus === 'published') translations[ownLang] = true;
+    return translations;
+  }
+
+  const filter = buildPublicPublishedFilter({});
+  filter.$and.push({ $or: [{ translationGroupId: groupKey }, { translationKey: groupKey }] });
+  filter.$and.push({
+    $or: [
+      { language: { $in: ['en', 'hi', 'gu', 'EN', 'HI', 'GU'] } },
+      { lang: { $in: ['en', 'hi', 'gu', 'EN', 'HI', 'GU'] } },
+    ],
+  });
+
+  const docs = await News.find(filter)
+    .select('_id language lang originalLang status publishedAt deletedAt translationGroupId translationKey')
+    .lean();
+  return buildRealTranslationAvailabilityFromDocs(docs);
+}
+
+async function findPublishedTranslationSiblingForLang(doc, requestedLang, selectFields) {
+  const desired = normalizeLanguage(requestedLang) || normalizeLang(requestedLang);
+  if (!doc || !desired) return null;
+
+  const storedLang = normalizeLanguage(doc.language) || normalizeLanguage(doc.lang);
+  if (storedLang === desired) return null;
+
+  const groupKey = String(doc.translationGroupId || doc.translationKey || '').trim();
+  if (!groupKey) return null;
+
+  const exactLangMatch = buildExactStoredLangMatch(desired);
+  if (!exactLangMatch) return null;
+
+  const filter = buildPublicPublishedFilter({});
+  filter.$and.push({ $or: [{ translationGroupId: groupKey }, { translationKey: groupKey }] });
+  filter.$and.push(exactLangMatch);
+  if (doc._id) filter._id = { $ne: doc._id };
+
+  return News.findOne(filter)
+    .select(selectFields || PUBLIC_DETAIL_SELECT)
+    .lean();
 }
 
 function buildOriginalLangMatch(lang) {
@@ -398,6 +471,7 @@ function buildPublicPublishedFilter({ category, track, q, founderOnly, type }) {
       // Public list must only include published stories.
       { status: { $regex: '^published$', $options: 'i' } },
       { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
+      { $or: [{ publishedAt: null }, { publishedAt: { $exists: false } }, { publishedAt: { $lte: now } }] },
       { $or: [{ locked: { $ne: true } }, { locked: { $exists: false } }] },
       { $or: [{ embargoUntil: null }, { embargoUntil: { $exists: false } }, { embargoUntil: { $lte: now } }] },
       // Some docs may only have workflow.* fields; keep public feed safe.
@@ -749,22 +823,32 @@ function _hasPublishedLocale(doc, lang) {
   return _getPublishedLocales(doc).includes(desired);
 }
 
-function _attachPublicRouteData(doc, requestedLang, { fallbackEnabled = false } = {}) {
+function _attachPublicRouteData(doc, requestedLang, { fallbackEnabled = false, realTranslations = null } = {}) {
   const requested = normalizeLang(requestedLang) || _resolveBaseLang(doc);
   const resolved = normalizeLang(doc?.resolvedLang) || _resolveBaseLang(doc);
   const publishedLocales = _getPublishedLocales(doc);
   const requestedLocalePublished = publishedLocales.includes(requested);
   const safeDetailLang = requestedLocalePublished ? requested : resolved;
+  const realAvailability = realTranslations || defaultRealTranslationAvailability();
+  const isFallback = Boolean(requested && resolved && requested !== resolved && fallbackEnabled);
 
   doc.locale = requested;
   doc.articleId = doc && doc._id ? String(doc._id) : null;
   doc.availableLocales = publishedLocales;
   doc.publishedLocales = publishedLocales;
+  doc.translations = realAvailability;
+  doc.requestedLanguage = requested;
+  doc.resolvedLanguage = resolved;
+  doc.isFallback = isFallback;
   doc.translationAvailability = {
     requestedLang: requested,
+    requestedLanguage: requested,
     resolvedLang: resolved,
+    resolvedLanguage: resolved,
+    isFallback,
     isTranslated: Boolean(doc?.isTranslated),
     requestedLocalePublished,
+    translations: realAvailability,
     availableLocales: publishedLocales,
     publishedLocales,
     fallbackEnabled: Boolean(fallbackEnabled),
@@ -833,14 +917,18 @@ function _debugPublicCategoryListing(payload) {
 function _pickBestLocalizedGroupedNewsDoc(groupDocs, requestedLang) {
   if (!Array.isArray(groupDocs) || !groupDocs.length) return null;
 
+  const desired = normalizeLanguage(requestedLang) || normalizeLang(requestedLang);
   let best = null;
   for (const rawDoc of groupDocs) {
     const doc = { ...rawDoc };
-    const localized = _localizePublicNewsDocInPlace(doc, requestedLang, { fallbackToBase: true });
+    const localized = _localizePublicNewsDocInPlace(doc, desired || requestedLang, { fallbackToBase: true });
     if (!localized.ok) continue;
 
+    const storedLang = normalizeLanguage(doc.language) || normalizeLanguage(doc.lang) || normalizeLanguage(doc.originalLang);
     let rank = 1;
-    if (localized.resolvedLang === requestedLang) {
+    if (storedLang && desired && storedLang === desired && localized.resolvedLang === desired) {
+      rank = 4;
+    } else if (desired && localized.resolvedLang === desired) {
       rank = doc.isTranslated ? 2 : 3;
     }
 
@@ -1547,6 +1635,13 @@ async function getPublicNewsBySlugOrId(req, res) {
       return res.status(404).json({ message: 'Not found' });
     }
 
+    const siblingForRequestedLang = await findPublishedTranslationSiblingForLang(doc, requestedLang, PUBLIC_DETAIL_SELECT);
+    if (siblingForRequestedLang) {
+      doc = siblingForRequestedLang;
+      docSource = 'news';
+    }
+    const realTranslations = await getPublishedRealTranslationAvailability(doc);
+
     if (_matchesDebugStory(doc, slugOrIdRaw)) {
       _debugPublicNewsStory('detail_matched', {
         requestedLang: requestedLang || null,
@@ -1581,6 +1676,7 @@ async function getPublicNewsBySlugOrId(req, res) {
       try { delete out.translationStatus; } catch (_) {}
       await _attachLinkedSponsoredFeature(out);
       attachLocalizationFields(out, out.resolvedLang);
+      _attachPublicRouteData(out, out.resolvedLang, { fallbackEnabled, realTranslations });
       return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
     }
 
@@ -1609,9 +1705,13 @@ async function getPublicNewsBySlugOrId(req, res) {
         publishedLocales: cachedRes.publishedLocales,
         translationAvailability: {
           requestedLang: desired,
+          requestedLanguage: desired,
           resolvedLang: null,
+          resolvedLanguage: null,
+          isFallback: false,
           isTranslated: false,
           requestedLocalePublished: false,
+          translations: realTranslations,
           availableLocales: cachedRes.publishedLocales,
           publishedLocales: cachedRes.publishedLocales,
           fallbackEnabled,
@@ -1661,7 +1761,7 @@ async function getPublicNewsBySlugOrId(req, res) {
     try { delete out.translationNextRetryAt; } catch (_) {}
     await _attachLinkedSponsoredFeature(out);
     attachLocalizationFields(out, desired);
-    _attachPublicRouteData(out, desired, { fallbackEnabled });
+    _attachPublicRouteData(out, desired, { fallbackEnabled, realTranslations });
     return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });
@@ -1727,7 +1827,11 @@ async function getPublicNewsBySlug(req, res) {
 
     if (!doc) return res.status(404).json({ message: 'Not found' });
 
-    let out = withCoverImageUrl(doc);
+    const siblingForRequestedLang = await findPublishedTranslationSiblingForLang(doc, requestedLang, PUBLIC_DETAIL_SELECT);
+    const resolvedDoc = siblingForRequestedLang || doc;
+    const realTranslations = await getPublishedRealTranslationAvailability(resolvedDoc);
+
+    let out = withCoverImageUrl(resolvedDoc);
     const rawForTranslation = { ...out };
 
     const inferredLang = requestedLang ? null : detectSlugLocale(out, rawFromUrl || decodedParam);
@@ -1740,6 +1844,7 @@ async function getPublicNewsBySlug(req, res) {
       try { delete out.translationStatus; } catch (_) {}
       await _attachLinkedSponsoredFeature(out);
       attachLocalizationFields(out, desired);
+      _attachPublicRouteData(out, out.resolvedLang, { fallbackEnabled, realTranslations });
       return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
     }
 
@@ -1754,9 +1859,13 @@ async function getPublicNewsBySlug(req, res) {
         publishedLocales: cachedRes.publishedLocales,
         translationAvailability: {
           requestedLang: desired,
+          requestedLanguage: desired,
           resolvedLang: null,
+          resolvedLanguage: null,
+          isFallback: false,
           isTranslated: false,
           requestedLocalePublished: false,
+          translations: realTranslations,
           availableLocales: cachedRes.publishedLocales,
           publishedLocales: cachedRes.publishedLocales,
           fallbackEnabled,
@@ -1803,7 +1912,7 @@ async function getPublicNewsBySlug(req, res) {
     try { delete out.translationNextRetryAt; } catch (_) {}
     await _attachLinkedSponsoredFeature(out);
     attachLocalizationFields(out, desired);
-    _attachPublicRouteData(out, desired, { fallbackEnabled });
+    _attachPublicRouteData(out, desired, { fallbackEnabled, realTranslations });
     return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
   } catch (e) {
     return res.status(500).json({ message: e?.message || String(e) });

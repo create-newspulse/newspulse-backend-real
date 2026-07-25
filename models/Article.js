@@ -20,8 +20,32 @@ const CATEGORY_VALUES = [
 
 const LANGUAGE_VALUES = ['en', 'hi', 'gu'];
 const STATUS_VALUES = ['draft', 'scheduled', 'published', 'archived', 'deleted'];
+const EDITORIAL_TYPE_VALUES = ['editorial', 'special_story'];
 
 const TRANSLATION_PROVIDER_VALUES = ['google', 'openai', 'manual'];
+
+function normalizeEditorialType(v) {
+  if (v === null || v === undefined) return undefined;
+  const s = String(v).trim().toLowerCase();
+  if (!s) return undefined;
+  return EDITORIAL_TYPE_VALUES.includes(s) ? s : v;
+}
+
+function normalizeLanguageCode(v) {
+  if (v === null || v === undefined) return v;
+  const raw = String(v).trim();
+  if (!raw) return 'en';
+  if (/[\u0A80-\u0AFF]/.test(raw)) return 'gu';
+  if (/[\u0900-\u097F]/.test(raw)) return 'hi';
+  const lower = raw.toLowerCase();
+  const primary = lower.split(/[-_]/)[0];
+  if (primary === 'en' || primary === 'hi' || primary === 'gu') return primary;
+  const lettersOnly = lower.replace(/[^a-z]/g, '');
+  if (lettersOnly === 'english' || lettersOnly === 'eng') return 'en';
+  if (lettersOnly === 'hindi' || lettersOnly === 'hin') return 'hi';
+  if (lettersOnly === 'gujarati' || lettersOnly === 'gujrati' || lettersOnly === 'guj' || lettersOnly === 'gj') return 'gu';
+  return lower;
+}
 
 function normalizeTranslationProvider(v) {
   if (v === null || v === undefined) return 'google';
@@ -110,6 +134,13 @@ const articleSchema = new mongoose.Schema(
     },
 
     category: { type: String, required: true, enum: CATEGORY_VALUES, index: true },
+    editorialType: {
+      type: String,
+      enum: EDITORIAL_TYPE_VALUES,
+      default: undefined,
+      index: true,
+      set: normalizeEditorialType,
+    },
     track: {
       type: String,
       enum: [...YOUTH_PULSE_TRACKS, null],
@@ -120,11 +151,11 @@ const articleSchema = new mongoose.Schema(
         return normalizeTrackValue(v);
       },
     },
-    language: { type: String, enum: LANGUAGE_VALUES, default: 'en', index: true },
+    language: { type: String, enum: LANGUAGE_VALUES, default: 'en', index: true, set: normalizeLanguageCode },
 
     // Immutable-ish: the language the article was originally authored in.
     // Public language switching should translate FROM this language.
-    originalLang: { type: String, enum: LANGUAGE_VALUES, default: null, index: true },
+    originalLang: { type: String, enum: LANGUAGE_VALUES, default: null, index: true, set: normalizeLanguageCode },
 
     // Translation grouping key from the CMS/admin News document.
     // Used to dedupe feed items across language variants.
@@ -292,6 +323,13 @@ articleSchema.pre('validate', function preValidate(next) {
       this.slug = this.slugs[docLang];
     }
 
+    const category = String(this.category || '').trim().toLowerCase();
+    if (category === 'editorial') {
+      if (!this.editorialType) this.editorialType = 'editorial';
+    } else if (this.editorialType !== undefined) {
+      this.editorialType = undefined;
+    }
+
     // Backfill originalLang from stored language (never infer from title).
     // If language is missing/invalid, leave originalLang null (public read path may detect from content).
     if ((!this.originalLang || !String(this.originalLang).trim()) && LANGUAGE_VALUES.includes(docLang)) {
@@ -369,3 +407,4 @@ module.exports = mongoose.models.Article || mongoose.model('Article', articleSch
 module.exports.CATEGORY_VALUES = CATEGORY_VALUES;
 module.exports.LANGUAGE_VALUES = LANGUAGE_VALUES;
 module.exports.STATUS_VALUES = STATUS_VALUES;
+module.exports.EDITORIAL_TYPE_VALUES = EDITORIAL_TYPE_VALUES;

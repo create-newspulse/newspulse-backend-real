@@ -70,6 +70,15 @@ if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() 
     console.warn('[startup] JWT_SECRET is not set; auth endpoints may fail until configured.');
   }
 
+  try {
+    const { validateGoogleTranslationConfig } = require('./services/googleTranslationService');
+    const translationConfig = validateGoogleTranslationConfig();
+    if (!translationConfig.ok) {
+      // eslint-disable-next-line no-console
+      console.warn('[startup] GOOGLE_TRANSLATE_API_KEY is not configured; article translation requests will fail safely.');
+    }
+  } catch (_) {}
+
   // Cloudinary is optional; warn once when missing so admins understand why cover uploads fail.
   try {
     const { getCloudinaryConfigStatus, initCloudinaryIfConfigured } = require('./lib/cloudinary');
@@ -268,6 +277,7 @@ const BASE = './newspulse-backend-real-main';
 // Public news feed routes (no auth; published-only)
 const newsRoutes = require('./routes/news');
 const articlesRoutes = require('./routes/articles');
+const adminDraftsRoutes = require('./routes/adminDrafts');
 const adminRoutes = require('./routes/admin');
 const adminAuthRoutes = require(`${BASE}/routes/adminAuth`);
 const aiTrainingInfoRoutes = require(`${BASE}/routes/system/aiTrainingInfo`);
@@ -1715,6 +1725,7 @@ app.use('/api', articlesRoutes);
 app.use('/', articlesRoutes);
 // Admin panel compatibility: /api/admin/articles should behave like /api/articles
 app.use('/api/admin', articlesRoutes);
+app.use('/api/admin', adminDraftsRoutes);
 // Explicit legacy alias: some admin autosave builds call /api/admin/articles/:id
 // Forward to the canonical /api/articles/:id handler.
 app.get('/api/admin/articles/:id', (req, res, next) => {
@@ -1742,6 +1753,8 @@ app.put('/api/admin/articles/:id', (req, res, next) => {
 // Admin panel proxy basePath support (some frontends call /admin-api/*)
 app.use('/admin-api/admin', articlesRoutes);
 app.use('/admin-api/api/admin', articlesRoutes);
+app.use('/admin-api/admin', adminDraftsRoutes);
+app.use('/admin-api/api/admin', adminDraftsRoutes);
 // Compatibility: some admin builds call /admin-api/articles directly
 app.use('/admin-api', articlesRoutes);
 

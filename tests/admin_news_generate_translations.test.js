@@ -20,7 +20,7 @@ test('POST /api/admin/news/:id/generate-translations requires auth (401)', async
   assert.equal(res.statusCode, 401);
 });
 
-test('POST /api/admin/news/:id/generate-translations creates missing EN/HI/GU docs linked by translationKey', async () => {
+test('POST /api/admin/news/:id/generate-translations creates missing target docs linked by translationKey', async () => {
   const id = '507f1f77bcf86cd799439011';
   const originals = {
     findById: News.findById,
@@ -91,15 +91,19 @@ test('POST /api/admin/news/:id/generate-translations creates missing EN/HI/GU do
     assert.equal(String(updated.u.$set.translationKey), 'grp-1');
     assert.equal(String(updated.u.$set.translationGroupId), 'grp-1');
 
-    // Should create 3 docs.
-    assert.equal(created.length, 3);
+    // Source is Gujarati, so only EN and HI targets should be created.
+    assert.equal(created.length, 2);
     const langs = created.map((p) => p.lang).sort();
-    assert.deepEqual(langs, ['en', 'gu', 'hi']);
+    assert.deepEqual(langs, ['en', 'hi']);
 
     // Ensure linkage.
     for (const p of created) {
       assert.equal(p.translationKey, 'grp-1');
       assert.equal(p.translationGroupId, 'grp-1');
+      assert.equal(p.status, 'draft');
+      assert.equal(p.translationReviewStatus, 'review_required');
+      assert.equal(p.machineGenerated, true);
+      assert.equal(p.translatedByProvider, 'google_translate');
     }
   } finally {
     restore(originals);

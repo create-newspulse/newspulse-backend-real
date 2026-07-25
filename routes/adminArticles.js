@@ -21,6 +21,39 @@ function normalizeRetryLang(v) {
   return null;
 }
 
+function normalizeCategoryValue(v) {
+  if (v === undefined || v === null) return undefined;
+  const s = String(v).trim().toLowerCase();
+  return s || undefined;
+}
+
+function normalizeEditorialTypeValue(v) {
+  if (v === undefined || v === null) return undefined;
+  const s = String(v).trim().toLowerCase();
+  if (!s) return undefined;
+  if (s === 'editorial' || s === 'special_story') return s;
+  return null;
+}
+
+function buildEditorialTypePatch({ category, existingCategory, editorialType }) {
+  const categoryNorm = category !== undefined
+    ? String(category || '').trim().toLowerCase()
+    : String(existingCategory || '').trim().toLowerCase();
+  if (categoryNorm !== 'editorial') return { ok: true, shouldUnset: true };
+
+  const normalized = normalizeEditorialTypeValue(editorialType);
+  if (normalized === null) return { ok: false, message: 'Invalid editorialType' };
+  return { ok: true, value: normalized || 'editorial', shouldUnset: false };
+}
+
+function withEditorialTypeFallback(doc) {
+  if (!doc || typeof doc !== 'object') return doc;
+  if (String(doc.category || '').trim().toLowerCase() === 'editorial' && !doc.editorialType) {
+    return { ...doc, editorialType: 'editorial' };
+  }
+  return doc;
+}
+
 // Helper: build Mongo filter from query params
 function buildFilter(query) {
   const {
@@ -108,10 +141,11 @@ router.get('/articles', requireAdminAuth, async (req, res) => {
     }
     if (!Object.keys(sort).length) sort.updatedAt = -1;
 
-    const [items, total] = await Promise.all([
+    const [itemsRaw, total] = await Promise.all([
       News.find(filter).sort(sort).skip(skip).limit(pageSize).lean(),
       News.countDocuments(filter),
     ]);
+    const items = (itemsRaw || []).map(withEditorialTypeFallback);
 
     return res.json({ ok: true, success: true, items, total, page, pageSize });
   } catch (e) {
@@ -258,6 +292,7 @@ router.post('/articles', requireAdminAuth, async (req, res) => {
       content,
       tags,
       category,
+      editorialType,
       status,
       language,
       scheduledAt,
@@ -277,6 +312,12 @@ router.post('/articles', requireAdminAuth, async (req, res) => {
       status = 'draft'; // fall back to schema default
     }
 
+    category = normalizeCategoryValue(category) || category;
+    const editorialPatch = buildEditorialTypePatch({ category, editorialType });
+    if (!editorialPatch.ok) {
+      return res.status(400).json({ ok: false, success: false, message: editorialPatch.message });
+    }
+
     if (scheduledAt) {
       const dt = new Date(scheduledAt);
       if (!isNaN(dt)) scheduledAt = dt; else scheduledAt = undefined;
@@ -289,6 +330,7 @@ router.post('/articles', requireAdminAuth, async (req, res) => {
       content,
       tags: Array.isArray(tags) ? tags : (tags ? String(tags).split(',').map(t => t.trim()).filter(Boolean) : []),
       category,
+      ...(editorialPatch.value !== undefined ? { editorialType: editorialPatch.value } : {}),
       status: status || 'draft',
       language: language || 'en',
       scheduledAt,
@@ -302,7 +344,7 @@ router.post('/articles', requireAdminAuth, async (req, res) => {
 
     await article.save();
 
-    return res.status(201).json({ ok: true, success: true, article });
+    return res.status(201).json({ ok: true, success: true, article: withEditorialTypeFallback(article.toJSON ? article.toJSON() : article) });
   } catch (e) {
     const message = e?.message || 'Failed to create article';
     console.error('[ADMIN_ARTICLES][create-error]', message);
@@ -325,7 +367,7 @@ router.get('/articles/:id', requireAdminAuth, async (req, res) => {
     if (!isObjectIdLike) return res.status(400).json({ ok: false, message: 'Invalid article id' });
     const doc = await News.findById(id);
     if (!doc) return res.status(404).json({ ok: false, message: 'Article not found' });
-    const article = doc.toJSON(); // include virtuals (e.g. body)
+    const article = withEditorialTypeFallback(doc.toJSON()); // include virtuals (e.g. body)
 
     const baseLang = resolveBaseLang(article);
     const groupKey = String(article.translationKey || article.translationGroupId || '').trim();
@@ -377,12 +419,14 @@ router.put('/articles/:id', requireAdminAuth, async (req, res) => {
 
     const body = req.body || {};
     const allowedStatuses = new Set(['draft','scheduled','published','archived','deleted']);
+    const before = await News.findById(id).select('category editorialType').lean();
+    if (!before) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
 
     const update = {};
     if (body.title !== undefined) update.title = body.title;
     if (body.description !== undefined || body.summary !== undefined) update.description = body.description ?? body.summary ?? '';
     if (body.content !== undefined || body.body !== undefined) update.content = body.content ?? body.body ?? '';
-    if (body.category !== undefined) update.category = body.category;
+    if (body.category !== undefined) update.category = normalizeCategoryValue(body.category) || body.category;
     if (body.language !== undefined) update.language = body.language || 'en';
     if (body.tags !== undefined) {
       const tags = Array.isArray(body.tags) ? body.tags : (body.tags ? String(body.tags).split(',').map(t => t.trim()).filter(Boolean) : []);
@@ -408,14 +452,26 @@ router.put('/articles/:id', requireAdminAuth, async (req, res) => {
       update.spotlightExpiresAt = body.spotlightExpiresAt ? new Date(body.spotlightExpiresAt) : null;
     }
 
+    const editorialPatch = buildEditorialTypePatch({
+      category: update.category,
+      existingCategory: before.category,
+      editorialType: body.editorialType,
+    });
+    if (!editorialPatch.ok) {
+      return res.status(400).json({ ok: false, success: false, message: editorialPatch.message });
+    }
+    if (editorialPatch.value !== undefined) update.editorialType = editorialPatch.value;
+
     const resolvedCoverImageUrl = body.coverImageUrl ?? body.imageURL;
     if (resolvedCoverImageUrl !== undefined) update.coverImageUrl = resolvedCoverImageUrl;
     if (body.imageURL !== undefined) update.imageURL = body.imageURL;
     else if (resolvedCoverImageUrl !== undefined) update.imageURL = resolvedCoverImageUrl;
 
-    const doc = await News.findByIdAndUpdate(id, update, { new: true });
+    const updateOp = { $set: update };
+    if (editorialPatch.shouldUnset) updateOp.$unset = { editorialType: '' };
+    const doc = await News.findByIdAndUpdate(id, updateOp, { new: true });
     if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
-    return res.json({ ok: true, success: true, article: doc });
+    return res.json({ ok: true, success: true, article: withEditorialTypeFallback(doc.toJSON ? doc.toJSON() : doc) });
   } catch (e) {
     console.error('[ADMIN_ARTICLES][update-error]', e?.message || e);
     return res.status(500).json({ ok: false, success: false, message: 'Failed to update article' });
@@ -432,12 +488,14 @@ router.patch('/articles/:id', requireAdminAuth, async (req, res) => {
 
     const body = req.body || {};
     const allowedStatuses = new Set(['draft','scheduled','published','archived','deleted']);
+    const before = await News.findById(id).select('category editorialType').lean();
+    if (!before) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
 
     const update = {};
     if (body.title !== undefined) update.title = body.title;
     if (body.description !== undefined || body.summary !== undefined) update.description = body.description ?? body.summary ?? '';
     if (body.content !== undefined || body.body !== undefined) update.content = body.content ?? body.body ?? '';
-    if (body.category !== undefined) update.category = body.category;
+    if (body.category !== undefined) update.category = normalizeCategoryValue(body.category) || body.category;
     if (body.language !== undefined) update.language = body.language || 'en';
     if (body.tags !== undefined) {
       const tags = Array.isArray(body.tags) ? body.tags : (body.tags ? String(body.tags).split(',').map(t => t.trim()).filter(Boolean) : []);
@@ -454,14 +512,26 @@ router.patch('/articles/:id', requireAdminAuth, async (req, res) => {
     }
     if (body.slug !== undefined) update.slug = body.slug;
 
+    const editorialPatch = buildEditorialTypePatch({
+      category: update.category,
+      existingCategory: before.category,
+      editorialType: body.editorialType,
+    });
+    if (!editorialPatch.ok) {
+      return res.status(400).json({ ok: false, success: false, message: editorialPatch.message });
+    }
+    if (editorialPatch.value !== undefined) update.editorialType = editorialPatch.value;
+
     const resolvedCoverImageUrl = body.coverImageUrl ?? body.imageURL;
     if (resolvedCoverImageUrl !== undefined) update.coverImageUrl = resolvedCoverImageUrl;
     if (body.imageURL !== undefined) update.imageURL = body.imageURL;
     else if (resolvedCoverImageUrl !== undefined) update.imageURL = resolvedCoverImageUrl;
 
-    const doc = await News.findByIdAndUpdate(id, update, { new: true });
+    const updateOp = { $set: update };
+    if (editorialPatch.shouldUnset) updateOp.$unset = { editorialType: '' };
+    const doc = await News.findByIdAndUpdate(id, updateOp, { new: true });
     if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
-    return res.json({ ok: true, success: true, article: doc });
+    return res.json({ ok: true, success: true, article: withEditorialTypeFallback(doc.toJSON ? doc.toJSON() : doc) });
   } catch (e) {
     console.error('[ADMIN_ARTICLES][patch-error]', e?.message || e);
     return res.status(500).json({ ok: false, success: false, message: 'Failed to update article' });

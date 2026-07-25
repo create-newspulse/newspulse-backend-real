@@ -57,6 +57,10 @@ function _baseLangForDoc(doc) {
   return normalizeLang(doc?.originalLang) || normalizeLang(doc?.lang || doc?.language) || 'en';
 }
 
+function _storedLangForDoc(doc) {
+  return normalizeLang(doc?.language) || normalizeLang(doc?.lang) || normalizeLang(doc?.originalLang) || null;
+}
+
 function pickBestLocalizedGroupDoc(groupDocs, requestedLang, { fallbackToBase = false } = {}) {
   if (!Array.isArray(groupDocs) || !groupDocs.length) return null;
 
@@ -71,9 +75,12 @@ function pickBestLocalizedGroupDoc(groupDocs, requestedLang, { fallbackToBase = 
     });
     if (!mapped) continue;
 
+    const storedLang = _storedLangForDoc(doc);
     let rank = 1;
     if (!desired) {
       rank = 2;
+    } else if (storedLang === desired && mapped.resolvedLang === desired) {
+      rank = 4;
     } else if (mapped.resolvedLang === desired) {
       rank = mapped.isTranslated ? 2 : 3;
     }

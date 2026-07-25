@@ -6,7 +6,12 @@ function normalizeLang(v) {
   const s0 = String(v || '').trim().toLowerCase();
   if (!s0) return null;
   const s = s0.split(/[-_]/)[0];
-  return SUPPORTED_LANGS.includes(s) ? s : null;
+  const lettersOnly = s0.replace(/[^a-z]/g, '');
+  if (SUPPORTED_LANGS.includes(s)) return s;
+  if (lettersOnly === 'english' || lettersOnly === 'eng') return 'en';
+  if (lettersOnly === 'hindi' || lettersOnly === 'hin') return 'hi';
+  if (lettersOnly === 'gujarati' || lettersOnly === 'gujrati' || lettersOnly === 'guj' || lettersOnly === 'gj') return 'gu';
+  return null;
 }
 
 function _isNonEmptyString(v) {

@@ -41,6 +41,31 @@ const WORKFLOW_CHAIN_STAGES = [
 ];
 
 const TRANSLATION_PROVIDER_VALUES = ['google', 'openai', 'manual'];
+const EDITORIAL_TYPE_VALUES = ['editorial', 'special_story'];
+const TRANSLATION_REVIEW_STATUS_VALUES = ['none', 'review_required', 'reviewed', 'approved', 'translation_outdated'];
+
+function normalizeEditorialType(v) {
+  if (v === null || v === undefined) return undefined;
+  const s = String(v).trim().toLowerCase();
+  if (!s) return undefined;
+  return EDITORIAL_TYPE_VALUES.includes(s) ? s : v;
+}
+
+function normalizeLanguageCode(v) {
+  if (v === null || v === undefined) return v;
+  const raw = String(v).trim();
+  if (!raw) return 'en';
+  if (/[\u0A80-\u0AFF]/.test(raw)) return 'gu';
+  if (/[\u0900-\u097F]/.test(raw)) return 'hi';
+  const lower = raw.toLowerCase();
+  const primary = lower.split(/[-_]/)[0];
+  if (primary === 'en' || primary === 'hi' || primary === 'gu') return primary;
+  const lettersOnly = lower.replace(/[^a-z]/g, '');
+  if (lettersOnly === 'english' || lettersOnly === 'eng') return 'en';
+  if (lettersOnly === 'hindi' || lettersOnly === 'hin') return 'hi';
+  if (lettersOnly === 'gujarati' || lettersOnly === 'gujrati' || lettersOnly === 'guj' || lettersOnly === 'gj') return 'gu';
+  return lower;
+}
 
 function normalizeTranslationProvider(v) {
   if (v === null || v === undefined) return 'google';
@@ -112,6 +137,13 @@ const newsSchema = new mongoose.Schema({
       return String(v).trim().toLowerCase();
     },
   },
+  editorialType: {
+    type: String,
+    enum: EDITORIAL_TYPE_VALUES,
+    default: undefined,
+    index: true,
+    set: normalizeEditorialType,
+  },
   track: {
     type: String,
     enum: [...YOUTH_PULSE_TRACKS, null],
@@ -129,18 +161,14 @@ const newsSchema = new mongoose.Schema({
     enum: ['en', 'hi', 'gu'],
     default: 'en',
     index: true,
-    set: (v) => {
-      return String(v || 'en').trim().toLowerCase();
-    },
+    set: normalizeLanguageCode,
   },
   language: {
     type: String,
     enum: ['en', 'hi', 'gu'],
     default: 'en',
     index: true,
-    set: (v) => {
-      return String(v || 'en').trim().toLowerCase();
-    },
+    set: normalizeLanguageCode,
   },
 
   // Language of the original authored content (source for translations).
@@ -220,6 +248,33 @@ const newsSchema = new mongoose.Schema({
   syncMode: { type: String, enum: ['auto'], default: 'auto', index: true },
   sourceArticleId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
   sourceLanguage: { type: String, enum: ['en', 'hi', 'gu', null], default: null, index: true },
+  machineGenerated: { type: Boolean, default: false, index: true },
+  humanEdited: { type: Boolean, default: false, index: true },
+  translationReviewStatus: {
+    type: String,
+    enum: TRANSLATION_REVIEW_STATUS_VALUES,
+    default: 'none',
+    index: true,
+  },
+  translatedAt: { type: Date, default: null },
+  translatedByProvider: { type: String, default: null, index: true },
+  sourceHash: { type: String, default: null, index: true },
+  reviewedAt: { type: Date, default: null },
+  reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  translationJobId: { type: mongoose.Schema.Types.ObjectId, ref: 'TranslationJob', default: null, index: true },
+  translationMeta: {
+    provider: { type: String, default: null },
+    sourceArticleId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    sourceLanguage: { type: String, enum: ['en', 'hi', 'gu', null], default: null },
+    sourceHash: { type: String, default: null },
+    targetLanguage: { type: String, enum: ['en', 'hi', 'gu', null], default: null },
+    machineGenerated: { type: Boolean, default: false },
+    humanEdited: { type: Boolean, default: false },
+    translatedAt: { type: Date, default: null },
+    reviewedAt: { type: Date, default: null },
+    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    sourceFields: { type: mongoose.Schema.Types.Mixed, default: null },
+  },
   lastSyncedAt: { type: Date, default: null, index: true },
   syncVersion: { type: Number, default: 0 },
   contentFingerprint: { type: String, default: null },
@@ -444,6 +499,13 @@ newsSchema.pre('validate', function preValidate(next) {
     const docLang = String(this.lang || this.language || 'en').trim().toLowerCase();
     if ((!this.slug || !String(this.slug).trim()) && this.slugs && this.slugs[docLang]) {
       this.slug = this.slugs[docLang];
+    }
+
+    const category = String(this.category || '').trim().toLowerCase();
+    if (category === 'editorial') {
+      if (!this.editorialType) this.editorialType = 'editorial';
+    } else if (this.editorialType !== undefined) {
+      this.editorialType = undefined;
     }
 
     // Normalize and store location slugs for stable regional filtering.

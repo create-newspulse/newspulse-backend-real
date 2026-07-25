@@ -1,9 +1,31 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const News = require('../models/News');
+const { logAudit } = require('../lib/audit');
 let { requireAdminAuth } = (() => { try { return require('../middleware/adminAuth'); } catch (_) { return { requireAdminAuth: (_req,_res,next)=>next() }; } })();
 
 const router = express.Router();
+
+function isEditorialArticle(docLike) {
+  return String(docLike?.category || '').trim().toLowerCase() === 'editorial';
+}
+
+async function logEditorialDraftAudit(req, action, docLike, meta = {}) {
+  if (!isEditorialArticle(docLike)) return;
+  const articleId = docLike?._id ? String(docLike._id) : null;
+  await logAudit(req, action, articleId, {
+    module: 'articles',
+    targetType: 'article',
+    targetId: articleId,
+    targetName: docLike?.title || null,
+    oldValue: meta.oldValue ?? null,
+    newValue: meta.newValue ?? null,
+    reason: meta.reason || null,
+    articleId,
+    headline: docLike?.title || null,
+    editorialType: docLike?.editorialType || 'editorial',
+  });
+}
 
 // GET /api/admin/drafts
 // Supports filters: ?deleted=1 (only deleted), ?deleted=0 (exclude deleted), default exclude deleted
@@ -15,6 +37,7 @@ router.get('/drafts', requireAdminAuth, async (req, res) => {
     const skip = (page - 1) * limit;
     const deleted = req.query.deleted;
     const source = (req.query.source || '').toString().trim();
+    const category = (req.query.category || '').toString().trim().toLowerCase();
 
     const query = {};
     if (deleted === '1' || deleted === 1) {
@@ -23,6 +46,7 @@ router.get('/drafts', requireAdminAuth, async (req, res) => {
       query.status = 'draft';
     }
     if (source) query.source = source;
+    if (category && category !== 'all') query.category = category;
 
     const [items, total] = await Promise.all([
       News.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
@@ -35,6 +59,7 @@ router.get('/drafts', requireAdminAuth, async (req, res) => {
       headline: i.title,
       language: i.language,
       category: i.category,
+      editorialType: i.category === 'editorial' ? (i.editorialType || 'editorial') : i.editorialType,
       createdAt: i.createdAt,
       status: i.status,
       source: i.source || null,
@@ -71,6 +96,7 @@ router.post('/drafts/:id/delete', requireAdminAuth, async (req, res) => {
     doc.status = 'deleted';
     if ('deletedAt' in doc) doc.deletedAt = new Date();
     await doc.save();
+    await logEditorialDraftAudit(req, 'EDITORIAL_ARTICLE_DELETED', doc, { oldValue: 'draft', newValue: 'deleted', reason: req.body?.reason });
     return res.json({ ok: true, success: true, data: doc });
   } catch (err) {
     console.error('[ADMIN_DRAFTS][delete-error]', err?.message || err);
@@ -92,6 +118,7 @@ router.post('/drafts/:id/restore', requireAdminAuth, async (req, res) => {
     doc.status = 'draft';
     if ('deletedAt' in doc) doc.deletedAt = null;
     await doc.save();
+    await logEditorialDraftAudit(req, 'EDITORIAL_ARTICLE_RESTORED', doc, { oldValue: 'deleted', newValue: 'draft', reason: req.body?.reason });
     return res.json({ ok: true, success: true, data: doc });
   } catch (err) {
     console.error('[ADMIN_DRAFTS][restore-error]', err?.message || err);
