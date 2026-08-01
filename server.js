@@ -338,6 +338,8 @@ const adminGlossaryRouter = require('./routes/adminGlossary.routes');
 const authRoutes = require('./routes/auth.routes');
 const adminAccountRoutes = require('./routes/adminAccount.routes');
 const auditRoutes = require('./routes/audit.routes');
+const seoAuditRouter = require('./routes/seoAudit.routes');
+const seoPublicRouter = require('./routes/seoPublic.routes');
 const adminTeamRoutes = require('./routes/adminTeam.routes');
 const teamPresenceRoutes = require('./routes/teamPresence.routes');
 const attendanceRoutes = require('./routes/attendance.routes');
@@ -1580,6 +1582,8 @@ app.use('/api/access', accessRoutes);
 app.use('/api/finance', financeRoutes);
 // Audit (founder-only)
 app.use('/api/audit', auditRoutes);
+app.use('/api/seo', seoAuditRouter);
+app.use('/api/public/seo', seoPublicRouter);
 // Broadcast Center (mount early so it cannot be shadowed by other /api routers)
 app.use('/api/broadcast/ticker-ads', adminTickerAdsRouter);
 app.use('/admin-api/broadcast/ticker-ads', adminTickerAdsRouter);
@@ -3336,21 +3340,6 @@ app.get('/api/uploads', (req, res) => {
     status: 200,
     message: 'Uploads list stub',
     data: {
-      items: [],
-    },
-  });
-});
-
-// --- SEO audit history stub ---
-app.get('/api/seo/audit/history', (req, res) => {
-  const limit = Number(req.query.limit || 0);
-  return res.json({
-    ok: true,
-    success: true,
-    status: 200,
-    message: 'SEO audit history stub',
-    data: {
-      limit,
       items: [],
     },
   });

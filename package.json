@@ -25,6 +25,7 @@
     "@simplewebauthn/server": "^13.2.2",
     "axios": "^1.13.6",
     "bcrypt": "^5.1.1",
+    "cheerio": "^1.0.0-rc.12",
     "cloudinary": "^2.9.0",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
