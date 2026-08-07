@@ -9,6 +9,7 @@ const roleSchema = new mongoose.Schema({
   isProtected: { type: Boolean, default: false, index: true },
   moduleAccess: { type: [String], default: [] },
   specialRights: { type: [String], default: [] },
+  taskRights: { type: [String], default: [] },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   createdAt: { type: Date, default: Date.now },

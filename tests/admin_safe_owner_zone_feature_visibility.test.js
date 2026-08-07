@@ -72,7 +72,7 @@ test('GET /api/admin/safe-owner-zone/feature-visibility returns normalized defau
   assert.strictEqual(res.body.success, true);
   assert.strictEqual(res.body.visibility.addNews, false);
   assert.strictEqual(res.body.visibility.liveTv, false);
-  assert.strictEqual(res.body.visibility.manageNews, true);
+  assert.strictEqual(res.body.visibility.manageNews, false);
   assert.strictEqual(Object.prototype.hasOwnProperty.call(res.body.visibility, 'unsupportedKey'), false);
 });
 
@@ -142,5 +142,5 @@ test('server mounts safe owner zone feature visibility on admin-api alias', asyn
   assert.strictEqual(res.statusCode, 200);
   assert.strictEqual(res.body.success, true);
   assert.strictEqual(res.body.visibility.addNews, false);
-  assert.strictEqual(res.body.visibility.manageNews, true);
+  assert.strictEqual(res.body.visibility.manageNews, false);
 });

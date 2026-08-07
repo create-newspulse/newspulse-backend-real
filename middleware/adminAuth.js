@@ -11,11 +11,19 @@ const mongoose = require('mongoose');
 const User = require('../models/User');
 const { shouldLog } = require('../lib/logThrottle');
 const {
-  effectiveModuleAccess,
+  effectiveAccountControlRights,
   effectivePermissions,
   effectiveSpecialRights,
+  effectiveTaskRights,
+  normalizeModuleAccess,
   normalizeRole,
 } = require('../lib/teamAccess');
+const {
+  ACCOUNT_STATUS,
+  accountLifecycleResponse,
+  expireAccount,
+  lifecycleStatus,
+} = require('../lib/accountLifecycle');
 
 const OFFICIAL_FOUNDER_EMAIL = 'kiran@newspulse.co.in';
 const FOUNDER_RECOVERY_EMAIL = 'newspulse.team@gmail.com';
@@ -106,25 +114,15 @@ async function requireAdminAuth(req, res, next) {
         }
 
         if (user) {
-          const accountStatus = String(user.accountStatus || user.status || 'active').toLowerCase();
-          const userStatus = String(user.status || accountStatus || 'active').toLowerCase();
-          if (userStatus === 'suspended' || accountStatus === 'suspended') {
-            return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_SUSPENDED', message: 'Account suspended' });
+          const now = new Date();
+          const resolvedStatus = lifecycleStatus(user, now);
+          if (resolvedStatus !== ACCOUNT_STATUS.ACTIVE) {
+            if (resolvedStatus === ACCOUNT_STATUS.EXPIRED) await expireAccount(User, user, { now });
+            return accountLifecycleResponse(res, resolvedStatus);
           }
+          const accountStatus = String(user.accountStatus || user.status || 'active').toLowerCase();
           if (user.loginAllowed === false) {
             return res.status(403).json({ ok: false, success: false, status: 403, code: 'LOGIN_DISABLED', message: 'Login disabled' });
-          }
-          if (userStatus === 'archived' || accountStatus === 'archived') {
-            return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_ARCHIVED', message: 'Account archived' });
-          }
-          if (userStatus === 'deleted' || userStatus === 'deleted_test' || accountStatus === 'deleted' || accountStatus === 'deleted_test' || user.isDeleted || user.deletedAt) {
-            return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_DELETED', message: 'Account deleted' });
-          }
-          if (userStatus === 'locked' || accountStatus === 'locked' || (user.lockedUntil && user.lockedUntil > new Date())) {
-            return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_LOCKED', message: 'Account locked' });
-          }
-          if (userStatus === 'expired' || accountStatus === 'expired' || (user.accessExpiresAt && user.accessExpiresAt <= new Date())) {
-            return res.status(403).json({ ok: false, success: false, status: 403, code: 'ACCOUNT_EXPIRED', message: 'Account expired' });
           }
           const jwtTv = typeof payload.tokenVersion === 'number' ? payload.tokenVersion : 0;
           const userTv = typeof user.tokenVersion === 'number' ? user.tokenVersion : 0;
@@ -135,13 +133,19 @@ async function requireAdminAuth(req, res, next) {
           req.admin = {
             id: payload.sub,
             email: payload.email,
+            staffId: user.staffId || null,
             role,
             name: payload.name,
-            moduleAccess: effectiveModuleAccess(user),
+            moduleAccess: normalizeModuleAccess(user.moduleAccessOverride),
             permissions: effectivePermissions(user),
             specialRights: effectiveSpecialRights(user),
+            taskRights: effectiveTaskRights(user),
+            accountControlRights: effectiveAccountControlRights(user),
             status: user.status || 'active',
             accountStatus: user.accountStatus || accountStatus,
+            accountExpiresAt: user.noExpiry === true ? null : (user.accessExpiresAt || null),
+            accessExpiresAt: user.noExpiry === true ? null : (user.accessExpiresAt || null),
+            noExpiry: Boolean(user.noExpiry || user.accessExpiresAt == null),
             onlineStatus: user.onlineStatus || 'offline',
             tokenVersion: userTv,
             lastLoginAt: user.lastLoginAt || null,
@@ -257,15 +261,14 @@ async function requireAdminJwt(req, res, next) {
       }
 
       if (user) {
+        const now = new Date();
+        const resolvedStatus = lifecycleStatus(user, now);
+        if (resolvedStatus !== ACCOUNT_STATUS.ACTIVE) {
+          if (resolvedStatus === ACCOUNT_STATUS.EXPIRED) await expireAccount(User, user, { now });
+          return accountLifecycleResponse(res, resolvedStatus);
+        }
         const accountStatus = String(user.accountStatus || user.status || 'active').toLowerCase();
-        const userStatus = String(user.status || accountStatus || 'active').toLowerCase();
-        if (userStatus === 'suspended' || userStatus === 'locked' || userStatus === 'expired' || userStatus === 'archived' || userStatus === 'deleted' || userStatus === 'deleted_test' || accountStatus === 'suspended' || accountStatus === 'locked' || accountStatus === 'expired' || accountStatus === 'archived' || accountStatus === 'deleted' || accountStatus === 'deleted_test' || user.isDeleted || user.deletedAt) {
-          return res.status(403).json({ ok: false, message: 'Forbidden' });
-        }
         if (user.loginAllowed === false) {
-          return res.status(403).json({ ok: false, message: 'Forbidden' });
-        }
-        if ((user.lockedUntil && user.lockedUntil > new Date()) || (user.accessExpiresAt && user.accessExpiresAt <= new Date())) {
           return res.status(403).json({ ok: false, message: 'Forbidden' });
         }
 
@@ -278,11 +281,19 @@ async function requireAdminJwt(req, res, next) {
         req.admin = {
           id: String(user._id),
           email: user.email,
+          staffId: user.staffId || null,
           role: normalizeRole(user.role) || user.role,
           name: user.name,
           permissions: effectivePermissions(user),
+          moduleAccess: normalizeModuleAccess(user.moduleAccessOverride),
+          specialRights: effectiveSpecialRights(user),
+          taskRights: effectiveTaskRights(user),
+          accountControlRights: effectiveAccountControlRights(user),
           status: user.status || 'active',
           accountStatus: user.accountStatus || accountStatus,
+          accountExpiresAt: user.noExpiry === true ? null : (user.accessExpiresAt || null),
+          accessExpiresAt: user.noExpiry === true ? null : (user.accessExpiresAt || null),
+          noExpiry: Boolean(user.noExpiry || user.accessExpiresAt == null),
           onlineStatus: user.onlineStatus || 'offline',
           tokenVersion: userTv,
           isFounder: Boolean(user.isFounder || normalizeRole(user.role) === 'founder'),

@@ -1,26 +1,15 @@
 const SiteSettings = require('../models/SiteSettings');
+const {
+  CANONICAL_ADMIN_MODULE_KEYS,
+  getFounderModulePolicy,
+  patchFromLegacyVisibility,
+  updateFounderModulePolicy,
+  visibilityFromPolicy,
+} = require('./founderAccessPolicyService');
 
 const ADMIN_FEATURE_VISIBILITY_KEY = 'adminFeatureVisibility';
 
-const ADMIN_FEATURE_VISIBILITY_KEYS = Object.freeze([
-  'addNews',
-  'manageNews',
-  'draftDesk',
-  'communityReporterQueue',
-  'reporterPortalAdmin',
-  'broadcastCenter',
-  'adsManager',
-  'media',
-  'viralVideos',
-  'aira',
-  'liveTv',
-  'editorial',
-  'seo',
-  'analytics',
-  'moderation',
-  'aiEngine',
-  'settings',
-]);
+const ADMIN_FEATURE_VISIBILITY_KEYS = Object.freeze(CANONICAL_ADMIN_MODULE_KEYS.filter((key) => key !== 'safeZone'));
 
 function getDefaultAdminFeatureVisibility() {
   return ADMIN_FEATURE_VISIBILITY_KEYS.reduce((acc, key) => {
@@ -81,11 +70,27 @@ async function getOrCreateSiteSettings() {
 }
 
 async function getAdminFeatureVisibility() {
-  const settings = await getOrCreateSiteSettings();
-  return normalizeAdminFeatureVisibility(settings?.[ADMIN_FEATURE_VISIBILITY_KEY]);
+  const policy = await getFounderModulePolicy();
+  return normalizeAdminFeatureVisibility(visibilityFromPolicy(policy));
 }
 
-async function saveAdminFeatureVisibility(patch) {
+async function saveAdminFeatureVisibility(patch, actor = null, auditReason = 'Legacy Safe Zone visibility update') {
+  const mapped = patchFromLegacyVisibility(patch || {});
+  if (mapped.invalidKeys.length || mapped.invalidValueKeys.length) {
+    const error = new Error('Invalid admin feature visibility payload');
+    error.invalidKeys = mapped.invalidKeys;
+    error.invalidValueKeys = mapped.invalidValueKeys;
+    throw error;
+  }
+
+  const currentPolicy = await getFounderModulePolicy();
+  const result = await updateFounderModulePolicy({ modulePolicies: mapped.patch, auditReason, expectedVersion: currentPolicy.version }, actor);
+  if (!result.ok) {
+    const error = new Error(result.message || 'Failed to save admin feature visibility');
+    error.result = result;
+    throw error;
+  }
+
   const settings = await getOrCreateSiteSettings();
   const current = normalizeAdminFeatureVisibility(settings?.[ADMIN_FEATURE_VISIBILITY_KEY]);
   settings[ADMIN_FEATURE_VISIBILITY_KEY] = {
@@ -93,7 +98,7 @@ async function saveAdminFeatureVisibility(patch) {
     ...patch,
   };
   await settings.save();
-  return normalizeAdminFeatureVisibility(settings[ADMIN_FEATURE_VISIBILITY_KEY]);
+  return normalizeAdminFeatureVisibility(visibilityFromPolicy(result.policy));
 }
 
 module.exports = {

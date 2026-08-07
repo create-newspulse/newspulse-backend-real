@@ -1579,6 +1579,9 @@ app.use('/api/admin/team/roles', rolesRoutes);
 app.use('/admin-api/admin/team/roles', rolesRoutes);
 app.use('/admin-api/api/admin/team/roles', rolesRoutes);
 app.use('/api/access', accessRoutes);
+app.use('/admin/access', accessRoutes);
+app.use('/admin-api/admin/access', accessRoutes);
+app.use('/admin-api/api/admin/access', accessRoutes);
 app.use('/api/finance', financeRoutes);
 // Audit (founder-only)
 app.use('/api/audit', auditRoutes);

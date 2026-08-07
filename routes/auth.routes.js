@@ -8,6 +8,8 @@ const { requireAuth } = require('../middleware/requireAuth');
 const { logAudit } = require('../lib/audit');
 const { recordLoginSession, recordLogoutSession } = require('../lib/teamManagement');
 const { normalizeRole, requirePasswordPolicy, safeUserDto } = require('../lib/teamAccess');
+const { ACCOUNT_STATUS, accountLifecycleResponse, expireAccount, lifecycleStatus } = require('../lib/accountLifecycle');
+const { myAccessPayload } = require('./access.routes');
 
 const router = express.Router();
 
@@ -102,12 +104,6 @@ async function enforceLoginAccountState(req, res, user) {
   const status = String(user.status || 'active').toLowerCase();
   const accountStatus = String(user.accountStatus || '').toLowerCase();
 
-  if (user.loginAllowed === false) {
-    await logAudit(req, 'AUTH_LOGIN_FAILED', String(user._id), { reason: 'login_disabled' });
-    bad(res, 403, 'Login disabled', 'LOGIN_DISABLED');
-    return false;
-  }
-
   if (status === 'locked' && user.lockedUntil && user.lockedUntil <= now) {
     user.status = 'active';
     if (accountStatus === 'locked') user.accountStatus = 'active';
@@ -117,21 +113,17 @@ async function enforceLoginAccountState(req, res, user) {
     return true;
   }
 
-  if (status === 'suspended' || accountStatus === 'suspended') {
-    await logAudit(req, 'AUTH_LOGIN_FAILED', String(user._id), { reason: 'suspended' });
-    bad(res, 403, 'Account suspended', 'ACCOUNT_SUSPENDED');
+  const resolvedStatus = lifecycleStatus(user, now);
+  if (resolvedStatus !== ACCOUNT_STATUS.ACTIVE) {
+    if (resolvedStatus === ACCOUNT_STATUS.EXPIRED) await expireAccount(User, user, { now });
+    await logAudit(req, 'AUTH_LOGIN_FAILED', String(user._id), { reason: resolvedStatus });
+    accountLifecycleResponse(res, resolvedStatus);
     return false;
   }
 
-  if (status === 'locked' || accountStatus === 'locked' || (user.lockedUntil && user.lockedUntil > now)) {
-    await logAudit(req, 'AUTH_LOGIN_FAILED', String(user._id), { reason: 'locked' });
-    bad(res, 403, 'Account locked', 'ACCOUNT_LOCKED');
-    return false;
-  }
-
-  if (status === 'expired' || accountStatus === 'expired' || (user.accessExpiresAt && user.accessExpiresAt <= now)) {
-    await logAudit(req, 'AUTH_LOGIN_FAILED', String(user._id), { reason: 'expired' });
-    bad(res, 403, 'Account expired', 'ACCOUNT_EXPIRED');
+  if (user.loginAllowed === false) {
+    await logAudit(req, 'AUTH_LOGIN_FAILED', String(user._id), { reason: 'login_disabled' });
+    bad(res, 403, 'Login disabled', 'LOGIN_DISABLED');
     return false;
   }
 
@@ -300,11 +292,14 @@ async function refreshHandler(req, res) {
 async function meHandler(req, res) {
   try {
     const user = req._authUserDoc || (isDbReady() && req.user?.id ? await User.findById(req.user.id) : null);
+    const access = await myAccessPayload(req);
     return res.status(200).json({
       ok: true,
       success: true,
       status: 200,
       user: user ? safeUserDto(user) : safeUserDto(req.user),
+      access,
+      effectiveModuleAccess: access.effectiveModuleAccess,
     });
   } catch (err) {
     return bad(res, 500, err?.message || 'Failed to load user', 'ME_FAILED');

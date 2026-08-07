@@ -8,25 +8,39 @@ const express = require('express');
 const mongoose = require('mongoose');
 
 const User = require('../models/User');
+const Role = require('../models/Role');
 const News = require('../models/News');
 const FinanceRecord = require('../models/FinanceRecord');
 const AuditLog = require('../models/AuditLog');
 const OtpToken = require('../models/OtpToken');
 const SessionLog = require('../models/SessionLog');
+const AccountControlDelegation = require('../models/AccountControlDelegation');
+const SiteSettings = require('../models/SiteSettings');
+const Counter = require('../models/Counter');
 const { TEAM_ROLES } = require('../lib/teamAccess');
+const { CANONICAL_ADMIN_MODULE_KEYS } = require('../services/founderAccessPolicyService');
 
 let usersById;
 let usersByEmail;
+let delegationsById;
 let auditLogs;
 let otpTokenUpdates;
 let sessionUpdates;
 let originalReadyState;
+let originalConnectionDb;
+let siteSettingsDoc;
 
 function cloneUser(user) {
   if (!user) return null;
   return {
     ...user,
     permissions: Array.isArray(user.permissions) ? [...user.permissions] : [],
+    moduleAccessOverride: Array.isArray(user.moduleAccessOverride) ? [...user.moduleAccessOverride] : [],
+    moduleAccessStates: user.moduleAccessStates && typeof user.moduleAccessStates === 'object' ? { ...user.moduleAccessStates } : user.moduleAccessStates,
+    specialRightsOverride: Array.isArray(user.specialRightsOverride) ? [...user.specialRightsOverride] : [],
+    taskRightsOverride: Array.isArray(user.taskRightsOverride) ? [...user.taskRightsOverride] : [],
+    accountControlRightsOverride: Array.isArray(user.accountControlRightsOverride) ? [...user.accountControlRightsOverride] : [],
+    temporaryAccess: Array.isArray(user.temporaryAccess) ? user.temporaryAccess.map((entry) => ({ ...entry })) : [],
     sections: Array.isArray(user.sections) ? [...user.sections] : [],
     assignedSections: Array.isArray(user.assignedSections) ? [...user.assignedSections] : [],
     coverageAreas: Array.isArray(user.coverageAreas) ? [...user.coverageAreas] : [],
@@ -41,6 +55,8 @@ function seedUsers() {
     name: 'Founder',
     role: 'founder',
     staffId: 'NP-FND-0001',
+    accountStatus: 'active',
+    noExpiry: true,
     designation: null,
     permissions: [],
     status: 'active',
@@ -54,29 +70,79 @@ function seedUsers() {
   const editor = {
     _id: '507f1f77bcf86cd799439012',
     email: 'editor@example.com',
-    name: 'Editor',
+    name: 'Shailesh Rathod',
+    fullName: 'Shailesh Rathod',
     role: 'editor',
-    designation: 'Desk Editor',
+    staffId: 'NP-2026-0003',
+    position: 'Editorial Head',
+    designation: 'Editorial Head',
+    accountGroup: 'Staff Account / Newsroom Staff',
+    department: 'Editorial / Newsroom',
+    permissions: [],
+    moduleAccessOverride: ['add_news'],
+    moduleAccessStates: { addNews: 'enabled' },
+    specialRightsOverride: ['news_create'],
+    taskRightsOverride: [],
+    accountControlRightsOverride: [],
+    temporaryAccess: [],
+    status: 'active',
+    accountStatus: 'active',
+    noExpiry: false,
+    mustChangePassword: false,
+    mustResetPassword: false,
+    forceReset: false,
+    accessVersion: 0,
+    tokenVersion: 0,
+    createdAt: new Date('2026-01-02T00:00:00.000Z'),
+    lastLoginAt: null,
+  };
+  const manager = {
+    _id: '507f1f77bcf86cd799439013',
+    email: 'manager@example.com',
+    name: 'Delegated Manager',
+    role: 'manager',
+    staffId: 'NP-2026-0004',
+    position: 'Manager',
+    accountGroup: 'Management Staff',
+    department: 'Management & Operations',
     permissions: [],
     status: 'active',
+    accountStatus: 'active',
+    noExpiry: true,
     mustChangePassword: false,
     mustResetPassword: false,
     forceReset: false,
     tokenVersion: 0,
-    createdAt: new Date('2026-01-02T00:00:00.000Z'),
+    createdAt: new Date('2026-01-03T00:00:00.000Z'),
     lastLoginAt: null,
   };
   usersById = new Map([
     [founder._id, founder],
     [editor._id, editor],
+    [manager._id, manager],
   ]);
   usersByEmail = new Map([
     [founder.email, founder._id],
     [editor.email, editor._id],
+    [manager.email, manager._id],
   ]);
+  delegationsById = new Map();
   auditLogs = [];
   otpTokenUpdates = [];
   sessionUpdates = [];
+  siteSettingsDoc = {
+    _id: '507f1f77bcf86cd799439555',
+    adminModulePolicy: {
+      version: 3,
+      modulePolicies: CANONICAL_ADMIN_MODULE_KEYS.reduce((acc, key) => {
+        acc[key] = key === 'safeZone' ? 'founder_only' : 'available';
+        return acc;
+      }, {}),
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+      updatedBy: 'test-founder@example.com',
+      auditReason: 'test policy',
+    },
+  };
 }
 
 function makeFindChain(users) {
@@ -85,6 +151,19 @@ function makeFindChain(users) {
       return {
         lean: async () => users.map(cloneUser),
       };
+    },
+  };
+}
+
+function makeDocQuery(doc, clone = (value) => value) {
+  return {
+    lean: async () => clone(doc),
+    select: async () => clone(doc),
+    then(resolve, reject) {
+      return Promise.resolve(clone(doc)).then(resolve, reject);
+    },
+    catch(reject) {
+      return Promise.resolve(clone(doc)).catch(reject);
     },
   };
 }
@@ -120,12 +199,17 @@ function matchesQuery(user, query) {
 }
 
 User.findById = async (id) => cloneUser(usersById.get(String(id)));
-User.findOne = (filter) => ({
-  lean: async () => {
-    const id = usersByEmail.get(String(filter && filter.email || '').toLowerCase());
-    return cloneUser(id ? usersById.get(id) : null);
-  },
-});
+User.findOne = (filter) => {
+  let user = null;
+  if (filter && filter.email) {
+    const id = usersByEmail.get(String(filter.email || '').toLowerCase());
+    user = id ? usersById.get(id) : null;
+  } else if (filter && filter.staffId) {
+    const staffId = String(filter.staffId || '').trim().toUpperCase();
+    user = Array.from(usersById.values()).find((item) => String(item.staffId || '').trim().toUpperCase() === staffId) || null;
+  }
+  return makeDocQuery(user, cloneUser);
+};
 User.find = (query) => makeFindChain(Array.from(usersById.values()).filter((user) => matchesQuery(user, query)));
 User.create = async (payload) => {
   const _id = '507f1f77bcf86cd799439099';
@@ -142,10 +226,14 @@ User.findByIdAndUpdate = async (id, update) => {
   const current = usersById.get(String(id));
   if (!current) return null;
   const setPatch = update && update.$set ? update.$set : {};
+  const incPatch = update && update.$inc ? Object.entries(update.$inc).reduce((acc, [key, value]) => {
+    acc[key] = (typeof current[key] === 'number' ? current[key] : 0) + value;
+    return acc;
+  }, {}) : {};
   const next = {
     ...current,
     ...setPatch,
-    tokenVersion: current.tokenVersion + (update && update.$inc && typeof update.$inc.tokenVersion === 'number' ? update.$inc.tokenVersion : 0),
+    ...incPatch,
   };
   if (update && update.$push) {
     for (const [key, value] of Object.entries(update.$push)) {
@@ -159,6 +247,16 @@ User.findByIdAndUpdate = async (id, update) => {
   if (next.email) usersByEmail.set(String(next.email).toLowerCase(), String(id));
   return cloneUser(next);
 };
+
+SiteSettings.findOne = async () => siteSettingsDoc;
+SiteSettings.create = async (payload) => {
+  siteSettingsDoc = { _id: '507f1f77bcf86cd799439555', ...payload };
+  return siteSettingsDoc;
+};
+SiteSettings.findOneAndUpdate = async (filter, update) => {
+  siteSettingsDoc = { ...siteSettingsDoc, ...(update && update.$set ? update.$set : {}) };
+  return siteSettingsDoc;
+};
 User.deleteOne = async (filter) => {
   const id = String(filter && filter._id || '');
   const current = usersById.get(id);
@@ -166,6 +264,26 @@ User.deleteOne = async (filter) => {
   usersById.delete(id);
   if (current.email) usersByEmail.delete(String(current.email).toLowerCase());
   return { deletedCount: 1 };
+};
+
+Role.findById = () => ({ lean: async () => null });
+Role.findOne = () => ({ lean: async () => null });
+
+Counter.findOneAndUpdate = async (filter) => {
+  const key = String(filter?.key || 'staffId_2026');
+  const existingSequences = Array.from(usersById.values())
+    .map((user) => String(user.staffId || '').match(/^NP-(\d{4})-(\d{4})$/))
+    .filter((match) => match && `staffId_${match[1]}` === key)
+    .map((match) => Number(match[2]));
+  return { key, value: Math.max(0, ...existingSequences) + 1 };
+};
+Counter.findOne = async (filter) => {
+  const key = String(filter?.key || 'staffId_2026');
+  const existingSequences = Array.from(usersById.values())
+    .map((user) => String(user.staffId || '').match(/^NP-(\d{4})-(\d{4})$/))
+    .filter((match) => match && `staffId_${match[1]}` === key)
+    .map((match) => Number(match[2]));
+  return { key, value: Math.max(0, ...existingSequences) };
 };
 
 AuditLog.create = async (payload) => {
@@ -186,6 +304,48 @@ OtpToken.updateMany = async (filter, update) => {
 SessionLog.updateMany = async (filter, update) => {
   sessionUpdates.push({ filter, update });
   return { modifiedCount: 1 };
+};
+
+function cloneDelegation(delegation) {
+  return delegation ? {
+    ...delegation,
+    grantedRights: Array.isArray(delegation.grantedRights) ? [...delegation.grantedRights] : [],
+    manageableAccountTypes: Array.isArray(delegation.manageableAccountTypes) ? [...delegation.manageableAccountTypes] : [],
+  } : null;
+}
+
+function makeDelegationFindChain(delegations) {
+  return {
+    lean: async () => delegations.map(cloneDelegation),
+    sort() {
+      return { lean: async () => delegations.map(cloneDelegation) };
+    },
+  };
+}
+
+function matchesDelegationQuery(delegation, query) {
+  if (!query || !Object.keys(query).length) return true;
+  for (const [key, value] of Object.entries(query)) {
+    if (delegation[key] !== value) return false;
+  }
+  return true;
+}
+
+AccountControlDelegation.find = (query) => makeDelegationFindChain(Array.from(delegationsById.values()).filter((delegation) => matchesDelegationQuery(delegation, query)));
+AccountControlDelegation.create = async (payload) => {
+  const _id = `507f1f77bcf86cd7994391${String(delegationsById.size).padStart(2, '0')}`;
+  const now = new Date();
+  const created = { _id, createdAt: now, updatedAt: now, ...payload };
+  delegationsById.set(_id, created);
+  return cloneDelegation(created);
+};
+AccountControlDelegation.findById = (id) => makeDocQuery(delegationsById.get(String(id)) || null, cloneDelegation);
+AccountControlDelegation.findByIdAndUpdate = async (id, update) => {
+  const current = delegationsById.get(String(id));
+  if (!current) return null;
+  const next = { ...current, ...(update && update.$set ? update.$set : {}), updatedAt: new Date() };
+  delegationsById.set(String(id), next);
+  return cloneDelegation(next);
 };
 
 const router = require('../routes/adminTeam.routes');
@@ -216,11 +376,14 @@ function signToken({ sub, email, role, name, tokenVersion = 0 }) {
 test.beforeEach(() => {
   seedUsers();
   originalReadyState = mongoose.connection.readyState;
+  originalConnectionDb = mongoose.connection.db;
   mongoose.connection.readyState = 1;
+  mongoose.connection.db = { collection: () => ({}) };
 });
 
 test.afterEach(() => {
   mongoose.connection.readyState = originalReadyState;
+  mongoose.connection.db = originalConnectionDb;
 });
 
 test('GET /api/admin/team/users exposes requested team roles while preserving founder record', async () => {
@@ -236,7 +399,7 @@ test('GET /api/admin/team/users exposes requested team roles while preserving fo
     .get('/api/admin/team/users')
     .set('Authorization', `Bearer ${founderToken}`);
 
-  assert.equal(res.status, 200);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
   assert.deepEqual(res.body.availableRoles, TEAM_ROLES);
   assert.deepEqual(res.body.data.availableRoles, TEAM_ROLES);
   assert.ok(res.body.users.some((user) => user.email === 'editor@example.com'));
@@ -247,6 +410,143 @@ test('GET /api/admin/team/users exposes requested team roles while preserving fo
   assert.equal(founder.department, 'Founder / Ownership');
   assert.deepEqual(founder.assignedSections, []);
   assert.deepEqual(founder.coverageAreas, []);
+});
+
+test('Staff Access save accepts canonical keys, aliases, object draft values, and returns effective access', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const res = await request(app)
+    .patch('/api/admin/access/staff/NP-2026-0003/modules')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({
+      auditReason: 'Founder saved Staff Access changes',
+      moduleAccessStates: {
+        'DPDP Privacy Requests': { individualState: 'Enabled' },
+        ads_manager: { individualState: 'Enabled' },
+        settings: 'enabled',
+        'AI Engine': { state: 'Enabled' },
+        dashboard: true,
+        live_tv: false,
+      },
+    });
+
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.data.record.accessVersion, 1);
+  assert.deepEqual(res.body.data.record.moduleAccessStates, {
+    dpdpCompliance: 'enabled',
+    adsManager: 'enabled',
+    settings: 'enabled',
+    aiEngine: 'enabled',
+    dashboard: 'enabled',
+    liveTv: 'disabled',
+  });
+  assert.deepEqual(res.body.data.record.moduleAccessOverride, ['dpdp_compliance', 'ads_manager', 'settings', 'ai_engine', 'dashboard']);
+  assert.equal(res.body.data.effectiveAccess.accessVersion, 1);
+  assert.equal(res.body.data.effectiveAccess.policyVersion, 3);
+  assert.equal(res.body.data.effectiveAccess.canonicalModules.dpdpCompliance.allowed, true);
+  assert.equal(res.body.data.effectiveAccess.canonicalModules.adsManager.allowed, true);
+  assert.equal(res.body.data.effectiveAccess.canonicalModules.settings.allowed, true);
+  assert.equal(res.body.data.effectiveAccess.canonicalModules.aiEngine.allowed, true);
+  assert.equal(res.body.data.effectiveAccess.canonicalModules.liveTv.reasonCode, 'STAFF_ACCESS_DISABLED');
+  assert.deepEqual(usersById.get('507f1f77bcf86cd799439012').moduleAccessStates, res.body.data.record.moduleAccessStates);
+  assert.ok(auditLogs.some((entry) => entry.action === 'TEAM_ACCESS_CHANGE' && entry.reason === 'Founder saved Staff Access changes'));
+});
+
+test('Staff Access save rejects malformed payloads with precise errors and no partial save', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+  const before = cloneUser(usersById.get('507f1f77bcf86cd799439012'));
+
+  const res = await request(app)
+    .patch('/api/admin/access/staff/NP-2026-0003/modules')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({
+      auditReason: 'bad payload should not save',
+      moduleAccess: {
+        dpdpCompliance: 'enabled',
+        unknownPanel: 'enabled',
+      },
+    });
+
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'INVALID_MODULE_ACCESS_PAYLOAD');
+  assert.equal(res.body.invalidField, 'moduleAccess.unknownPanel');
+  assert.equal(res.body.reason, 'UNKNOWN_MODULE_KEY');
+  assert.deepEqual(usersById.get('507f1f77bcf86cd799439012').moduleAccessOverride, before.moduleAccessOverride);
+  assert.deepEqual(usersById.get('507f1f77bcf86cd799439012').moduleAccessStates, before.moduleAccessStates);
+  assert.equal(usersById.get('507f1f77bcf86cd799439012').accessVersion, before.accessVersion);
+  assert.equal(auditLogs.some((entry) => entry.action === 'TEAM_ACCESS_CHANGE'), false);
+});
+
+test('Staff Access save blocks Safe Zone grants while accepting a full canonical module map', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+  const fullMap = CANONICAL_ADMIN_MODULE_KEYS.reduce((acc, key) => {
+    acc[key] = key === 'safeZone' ? 'disabled' : 'enabled';
+    return acc;
+  }, { dashboard: 'enabled' });
+
+  const safeZoneGrant = await request(app)
+    .patch('/api/admin/access/staff/NP-2026-0003/modules')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ auditReason: 'try safe zone grant', moduleAccessStates: { safeZone: 'enabled' } });
+
+  assert.equal(safeZoneGrant.status, 400);
+  assert.equal(safeZoneGrant.body.code, 'INVALID_MODULE_ACCESS_PAYLOAD');
+  assert.equal(safeZoneGrant.body.reason, 'FOUNDER_ONLY_MODULE');
+
+  const fullSave = await request(app)
+    .patch('/api/admin/access/staff/NP-2026-0003/modules')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ auditReason: 'save full access map', moduleAccessStates: fullMap });
+
+  assert.equal(fullSave.status, 200, JSON.stringify(fullSave.body));
+  assert.equal(fullSave.body.data.record.moduleAccessStates.dpdpCompliance, 'enabled');
+  assert.equal(fullSave.body.data.record.moduleAccessStates.settings, 'enabled');
+  assert.equal(fullSave.body.data.record.moduleAccessStates.aiEngine, 'enabled');
+  assert.equal(fullSave.body.data.record.moduleAccessStates.safeZone, 'disabled');
+  assert.equal(fullSave.body.data.effectiveAccess.canonicalModules.safeZone.allowed, false);
+  assert.equal(fullSave.body.data.effectiveAccess.canonicalModules.safeZone.reasonCode, 'FOUNDER_ONLY');
+});
+
+test('Temporary module access accepts canonical aliases and returns allowed effective access', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const res = await request(app)
+    .post('/api/admin/access/staff/507f1f77bcf86cd799439012/temporary')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({
+      auditReason: 'temporary DPDP access',
+      moduleKey: 'DPDP Privacy Requests',
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  assert.equal(res.body.data.effectiveAccess.canonicalModules.dpdpCompliance.allowed, true);
+  assert.equal(res.body.data.effectiveAccess.canonicalModules.dpdpCompliance.individualState, 'temporary');
+  assert.equal(usersById.get('507f1f77bcf86cd799439012').temporaryAccess[0].moduleKey, 'dpdp_compliance');
 });
 
 test('POST /api/admin/team/users rejects blank email, founder email, and invalid roles', async () => {
@@ -303,7 +603,7 @@ test('POST /api/admin/team/users creates intern users by default with one-time t
   assert.equal(typeof res.body.data.user.passwordHash, 'undefined');
   assert.equal(usersById.get('507f1f77bcf86cd799439099').role, 'intern');
   assert.equal(res.body.data.user.department, 'Training / Internship');
-  assert.equal(res.body.data.user.staffId, 'NP-2026-0001');
+  assert.equal(res.body.data.user.staffId, 'NP-2026-0005');
   assert.equal(res.body.data.user.staffIdLocked, true);
 });
 
@@ -332,9 +632,9 @@ test('POST /api/admin/team/users accepts frontend payload aliases and ignores st
 
   assert.equal(res.status, 201);
   assert.equal(res.body.data.user.email, 'alias-staff@example.com');
-  assert.equal(res.body.data.user.staffId, 'NP-2026-0001');
+  assert.equal(res.body.data.user.staffId, 'NP-2026-0005');
   assert.equal(res.body.data.user.accountStatus, 'active');
-  assert.equal(usersById.get('507f1f77bcf86cd799439099').staffId, 'NP-2026-0001');
+  assert.equal(usersById.get('507f1f77bcf86cd799439099').staffId, 'NP-2026-0005');
 });
 
 test('POST /api/admin/team/users returns useful array validation errors', async () => {
@@ -482,7 +782,7 @@ test('staff ID remains immutable after creation even when role changes', async (
   assert.equal(createRes.status, 201);
   const userId = createRes.body.data.user.id;
   const originalStaffId = createRes.body.data.user.staffId;
-  assert.equal(originalStaffId, 'NP-2026-0001');
+  assert.equal(originalStaffId, 'NP-2026-0005');
 
   const roleUpdate = await request(app)
     .patch(`/api/team/users/${userId}`)
@@ -752,7 +1052,7 @@ test('extend, archive, reactivate, and logout-all-devices update status safely',
     .set('Authorization', `Bearer ${founderToken}`)
     .send({ accessExpiryDate: '2026-12-31T00:00:00.000Z' });
 
-  assert.equal(extendRes.status, 200);
+  assert.equal(extendRes.status, 200, JSON.stringify(extendRes.body));
   assert.equal(extendRes.body.user.accountStatus, 'active');
   assert.equal(usersById.get('507f1f77bcf86cd799439012').loginAllowed, true);
   assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_ACCESS_EXTENDED'));
@@ -785,6 +1085,289 @@ test('extend, archive, reactivate, and logout-all-devices update status safely',
   assert.equal(logoutRes.status, 200);
   assert.equal(sessionUpdates.at(-1).update.$set.logoutReason, 'staff_logout_all_devices');
   assert.ok(auditLogs.some((entry) => entry.action === 'STAFF_LOGOUT_ALL_DEVICES'));
+});
+
+test('expired staff is denied before module access but remains visible in Staff Registry', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+  const expiredToken = signToken({
+    sub: '507f1f77bcf86cd799439012',
+    email: 'editor@example.com',
+    role: 'editor',
+    name: 'Shailesh Rathod',
+  });
+  const editor = usersById.get('507f1f77bcf86cd799439012');
+  editor.status = 'active';
+  editor.accountStatus = 'active';
+  editor.accessExpiresAt = new Date('2026-01-01T00:00:00.000Z');
+  editor.noExpiry = false;
+  editor.moduleAccessOverride = ['staff_tasks', 'add_news'];
+
+  const taskRes = await request(app)
+    .get('/api/admin/team/tasks')
+    .set('Authorization', `Bearer ${expiredToken}`);
+
+  assert.equal(taskRes.status, 403);
+  assert.equal(taskRes.body.code, 'ACCOUNT_EXPIRED');
+  assert.equal(taskRes.body.message, 'Your staff account access period has expired.');
+  assert.equal(usersById.get('507f1f77bcf86cd799439012').accountStatus, 'expired');
+  assert.equal(usersById.get('507f1f77bcf86cd799439012').staffId, 'NP-2026-0003');
+
+  const listRes = await request(app)
+    .get('/api/admin/team/staff')
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(listRes.status, 200);
+  const listed = listRes.body.users.find((user) => user.staffId === 'NP-2026-0003');
+  assert.ok(listed);
+  assert.equal(listed.accountStatus, 'expired');
+});
+
+test('Shailesh NP-2026-0003 reactivates to no-expiry active without losing access settings', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+  const editor = usersById.get('507f1f77bcf86cd799439012');
+  editor.status = 'expired';
+  editor.accountStatus = 'expired';
+  editor.loginAllowed = false;
+  editor.accessExpiresAt = new Date('2026-01-01T00:00:00.000Z');
+  editor.noExpiry = false;
+  editor.moduleAccessOverride = ['add_news', 'manage_news'];
+  editor.specialRightsOverride = ['news_create', 'news_edit'];
+
+  const res = await request(app)
+    .post('/api/admin/team/staff/NP-2026-0003/reactivate')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ noExpiry: true, auditReason: 'Founder reactivated Editorial Head as permanent staff' });
+
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.user.staffId, 'NP-2026-0003');
+  assert.equal(res.body.user.accountStatus, 'active');
+  assert.equal(res.body.user.noExpiry, true);
+  assert.equal(res.body.user.accessExpiresAt, null);
+  assert.deepEqual(usersById.get('507f1f77bcf86cd799439012').moduleAccessOverride, ['add_news', 'manage_news']);
+  assert.deepEqual(usersById.get('507f1f77bcf86cd799439012').specialRightsOverride, ['news_create', 'news_edit']);
+  assert.ok(auditLogs.some((entry) => entry.action === 'ACCOUNT_REACTIVATED'));
+});
+
+test('extend access and password reset preserve existing Staff ID', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const extendRes = await request(app)
+    .post('/api/admin/team/staff/NP-2026-0003/extend-access')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ expiryPreset: '90_days', auditReason: 'extend editorial access' });
+
+  assert.equal(extendRes.status, 200, JSON.stringify(extendRes.body));
+  assert.equal(extendRes.body.user.staffId, 'NP-2026-0003');
+  assert.equal(extendRes.body.user.noExpiry, false);
+
+  const resetRes = await request(app)
+    .post('/api/admin/team/staff/NP-2026-0003/reset-password')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ auditReason: 'force password reset' });
+
+  assert.equal(resetRes.status, 200, JSON.stringify(resetRes.body));
+  assert.equal(resetRes.body.user.staffId, 'NP-2026-0003');
+  assert.equal(usersById.get('507f1f77bcf86cd799439012').staffId, 'NP-2026-0003');
+  assert.equal(JSON.stringify(auditLogs).includes(resetRes.body.temporaryPassword), false);
+  assert.equal(JSON.stringify(auditLogs).includes('passwordHash'), false);
+});
+
+test('Founder account is no-expiry and cannot be suspended archived or deleted', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+  const founder = usersById.get('507f1f77bcf86cd799439011');
+  founder.accessExpiresAt = new Date('2020-01-01T00:00:00.000Z');
+  founder.noExpiry = true;
+
+  const stateRes = await request(app)
+    .get('/api/admin/team/staff/507f1f77bcf86cd799439011/account-control')
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(stateRes.status, 200);
+  assert.equal(stateRes.body.accountState.accountStatus, 'active');
+  assert.equal(stateRes.body.accountState.noExpiry, true);
+
+  const archiveRes = await request(app)
+    .post('/api/admin/team/staff/507f1f77bcf86cd799439011/archive')
+    .set('Authorization', `Bearer ${founderToken}`);
+
+  assert.equal(archiveRes.status, 403);
+  assert.equal(archiveRes.body.code, 'FOUNDER_PROTECTED');
+
+  const deleteRes = await request(app)
+    .delete('/api/admin/team/staff/507f1f77bcf86cd799439011/delete-permanently')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ confirmText: 'DELETE', reason: 'never' });
+
+  assert.equal(deleteRes.status, 403);
+  assert.equal(deleteRes.body.code, 'FOUNDER_PROTECTED');
+  assert.equal(usersById.get('507f1f77bcf86cd799439011').staffId, 'NP-FND-0001');
+});
+
+test('delegated user with extend right can extend eligible staff only', async () => {
+  const app = buildApp();
+  delegationsById.set('507f1f77bcf86cd799439100', {
+    _id: '507f1f77bcf86cd799439100',
+    delegatedToStaffId: 'NP-2026-0004',
+    grantedRights: ['extend_account_expiry'],
+    manageableAccountTypes: ['newsroom_staff'],
+    startsAt: new Date('2026-01-01T00:00:00.000Z'),
+    expiresAt: null,
+    active: true,
+    appointedByFounderId: 'NP-FND-0001',
+    auditReason: 'trusted manager',
+  });
+  const managerToken = signToken({
+    sub: '507f1f77bcf86cd799439013',
+    email: 'manager@example.com',
+    role: 'manager',
+    name: 'Delegated Manager',
+  });
+
+  const res = await request(app)
+    .post('/api/admin/team/staff/NP-2026-0003/extend-access')
+    .set('Authorization', `Bearer ${managerToken}`)
+    .send({ expiryPreset: '30_days', auditReason: 'delegated extension' });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.user.staffId, 'NP-2026-0003');
+  assert.ok(auditLogs.some((entry) => entry.action === 'ACCOUNT_EXPIRY_EXTENDED'));
+
+  const founderRes = await request(app)
+    .post('/api/admin/team/staff/NP-FND-0001/extend-access')
+    .set('Authorization', `Bearer ${managerToken}`)
+    .send({ expiryPreset: '30_days' });
+
+  assert.equal(founderRes.status, 403);
+  assert.equal(founderRes.body.code, 'FOUNDER_PROTECTED');
+});
+
+test('delegated user without right or with expired delegation receives 403 and cannot self-grant', async () => {
+  const app = buildApp();
+  delegationsById.set('507f1f77bcf86cd799439101', {
+    _id: '507f1f77bcf86cd799439101',
+    delegatedToStaffId: 'NP-2026-0004',
+    grantedRights: ['extend_account_expiry'],
+    manageableAccountTypes: ['newsroom_staff'],
+    startsAt: new Date('2026-01-01T00:00:00.000Z'),
+    expiresAt: new Date('2026-01-02T00:00:00.000Z'),
+    active: true,
+    appointedByFounderId: 'NP-FND-0001',
+  });
+  const managerToken = signToken({
+    sub: '507f1f77bcf86cd799439013',
+    email: 'manager@example.com',
+    role: 'manager',
+    name: 'Delegated Manager',
+  });
+
+  const expiredDelegationRes = await request(app)
+    .post('/api/admin/team/staff/NP-2026-0003/extend-access')
+    .set('Authorization', `Bearer ${managerToken}`)
+    .send({ expiryPreset: '30_days' });
+
+  assert.equal(expiredDelegationRes.status, 403, JSON.stringify(expiredDelegationRes.body));
+
+  const missingRightRes = await request(app)
+    .post('/api/admin/team/staff/NP-2026-0003/suspend')
+    .set('Authorization', `Bearer ${managerToken}`);
+
+  assert.equal(missingRightRes.status, 403);
+
+  const selfGrantRes = await request(app)
+    .post('/api/admin/team/delegations')
+    .set('Authorization', `Bearer ${managerToken}`)
+    .send({ delegatedToStaffId: 'NP-2026-0004', grantedRights: ['suspend_staff_account'], manageableAccountTypes: ['newsroom_staff'], auditReason: 'self grant' });
+
+  assert.equal(selfGrantRes.status, 403);
+});
+
+test('Founder grants updates and revokes delegation with audit and token invalidation', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const grantRes = await request(app)
+    .post('/api/admin/team/delegations')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ delegatedToStaffId: 'NP-2026-0004', grantedRights: ['extend_account_expiry'], manageableAccountTypes: ['newsroom_staff'], auditReason: 'trusted account control' });
+
+  assert.equal(grantRes.status, 201);
+  assert.equal(grantRes.body.delegation.delegatedToStaffId, 'NP-2026-0004');
+  assert.ok(auditLogs.some((entry) => entry.action === 'DELEGATION_GRANTED'));
+
+  const updateRes = await request(app)
+    .patch(`/api/admin/team/delegations/${grantRes.body.delegation.id}`)
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ grantedRights: ['extend_account_expiry', 'lock_staff_account'], auditReason: 'add lock right' });
+
+  assert.equal(updateRes.status, 200);
+  assert.deepEqual(updateRes.body.delegation.grantedRights, ['extend_account_expiry', 'lock_staff_account']);
+
+  const beforeTokenVersion = usersById.get('507f1f77bcf86cd799439013').tokenVersion;
+  const revokeRes = await request(app)
+    .delete(`/api/admin/team/delegations/${grantRes.body.delegation.id}`)
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ auditReason: 'remove delegated access' });
+
+  assert.equal(revokeRes.status, 200);
+  assert.equal(revokeRes.body.delegation.active, false);
+  assert.equal(usersById.get('507f1f77bcf86cd799439013').tokenVersion, beforeTokenVersion + 1);
+  assert.ok(auditLogs.some((entry) => entry.action === 'DELEGATION_REVOKED'));
+});
+
+test('role change does not change Staff ID and database unavailable is not false success', async () => {
+  const app = buildApp();
+  const founderToken = signToken({
+    sub: '507f1f77bcf86cd799439011',
+    email: 'newspulse.team@gmail.com',
+    role: 'founder',
+    name: 'Founder',
+  });
+
+  const roleRes = await request(app)
+    .patch('/api/admin/team/staff/507f1f77bcf86cd799439012')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ role: 'manager' });
+
+  assert.equal(roleRes.status, 200);
+  assert.equal(roleRes.body.user.staffId, 'NP-2026-0003');
+
+  mongoose.connection.readyState = 0;
+  const dbDownRes = await request(app)
+    .post('/api/admin/team/staff/NP-2026-0003/reactivate')
+    .set('Authorization', `Bearer ${founderToken}`)
+    .send({ noExpiry: true });
+
+  assert.equal(dbDownRes.status, 503);
+  assert.equal(dbDownRes.body.code, 'DB_UNAVAILABLE');
 });
 
 test('mark-test-account flags non-founder test accounts and blocks founder', async () => {
@@ -1118,5 +1701,5 @@ test('Founder permanently deletes unwanted staff only after DELETE confirmation 
     .send({ fullName: 'Next Staff', email: 'next-staff@example.com', role: 'reporter' });
 
   assert.equal(nextCreate.status, 201);
-  assert.equal(nextCreate.body.data.user.staffId, 'NP-2026-0002');
+  assert.equal(nextCreate.body.data.user.staffId, 'NP-2026-0005');
 });

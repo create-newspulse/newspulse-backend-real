@@ -11,6 +11,7 @@ const User = require('../models/User');
 const { logAudit } = require('../lib/audit');
 const { recordLoginSession, recordLogoutSession } = require('../lib/teamManagement');
 const { FOUNDER_STAFF_ID } = require('../lib/staffId');
+const { ACCOUNT_STATUS, accountLifecycleResponse, expireAccount, lifecycleStatus } = require('../lib/accountLifecycle');
 const {
   getLocalFounderSafeDiagnostics,
   isLocalDevLike,
@@ -264,27 +265,18 @@ router.post('/login', async (req, res, next) => {
       localDebugUserFound = !!u;
       localDebugRoleFound = u ? String(u.role || '') || null : null;
       if (u) {
-        const blockedStatus = String(u.accountStatus || u.status || 'active').toLowerCase();
-        const legacyStatus = String(u.status || 'active').toLowerCase();
-        if (blockedStatus === 'suspended' || legacyStatus === 'suspended') {
+        const now = new Date();
+        const resolvedStatus = lifecycleStatus(u, now);
+        if (resolvedStatus !== ACCOUNT_STATUS.ACTIVE) {
           localDebugPasswordMatch = false;
-          logLocalLoginDebug({ userFound: true, passwordMatch: false, roleFound: localDebugRoleFound, status: 'suspended' });
-          return res.status(403).json({ ok: false, message: 'Account suspended' });
+          logLocalLoginDebug({ userFound: true, passwordMatch: false, roleFound: localDebugRoleFound, status: resolvedStatus });
+          if (resolvedStatus === ACCOUNT_STATUS.EXPIRED) await expireAccount(User, u, { now });
+          return accountLifecycleResponse(res, resolvedStatus);
         }
         if (u.loginAllowed === false) {
           localDebugPasswordMatch = false;
           logLocalLoginDebug({ userFound: true, passwordMatch: false, roleFound: localDebugRoleFound, status: 'login_disabled' });
           return res.status(403).json({ ok: false, message: 'Login disabled', code: 'LOGIN_DISABLED' });
-        }
-        if (blockedStatus === 'locked' || legacyStatus === 'locked' || (u.lockedUntil && u.lockedUntil > new Date())) {
-          localDebugPasswordMatch = false;
-          logLocalLoginDebug({ userFound: true, passwordMatch: false, roleFound: localDebugRoleFound, status: 'locked' });
-          return res.status(403).json({ ok: false, message: 'Account locked' });
-        }
-        if (blockedStatus === 'expired' || legacyStatus === 'expired' || (u.accessExpiresAt && u.accessExpiresAt <= new Date())) {
-          localDebugPasswordMatch = false;
-          logLocalLoginDebug({ userFound: true, passwordMatch: false, roleFound: localDebugRoleFound, status: 'expired' });
-          return res.status(403).json({ ok: false, message: 'Account expired' });
         }
         if (u.passwordHash) {
           const okPw = await bcrypt.compare(password, u.passwordHash);

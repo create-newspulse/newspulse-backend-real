@@ -47,6 +47,7 @@ const userSchema = new mongoose.Schema({
   designation: { type: String, default: null, trim: true },
   permissions: { type: [String], default: [] },
   moduleAccessOverride: { type: [String], default: [] },
+  moduleAccessStates: { type: mongoose.Schema.Types.Mixed, default: undefined },
   specialRightsOverride: { type: [String], default: [] },
   taskRightsOverride: { type: [String], default: [] },
   accountControlRightsOverride: { type: [String], default: [] },
@@ -88,6 +89,7 @@ const userSchema = new mongoose.Schema({
   mustResetPassword: { type: Boolean, default: false },
   mustChangePassword: { type: Boolean, default: false },
   tempPasswordExpiresAt: { type: Date, default: null },
+  accessVersion: { type: Number, default: 0 },
   tokenVersion: { type: Number, default: 0 },
   sessionsRevokedAt: { type: Date, default: null },
   resetTokensRevokedAt: { type: Date, default: null },
@@ -101,6 +103,10 @@ const userSchema = new mongoose.Schema({
   failedLoginCount: { type: Number, default: 0 },
   lockedUntil: { type: Date, default: null },
   accessExpiresAt: { type: Date, default: null },
+  noExpiry: { type: Boolean, default: false, index: true },
+  suspendedAt: { type: Date, default: null },
+  lockedAt: { type: Date, default: null },
+  reactivatedAt: { type: Date, default: null },
   isFounder: { type: Boolean, default: false, index: true },
   isOwner: { type: Boolean, default: false, index: true },
   isProtected: { type: Boolean, default: false, index: true },
@@ -147,6 +153,9 @@ userSchema.pre('save', function touchUpdatedAt(next) {
     this.canBeDemoted = false;
     this.status = 'active';
     this.accountStatus = 'active';
+    this.loginAllowed = true;
+    this.noExpiry = true;
+    this.accessExpiresAt = null;
   }
   next();
 });

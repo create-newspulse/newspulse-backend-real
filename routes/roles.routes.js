@@ -7,12 +7,21 @@ const { requireAuth, requireFounder } = require('../middleware/requireAuth');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const { logAudit } = require('../lib/audit');
 const {
+  ACCOUNT_CONTROL_RIGHT_KEYS,
   ADMIN_MODULE_KEYS,
+  FOUNDER_ONLY_ACCOUNT_CONTROL_RIGHTS,
+  FOUNDER_ONLY_RIGHTS,
   SPECIAL_RIGHT_KEYS,
   SYSTEM_ROLE_DEFINITIONS,
+  TASK_RIGHT_KEYS,
   normalizeModuleAccess,
   normalizeSpecialRights,
+  normalizeTaskRights,
 } = require('../lib/teamAccess');
+const {
+  CANONICAL_TO_LEGACY_MODULE,
+  canonicalModuleKey,
+} = require('../services/founderAccessPolicyService');
 
 const router = express.Router();
 
@@ -26,6 +35,30 @@ function ok(res, data, status = 200) {
 
 function bad(res, status, message, code) {
   return res.status(status).json({ ok: false, success: false, status, code: code || undefined, message });
+}
+
+function validationBad(res, error) {
+  return res.status(error.status || 400).json({
+    ok: false,
+    success: false,
+    status: error.status || 400,
+    code: error.code,
+    message: error.message,
+    permissionKey: error.permissionKey || null,
+    reason: error.reason || null,
+  });
+}
+
+function roleTemplatePermissionError(permissionKey, reason, status = 400) {
+  return {
+    status,
+    message: reason === 'unknown'
+      ? 'Unknown permission cannot be included in a role template.'
+      : 'This permission cannot be included in a role template.',
+    code: reason === 'unknown' ? 'ROLE_TEMPLATE_UNKNOWN_PERMISSION' : 'ROLE_TEMPLATE_FORBIDDEN_PERMISSION',
+    permissionKey,
+    reason,
+  };
 }
 
 function syncReqUserFromAdmin(req) {
@@ -93,10 +126,143 @@ function roleDto(role) {
     isProtected: Boolean(role.isProtected || role.slug === 'founder'),
     moduleAccess: normalizeModuleAccess(role.moduleAccess),
     specialRights: normalizeSpecialRights(role.specialRights),
+    taskRights: normalizeTaskRights(role.taskRights),
     createdBy: role.createdBy || null,
     createdAt: role.createdAt || null,
     updatedAt: role.updatedAt || null,
   };
+}
+
+const ROLE_TEMPLATE_FORBIDDEN_MODULES = Object.freeze(new Set([
+  'safe_zone',
+  'team_management',
+  'settings',
+  'ai_engine',
+  'audit_logs',
+]));
+
+const ROLE_TEMPLATE_FORBIDDEN_MODULE_ALIASES = Object.freeze(new Set([
+  'safeZone',
+  'founderAccessControl',
+  'founderAccountControl',
+  'emergencyFounderControls',
+  'safe_zone',
+  'team_management',
+  'settings',
+  'audit_logs',
+]));
+
+const ROLE_TEMPLATE_FORBIDDEN_RIGHTS = Object.freeze(new Set([
+  ...FOUNDER_ONLY_RIGHTS,
+  ...FOUNDER_ONLY_ACCOUNT_CONTROL_RIGHTS,
+  ...ACCOUNT_CONTROL_RIGHT_KEYS,
+  'staff_create',
+  'staff_edit',
+  'staff_email_change',
+  'role_create',
+  'role_edit',
+  'role_delete',
+  'role_delete_system',
+  'finance_approve_payment',
+  'finance_delete_record',
+  'finance_change_bank_details',
+  'finance_change_payment_gateway',
+  'finance_approve_withdrawal',
+  'finance_final_report_approval',
+  'finance_final_approval',
+  'bank_payment_settings_change',
+]));
+
+const ROLE_TEMPLATE_FORBIDDEN_RIGHT_ALIASES = Object.freeze(new Set([
+  'control_founder_account',
+  'modify_founder_account',
+  'grant_founder_role',
+  'access_safe_zone',
+  'manage_founder_access_control',
+  'delete_founder',
+  'suspend_founder',
+  'demote_founder',
+  'create_staff',
+  'delete_staff_permanently',
+  'change_bank_details',
+  'change_payment_gateway',
+  'approve_withdrawal',
+  'payment_approval',
+]));
+
+function submittedKeys(value) {
+  if (value === undefined) return { provided: false, keys: [] };
+  if (Array.isArray(value)) return { provided: true, keys: value.map((item) => String(item || '').trim()).filter(Boolean) };
+  if (value && typeof value === 'object') return { provided: true, keys: Object.keys(value).map((key) => String(key || '').trim()).filter(Boolean) };
+  return { provided: true, keys: [String(value || '').trim()].filter(Boolean) };
+}
+
+function normalizeRoleTemplateModuleKey(key) {
+  const raw = String(key || '').trim();
+  if (!raw) return null;
+  if (ADMIN_MODULE_KEYS.includes(raw)) return raw;
+  const canonical = canonicalModuleKey(raw, { allowLegacy: true });
+  if (canonical === 'dashboard') return 'dashboard';
+  if (canonical && CANONICAL_TO_LEGACY_MODULE[canonical] && ADMIN_MODULE_KEYS.includes(CANONICAL_TO_LEGACY_MODULE[canonical])) return CANONICAL_TO_LEGACY_MODULE[canonical];
+  if (raw === 'staffTasks') return 'staff_tasks';
+  return null;
+}
+
+function validateRoleTemplatePermissions(body) {
+  const moduleInput = submittedKeys(body.moduleAccess);
+  if (moduleInput.provided) {
+    for (const key of moduleInput.keys) {
+      if (ROLE_TEMPLATE_FORBIDDEN_MODULE_ALIASES.has(key)) return { error: roleTemplatePermissionError(key, 'forbidden') };
+      const normalized = normalizeRoleTemplateModuleKey(key);
+      if (!normalized) return { error: roleTemplatePermissionError(key, 'unknown') };
+      if (ROLE_TEMPLATE_FORBIDDEN_MODULES.has(normalized)) return { error: roleTemplatePermissionError(key, 'forbidden') };
+    }
+  }
+
+  for (const field of ['specialRights', 'taskRights']) {
+    const input = submittedKeys(body[field]);
+    if (!input.provided) continue;
+    const allowed = field === 'taskRights' ? new Set(TASK_RIGHT_KEYS) : new Set(SPECIAL_RIGHT_KEYS);
+    for (const key of input.keys) {
+      if (ROLE_TEMPLATE_FORBIDDEN_RIGHT_ALIASES.has(key) || ROLE_TEMPLATE_FORBIDDEN_RIGHTS.has(key)) return { error: roleTemplatePermissionError(key, 'forbidden') };
+      if (!allowed.has(key)) return { error: roleTemplatePermissionError(key, 'unknown') };
+    }
+  }
+
+  return { ok: true };
+}
+
+function normalizeRoleTemplateModules(value) {
+  if (value === undefined) return [];
+  let keys = [];
+  if (Array.isArray(value)) {
+    keys = value.map((item) => String(item || '').trim()).filter(Boolean);
+  } else if (value && typeof value === 'object') {
+    keys = Object.entries(value)
+      .filter(([, state]) => state === true || state === 1 || ['enabled', 'temporary', 'on', 'true', 'yes'].includes(String(state || '').trim().toLowerCase()))
+      .map(([key]) => String(key || '').trim())
+      .filter(Boolean);
+  } else {
+    keys = [String(value || '').trim()].filter(Boolean);
+  }
+  const normalized = keys.map(normalizeRoleTemplateModuleKey).filter(Boolean);
+  return normalizeModuleAccess(normalized);
+}
+
+function inspectUnsafeRoleTemplate(role) {
+  const unsafe = [];
+  for (const key of submittedKeys(role?.moduleAccess).keys) {
+    const normalized = normalizeRoleTemplateModuleKey(key);
+    if (!normalized || ROLE_TEMPLATE_FORBIDDEN_MODULES.has(normalized) || ROLE_TEMPLATE_FORBIDDEN_MODULE_ALIASES.has(key)) unsafe.push({ field: 'moduleAccess', key, reason: normalized ? 'forbidden' : 'unknown' });
+  }
+  for (const [field, allowedList] of [['specialRights', SPECIAL_RIGHT_KEYS], ['taskRights', TASK_RIGHT_KEYS]]) {
+    const allowed = new Set(allowedList);
+    for (const key of submittedKeys(role?.[field]).keys) {
+      if (ROLE_TEMPLATE_FORBIDDEN_RIGHT_ALIASES.has(key) || ROLE_TEMPLATE_FORBIDDEN_RIGHTS.has(key)) unsafe.push({ field, key, reason: 'forbidden' });
+      else if (!allowed.has(key)) unsafe.push({ field, key, reason: 'unknown' });
+    }
+  }
+  return unsafe;
 }
 
 async function ensureSystemRoles(req) {
@@ -119,6 +285,7 @@ async function ensureSystemRoles(req) {
           isSystemRole: true,
           moduleAccess: role.moduleAccess.slice(),
           specialRights: role.specialRights.slice(),
+          taskRights: role.taskRights ? role.taskRights.slice() : [],
           updatedAt: new Date(),
           ...(role.slug === 'founder' ? { isProtected: true } : {}),
         },
@@ -162,8 +329,9 @@ function parseRolePayload(body, existing) {
     if (!Number.isFinite(sortOrder)) return { error: { status: 400, message: 'Invalid sortOrder', code: 'INVALID_SORT_ORDER' } };
     patch.sortOrder = sortOrder;
   }
-  if (body.moduleAccess !== undefined) patch.moduleAccess = normalizeModuleAccess(body.moduleAccess);
+  if (body.moduleAccess !== undefined) patch.moduleAccess = normalizeRoleTemplateModules(body.moduleAccess);
   if (body.specialRights !== undefined) patch.specialRights = normalizeSpecialRights(body.specialRights);
+  if (body.taskRights !== undefined) patch.taskRights = normalizeTaskRights(body.taskRights);
   return { patch };
 }
 
@@ -175,7 +343,10 @@ router.get('/', async (req, res) => {
     await ensureSystemRoles(req);
     const roles = await Role.find({}).sort({ sortOrder: 1, isSystemRole: -1, name: 1 }).lean();
     const data = (roles || []).map(roleDto);
-    return ok(res, { data: { roles: data }, roles: data });
+    const unsafeRoleTemplates = (roles || [])
+      .map((role) => ({ role: roleDto(role), unsafePermissions: inspectUnsafeRoleTemplate(role) }))
+      .filter((entry) => entry.unsafePermissions.length > 0);
+    return ok(res, { data: { roles: data, unsafeRoleTemplates }, roles: data, unsafeRoleTemplates });
   } catch (err) {
     return bad(res, 500, err?.message || 'Failed to list roles', 'LIST_ROLES_FAILED');
   }
@@ -186,6 +357,8 @@ router.post('/', async (req, res) => {
     if (!isDbReady()) return bad(res, 503, 'Database unavailable', 'DB_UNAVAILABLE');
     await ensureSystemRoles(req);
     const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const validation = validateRoleTemplatePermissions(body);
+    if (validation.error) return validationBad(res, validation.error);
     const parsed = parseRolePayload(body, null);
     if (parsed.error) return bad(res, parsed.error.status, parsed.error.message, parsed.error.code);
     if (parsed.patch.slug === 'founder') return bad(res, 403, 'Founder role is protected', 'FOUNDER_ROLE_PROTECTED');
@@ -202,6 +375,7 @@ router.post('/', async (req, res) => {
       isProtected: false,
       moduleAccess: parsed.patch.moduleAccess || [],
       specialRights: parsed.patch.specialRights || [],
+      taskRights: parsed.patch.taskRights || [],
       createdBy: actorId(req),
       updatedBy: actorId(req),
       createdAt: new Date(),
@@ -236,6 +410,8 @@ router.patch('/:id', async (req, res) => {
     if (role.isProtected || role.slug === 'founder') return bad(res, 403, 'Founder role is protected', 'FOUNDER_ROLE_PROTECTED');
 
     const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const validation = validateRoleTemplatePermissions(body);
+    if (validation.error) return validationBad(res, validation.error);
     const parsed = parseRolePayload(body, role);
     if (parsed.error) return bad(res, parsed.error.status, parsed.error.message, parsed.error.code);
     if (parsed.patch.slug === 'founder') return bad(res, 403, 'Founder role is protected', 'FOUNDER_ROLE_PROTECTED');

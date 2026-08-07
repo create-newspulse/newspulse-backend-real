@@ -11,9 +11,17 @@ const OtpToken = require('../models/OtpToken');
 const Role = require('../models/Role');
 const SessionLog = require('../models/SessionLog');
 const StaffTask = require('../models/StaffTask');
+const AccountControlDelegation = require('../models/AccountControlDelegation');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const { requireAuth, requireModuleAccess, requireTaskRight } = require('../middleware/requireAuth');
 const { logAudit } = require('../lib/audit');
+const {
+  ACCOUNT_STATUS,
+  hasNoExpiry,
+  isAccountExpired,
+  isFounderAccount,
+  lifecycleStatus,
+} = require('../lib/accountLifecycle');
 const {
   FOUNDER_STAFF_ID,
   ensureUserStaffId,
@@ -62,11 +70,36 @@ const {
   requirePasswordPolicy,
   safeUserDto,
 } = require('../lib/teamAccess');
+const {
+  CANONICAL_TO_LEGACY_MODULE,
+  canonicalModuleKey,
+  evaluateAllModuleAccess,
+  getFounderModulePolicy,
+  normalizeStaffModuleStates,
+  parseStaffModuleAccessPayload,
+} = require('../services/founderAccessPolicyService');
 
 const router = express.Router();
 const FOUNDER_PROTECTED_MESSAGE = 'Founder account is protected. Use Founder My Account / Safe Zone.';
 const PROTECTED_FOUNDER_EMAIL = 'kiran@newspulse.co.in';
 const STAFF_MANAGE_GRANTS = Object.freeze(['staff_manage', 'staff.manage', 'team.manage']);
+const { ACCOUNT_CONTROL_DELEGATED_RIGHTS, MANAGEABLE_ACCOUNT_TYPES } = AccountControlDelegation;
+const DELEGATED_RIGHT_TO_LEGACY_RIGHT = Object.freeze({
+  view_staff_registry: 'staff_view_details',
+  create_staff_account: null,
+  edit_staff_details: 'staff_edit_basic',
+  extend_account_expiry: 'staff_extend_access',
+  reactivate_expired_account: 'staff_reactivate',
+  suspend_staff_account: 'staff_suspend',
+  lock_staff_account: 'staff_lock',
+  unlock_staff_account: 'staff_lock',
+  reset_temporary_password: 'staff_reset_password',
+  force_password_change: 'staff_force_password_change',
+  logout_staff_sessions: 'staff_logout_devices',
+  archive_staff_account: 'staff_archive',
+  assign_staff_access: null,
+  assign_staff_tasks: null,
+});
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -224,6 +257,29 @@ async function findUserById(id, res) {
   return user;
 }
 
+async function findUserByIdOrStaffId(id, res) {
+  const raw = String(id || '').trim();
+  if (!raw) {
+    bad(res, 400, 'Invalid id', 'INVALID_ID');
+    return null;
+  }
+  if (/^NP-[A-Z0-9-]+$/i.test(raw)) {
+    const user = await User.findOne({ staffId: raw.toUpperCase() });
+    if (!user) {
+      bad(res, 404, 'Not found', 'NOT_FOUND');
+      return null;
+    }
+    return user;
+  }
+  if (mongoose.isValidObjectId(raw)) return findUserById(raw, res);
+  const user = await User.findOne({ staffId: raw.toUpperCase() });
+  if (!user) {
+    bad(res, 404, 'Not found', 'NOT_FOUND');
+    return null;
+  }
+  return user;
+}
+
 async function blockFounderStaffAction(req, res, user, attemptedAction) {
   await logAudit(req, 'BLOCKED_FOUNDER_STAFF_ACTION', user?._id ? String(user._id) : req.params?.id || null, {
     attemptedAction,
@@ -263,6 +319,52 @@ function parseDateOrNull(value) {
 
 function pickDateAlias(body, primary, alias) {
   return body[primary] !== undefined ? body[primary] : body[alias];
+}
+
+function addDays(date, days) {
+  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+function addMonths(date, months) {
+  const next = new Date(date.getTime());
+  next.setMonth(next.getMonth() + months);
+  return next;
+}
+
+function resolveAccessExpiryInput(body, fallbackDate = null) {
+  const input = body && typeof body === 'object' ? body : {};
+  const preset = String(input.expiryPreset || input.accessPeriod || input.duration || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (input.noExpiry === true || input.setNoExpiry === true || input.permanent === true || preset === 'no_expiry' || preset === 'none' || preset === 'permanent') {
+    return { accessExpiresAt: null, noExpiry: true, preset: 'no_expiry' };
+  }
+  const now = new Date();
+  if (preset === '30_days' || preset === '30_day') return { accessExpiresAt: addDays(now, 30), noExpiry: false, preset: '30_days' };
+  if (preset === '90_days' || preset === '90_day') return { accessExpiresAt: addDays(now, 90), noExpiry: false, preset: '90_days' };
+  if (preset === '6_months' || preset === '6_month') return { accessExpiresAt: addMonths(now, 6), noExpiry: false, preset: '6_months' };
+  if (preset === '1_year' || preset === 'one_year') return { accessExpiresAt: addMonths(now, 12), noExpiry: false, preset: '1_year' };
+  const rawDate = pickDateAlias(input, 'accessExpiresAt', 'accessExpiryDate');
+  const customRaw = rawDate !== undefined ? rawDate : input.customDate;
+  if (customRaw !== undefined) {
+    const parsed = parseDateOrNull(customRaw);
+    if (parsed === undefined) return { error: { status: 400, message: 'Invalid accessExpiryDate', code: 'INVALID_DATE' } };
+    if (parsed === null) return { accessExpiresAt: null, noExpiry: true, preset: 'no_expiry' };
+    return { accessExpiresAt: parsed, noExpiry: false, preset: 'custom' };
+  }
+  return { accessExpiresAt: fallbackDate || null, noExpiry: fallbackDate ? false : true, preset: fallbackDate ? 'existing' : 'no_expiry' };
+}
+
+async function auditAccountLifecycle(req, action, targetUserId, beforeValue, afterValue, extra = {}) {
+  await logAudit(req, action, targetUserId, {
+    oldValue: beforeValue,
+    newValue: afterValue,
+    before: beforeValue,
+    after: afterValue,
+    actorStaffId: req.user?.staffId || null,
+    actorRole: req.user?.role || null,
+    targetStaffId: extra.targetStaffId || null,
+    reason: auditReasonFromBody(req.body) || extra.reason || null,
+    ...extra,
+  });
 }
 
 function normalizeRequestedStaffId(value) {
@@ -412,6 +514,137 @@ function requireTeamAccountControlRight(rightKey, fallbackPermission = null) {
     if (accountRights.has(rightKey)) return next();
     if (fallbackPermission && hasStaffActionPermission(req.user, fallbackPermission)) return next();
     return bad(res, 403, 'Action denied. Founder permission is required.', 'FORBIDDEN');
+  };
+}
+
+function normalizeDelegatedRights(value) {
+  const allowed = new Set(ACCOUNT_CONTROL_DELEGATED_RIGHTS);
+  const source = Array.isArray(value) ? value : [];
+  const out = [];
+  const seen = new Set();
+  for (const raw of source) {
+    const right = String(raw || '').trim();
+    if (!allowed.has(right) || seen.has(right)) continue;
+    seen.add(right);
+    out.push(right);
+  }
+  return out;
+}
+
+function normalizeManageableAccountTypes(value) {
+  const allowed = new Set(MANAGEABLE_ACCOUNT_TYPES);
+  const source = Array.isArray(value) ? value : [];
+  const out = [];
+  const seen = new Set();
+  for (const raw of source) {
+    const type = String(raw || '').trim().toLowerCase();
+    if (!allowed.has(type) || seen.has(type)) continue;
+    seen.add(type);
+    out.push(type);
+  }
+  return out;
+}
+
+function accountTypeForUser(user) {
+  if (!user || isFounderAccount(user)) return null;
+  const role = normalizeRole(user.role);
+  const position = String(user.position || user.officialTitle || user.designation || '').trim().toLowerCase();
+  const group = String(user.accountGroup || '').trim().toLowerCase();
+  const department = String(user.department || '').trim().toLowerCase();
+  if (role === 'intern' || position.includes('intern') || group.includes('intern') || department.includes('intern')) return 'intern';
+  if (group.includes('field') || department.includes('field') || ['reporter'].includes(role) || position.includes('reporter') || position.includes('coordinator') || position.includes('bureau')) return 'field_network_staff';
+  if (group.includes('newsroom') || department.includes('newsroom') || department.includes('editorial') || ['editor', 'copy editor', 'fact checker', 'live tv controller', 'video editor', 'social media manager'].includes(role) || position.includes('editor')) return 'newsroom_staff';
+  return 'management_staff';
+}
+
+function delegationDto(doc) {
+  if (!doc) return null;
+  const obj = typeof doc.toObject === 'function' ? doc.toObject() : doc;
+  return {
+    id: obj._id ? String(obj._id) : null,
+    _id: obj._id ? String(obj._id) : null,
+    delegatedToStaffId: obj.delegatedToStaffId || null,
+    grantedRights: normalizeDelegatedRights(obj.grantedRights),
+    manageableAccountTypes: normalizeManageableAccountTypes(obj.manageableAccountTypes),
+    startsAt: obj.startsAt || null,
+    expiresAt: obj.expiresAt || null,
+    active: obj.active !== false,
+    appointedByFounderId: obj.appointedByFounderId || null,
+    auditReason: obj.auditReason || null,
+    createdAt: obj.createdAt || null,
+    updatedAt: obj.updatedAt || null,
+  };
+}
+
+function delegationActiveForRight(delegation, rightKey, targetType, now = new Date()) {
+  if (!delegation || delegation.active === false) return false;
+  const startsAt = delegation.startsAt ? new Date(delegation.startsAt) : null;
+  const expiresAt = delegation.expiresAt ? new Date(delegation.expiresAt) : null;
+  if (startsAt && !Number.isNaN(startsAt.getTime()) && startsAt > now) return false;
+  if (expiresAt && (!Number.isNaN(expiresAt.getTime()) && expiresAt <= now)) return false;
+  if (!normalizeDelegatedRights(delegation.grantedRights).includes(rightKey)) return false;
+  return normalizeManageableAccountTypes(delegation.manageableAccountTypes).includes(targetType);
+}
+
+async function findValidDelegation(actor, rightKey, targetType, now = new Date()) {
+  const staffId = String(actor?.staffId || '').trim().toUpperCase();
+  if (!staffId || !rightKey || !targetType) return null;
+  const query = { delegatedToStaffId: staffId, active: true };
+  const found = AccountControlDelegation.find ? await AccountControlDelegation.find(query).lean() : [];
+  return (found || []).find((delegation) => delegationActiveForRight(delegation, rightKey, targetType, now)) || null;
+}
+
+async function actorHasDelegatedRight(req, rightKey, targetUser) {
+  if (actorIsFounder(req)) return { ok: true, founder: true };
+  if (!targetUser || isFounderAccount(targetUser)) return { ok: false, code: 'FOUNDER_PROTECTED' };
+  const targetType = accountTypeForUser(targetUser);
+  const delegation = await findValidDelegation(req.user, rightKey, targetType);
+  if (delegation) return { ok: true, delegation };
+
+  const legacyRight = DELEGATED_RIGHT_TO_LEGACY_RIGHT[rightKey];
+  const explicitRights = new Set(Array.isArray(req.user?.accountControlRights) ? req.user.accountControlRights : []);
+  if (legacyRight && explicitRights.has(legacyRight)) return { ok: true, legacyRight };
+  return { ok: false, code: 'DELEGATED_RIGHT_REQUIRED' };
+}
+
+function requireDelegatedAccountControlRight(rightKey) {
+  return async (req, res, next) => {
+    if (!req.user) return authBad(res, 401, 'UNAUTHORIZED');
+    if (actorIsFounder(req)) return next();
+    const user = req.accountControlTargetUser || await findUserByIdOrStaffId(req.params.id, res);
+    if (!user) return;
+    req.accountControlTargetUser = user;
+    const decision = await actorHasDelegatedRight(req, rightKey, user);
+    if (decision.ok) {
+      req.accountControlDelegation = decision.delegation || null;
+      return next();
+    }
+    if (decision.code === 'FOUNDER_PROTECTED') return bad(res, 403, FOUNDER_PROTECTED_MESSAGE, 'FOUNDER_PROTECTED');
+    return bad(res, 403, 'Delegated account-control right required.', 'FORBIDDEN');
+  };
+}
+
+function requireDelegatedRegistryRight(rightKey) {
+  return async (req, res, next) => {
+    if (!req.user) return authBad(res, 401, 'UNAUTHORIZED');
+    if (actorIsFounder(req)) return next();
+    const staffId = String(req.user.staffId || '').trim().toUpperCase();
+    if (!staffId) return bad(res, 403, 'Delegated account-control right required.', 'FORBIDDEN');
+    const found = AccountControlDelegation.find ? await AccountControlDelegation.find({ delegatedToStaffId: staffId, active: true }).lean() : [];
+    const active = (found || []).some((delegation) => {
+      const rights = normalizeDelegatedRights(delegation.grantedRights);
+      const types = normalizeManageableAccountTypes(delegation.manageableAccountTypes);
+      const startsAt = delegation.startsAt ? new Date(delegation.startsAt) : null;
+      const expiresAt = delegation.expiresAt ? new Date(delegation.expiresAt) : null;
+      const now = new Date();
+      return rights.includes(rightKey)
+        && types.length > 0
+        && (!startsAt || Number.isNaN(startsAt.getTime()) || startsAt <= now)
+        && (!expiresAt || Number.isNaN(expiresAt.getTime()) || expiresAt > now)
+        && delegation.active !== false;
+    });
+    if (active) return next();
+    return bad(res, 403, 'Delegated account-control right required.', 'FORBIDDEN');
   };
 }
 
@@ -703,6 +936,7 @@ async function createUserHandler(req, res) {
     createdBy: actorId(req),
     updatedBy: actorId(req),
     accessExpiresAt: accessExpiresAt === undefined ? null : accessExpiresAt,
+    noExpiry: body.noExpiry === true || accessExpiresAt === null || accessExpiresAt === undefined,
     isFounder: false,
     isProtected: false,
     createdAt: new Date(),
@@ -1036,24 +1270,25 @@ async function accessOverrideHandler(req, res) {
 
 async function suspendUserHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await findUserById(req.params.id, res);
+  const user = req.accountControlTargetUser || await findUserByIdOrStaffId(req.params.id, res);
   if (!user) return;
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_SUSPENDED'))) return;
   const now = new Date();
   await markUserSessionsRevoked(user._id, now, 'staff_suspended');
 
   const updated = await User.findByIdAndUpdate(
-    req.params.id,
-    { $set: { status: 'suspended', accountStatus: 'suspended', loginAllowed: false, sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now, updatedBy: actorId(req), updatedAt: now }, $inc: { tokenVersion: 1 } },
+    user._id,
+    { $set: { status: 'suspended', accountStatus: 'suspended', loginAllowed: false, suspendedAt: now, sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now, updatedBy: actorId(req), updatedAt: now }, $inc: { tokenVersion: 1 } },
     { new: true },
   );
-  await logAudit(req, 'STAFF_SUSPENDED', req.params.id, null);
+  await logAudit(req, 'STAFF_SUSPENDED', String(user._id), null);
+  await auditAccountLifecycle(req, 'ACCOUNT_SUSPENDED', String(user._id), { accountStatus: user.accountStatus || user.status || null }, { accountStatus: updated.accountStatus, suspendedAt: updated.suspendedAt }, { targetStaffId: updated.staffId || null });
   return ok(res, { message: 'Staff account suspended.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
 }
 
 async function lockUserHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await findUserById(req.params.id, res);
+  const user = req.accountControlTargetUser || await findUserByIdOrStaffId(req.params.id, res);
   if (!user) return;
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_LOCKED'))) return;
 
@@ -1064,50 +1299,71 @@ async function lockUserHandler(req, res) {
   const now = new Date();
   await markUserSessionsRevoked(user._id, now, 'staff_locked');
   const updated = await User.findByIdAndUpdate(
-    req.params.id,
-    { $set: { status: 'locked', accountStatus: 'locked', lockedUntil: finalLockedUntil, sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now, updatedBy: actorId(req), updatedAt: now }, $inc: { tokenVersion: 1 } },
+    user._id,
+    { $set: { status: 'locked', accountStatus: 'locked', loginAllowed: false, lockedAt: now, lockedUntil: finalLockedUntil, sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now, updatedBy: actorId(req), updatedAt: now }, $inc: { tokenVersion: 1 } },
     { new: true },
   );
-  await logAudit(req, 'STAFF_LOCKED', req.params.id, { lockedUntil: finalLockedUntil });
+  await logAudit(req, 'STAFF_LOCKED', String(user._id), { lockedUntil: finalLockedUntil });
+  await auditAccountLifecycle(req, 'ACCOUNT_LOCKED', String(user._id), { accountStatus: user.accountStatus || user.status || null }, { accountStatus: updated.accountStatus, lockedAt: updated.lockedAt, lockedUntil: updated.lockedUntil }, { targetStaffId: updated.staffId || null });
   return ok(res, { message: 'Staff account locked.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
+}
+
+async function unlockUserHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = req.accountControlTargetUser || await findUserByIdOrStaffId(req.params.id, res);
+  if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_UNLOCKED'))) return;
+  if (isAccountExpired(user)) return bad(res, 400, 'Account access has expired. Reactivate the account instead.', 'ACCOUNT_EXPIRED');
+  const now = new Date();
+  const updated = await User.findByIdAndUpdate(
+    user._id,
+    { $set: { status: 'active', accountStatus: 'active', loginAllowed: true, lockedUntil: null, lockedAt: null, updatedBy: actorId(req), updatedAt: now }, $inc: { tokenVersion: 1 } },
+    { new: true },
+  );
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await logAudit(req, 'STAFF_UNLOCKED', String(user._id), { fromStatus: user.accountStatus || user.status || null });
+  await auditAccountLifecycle(req, 'ACCOUNT_UNLOCKED', String(user._id), { accountStatus: user.accountStatus || user.status || null, lockedAt: user.lockedAt || null }, { accountStatus: updated.accountStatus, lockedAt: null }, { targetStaffId: updated.staffId || null });
+  return ok(res, { message: 'Staff account unlocked.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
 }
 
 async function resetPasswordHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await findUserById(req.params.id, res);
+  const user = req.accountControlTargetUser || await findUserByIdOrStaffId(req.params.id, res);
   if (!user) return;
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_PASSWORD_RESET'))) return;
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const resolved = resolveTemporaryPasswordInput(body);
   if (resolved.error) return bad(res, resolved.error.status, resolved.error.message, resolved.error.code);
 
-  const { updated, tempPassword, tempPasswordExpiresAt } = await assignTemporaryPassword(req.params.id, {
+  const { updated, tempPassword, tempPasswordExpiresAt } = await assignTemporaryPassword(user._id, {
     temporaryPassword: resolved.temporaryPassword,
     sessionReason: 'staff_password_reset',
   });
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
-  await logAudit(req, 'STAFF_PASSWORD_RESET', req.params.id, { temporaryPasswordExpiresAt: tempPasswordExpiresAt, providedTemporaryPassword: resolved.provided });
+  await logAudit(req, 'STAFF_PASSWORD_RESET', String(user._id), { temporaryPasswordExpiresAt: tempPasswordExpiresAt, providedTemporaryPassword: resolved.provided });
+  await auditAccountLifecycle(req, 'PASSWORD_RESET_REQUIRED', String(user._id), { passwordStatus: 'set' }, { passwordStatus: 'force_change_required', temporaryPasswordExpiresAt: tempPasswordExpiresAt }, { targetStaffId: updated.staffId || null });
   return ok(res, { message: 'Temporary password generated. It is shown only once.', data: { user: safeUserDto(updated), temporaryPassword: tempPassword, tempPassword, tempPasswordExpiresAt }, user: safeUserDto(updated), temporaryPassword: tempPassword, tempPasswordExpiresAt });
 }
 
 async function generateTemporaryPasswordHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await findUserById(req.params.id, res);
+  const user = req.accountControlTargetUser || await findUserByIdOrStaffId(req.params.id, res);
   if (!user) return;
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_TEMP_PASSWORD_GENERATED'))) return;
-  const { updated, tempPassword, tempPasswordExpiresAt } = await assignTemporaryPassword(req.params.id, { sessionReason: 'staff_temp_password_generated' });
+  const { updated, tempPassword, tempPasswordExpiresAt } = await assignTemporaryPassword(user._id, { sessionReason: 'staff_temp_password_generated' });
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
-  await logAudit(req, 'STAFF_TEMP_PASSWORD_GENERATED', req.params.id, { temporaryPasswordExpiresAt: tempPasswordExpiresAt });
+  await logAudit(req, 'STAFF_TEMP_PASSWORD_GENERATED', String(user._id), { temporaryPasswordExpiresAt: tempPasswordExpiresAt });
+  await auditAccountLifecycle(req, 'PASSWORD_RESET_REQUIRED', String(user._id), { passwordStatus: 'set' }, { passwordStatus: 'force_change_required', temporaryPasswordExpiresAt: tempPasswordExpiresAt }, { targetStaffId: updated.staffId || null });
   return ok(res, { message: 'Temporary password generated. It is shown only once.', data: { user: safeUserDto(updated), temporaryPassword: tempPassword, tempPasswordExpiresAt }, user: safeUserDto(updated), temporaryPassword: tempPassword, tempPasswordExpiresAt });
 }
 
 async function forcePasswordChangeHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await findUserById(req.params.id, res);
+  const user = req.accountControlTargetUser || await findUserByIdOrStaffId(req.params.id, res);
   if (!user) return;
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_FORCE_CHANGE_PASSWORD'))) return;
   if (user.mustChangePassword || user.mustResetPassword || user.forceReset) {
-    await logAudit(req, 'STAFF_FORCE_CHANGE_PASSWORD', req.params.id, { alreadyRequired: true });
+    await logAudit(req, 'STAFF_FORCE_CHANGE_PASSWORD', String(user._id), { alreadyRequired: true });
     return ok(res, { message: 'Password change already required.', data: { user: safeUserDto(user) }, user: safeUserDto(user) });
   }
 
@@ -1116,7 +1372,7 @@ async function forcePasswordChangeHandler(req, res) {
   if (body.logoutAllDevices === true) await markUserSessionsRevoked(user._id, now, 'staff_force_change_password');
 
   const updated = await User.findByIdAndUpdate(
-    req.params.id,
+    user._id,
     {
       $set: {
         mustChangePassword: true,
@@ -1130,7 +1386,8 @@ async function forcePasswordChangeHandler(req, res) {
     },
     { new: true },
   );
-  await logAudit(req, 'STAFF_FORCE_CHANGE_PASSWORD', req.params.id, { logoutAllDevices: body.logoutAllDevices === true });
+  await logAudit(req, 'STAFF_FORCE_CHANGE_PASSWORD', String(user._id), { logoutAllDevices: body.logoutAllDevices === true });
+  await auditAccountLifecycle(req, 'PASSWORD_RESET_REQUIRED', String(user._id), { passwordStatus: 'set' }, { passwordStatus: 'force_change_required' }, { targetStaffId: updated.staffId || null });
   return ok(res, { message: 'Password change required on next login.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
 }
 
@@ -1156,75 +1413,235 @@ async function permissionsHandler(req, res) {
 
 async function logoutAllHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await findUserById(req.params.id, res);
+  const user = req.accountControlTargetUser || await findUserByIdOrStaffId(req.params.id, res);
   if (!user) return;
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_LOGOUT_ALL_DEVICES'))) return;
   const now = new Date();
   await markUserSessionsRevoked(user._id, now, 'staff_logout_all_devices');
   const updated = await User.findByIdAndUpdate(
-    req.params.id,
+    user._id,
     { $inc: { tokenVersion: 1 }, $set: { sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now, updatedBy: actorId(req), updatedAt: now } },
     { new: true },
   );
-  await logAudit(req, 'STAFF_LOGOUT_ALL_DEVICES', req.params.id, null);
+  await logAudit(req, 'STAFF_LOGOUT_ALL_DEVICES', String(user._id), null);
+  await auditAccountLifecycle(req, 'SESSIONS_REVOKED', String(user._id), { tokenVersion: user.tokenVersion || 0 }, { tokenVersion: updated.tokenVersion, sessionsRevokedAt: now }, { targetStaffId: updated.staffId || null });
   return ok(res, { message: 'All staff sessions revoked.', data: { user: safeUserDto(updated), tokenVersion: updated.tokenVersion }, user: safeUserDto(updated), tokenVersion: updated.tokenVersion });
 }
 
 async function extendAccessHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await findUserById(req.params.id, res);
+  const user = req.accountControlTargetUser || await findUserByIdOrStaffId(req.params.id, res);
   if (!user) return;
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_ACCESS_EXTENDED'))) return;
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  const rawDate = pickDateAlias(body, 'accessExpiresAt', 'accessExpiryDate');
-  const accessExpiresAt = parseDateOrNull(rawDate);
-  if (accessExpiresAt === undefined || accessExpiresAt === null) return bad(res, 400, 'Valid accessExpiryDate is required', 'INVALID_DATE');
+  const expiry = resolveAccessExpiryInput(body, user.accessExpiresAt || null);
+  if (expiry.error) return bad(res, expiry.error.status, expiry.error.message, expiry.error.code);
   const now = new Date();
-  const wasExpired = String(user.accountStatus || user.status || '').toLowerCase() === 'expired' || (user.accessExpiresAt && user.accessExpiresAt <= now);
-  const patch = { accessExpiresAt, updatedBy: actorId(req), updatedAt: now };
+  const accessExpiresAt = expiry.accessExpiresAt;
+  const wasExpired = lifecycleStatus(user, now) === ACCOUNT_STATUS.EXPIRED;
+  const patch = { accessExpiresAt, noExpiry: expiry.noExpiry, updatedBy: actorId(req), updatedAt: now };
   if (wasExpired) Object.assign(patch, { status: 'active', accountStatus: 'active', loginAllowed: true, lockedUntil: null });
-  const updated = await User.findByIdAndUpdate(req.params.id, { $set: patch }, { new: true });
+  const update = { $set: patch };
+  if (wasExpired || body.logoutAllDevices === true) {
+    await markUserSessionsRevoked(user._id, now, 'staff_access_extended');
+    Object.assign(update.$set, { sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now });
+    update.$inc = { tokenVersion: 1 };
+  }
+  const updated = await User.findByIdAndUpdate(user._id, update, { new: true });
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
-  await logAudit(req, 'STAFF_ACCESS_EXTENDED', req.params.id, { accessExpiresAt, reactivatedExpiredAccount: wasExpired });
+  await logAudit(req, 'STAFF_ACCESS_EXTENDED', String(user._id), { accessExpiresAt, noExpiry: expiry.noExpiry, reactivatedExpiredAccount: wasExpired });
+  await auditAccountLifecycle(req, expiry.noExpiry ? 'ACCOUNT_NO_EXPIRY_SET' : 'ACCOUNT_EXPIRY_EXTENDED', String(user._id), { accountStatus: user.accountStatus || user.status || null, accessExpiresAt: user.accessExpiresAt || null, noExpiry: hasNoExpiry(user) }, { accountStatus: updated.accountStatus, accessExpiresAt: updated.accessExpiresAt || null, noExpiry: updated.noExpiry === true }, { targetStaffId: updated.staffId || null });
   return ok(res, { message: 'Staff access extended.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
 }
 
 async function reactivateUserHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await findUserById(req.params.id, res);
+  const user = req.accountControlTargetUser || await findUserByIdOrStaffId(req.params.id, res);
   if (!user) return;
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_REACTIVATED'))) return;
   const current = String(user.accountStatus || user.status || 'active').toLowerCase();
   if (!['expired', 'suspended', 'archived', 'locked', 'active'].includes(current)) return bad(res, 400, 'Account cannot be reactivated from current status', 'INVALID_STATUS');
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  const rawDate = pickDateAlias(body, 'accessExpiresAt', 'accessExpiryDate');
-  const accessExpiresAt = rawDate === undefined ? user.accessExpiresAt || null : parseDateOrNull(rawDate);
-  if (accessExpiresAt === undefined) return bad(res, 400, 'Invalid accessExpiryDate', 'INVALID_DATE');
+  const expiry = resolveAccessExpiryInput(body, user.accessExpiresAt || null);
+  if (expiry.error) return bad(res, expiry.error.status, expiry.error.message, expiry.error.code);
   const now = new Date();
+  await markUserSessionsRevoked(user._id, now, 'staff_reactivated');
   const updated = await User.findByIdAndUpdate(
-    req.params.id,
-    { $set: { status: 'active', accountStatus: 'active', loginAllowed: true, lockedUntil: null, accessExpiresAt, updatedBy: actorId(req), updatedAt: now }, $inc: { tokenVersion: 1 } },
+    user._id,
+    { $set: { status: 'active', accountStatus: 'active', loginAllowed: true, lockedUntil: null, lockedAt: null, suspendedAt: null, isArchived: false, archivedAt: null, archivedBy: null, accessExpiresAt: expiry.accessExpiresAt, noExpiry: expiry.noExpiry, reactivatedAt: now, sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now, updatedBy: actorId(req), updatedAt: now }, $inc: { tokenVersion: 1 } },
     { new: true },
   );
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
-  await logAudit(req, 'STAFF_REACTIVATED', req.params.id, { fromStatus: current, accessExpiresAt });
-  return ok(res, { message: 'Staff account reactivated.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
+  let passwordPayload = {};
+  if (body.resetPassword === true || body.requirePasswordReset === true || body.reactivateAndResetPassword === true) {
+    const resolved = resolveTemporaryPasswordInput(body);
+    if (resolved.error) return bad(res, resolved.error.status, resolved.error.message, resolved.error.code);
+    const reset = await assignTemporaryPassword(user._id, { temporaryPassword: resolved.temporaryPassword, sessionReason: 'staff_reactivated_password_reset' });
+    if (reset.updated) {
+      passwordPayload = { temporaryPassword: reset.tempPassword, tempPassword: reset.tempPassword, tempPasswordExpiresAt: reset.tempPasswordExpiresAt, user: safeUserDto(reset.updated) };
+    }
+  }
+  const finalUser = passwordPayload.user ? await User.findById(user._id) : updated;
+  await logAudit(req, 'STAFF_REACTIVATED', String(user._id), { fromStatus: current, accessExpiresAt: expiry.accessExpiresAt, noExpiry: expiry.noExpiry, passwordResetRequired: Boolean(passwordPayload.temporaryPassword) });
+  await auditAccountLifecycle(req, 'ACCOUNT_REACTIVATED', String(user._id), { accountStatus: current, accessExpiresAt: user.accessExpiresAt || null, noExpiry: hasNoExpiry(user), staffId: user.staffId || null }, { accountStatus: 'active', accessExpiresAt: finalUser.accessExpiresAt || null, noExpiry: finalUser.noExpiry === true, staffId: finalUser.staffId || null }, { targetStaffId: finalUser.staffId || null });
+  return ok(res, { message: 'Staff account reactivated.', data: { user: safeUserDto(finalUser), ...passwordPayload }, user: safeUserDto(finalUser), ...passwordPayload });
+}
+
+async function keepExpiredHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = req.accountControlTargetUser || await findUserByIdOrStaffId(req.params.id, res);
+  if (!user) return;
+  if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_KEPT_EXPIRED'))) return;
+  const now = new Date();
+  await markUserSessionsRevoked(user._id, now, 'staff_kept_expired');
+  const updated = await User.findByIdAndUpdate(
+    user._id,
+    { $set: { status: 'expired', accountStatus: 'expired', loginAllowed: false, noExpiry: false, accessExpiresAt: user.accessExpiresAt || now, sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now, updatedBy: actorId(req), updatedAt: now }, $inc: { tokenVersion: 1 } },
+    { new: true },
+  );
+  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  await auditAccountLifecycle(req, 'ACCOUNT_KEPT_EXPIRED', String(user._id), { accountStatus: user.accountStatus || user.status || null }, { accountStatus: updated.accountStatus, accessExpiresAt: updated.accessExpiresAt || null }, { targetStaffId: updated.staffId || null });
+  return ok(res, { message: 'Staff account kept expired.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
+}
+
+async function accountControlStateHandler(req, res) {
+  if (!ensureDb(res)) return;
+  const user = req.accountControlTargetUser || await findUserByIdOrStaffId(req.params.id, res);
+  if (!user) return;
+  const roleDoc = await loadRoleDocForUser(user);
+  const effectiveAccess = await buildFounderStudioEffectiveAccess(user, roleDoc);
+  const status = lifecycleStatus(user);
+  const activeSessionCount = user.currentSessionId ? 1 : 0;
+  const accountState = {
+    staffId: user.staffId || null,
+    loginEmail: user.email || null,
+    accountStatus: status,
+    accessStartAt: user.createdAt || null,
+    accessExpiresAt: hasNoExpiry(user) ? null : (user.accessExpiresAt || null),
+    accountExpiresAt: hasNoExpiry(user) ? null : (user.accessExpiresAt || null),
+    noExpiry: hasNoExpiry(user),
+    lastLoginAt: user.lastLoginAt || null,
+    passwordStatus: (user.mustChangePassword || user.mustResetPassword || user.forceReset) ? 'force_change_required' : 'set',
+    forcePasswordChange: Boolean(user.mustChangePassword || user.mustResetPassword || user.forceReset),
+    activeSessionCount,
+    suspendedAt: user.suspendedAt || null,
+    lockedAt: user.lockedAt || null,
+    archivedAt: user.archivedAt || null,
+    reactivatedAt: user.reactivatedAt || null,
+    updatedAt: user.updatedAt || null,
+    updatedBy: user.updatedBy || null,
+  };
+  const baseUser = typeof user.toObject === 'function' ? user.toObject() : user;
+  const userDto = safeUserDto({ ...baseUser, activeSessionCount });
+  return ok(res, { data: { user: userDto, accountState, effectiveAccess }, user: userDto, accountState, effectiveAccess });
+}
+
+async function listDelegationsHandler(req, res) {
+  if (!ensureDb(res)) return;
+  if (!actorIsFounder(req)) return bad(res, 403, 'Founder role required', 'FOUNDER_REQUIRED');
+  const filter = {};
+  if (req.query?.staffId) filter.delegatedToStaffId = String(req.query.staffId || '').trim().toUpperCase();
+  const docs = await AccountControlDelegation.find(filter).sort({ updatedAt: -1, createdAt: -1 }).lean();
+  const delegations = (docs || []).map(delegationDto);
+  return ok(res, { data: { delegations, rights: ACCOUNT_CONTROL_DELEGATED_RIGHTS, manageableAccountTypes: MANAGEABLE_ACCOUNT_TYPES }, delegations, rights: ACCOUNT_CONTROL_DELEGATED_RIGHTS, manageableAccountTypes: MANAGEABLE_ACCOUNT_TYPES });
+}
+
+async function grantDelegationHandler(req, res) {
+  if (!ensureDb(res)) return;
+  if (!actorIsFounder(req)) return bad(res, 403, 'Founder role required', 'FOUNDER_REQUIRED');
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const delegatedToStaffId = String(body.delegatedToStaffId || body.staffId || '').trim().toUpperCase();
+  if (!delegatedToStaffId) return bad(res, 400, 'delegatedToStaffId is required', 'MISSING_STAFF_ID');
+  const target = await User.findOne({ staffId: delegatedToStaffId });
+  if (!target) return bad(res, 404, 'Staff not found', 'NOT_FOUND');
+  if (isFounderAccount(target)) return bad(res, 403, FOUNDER_PROTECTED_MESSAGE, 'FOUNDER_PROTECTED');
+  const grantedRights = normalizeDelegatedRights(body.grantedRights || body.rights);
+  const manageableAccountTypes = normalizeManageableAccountTypes(body.manageableAccountTypes || body.accountTypes);
+  if (!grantedRights.length) return bad(res, 400, 'At least one delegated right is required', 'NO_DELEGATED_RIGHTS');
+  if (!manageableAccountTypes.length) return bad(res, 400, 'At least one manageable account type is required', 'NO_MANAGEABLE_ACCOUNT_TYPES');
+  const startsAt = body.startsAt === undefined ? new Date() : parseDateOrNull(body.startsAt);
+  const expiresAt = body.expiresAt === undefined ? null : parseDateOrNull(body.expiresAt);
+  if (startsAt === undefined || expiresAt === undefined) return bad(res, 400, 'Invalid delegation date', 'INVALID_DATE');
+  const auditReason = auditReasonFromBody(body);
+  if (!auditReason) return bad(res, 400, 'auditReason is required', 'AUDIT_REASON_REQUIRED');
+  const created = await AccountControlDelegation.create({
+    delegatedToStaffId,
+    grantedRights,
+    manageableAccountTypes,
+    startsAt,
+    expiresAt,
+    active: body.active !== false,
+    appointedByFounderId: req.user?.staffId || req.user?.id || FOUNDER_STAFF_ID,
+    auditReason,
+  });
+  await logAudit(req, 'DELEGATION_GRANTED', String(target._id), { targetStaffId: delegatedToStaffId, grantedRights, manageableAccountTypes, startsAt, expiresAt, reason: auditReason });
+  return ok(res, { message: 'Delegation granted.', data: { delegation: delegationDto(created) }, delegation: delegationDto(created) }, 201);
+}
+
+async function updateDelegationHandler(req, res) {
+  if (!ensureDb(res)) return;
+  if (!actorIsFounder(req)) return bad(res, 403, 'Founder role required', 'FOUNDER_REQUIRED');
+  if (!mongoose.isValidObjectId(String(req.params.id))) return bad(res, 400, 'Invalid delegation id', 'INVALID_ID');
+  const existing = await AccountControlDelegation.findById(String(req.params.id)).lean();
+  if (!existing) return bad(res, 404, 'Delegation not found', 'NOT_FOUND');
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const patch = { updatedAt: new Date() };
+  if (body.grantedRights !== undefined || body.rights !== undefined) {
+    patch.grantedRights = normalizeDelegatedRights(body.grantedRights || body.rights);
+    if (!patch.grantedRights.length) return bad(res, 400, 'At least one delegated right is required', 'NO_DELEGATED_RIGHTS');
+  }
+  if (body.manageableAccountTypes !== undefined || body.accountTypes !== undefined) {
+    patch.manageableAccountTypes = normalizeManageableAccountTypes(body.manageableAccountTypes || body.accountTypes);
+    if (!patch.manageableAccountTypes.length) return bad(res, 400, 'At least one manageable account type is required', 'NO_MANAGEABLE_ACCOUNT_TYPES');
+  }
+  if (body.startsAt !== undefined) {
+    const startsAt = parseDateOrNull(body.startsAt);
+    if (startsAt === undefined) return bad(res, 400, 'Invalid startsAt', 'INVALID_DATE');
+    patch.startsAt = startsAt || new Date();
+  }
+  if (body.expiresAt !== undefined) {
+    const expiresAt = parseDateOrNull(body.expiresAt);
+    if (expiresAt === undefined) return bad(res, 400, 'Invalid expiresAt', 'INVALID_DATE');
+    patch.expiresAt = expiresAt;
+  }
+  if (body.active !== undefined) patch.active = body.active !== false;
+  const auditReason = auditReasonFromBody(body);
+  if (auditReason) patch.auditReason = auditReason;
+  const updated = await AccountControlDelegation.findByIdAndUpdate(String(req.params.id), { $set: patch }, { new: true });
+  await logAudit(req, 'DELEGATION_UPDATED', null, { targetStaffId: existing.delegatedToStaffId || null, oldValue: delegationDto(existing), newValue: delegationDto(updated), reason: auditReason });
+  return ok(res, { message: 'Delegation updated.', data: { delegation: delegationDto(updated) }, delegation: delegationDto(updated) });
+}
+
+async function revokeDelegationHandler(req, res) {
+  if (!ensureDb(res)) return;
+  if (!actorIsFounder(req)) return bad(res, 403, 'Founder role required', 'FOUNDER_REQUIRED');
+  if (!mongoose.isValidObjectId(String(req.params.id))) return bad(res, 400, 'Invalid delegation id', 'INVALID_ID');
+  const existing = await AccountControlDelegation.findById(String(req.params.id)).lean();
+  if (!existing) return bad(res, 404, 'Delegation not found', 'NOT_FOUND');
+  const updated = await AccountControlDelegation.findByIdAndUpdate(String(req.params.id), { $set: { active: false, updatedAt: new Date(), auditReason: auditReasonFromBody(req.body) || existing.auditReason || null } }, { new: true });
+  const target = existing.delegatedToStaffId ? await User.findOne({ staffId: existing.delegatedToStaffId }) : null;
+  if (target && !isFounderAccount(target)) {
+    await User.findByIdAndUpdate(target._id, { $inc: { tokenVersion: 1 }, $set: { sessionsRevokedAt: new Date(), updatedAt: new Date() } });
+  }
+  await logAudit(req, 'DELEGATION_REVOKED', target?._id ? String(target._id) : null, { targetStaffId: existing.delegatedToStaffId || null, oldValue: delegationDto(existing), newValue: delegationDto(updated), reason: auditReasonFromBody(req.body) || null });
+  return ok(res, { message: 'Delegation revoked.', data: { delegation: delegationDto(updated) }, delegation: delegationDto(updated) });
 }
 
 async function archiveUserHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await findUserById(req.params.id, res);
+  const user = req.accountControlTargetUser || await findUserByIdOrStaffId(req.params.id, res);
   if (!user) return;
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_ARCHIVED'))) return;
   const now = new Date();
   await markUserSessionsRevoked(user._id, now, 'staff_archived');
   const updated = await User.findByIdAndUpdate(
-    req.params.id,
+    user._id,
     { $set: { status: 'archived', accountStatus: 'archived', isArchived: true, archivedAt: now, archivedBy: actorId(req), loginAllowed: false, sessionsRevokedAt: now, currentSessionId: null, onlineStatus: 'offline', lastLogoutAt: now, updatedBy: actorId(req), updatedAt: now }, $inc: { tokenVersion: 1 } },
     { new: true },
   );
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
-  await logAudit(req, 'STAFF_ARCHIVED', req.params.id, { reason: String(req.body?.reason || '').trim().slice(0, 500) || null });
+  await logAudit(req, 'STAFF_ARCHIVED', String(user._id), { reason: String(req.body?.reason || '').trim().slice(0, 500) || null });
+  await auditAccountLifecycle(req, 'ACCOUNT_ARCHIVED', String(user._id), { accountStatus: user.accountStatus || user.status || null }, { accountStatus: updated.accountStatus, archivedAt: updated.archivedAt }, { targetStaffId: updated.staffId || null });
   return ok(res, { message: 'Staff account archived. Audit history was kept.', data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
 }
 
@@ -1470,6 +1887,27 @@ function parseKeyMap(...candidates) {
   return { provided: false, keys: [] };
 }
 
+function auditReasonFromBody(body) {
+  const reason = String(body?.auditReason || body?.reason || '').trim();
+  return reason.length >= 3 ? reason.slice(0, 500) : null;
+}
+
+function parseModuleAccessStates(body) {
+  return parseStaffModuleAccessPayload(body);
+}
+
+async function buildFounderStudioEffectiveAccess(user, roleDoc) {
+  const legacyAccess = computeEffectiveAccess(user, roleDoc, isSafeZoneMasterLocked());
+  const policy = await getFounderModulePolicy({ defaultWhenDbUnavailable: true });
+  const canonicalModules = evaluateAllModuleAccess(user, policy);
+  return {
+    ...legacyAccess,
+    accessVersion: typeof user?.accessVersion === 'number' ? user.accessVersion : 0,
+    policyVersion: policy.version,
+    canonicalModules,
+  };
+}
+
 async function accessStaffListHandler(req, res) {
   if (!isDbReady()) return ok(res, { data: { staff: [], availableRoles: TEAM_ROLES }, staff: [], users: [] });
   const docs = await User.find(userListQuery({})).sort({ createdAt: -1 }).lean();
@@ -1483,42 +1921,59 @@ async function accessStaffListHandler(req, res) {
 
 async function accessStaffDetailHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await findUserById(req.params.id, res);
+  const user = await findUserByIdOrStaffId(req.params.id, res);
   if (!user) return;
   const roleDoc = await loadRoleDocForUser(user);
-  const effectiveAccess = computeEffectiveAccess(user, roleDoc, isSafeZoneMasterLocked());
+  const effectiveAccess = await buildFounderStudioEffectiveAccess(user, roleDoc);
   return ok(res, { data: { user: safeUserDto(user), effectiveAccess }, user: safeUserDto(user), effectiveAccess });
 }
 
 async function effectiveAccessHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await findUserById(req.params.id, res);
+  const user = await findUserByIdOrStaffId(req.params.id, res);
   if (!user) return;
   const roleDoc = await loadRoleDocForUser(user);
-  const effectiveAccess = computeEffectiveAccess(user, roleDoc, isSafeZoneMasterLocked());
+  const effectiveAccess = await buildFounderStudioEffectiveAccess(user, roleDoc);
   return ok(res, { data: { effectiveAccess }, effectiveAccess });
 }
 
 async function setModuleAccessHandler(req, res) {
   if (!ensureDb(res)) return;
-  const user = await findUserById(req.params.id, res);
+  const user = await findUserByIdOrStaffId(req.params.id, res);
   if (!user) return;
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_MODULE_ACCESS_CHANGED'))) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  const parsed = parseKeyMap(body.modules, body.moduleAccess, body.moduleAccessOverride);
+  const reason = auditReasonFromBody(body);
+  if (!reason) return bad(res, 400, 'auditReason is required', 'AUDIT_REASON_REQUIRED');
+  const parsed = parseModuleAccessStates(body);
   if (!parsed.provided) return bad(res, 400, 'modules is required', 'NO_MODULE_CHANGES');
-  const moduleAccessOverride = normalizeModuleAccess(parsed.keys);
+  if (parsed.errors.length) {
+    const first = parsed.errors[0];
+    return res.status(400).json({
+      ok: false,
+      success: false,
+      status: 400,
+      code: 'INVALID_MODULE_ACCESS_PAYLOAD',
+      message: 'Invalid module access payload',
+      field: first.field,
+      invalidField: first.field,
+      reason: first.reason,
+      invalidFields: parsed.errors,
+    });
+  }
+  const moduleAccessStates = parsed.states;
+  const moduleAccessOverride = normalizeModuleAccess(parsed.enabledLegacyKeys);
 
   const updated = await User.findByIdAndUpdate(
-    req.params.id,
-    { $set: { moduleAccessOverride, updatedBy: actorId(req), updatedAt: new Date() } },
+    user._id,
+    { $set: { moduleAccessOverride, moduleAccessStates, updatedBy: actorId(req), updatedAt: new Date() }, $inc: { accessVersion: 1 } },
     { new: true },
   );
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
-  await logAudit(req, 'TEAM_ACCESS_CHANGE', String(updated._id), { moduleAccessOverride });
+  await logAudit(req, 'TEAM_ACCESS_CHANGE', String(updated._id), { oldValue: { moduleAccessOverride: user.moduleAccessOverride || [], moduleAccessStates: user.moduleAccessStates || {} }, newValue: { moduleAccessOverride, moduleAccessStates }, moduleAccessOverride, moduleAccessStates, reason, accessVersion: updated.accessVersion });
   const roleDoc = await loadRoleDocForUser(updated);
-  return ok(res, { message: 'Module access updated.', data: { user: safeUserDto(updated), effectiveAccess: computeEffectiveAccess(updated, roleDoc, isSafeZoneMasterLocked()) }, user: safeUserDto(updated) });
+  return ok(res, { message: 'Module access updated.', data: { user: safeUserDto(updated), record: { moduleAccessOverride, moduleAccessStates, accessVersion: updated.accessVersion }, effectiveAccess: await buildFounderStudioEffectiveAccess(updated, roleDoc) }, user: safeUserDto(updated), record: { moduleAccessOverride, moduleAccessStates, accessVersion: updated.accessVersion } });
 }
 
 async function setSpecialRightsHandler(req, res) {
@@ -1528,6 +1983,8 @@ async function setSpecialRightsHandler(req, res) {
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_SPECIAL_RIGHTS_CHANGED'))) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const reason = auditReasonFromBody(body);
+  if (!reason) return bad(res, 400, 'auditReason is required', 'AUDIT_REASON_REQUIRED');
   const parsed = parseKeyMap(body.rights, body.specialRights, body.specialRightsOverride);
   if (!parsed.provided) return bad(res, 400, 'rights is required', 'NO_RIGHT_CHANGES');
   // Founder-only rights can never be granted to non-founder staff via the studio.
@@ -1539,15 +1996,15 @@ async function setSpecialRightsHandler(req, res) {
 
   const updated = await User.findByIdAndUpdate(
     req.params.id,
-    { $set: { specialRightsOverride, permissions, updatedBy: actorId(req), updatedAt: new Date() } },
+    { $set: { specialRightsOverride, permissions, updatedBy: actorId(req), updatedAt: new Date() }, $inc: { accessVersion: 1 } },
     { new: true },
   );
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
-  await logAudit(req, 'TEAM_SPECIAL_RIGHTS_CHANGE', String(updated._id), { specialRightsOverride, blockedFounderOnly });
+  await logAudit(req, 'TEAM_SPECIAL_RIGHTS_CHANGE', String(updated._id), { oldValue: user.specialRightsOverride || [], newValue: specialRightsOverride, specialRightsOverride, blockedFounderOnly, reason, accessVersion: updated.accessVersion });
   const roleDoc = await loadRoleDocForUser(updated);
   return ok(res, {
     message: blockedFounderOnly.length ? 'Special rights updated. Founder-only rights were ignored.' : 'Special rights updated.',
-    data: { user: safeUserDto(updated), blockedFounderOnly, effectiveAccess: computeEffectiveAccess(updated, roleDoc, isSafeZoneMasterLocked()) },
+    data: { user: safeUserDto(updated), blockedFounderOnly, effectiveAccess: await buildFounderStudioEffectiveAccess(updated, roleDoc) },
     user: safeUserDto(updated),
     blockedFounderOnly,
   });
@@ -1560,19 +2017,21 @@ async function setTaskRightsHandler(req, res) {
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_TASK_RIGHTS_CHANGED'))) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const reason = auditReasonFromBody(body);
+  if (!reason) return bad(res, 400, 'auditReason is required', 'AUDIT_REASON_REQUIRED');
   const parsed = parseKeyMap(body.taskRights, body.rights, body.taskRightsOverride);
   if (!parsed.provided) return bad(res, 400, 'taskRights is required', 'NO_TASK_RIGHT_CHANGES');
   const taskRightsOverride = normalizeTaskRights(parsed.keys);
 
   const updated = await User.findByIdAndUpdate(
     req.params.id,
-    { $set: { taskRightsOverride, updatedBy: actorId(req), updatedAt: new Date() } },
+    { $set: { taskRightsOverride, updatedBy: actorId(req), updatedAt: new Date() }, $inc: { accessVersion: 1 } },
     { new: true },
   );
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
-  await logAudit(req, 'TEAM_TASK_RIGHTS_CHANGE', String(updated._id), { oldValue: user.taskRightsOverride || [], newValue: taskRightsOverride });
+  await logAudit(req, 'TEAM_TASK_RIGHTS_CHANGE', String(updated._id), { oldValue: user.taskRightsOverride || [], newValue: taskRightsOverride, reason, accessVersion: updated.accessVersion });
   const roleDoc = await loadRoleDocForUser(updated);
-  return ok(res, { message: 'Task rights updated.', data: { user: safeUserDto(updated), effectiveAccess: computeEffectiveAccess(updated, roleDoc, isSafeZoneMasterLocked()) }, user: safeUserDto(updated) });
+  return ok(res, { message: 'Task rights updated.', data: { user: safeUserDto(updated), effectiveAccess: await buildFounderStudioEffectiveAccess(updated, roleDoc) }, user: safeUserDto(updated) });
 }
 
 async function setAccountControlRightsHandler(req, res) {
@@ -1582,6 +2041,8 @@ async function setAccountControlRightsHandler(req, res) {
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_ACCOUNT_CONTROL_RIGHTS_CHANGED'))) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const reason = auditReasonFromBody(body);
+  if (!reason) return bad(res, 400, 'auditReason is required', 'AUDIT_REASON_REQUIRED');
   const parsed = parseKeyMap(body.accountControlRights, body.rights, body.accountControlRightsOverride);
   if (!parsed.provided) return bad(res, 400, 'accountControlRights is required', 'NO_ACCOUNT_CONTROL_RIGHT_CHANGES');
   const requested = normalizeAccountControlRights(parsed.keys);
@@ -1590,15 +2051,15 @@ async function setAccountControlRightsHandler(req, res) {
 
   const updated = await User.findByIdAndUpdate(
     req.params.id,
-    { $set: { accountControlRightsOverride, updatedBy: actorId(req), updatedAt: new Date() } },
+    { $set: { accountControlRightsOverride, updatedBy: actorId(req), updatedAt: new Date() }, $inc: { accessVersion: 1 } },
     { new: true },
   );
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
-  await logAudit(req, 'TEAM_ACCOUNT_CONTROL_RIGHTS_CHANGE', String(updated._id), { oldValue: user.accountControlRightsOverride || [], newValue: accountControlRightsOverride, blockedFounderOnly });
+  await logAudit(req, 'TEAM_ACCOUNT_CONTROL_RIGHTS_CHANGE', String(updated._id), { oldValue: user.accountControlRightsOverride || [], newValue: accountControlRightsOverride, blockedFounderOnly, reason, accessVersion: updated.accessVersion });
   const roleDoc = await loadRoleDocForUser(updated);
   return ok(res, {
     message: blockedFounderOnly.length ? 'Account control rights updated. Founder-only rights were ignored.' : 'Account control rights updated.',
-    data: { user: safeUserDto(updated), blockedFounderOnly, effectiveAccess: computeEffectiveAccess(updated, roleDoc, isSafeZoneMasterLocked()) },
+    data: { user: safeUserDto(updated), blockedFounderOnly, effectiveAccess: await buildFounderStudioEffectiveAccess(updated, roleDoc) },
     user: safeUserDto(updated),
     blockedFounderOnly,
   });
@@ -1611,14 +2072,17 @@ async function grantTemporaryAccessHandler(req, res) {
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_TEMP_ACCESS_GRANTED'))) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  const moduleKey = body.moduleKey && ADMIN_MODULE_KEYS.includes(String(body.moduleKey).trim()) ? String(body.moduleKey).trim() : null;
+  const reason = auditReasonFromBody(body);
+  if (!reason) return bad(res, 400, 'auditReason is required', 'AUDIT_REASON_REQUIRED');
+  const canonicalTempModuleKey = canonicalModuleKey(body.moduleKey, { allowLegacy: true, allowAliases: true });
+  const moduleKey = canonicalTempModuleKey && canonicalTempModuleKey !== 'safeZone' ? (CANONICAL_TO_LEGACY_MODULE[canonicalTempModuleKey] || canonicalTempModuleKey) : null;
   const rightKey = body.rightKey && SPECIAL_RIGHT_KEYS.includes(String(body.rightKey).trim()) ? String(body.rightKey).trim() : null;
   if (!moduleKey && !rightKey) return bad(res, 400, 'A valid moduleKey or rightKey is required', 'INVALID_TEMPORARY_TARGET');
   if (rightKey && FOUNDER_ONLY_RIGHTS.includes(rightKey)) return bad(res, 403, 'Founder-only rights cannot be granted temporarily', 'FOUNDER_ONLY_RIGHT');
 
   const expiresAt = parseDateOrNull(body.expiresAt);
-  if (expiresAt === undefined) return bad(res, 400, 'Invalid expiresAt', 'INVALID_DATE');
-  if (expiresAt && expiresAt <= new Date()) return bad(res, 400, 'expiresAt must be in the future', 'INVALID_DATE');
+  if (expiresAt === undefined || !expiresAt) return bad(res, 400, 'A valid ISO expiresAt is required for temporary access', 'INVALID_DATE');
+  if (expiresAt <= new Date()) return bad(res, 400, 'expiresAt must be in the future', 'INVALID_DATE');
 
   const entry = {
     _id: new mongoose.Types.ObjectId(),
@@ -1626,20 +2090,20 @@ async function grantTemporaryAccessHandler(req, res) {
     rightKey,
     enabled: body.enabled !== false,
     expiresAt: expiresAt || null,
-    reason: String(body.reason || '').trim().slice(0, 500) || null,
+    reason,
     grantedBy: actorId(req),
     grantedAt: new Date(),
   };
 
   const updated = await User.findByIdAndUpdate(
     req.params.id,
-    { $push: { temporaryAccess: entry }, $set: { updatedBy: actorId(req), updatedAt: new Date() } },
+    { $push: { temporaryAccess: entry }, $set: { updatedBy: actorId(req), updatedAt: new Date() }, $inc: { accessVersion: 1 } },
     { new: true },
   );
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
-  await logAudit(req, 'TEAM_TEMP_ACCESS_GRANTED', String(updated._id), { moduleKey, rightKey, enabled: entry.enabled, expiresAt: entry.expiresAt, temporaryAccessId: String(entry._id) });
+  await logAudit(req, 'TEAM_TEMP_ACCESS_GRANTED', String(updated._id), { moduleKey, canonicalModuleKey: canonicalTempModuleKey, rightKey, enabled: entry.enabled, expiresAt: entry.expiresAt, temporaryAccessId: String(entry._id), reason, accessVersion: updated.accessVersion });
   const roleDoc = await loadRoleDocForUser(updated);
-  return ok(res, { message: 'Temporary access granted.', data: { user: safeUserDto(updated), temporaryAccess: normalizeTemporaryAccessList(updated.temporaryAccess), effectiveAccess: computeEffectiveAccess(updated, roleDoc, isSafeZoneMasterLocked()) }, user: safeUserDto(updated) }, 201);
+  return ok(res, { message: 'Temporary access granted.', data: { user: safeUserDto(updated), temporaryAccess: normalizeTemporaryAccessList(updated.temporaryAccess), effectiveAccess: await buildFounderStudioEffectiveAccess(updated, roleDoc) }, user: safeUserDto(updated) }, 201);
 }
 
 async function removeTemporaryAccessHandler(req, res) {
@@ -1654,13 +2118,13 @@ async function removeTemporaryAccessHandler(req, res) {
 
   const updated = await User.findByIdAndUpdate(
     req.params.id,
-    { $pull: { temporaryAccess: { _id: new mongoose.Types.ObjectId(temporaryAccessId) } }, $set: { updatedBy: actorId(req), updatedAt: new Date() } },
+    { $pull: { temporaryAccess: { _id: new mongoose.Types.ObjectId(temporaryAccessId) } }, $set: { updatedBy: actorId(req), updatedAt: new Date() }, $inc: { accessVersion: 1 } },
     { new: true },
   );
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
-  await logAudit(req, 'TEAM_TEMP_ACCESS_REMOVED', String(updated._id), { temporaryAccessId });
+  await logAudit(req, 'TEAM_TEMP_ACCESS_REMOVED', String(updated._id), { temporaryAccessId, accessVersion: updated.accessVersion });
   const roleDoc = await loadRoleDocForUser(updated);
-  return ok(res, { message: 'Temporary access removed.', data: { user: safeUserDto(updated), temporaryAccess: normalizeTemporaryAccessList(updated.temporaryAccess), effectiveAccess: computeEffectiveAccess(updated, roleDoc, isSafeZoneMasterLocked()) }, user: safeUserDto(updated) });
+  return ok(res, { message: 'Temporary access removed.', data: { user: safeUserDto(updated), temporaryAccess: normalizeTemporaryAccessList(updated.temporaryAccess), effectiveAccess: await buildFounderStudioEffectiveAccess(updated, roleDoc) }, user: safeUserDto(updated) });
 }
 
 // ---------------------------------------------------------------------------
@@ -2046,6 +2510,7 @@ router.post(['/users/:id/logout-all', '/team/users/:id/logout-all'], requireTeam
 router.post(['/users/:id/logout-all-devices', '/team/users/:id/logout-all-devices'], requireTeamAuth, requireTeamPermission('auth.logout_user_sessions'), logoutAllHandler);
 router.post(['/users/:id/extend-access', '/team/users/:id/extend-access'], requireTeamAuth, requireTeamPermission('auth.suspend_user'), extendAccessHandler);
 router.post(['/users/:id/reactivate', '/team/users/:id/reactivate'], requireTeamAuth, requireTeamPermission('auth.suspend_user'), reactivateUserHandler);
+router.post(['/users/:id/keep-expired', '/team/users/:id/keep-expired'], requireTeamAuth, requireTeamPermission('auth.suspend_user'), keepExpiredHandler);
 router.post(['/users/:id/archive', '/team/users/:id/archive'], requireTeamAuth, requireTeamPermission('auth.suspend_user'), archiveUserHandler);
 router.delete(['/users/:id/test-only', '/team/users/:id/test-only'], requireTeamAuth, requireTeamPermission('auth.suspend_user'), deleteTestOnlyHandler);
 router.post(['/users/:id/mark-test-account', '/team/users/:id/mark-test-account'], requireTeamAuth, requireTeamPermission('auth.suspend_user'), markTestAccountHandler);
@@ -2081,27 +2546,38 @@ router.post(['/tasks/:id/close', '/team/tasks/:id/close'], requireTeamAuth, requ
 router.delete(['/tasks/:id', '/team/tasks/:id'], requireTeamAuth, requireModuleAccess('staff_tasks'), requireTaskRight('task_delete'), deleteTaskHandler);
 
 // --- Staff Control Center: Staff Registry ---
-router.get(['/staff', '/team/staff'], requireTeamAuth, requireTeamAccountControlRight('staff_view_details', 'auth.create_user'), listUsersHandler);
-router.post(['/staff', '/team/staff'], requireTeamAuth, requireTeamPermission('auth.create_user'), createUserHandler);
-router.get(['/staff/:id', '/team/staff/:id'], requireTeamAuth, requireTeamAccountControlRight('staff_view_details', 'auth.create_user'), getUserHandler);
+router.get(['/staff', '/team/staff'], requireTeamAuth, requireDelegatedRegistryRight('view_staff_registry'), listUsersHandler);
+router.post(['/staff', '/team/staff'], requireTeamAuth, requireDelegatedRegistryRight('create_staff_account'), createUserHandler);
+router.get(['/staff/:id', '/team/staff/:id'], requireTeamAuth, requireDelegatedAccountControlRight('view_staff_registry'), getUserHandler);
 router.patch(['/staff/:id/email', '/team/staff/:id/email'], requireTeamAuth, changeUserEmailHandler);
-router.patch(['/staff/:id', '/team/staff/:id'], requireTeamAuth, requireTeamAccountControlRight('staff_edit_basic', 'auth.create_user'), updateUserHandler);
+router.patch(['/staff/:id', '/team/staff/:id'], requireTeamAuth, requireDelegatedAccountControlRight('edit_staff_details'), updateUserHandler);
+router.get(['/staff/:id/account-control', '/team/staff/:id/account-control'], requireTeamAuth, requireDelegatedAccountControlRight('view_staff_registry'), accountControlStateHandler);
 
 // --- Staff Control Center: Security & Sessions ---
-router.post(['/staff/:id/generate-temporary-password', '/team/staff/:id/generate-temporary-password'], requireTeamAuth, requireTeamAccountControlRight('staff_generate_temp_password', 'auth.generate_temp_password'), generateTemporaryPasswordHandler);
-router.post(['/staff/:id/reset-password', '/team/staff/:id/reset-password'], requireTeamAuth, requireTeamAccountControlRight('staff_reset_password', 'auth.reset_password'), resetPasswordHandler);
-router.post(['/staff/:id/force-change-password', '/team/staff/:id/force-change-password'], requireTeamAuth, requireTeamAccountControlRight('staff_force_password_change', 'auth.force_password_change'), forcePasswordChangeHandler);
-router.post(['/staff/:id/logout-all-devices', '/team/staff/:id/logout-all-devices'], requireTeamAuth, requireTeamAccountControlRight('staff_logout_devices', 'auth.logout_user_sessions'), logoutAllHandler);
-router.post(['/staff/:id/suspend', '/team/staff/:id/suspend'], requireTeamAuth, requireTeamAccountControlRight('staff_suspend', 'auth.suspend_user'), suspendUserHandler);
-router.post(['/staff/:id/lock', '/team/staff/:id/lock'], requireTeamAuth, requireTeamAccountControlRight('staff_lock', 'auth.lock_user'), lockUserHandler);
-router.post(['/staff/:id/reactivate', '/team/staff/:id/reactivate'], requireTeamAuth, requireTeamAccountControlRight('staff_reactivate', 'auth.suspend_user'), reactivateUserHandler);
-router.post(['/staff/:id/extend-access', '/team/staff/:id/extend-access'], requireTeamAuth, requireTeamAccountControlRight('staff_extend_access', 'auth.suspend_user'), extendAccessHandler);
+router.post(['/staff/:id/generate-temporary-password', '/team/staff/:id/generate-temporary-password'], requireTeamAuth, requireDelegatedAccountControlRight('reset_temporary_password'), generateTemporaryPasswordHandler);
+router.post(['/staff/:id/reset-password', '/team/staff/:id/reset-password'], requireTeamAuth, requireDelegatedAccountControlRight('reset_temporary_password'), resetPasswordHandler);
+router.post(['/staff/:id/force-change-password', '/team/staff/:id/force-change-password'], requireTeamAuth, requireDelegatedAccountControlRight('force_password_change'), forcePasswordChangeHandler);
+router.post(['/staff/:id/logout-all-devices', '/team/staff/:id/logout-all-devices'], requireTeamAuth, requireDelegatedAccountControlRight('logout_staff_sessions'), logoutAllHandler);
+router.post(['/staff/:id/suspend', '/team/staff/:id/suspend'], requireTeamAuth, requireDelegatedAccountControlRight('suspend_staff_account'), suspendUserHandler);
+router.post(['/staff/:id/lock', '/team/staff/:id/lock'], requireTeamAuth, requireDelegatedAccountControlRight('lock_staff_account'), lockUserHandler);
+router.post(['/staff/:id/unlock', '/team/staff/:id/unlock'], requireTeamAuth, requireDelegatedAccountControlRight('unlock_staff_account'), unlockUserHandler);
+router.post(['/staff/:id/reactivate', '/team/staff/:id/reactivate'], requireTeamAuth, requireDelegatedAccountControlRight('reactivate_expired_account'), reactivateUserHandler);
+router.post(['/staff/:id/extend-access', '/team/staff/:id/extend-access'], requireTeamAuth, requireDelegatedAccountControlRight('extend_account_expiry'), extendAccessHandler);
+router.post(['/staff/:id/change-expiry', '/team/staff/:id/change-expiry'], requireTeamAuth, requireDelegatedAccountControlRight('extend_account_expiry'), extendAccessHandler);
+router.post(['/staff/:id/set-no-expiry', '/team/staff/:id/set-no-expiry'], requireTeamAuth, requireDelegatedAccountControlRight('extend_account_expiry'), (req, res) => { req.body = { ...(req.body || {}), noExpiry: true }; return extendAccessHandler(req, res); });
+router.post(['/staff/:id/keep-expired', '/team/staff/:id/keep-expired'], requireTeamAuth, requireDelegatedAccountControlRight('extend_account_expiry'), keepExpiredHandler);
 
 // --- Staff Control Center: Archived / Test Accounts ---
-router.get(['/archived', '/team/archived'], requireTeamAuth, requireTeamAccountControlRight('staff_archive', 'auth.suspend_user'), archivedListHandler);
-router.post(['/staff/:id/archive', '/team/staff/:id/archive'], requireTeamAuth, requireTeamAccountControlRight('staff_archive', 'auth.suspend_user'), archiveUserHandler);
-router.post(['/staff/:id/restore', '/team/staff/:id/restore'], requireTeamAuth, requireTeamAccountControlRight('staff_reactivate', 'auth.suspend_user'), restoreUserHandler);
+router.get(['/archived', '/team/archived'], requireTeamAuth, requireDelegatedRegistryRight('archive_staff_account'), archivedListHandler);
+router.post(['/staff/:id/archive', '/team/staff/:id/archive'], requireTeamAuth, requireDelegatedAccountControlRight('archive_staff_account'), archiveUserHandler);
+router.post(['/staff/:id/restore', '/team/staff/:id/restore'], requireTeamAuth, requireDelegatedAccountControlRight('reactivate_expired_account'), restoreUserHandler);
 router.delete(['/staff/:id/delete-permanently', '/team/staff/:id/delete-permanently'], requirePermanentDeleteAuth, deletePermanentlyHandler);
+
+// --- Staff Control Center: Delegated Account Control ---
+router.get(['/delegations', '/team/delegations'], requireTeamAuth, requireFounderActor, listDelegationsHandler);
+router.post(['/delegations', '/team/delegations'], requireTeamAuth, requireFounderActor, grantDelegationHandler);
+router.patch(['/delegations/:id', '/team/delegations/:id'], requireTeamAuth, requireFounderActor, updateDelegationHandler);
+router.delete(['/delegations/:id', '/team/delegations/:id'], requireTeamAuth, requireFounderActor, revokeDelegationHandler);
 
 // --- Staff Control Center: Roles & Workflow ---
 router.get(['/account-groups', '/team/account-groups'], requireTeamAuth, accountGroupsHandler);

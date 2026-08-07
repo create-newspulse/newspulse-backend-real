@@ -9,15 +9,18 @@ const request = require('supertest');
 
 const User = require('../models/User');
 const Role = require('../models/Role');
+const SiteSettings = require('../models/SiteSettings');
 const StaffTask = require('../models/StaffTask');
 const AuditLog = require('../models/AuditLog');
 const adminTeamRouter = require('../routes/adminTeam.routes');
+const { normalizeModulePolicies } = require('../services/founderAccessPolicyService');
 
 let currentUser;
 let usersById;
 let createdTasks;
 let auditLogs;
 let originalReadyState;
+let originalDb;
 
 function buildApp() {
   const app = express();
@@ -60,7 +63,9 @@ function signToken(user) {
 
 test.beforeEach(() => {
   originalReadyState = mongoose.connection.readyState;
+  originalDb = mongoose.connection.db;
   mongoose.connection.readyState = 1;
+  mongoose.connection.db = { collection: () => ({}) };
   createdTasks = [];
   auditLogs = [];
   currentUser = makeUser();
@@ -86,6 +91,15 @@ test.beforeEach(() => {
   };
   Role.findById = () => ({ lean: async () => null });
   Role.findOne = () => ({ lean: async () => null });
+  SiteSettings.findOne = async () => ({
+    adminModulePolicy: {
+      modulePolicies: normalizeModulePolicies({ staffTasks: 'available' }),
+      version: 1,
+      updatedAt: new Date(),
+      updatedBy: 'test',
+      auditReason: 'staff task test policy',
+    },
+  });
   AuditLog.create = async (payload) => {
     auditLogs.push(payload);
     return payload;
@@ -99,6 +113,7 @@ test.beforeEach(() => {
 
 test.afterEach(() => {
   mongoose.connection.readyState = originalReadyState;
+  mongoose.connection.db = originalDb;
 });
 
 test('staff_tasks module access is separate from task_create right', async () => {

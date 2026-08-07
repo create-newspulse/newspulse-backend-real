@@ -6,11 +6,15 @@ const { requireAuth } = require('../middleware/requireAuth');
 const { logAudit } = require('../lib/audit');
 const {
   ADMIN_MODULE_KEYS,
-  effectiveModuleAccess,
   effectiveSpecialRights,
-  hasModuleAccess,
   normalizeRole,
 } = require('../lib/teamAccess');
+const {
+  CANONICAL_ADMIN_MODULE_KEYS,
+  evaluateAllModuleAccess,
+  evaluateModuleAccess,
+  getFounderModulePolicy,
+} = require('../services/founderAccessPolicyService');
 
 const router = express.Router();
 
@@ -45,18 +49,67 @@ async function loadRoleForUser(req) {
 
 router.use(requireAuth);
 
+function buildIdentity(user) {
+  return {
+    id: user?.id || (user?._id ? String(user._id) : null),
+    email: user?.email || null,
+    name: user?.fullName || user?.name || null,
+    role: normalizeRole(user?.role) || user?.role || null,
+    position: user?.position || user?.designation || null,
+    staffId: user?.staffId || null,
+  };
+}
+
+function buildSpecialRightsSummary(user) {
+  return {
+    specialRights: Array.isArray(user?.specialRightsOverride) ? user.specialRightsOverride : [],
+    taskRights: Array.isArray(user?.taskRightsOverride) ? user.taskRightsOverride : [],
+    accountControlRights: Array.isArray(user?.accountControlRightsOverride) ? user.accountControlRightsOverride : [],
+  };
+}
+
+async function myAccessPayload(req) {
+  const user = req._authUserDoc || req.user;
+  const policy = await getFounderModulePolicy({ defaultWhenDbUnavailable: true });
+  const effectiveModuleAccess = evaluateAllModuleAccess(user, policy);
+  const allowedModules = CANONICAL_ADMIN_MODULE_KEYS.filter((key) => effectiveModuleAccess[key]?.allowed);
+
+  return {
+    identity: buildIdentity(user),
+    role: normalizeRole(user?.role) || user?.role || null,
+    position: user?.position || user?.designation || null,
+    staffId: user?.staffId || null,
+    accountStatus: user?.accountStatus || user?.status || 'active',
+    accountExpiry: user?.accessExpiresAt || null,
+    accessVersion: typeof user?.accessVersion === 'number' ? user.accessVersion : 0,
+    effectiveModuleAccess,
+    modules: allowedModules,
+    specialRights: buildSpecialRightsSummary(user),
+  };
+}
+
+router.get('/me', async (req, res) => {
+  const data = await myAccessPayload(req);
+  return ok(res, { data, access: data });
+});
+
 router.get('/my-modules', async (req, res) => {
   const roleDoc = await loadRoleForUser(req);
   const user = req._authUserDoc || req.user;
+  const access = await myAccessPayload(req);
   return ok(res, {
     data: {
-      modules: effectiveModuleAccess(user, roleDoc),
+      modules: access.modules,
       specialRights: effectiveSpecialRights(user, roleDoc),
       safeZoneMasterLocked: isSafeZoneMasterLocked(),
+      effectiveModuleAccess: access.effectiveModuleAccess,
+      accessVersion: access.accessVersion,
     },
-    modules: effectiveModuleAccess(user, roleDoc),
+    modules: access.modules,
     specialRights: effectiveSpecialRights(user, roleDoc),
     safeZoneMasterLocked: isSafeZoneMasterLocked(),
+    effectiveModuleAccess: access.effectiveModuleAccess,
+    accessVersion: access.accessVersion,
   });
 });
 
@@ -67,11 +120,14 @@ router.get('/can-access/:moduleKey', async (req, res) => {
     return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' });
   }
 
-  const roleDoc = await loadRoleForUser(req);
   const user = req._authUserDoc || req.user;
-  const allowed = hasModuleAccess(user, moduleKey, roleDoc, isSafeZoneMasterLocked());
-  if (!allowed) await logAudit(req, 'ACCESS_BLOCKED', req.user?.id || null, { moduleKey, reason: 'module_denied' });
-  return ok(res, { data: { moduleKey, allowed }, moduleKey, allowed });
+  const policy = await getFounderModulePolicy({ defaultWhenDbUnavailable: true });
+  const decision = evaluateModuleAccess(user, moduleKey, policy);
+  const allowed = decision.canonicalKey ? decision.allowed : false;
+  if (!allowed) await logAudit(req, 'ACCESS_BLOCKED', req.user?.id || null, { moduleKey, reason: decision.reasonCode || 'module_denied' });
+  return ok(res, { data: { moduleKey, allowed, decision }, moduleKey, allowed, decision });
 });
+
+router.myAccessPayload = myAccessPayload;
 
 module.exports = router;
