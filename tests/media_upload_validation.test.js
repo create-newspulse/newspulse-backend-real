@@ -13,18 +13,8 @@ const {
 } = require('../lib/mediaUploadValidation');
 const { deriveMediaType } = require('../services/mediaLibraryService');
 
-async function loginAsAdmin() {
-  const email = String(process.env.ADMIN_EMAIL || '').trim();
-  const password = String(process.env.ADMIN_PASSWORD || '').trim();
-
-  const res = await request(app)
-    .post('/admin-api/admin/login')
-    .send({ email, password })
-    .set('Accept', 'application/json');
-
-  assert.equal(res.statusCode, 200);
-  assert.ok(res.body.token, 'expected admin login token');
-  return res.body.token;
+function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
+  return `np.${Buffer.from(`${email}:${Date.now()}`).toString('base64')}`;
 }
 
 test('accepted MIME type constants match required admin media formats', () => {
@@ -185,7 +175,7 @@ test('Media Library upload rejects local disk fallback unless explicitly enabled
 });
 
 test('POST /admin-api/media/upload rejects unsupported MIME types', async () => {
-  const token = await loginAsAdmin();
+  const token = makeOpaqueAdminToken();
 
   const res = await request(app)
     .post('/admin-api/media/upload')

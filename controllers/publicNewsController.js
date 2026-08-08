@@ -559,6 +559,7 @@ const PUBLIC_SELECT = [
   'sponsorDisclosure',
   'sponsorCtaText',
   'sponsorCtaUrl',
+  'sponsorDestinationUrl',
   'sponsorFeatureEligible',
   'sponsorFeatureLinkedId',
   // Image fields (legacy + new)
@@ -608,6 +609,7 @@ const PUBLIC_ARTICLE_DETAIL_SELECT = [
   'sponsorDisclosure',
   'sponsorCtaText',
   'sponsorCtaUrl',
+  'sponsorDestinationUrl',
   'sponsorFeatureEligible',
   'sponsorFeatureLinkedId',
   'translations',
@@ -745,6 +747,31 @@ function attachMobileResponseFields(obj, { includeBody = false } = {}) {
   out.readMinutes = Number.isFinite(Number(out.readMinutes))
     ? Math.max(1, Number(out.readMinutes))
     : estimateReadMinutesFromContent(out.content || out.summary || out.description || '');
+
+  if (out.isSponsoredArticle === true || out.isSponsored === true) {
+    const articleCtaText = _normalizeOptionalString(out.sponsorCtaText);
+    const articleDestinationUrl = _normalizeOptionalString(out.sponsorDestinationUrl || out.sponsorCtaUrl);
+    const linkedFeatureDestinationUrl = _normalizeOptionalString(out.linkedSponsoredFeature && out.linkedSponsoredFeature.destinationUrl);
+    const linkedFeatureCtaText = _normalizeOptionalString(out.linkedSponsoredFeature && out.linkedSponsoredFeature.ctaText);
+
+    out.sponsorCtaText = articleCtaText;
+    out.sponsorDestinationUrl = articleDestinationUrl;
+    out.sponsorCtaUrl = articleDestinationUrl;
+
+    if (articleDestinationUrl) {
+      out.resolvedSponsorCtaText = articleCtaText;
+      out.resolvedSponsorDestinationUrl = articleDestinationUrl;
+      out.resolvedSponsorCtaSource = 'article';
+    } else if (linkedFeatureDestinationUrl) {
+      out.resolvedSponsorCtaText = linkedFeatureCtaText;
+      out.resolvedSponsorDestinationUrl = linkedFeatureDestinationUrl;
+      out.resolvedSponsorCtaSource = 'linked_feature';
+    } else {
+      out.resolvedSponsorCtaText = null;
+      out.resolvedSponsorDestinationUrl = null;
+      out.resolvedSponsorCtaSource = null;
+    }
+  }
 
   if (includeBody) {
     out.body = typeof out.body === 'string' && out.body.trim() ? out.body : (out.content || '');

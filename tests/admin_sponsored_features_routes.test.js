@@ -233,7 +233,7 @@ test('PATCH /api/admin/sponsored-features/:id/toggle turns off only the homepage
         comboCampaign: { isActive: true },
         isActive: true,
         startAt: new Date('2026-04-10T00:00:00.000Z'),
-        endAt: new Date('2026-05-20T00:00:00.000Z'),
+        endAt: new Date('2099-05-20T00:00:00.000Z'),
         save: async function save() { return this; },
       };
     };
@@ -299,7 +299,7 @@ test('PATCH /api/admin/sponsored-features/:id/combo-toggle turns off only the co
         comboCampaign: { isActive: true },
         isActive: true,
         startAt: new Date('2026-04-10T00:00:00.000Z'),
-        endAt: new Date('2026-05-20T00:00:00.000Z'),
+        endAt: new Date('2099-05-20T00:00:00.000Z'),
         save: async function save() { return this; },
       };
     };
@@ -310,6 +310,7 @@ test('PATCH /api/admin/sponsored-features/:id/combo-toggle turns off only the co
       summary: 'Article summary',
       slug: 'sponsored-article',
       language: 'en',
+      status: 'published',
       coverImage: { url: 'https://img.example/article.jpg', alt: 'Article', publicId: null },
       isSponsored: true,
       isSponsoredArticle: true,

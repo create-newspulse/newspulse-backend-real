@@ -62,13 +62,16 @@ async function withMongoReady(fn) {
 }
 
 test('reporter directory summary exposes required summary fields including newThisMonth', () => {
+  const now = new Date();
+  const currentMonthActivity = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 6, 10, 0, 0)).toISOString();
+  const currentMonthCreated = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 2, 9, 0, 0)).toISOString();
   const rows = [
     {
       verification: 'verified',
       missingPhone: false,
       missingLocation: false,
-      lastActivityAt: '2026-04-06T10:00:00.000Z',
-      createdAt: '2026-04-02T09:00:00.000Z',
+      lastActivityAt: currentMonthActivity,
+      createdAt: currentMonthCreated,
     },
     {
       verification: 'community_default',
@@ -91,8 +94,8 @@ test('reporter directory summary exposes required summary fields including newTh
   assert.strictEqual(summary.missingLocationCount, 1);
   assert.strictEqual(summary.activeThisMonth, 1);
   assert.strictEqual(summary.newThisMonth, 1);
-  assert.strictEqual(summary.lastSubmissionAt, '2026-04-06T10:00:00.000Z');
-  assert.strictEqual(summary.lastSubmission, '2026-04-06T10:00:00.000Z');
+  assert.strictEqual(summary.lastSubmissionAt, currentMonthActivity);
+  assert.strictEqual(summary.lastSubmission, currentMonthActivity);
 });
 
 test('directory-wide counts distinguish active and removed rows from the same contract', () => {

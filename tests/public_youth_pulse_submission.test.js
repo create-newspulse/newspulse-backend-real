@@ -5,7 +5,39 @@ const request = require('supertest');
 process.env.NODE_ENV = 'test';
 
 const app = require('../server');
-const CommunitySubmission = require('../models/CommunitySubmission');
+const YouthPulseContributor = require('../models/YouthPulseContributor');
+const YouthPulseSubmission = require('../models/YouthPulseSubmission');
+
+function stubYouthPulseStorage(submissionId) {
+  const originalFindOne = YouthPulseContributor.findOne;
+  const originalContributorCreate = YouthPulseContributor.create;
+  const originalSubmissionCreate = YouthPulseSubmission.create;
+  const originalAggregate = YouthPulseSubmission.aggregate;
+  const originalFindByIdAndUpdate = YouthPulseContributor.findByIdAndUpdate;
+
+  YouthPulseContributor.findOne = async () => null;
+  YouthPulseContributor.create = async (payload) => ({
+    _id: '507f1f77bcf86cd799439099',
+    ...payload,
+    save: async function save() { return this; },
+  });
+  YouthPulseSubmission.create = async (payload) => ({
+    _id: submissionId,
+    ...payload,
+    createdAt: new Date('2026-04-19T12:00:00.000Z'),
+    updatedAt: new Date('2026-04-19T12:00:00.000Z'),
+  });
+  YouthPulseSubmission.aggregate = async () => [];
+  YouthPulseContributor.findByIdAndUpdate = async () => null;
+
+  return () => {
+    YouthPulseContributor.findOne = originalFindOne;
+    YouthPulseContributor.create = originalContributorCreate;
+    YouthPulseSubmission.create = originalSubmissionCreate;
+    YouthPulseSubmission.aggregate = originalAggregate;
+    YouthPulseContributor.findByIdAndUpdate = originalFindByIdAndUpdate;
+  };
+}
 
 test('POST /api/community/youth-pulse/submissions rejects incomplete consent', async () => {
   const res = await request(app)
@@ -34,16 +66,9 @@ test('POST /api/community/youth-pulse/submissions rejects incomplete consent', a
 });
 
 test('POST /api/community/youth-pulse/submissions stores moderated Youth Pulse submission only', async () => {
-  const originalCreate = CommunitySubmission.create;
+  const restore = stubYouthPulseStorage('507f1f77bcf86cd799439011');
 
   try {
-    CommunitySubmission.create = async (payload) => ({
-      _id: '507f1f77bcf86cd799439011',
-      ...payload,
-      createdAt: new Date('2026-04-19T12:00:00.000Z'),
-      updatedAt: new Date('2026-04-19T12:00:00.000Z'),
-    });
-
     const res = await request(app)
       .post('/api/community/youth-pulse/submissions')
       .send({
@@ -72,25 +97,18 @@ test('POST /api/community/youth-pulse/submissions stores moderated Youth Pulse s
     assert.equal(res.body.submissionId, '507f1f77bcf86cd799439011');
     assert.equal(res.body.item.status, 'new');
     assert.equal(res.body.item.track, 'student-voices');
-    assert.equal(res.body.item.originType, 'youth_submission');
+    assert.equal(res.body.item.sourceType, 'youth_pulse');
     assert.equal(res.body.item.articleLinked, false);
     assert.equal(res.body.item.headline, 'Campus issue');
   } finally {
-    CommunitySubmission.create = originalCreate;
+    restore();
   }
 });
 
 test('POST /api/community/youth-pulse/submissions accepts current public form aliases', async () => {
-  const originalCreate = CommunitySubmission.create;
+  const restore = stubYouthPulseStorage('507f1f77bcf86cd799439012');
 
   try {
-    CommunitySubmission.create = async (payload) => ({
-      _id: '507f1f77bcf86cd799439012',
-      ...payload,
-      createdAt: new Date('2026-04-19T12:30:00.000Z'),
-      updatedAt: new Date('2026-04-19T12:30:00.000Z'),
-    });
-
     const res = await request(app)
       .post('/api/community/youth-pulse/submissions')
       .send({
@@ -118,9 +136,9 @@ test('POST /api/community/youth-pulse/submissions accepts current public form al
     assert.equal(res.body.submissionId, '507f1f77bcf86cd799439012');
     assert.equal(res.body.item.status, 'new');
     assert.equal(res.body.item.track, 'student-voices');
-    assert.equal(res.body.item.originType, 'youth_submission');
+    assert.equal(res.body.item.sourceType, 'youth_pulse');
     assert.equal(res.body.item.headline, 'Student union raises transport issue');
   } finally {
-    CommunitySubmission.create = originalCreate;
+    restore();
   }
 });

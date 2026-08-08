@@ -6,6 +6,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
 
 const app = require('../server');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const YouthPulseSubmission = require('../models/YouthPulseSubmission');
 
 function getPath(obj, path) {
   return path.split('.').reduce((acc, key) => (acc == null ? undefined : acc[key]), obj);
@@ -104,6 +105,25 @@ const seeded = [
   },
 ];
 
+const seededYouthPulse = [
+  {
+    _id: { toString: () => 'sub-y1' },
+    fullName: 'Yamini',
+    email: 'yamini@example.com',
+    mobile: '+91 7777777777',
+    city: 'Surat',
+    state: 'Gujarat',
+    headline: 'Youth Pulse Headline',
+    storyBody: 'Youth story body',
+    track: 'campus-buzz',
+    submissionType: 'reported_story',
+    status: 'new',
+    sourceType: 'youth_pulse',
+    optionalAttachmentUrls: ['https://example.com/youth-story.pdf'],
+    createdAt: new Date(Date.now() - 250),
+  },
+];
+
 CommunitySubmission.find = (filter) => {
   // Emulate minimal query builder chain
   const api = {
@@ -122,6 +142,26 @@ CommunitySubmission.find = (filter) => {
 };
 CommunitySubmission.countDocuments = async (filter) => {
   const items = await CommunitySubmission.find(filter).lean();
+  return items.length;
+};
+
+YouthPulseSubmission.find = (filter) => {
+  const api = {
+    sort() { return this; },
+    skip() { return this; },
+    limit() { return this; },
+    async lean() {
+      let results = seededYouthPulse.slice();
+      if (filter) {
+        results = results.filter((doc) => matchesClause(doc, filter));
+      }
+      return results;
+    },
+  };
+  return api;
+};
+YouthPulseSubmission.countDocuments = async (filter) => {
+  const items = await YouthPulseSubmission.find(filter).lean();
   return items.length;
 };
 
@@ -146,12 +186,13 @@ test('Admin community submissions source=all returns both docs', async () => {
     .send();
   assert.strictEqual(res.statusCode, 200);
   assert.ok(res.body.success);
-  assert.strictEqual(res.body.submissions.length, 3);
+  assert.strictEqual(res.body.submissions.length, 4);
+  assert.ok(res.body.submissions.some((item) => item.sourceType === 'youth_pulse'));
 });
 
 test('Admin Youth Pulse desk route returns only youth pulse submissions with metadata', async () => {
   const res = await request(app)
-    .get('/admin/community-reporter/youth-pulse?status=pending')
+    .get('/admin/community-reporter/youth-pulse?status=new')
     .set('Cookie', 'np_admin=admin@newspulse.ai')
     .send();
 
@@ -159,9 +200,9 @@ test('Admin Youth Pulse desk route returns only youth pulse submissions with met
   assert.ok(res.body.success);
   assert.strictEqual(res.body.submissions.length, 1);
   assert.strictEqual(res.body.submissions[0].id, 'sub-y1');
-  assert.strictEqual(res.body.submissions[0].desk, 'youth-pulse');
+  assert.strictEqual(res.body.submissions[0].sourceType, 'youth_pulse');
   assert.strictEqual(res.body.submissions[0].track, 'campus-buzz');
-  assert.strictEqual(res.body.submissions[0].attachments.length, 1);
+  assert.strictEqual(res.body.submissions[0].optionalAttachmentUrls.length, 1);
 });
 
 // Validate rejected filter supports legacy + uppercase values
@@ -262,7 +303,7 @@ test('Admin community submissions status=approved returns approved variants', as
 // Unknown status should fall back to direct equality (returns empty when none match)
 test('Admin community submissions unknown status falls back to equality', async () => {
   const res = await request(app)
-    .get('/admin/community-reporter/submissions?status=foobar')
+    .get('/admin/community-reporter/submissions?source=community&status=foobar')
     .set('Cookie', 'np_admin=admin@newspulse.ai')
     .send();
   assert.strictEqual(res.statusCode, 200);
@@ -335,13 +376,14 @@ test('POST /api/admin/community-reporter/submissions/:id/decision reject sets RE
 });
 
 test('PATCH /api/admin/community-reporter/youth-pulse/submissions/:id/status updates workflow status', async () => {
-  const originalFindById = CommunitySubmission.findById;
+  const originalFindById = YouthPulseSubmission.findById;
   const testId = '507f1f77bcf86cd799439025';
   let savedStatus = null;
 
-  CommunitySubmission.findById = () => ({
+  YouthPulseSubmission.findById = () => ({
     _id: testId,
-    status: 'NEW',
+    status: 'new',
+    sourceType: 'youth_pulse',
     desk: 'youth-pulse',
     track: 'campus-buzz',
     linkedArticleId: '507f1f77bcf86cd799439999',
@@ -351,12 +393,12 @@ test('PATCH /api/admin/community-reporter/youth-pulse/submissions/:id/status upd
   const res = await request(app)
     .patch(`/api/admin/community-reporter/youth-pulse/submissions/${testId}/status`)
     .set('Cookie', 'np_admin=admin@newspulse.ai')
-    .send({ status: 'AI_REVIEWED' });
+    .send({ status: 'under_review' });
 
   assert.strictEqual(res.statusCode, 200);
   assert.ok(res.body.success);
-  assert.strictEqual(savedStatus, 'AI_REVIEWED');
-  CommunitySubmission.findById = originalFindById;
+  assert.strictEqual(savedStatus, 'under_review');
+  YouthPulseSubmission.findById = originalFindById;
 });
 
 // Invalid decision returns 400

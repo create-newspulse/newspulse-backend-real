@@ -1971,9 +1971,10 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
       const mapped = localizeArticleForLang(doc, desired, { fallbackToBase: desired === 'gu' });
       if (!mapped) continue;
 
+      const storedSlug = String(doc.slug || mapped.slug || '').trim();
       const out = {
         _id: String(doc._id),
-        slug: mapped.slug,
+        slug: storedSlug || mapped.slug,
         canonicalSlug: mapped.canonicalSlug,
         slugs: doc.slugs || null,
         category: doc.category || null,
@@ -1987,7 +1988,13 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
         __isTranslated: Boolean(mapped.isTranslated),
       };
 
-      const canonicalSlug = String(mapped.canonicalSlug || '').trim();
+      const slugs = doc && doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
+      const canonicalSlug = String(
+        (slugs && (slugs.en || slugs.gu || slugs.hi))
+        || mapped.canonicalSlug
+        || storedSlug
+        || ''
+      ).trim();
       const groupKey = normalizeTranslationGroupKey(doc.translationKey)
         || normalizeTranslationGroupKey(doc.translationGroupId);
       const key = groupKey

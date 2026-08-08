@@ -7,6 +7,9 @@ const { createJsonCacheMiddleware, buildHomeCacheKey, normalizeCacheLang } = req
 router.get('/for-you', createJsonCacheMiddleware({
   ttlSeconds: 90,
   buildKey: (req) => {
+    // This endpoint is currently anonymous and only language-scoped. Authenticated/session requests bypass
+    // shared caching so future personalization cannot reuse a public home-feed entry.
+    if (req.headers.authorization || req.headers.cookie) return null;
     const rawLimit = parseInt(req.query.limit || '15', 10);
     const limit = Math.min(Math.max(rawLimit, 1), 50);
     const region = String(req.query.region || '').trim();

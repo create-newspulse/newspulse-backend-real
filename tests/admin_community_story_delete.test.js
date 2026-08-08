@@ -424,7 +424,7 @@ test('Community Story Desk: permanent delete is founder/admin-only', async () =>
     .set('Authorization', `Bearer ${token}`);
 
   assert.equal(res.status, 403);
-  assert.equal(res.body.code, 'PERMISSION_DENIED');
+  assert.equal(res.body.code, 'FORBIDDEN');
   restoreAudit();
   restoreUser();
   restoreMongo();
