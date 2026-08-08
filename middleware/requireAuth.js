@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const { performance } = require('perf_hooks');
 const User = require('../models/User');
 const Role = require('../models/Role');
 const { logAudit } = require('../lib/audit');
@@ -27,27 +28,126 @@ const {
   lifecycleStatus,
 } = require('../lib/accountLifecycle');
 
-function getBearerToken(req) {
+function parseCookies(header) {
+  const cookies = {};
+  String(header || '').split(';').forEach((entry) => {
+    const [key, ...value] = entry.trim().split('=');
+    if (!key) return;
+    cookies[key] = decodeURIComponent(value.join('=') || '');
+  });
+  return cookies;
+}
+
+function getAuthToken(req) {
   const auth = String(req.headers.authorization || '');
-  if (!auth.toLowerCase().startsWith('bearer ')) return null;
-  const token = auth.slice(7).trim();
-  return token || null;
+  if (auth.toLowerCase().startsWith('bearer ')) {
+    const token = auth.slice(7).trim();
+    if (token) return token;
+  }
+
+  const cookies = req.cookies && typeof req.cookies === 'object' ? req.cookies : parseCookies(req.headers.cookie || '');
+  for (const name of ['token', 'np_token', 'np_admin_token']) {
+    const token = String(cookies[name] || '').trim();
+    if (token) return token;
+  }
+  return null;
 }
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
 
-async function loadUserFromPayload(payload) {
+function isMeTimingEnabled(req) {
+  const flag = String(process.env.ME_TIMING || process.env.DEBUG_ME_TIMING || '').trim().toLowerCase();
+  if (!['1', 'true', 'yes', 'on'].includes(flag)) return false;
+  if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') return false;
+  const pathName = String(req.originalUrl || req.url || '').split('?')[0];
+  return req.method === 'GET' && (pathName === '/me' || pathName.endsWith('/me'));
+}
+
+function isCurrentUserProbe(req) {
+  const pathName = String(req?.originalUrl || req?.url || '').split('?')[0];
+  return req?.method === 'GET' && (pathName === '/me' || pathName.endsWith('/me'));
+}
+
+function roundTiming(value) {
+  return Math.round(Number(value || 0) * 1000) / 1000;
+}
+
+function ensureMeTiming(req) {
+  if (!req || !isMeTimingEnabled(req)) return null;
+  if (!req._meTiming) {
+    req._meTiming = {
+      start: performance.now(),
+      steps: [],
+      dbQueries: { user: 0, role: 0, policy: 0 },
+    };
+  }
+  return req._meTiming;
+}
+
+function recordMeTiming(req, label, startedAt, extra = {}) {
+  const timing = ensureMeTiming(req);
+  if (!timing) return;
+  timing.steps.push({ label, ms: roundTiming(performance.now() - startedAt), ...extra });
+}
+
+function timeMeStep(req, label, fn, extra = {}) {
+  const startedAt = performance.now();
+  try {
+    return fn();
+  } finally {
+    recordMeTiming(req, label, startedAt, extra);
+  }
+}
+
+async function timeMeStepAsync(req, label, fn, extra = {}) {
+  const startedAt = performance.now();
+  try {
+    return await fn();
+  } finally {
+    recordMeTiming(req, label, startedAt, extra);
+  }
+}
+
+function countMeQuery(req, key) {
+  const timing = ensureMeTiming(req);
+  if (!timing) return;
+  timing.dbQueries[key] = (timing.dbQueries[key] || 0) + 1;
+}
+
+function finishMeTiming(req, res, extra = {}) {
+  const timing = req?._meTiming;
+  if (!timing) return;
+  const totalMs = roundTiming(performance.now() - timing.start);
+  const slowest = timing.steps.reduce((max, step) => (step.ms > (max?.ms || -1) ? step : max), null);
+  const role = req.user?.role || req.admin?.role || null;
+  console.info('[me-timing]', {
+    method: req.method,
+    path: String(req.originalUrl || req.url || '').split('?')[0],
+    status: res?.statusCode || extra.status || null,
+    role,
+    isFounder: Boolean(req.user?.isFounder || req.admin?.isFounder || String(role || '').toLowerCase() === 'founder'),
+    totalMs,
+    slowest: slowest ? { label: slowest.label, ms: slowest.ms } : null,
+    dbQueries: timing.dbQueries,
+    steps: timing.steps,
+    ...extra,
+  });
+}
+
+async function loadUserFromPayload(payload, req = null) {
   const sub = payload && payload.sub ? String(payload.sub) : '';
   const email = payload && payload.email ? String(payload.email).toLowerCase() : '';
 
   if (sub && mongoose.isValidObjectId(sub)) {
+    countMeQuery(req, 'user');
     const byId = await User.findById(sub);
     if (byId) return byId;
   }
 
   if (email) {
+    countMeQuery(req, 'user');
     return User.findOne({ email });
   }
 
@@ -93,43 +193,51 @@ async function loadRoleForUser(user) {
 
 async function requireAuth(req, res, next) {
   try {
-    const token = getBearerToken(req);
+    ensureMeTiming(req);
+    const token = timeMeStep(req, 'auth.token_read', () => getAuthToken(req));
     if (!token) {
+      finishMeTiming(req, res, { status: 401, result: 'no_session' });
       return sessionExpired(res);
     }
 
     const secret = process.env.JWT_SECRET;
     if (!secret) {
+      finishMeTiming(req, res, { status: 500, result: 'missing_secret' });
       return res.status(500).json({ ok: false, success: false, status: 500, code: 'SERVER_ERROR', message: 'JWT_SECRET missing' });
     }
 
-    const payload = jwt.verify(token, secret);
+    const payload = timeMeStep(req, 'auth.jwt_verify', () => jwt.verify(token, secret));
 
     // If DB is down, fall back to payload-only auth (keeps dev/test from hard failing).
     if (!isDbReady()) {
-      req.user = {
+      req.user = timeMeStep(req, 'auth.payload_identity', () => ({
         id: payload.sub || payload.userId || null,
         email: payload.email || null,
         name: payload.name || null,
-        role: normalizeRole(payload.role),
+        role: normalizeRole(payload.role) || String(payload.role || 'intern').toLowerCase(),
         tokenVersion: typeof payload.tokenVersion === 'number' ? payload.tokenVersion : 0,
-      };
+        isFounder: (normalizeRole(payload.role) || String(payload.role || '').toLowerCase()) === 'founder',
+        isProtected: (normalizeRole(payload.role) || String(payload.role || '').toLowerCase()) === 'founder',
+      }));
       return next();
     }
 
-    const user = await loadUserFromPayload(payload);
+    const user = await timeMeStepAsync(req, 'auth.user_lookup', () => loadUserFromPayload(payload, req));
     if (!user) {
+      finishMeTiming(req, res, { status: 401, result: 'user_not_found' });
       return sessionExpired(res);
     }
 
     const now = new Date();
-    const resolvedStatus = lifecycleStatus(user, now);
+    const resolvedStatus = timeMeStep(req, 'auth.lifecycle_check', () => lifecycleStatus(user, now));
     if (resolvedStatus !== ACCOUNT_STATUS.ACTIVE) {
       if (resolvedStatus === ACCOUNT_STATUS.EXPIRED) await expireAccount(User, user, { now });
+      finishMeTiming(req, res, { status: 403, result: resolvedStatus });
       return accountLifecycleResponse(res, resolvedStatus);
     }
     const accountStatus = String(user.accountStatus || user.status || 'active').toLowerCase();
     if (user.loginAllowed === false) {
+      finishMeTiming(req, res, { status: 403, result: 'login_disabled' });
       return res.status(403).json({ ok: false, success: false, status: 403, code: 'LOGIN_DISABLED', message: 'Login disabled' });
     }
 
@@ -137,8 +245,32 @@ async function requireAuth(req, res, next) {
     const userTokenVersion = typeof user.tokenVersion === 'number' ? user.tokenVersion : 0;
 
     if (jwtTokenVersion !== userTokenVersion) {
+      finishMeTiming(req, res, { status: 401, result: 'token_version_mismatch' });
       return sessionExpired(res);
     }
+
+    const role = timeMeStep(req, 'auth.founder_detection', () => normalizeRole(user.role) || String(user.role || 'intern').toLowerCase());
+    const isFounder = Boolean(user.isFounder || role === 'founder');
+
+    const permissionFields = timeMeStep(req, 'auth.permission_projection', () => {
+      if (isCurrentUserProbe(req)) {
+        return {
+          permissions: [],
+          moduleAccess: normalizeModuleAccess(user.moduleAccessOverride),
+          specialRights: Array.isArray(user.specialRightsOverride) ? user.specialRightsOverride : [],
+          taskRights: Array.isArray(user.taskRightsOverride) ? user.taskRightsOverride : [],
+          accountControlRights: Array.isArray(user.accountControlRightsOverride) ? user.accountControlRightsOverride : [],
+        };
+      }
+
+      return {
+        permissions: effectivePermissions(user),
+        moduleAccess: normalizeModuleAccess(user.moduleAccessOverride),
+        specialRights: effectiveSpecialRights(user),
+        taskRights: effectiveTaskRights(user),
+        accountControlRights: effectiveAccountControlRights(user),
+      };
+    });
 
     req.user = {
       id: String(user._id),
@@ -146,16 +278,16 @@ async function requireAuth(req, res, next) {
       staffId: user.staffId || null,
       name: user.fullName || user.name,
       fullName: user.fullName || user.name,
-      role: normalizeRole(user.role) || 'intern',
+      role,
       roleId: user.roleId ? String(user.roleId) : null,
-      roleName: user.roleName || normalizeRole(user.role) || user.role || 'intern',
+      roleName: user.roleName || role || user.role || 'intern',
       position: user.position || user.officialTitle || user.designation || null,
       designation: user.designation || null,
-      permissions: effectivePermissions(user),
-      moduleAccess: normalizeModuleAccess(user.moduleAccessOverride),
-      specialRights: effectiveSpecialRights(user),
-      taskRights: effectiveTaskRights(user),
-      accountControlRights: effectiveAccountControlRights(user),
+      permissions: permissionFields.permissions,
+      moduleAccess: permissionFields.moduleAccess,
+      specialRights: permissionFields.specialRights,
+      taskRights: permissionFields.taskRights,
+      accountControlRights: permissionFields.accountControlRights,
       moduleAccessOverride: Array.isArray(user.moduleAccessOverride) ? user.moduleAccessOverride : [],
       specialRightsOverride: Array.isArray(user.specialRightsOverride) ? user.specialRightsOverride : [],
       taskRightsOverride: Array.isArray(user.taskRightsOverride) ? user.taskRightsOverride : [],
@@ -169,13 +301,14 @@ async function requireAuth(req, res, next) {
       mustChangePassword: Boolean(user.mustChangePassword || user.forceReset),
       tokenVersion: userTokenVersion,
       accessVersion: typeof user.accessVersion === 'number' ? user.accessVersion : 0,
-      isFounder: Boolean(user.isFounder || normalizeRole(user.role) === 'founder'),
-      isProtected: Boolean(user.isProtected || normalizeRole(user.role) === 'founder'),
+      isFounder,
+      isProtected: Boolean(user.isProtected || isFounder),
     };
 
     req._authUserDoc = user;
     return next();
   } catch (_e) {
+    finishMeTiming(req, res, { status: 401, result: 'auth_exception' });
     return sessionExpired(res);
   }
 }
@@ -285,6 +418,10 @@ function auditAction(action, metaBuilder = null) {
 
 module.exports = {
   requireAuth,
+  finishMeTiming,
+  timeMeStep,
+  timeMeStepAsync,
+  countMeQuery,
   requireFounder,
   requireModuleAccess,
   requireSpecialRight,

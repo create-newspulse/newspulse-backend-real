@@ -645,7 +645,7 @@ function temporaryModuleGrant(user, canonicalKey, now = new Date()) {
 function evaluateModuleAccess(user, moduleKey, policy, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const canonicalKey = canonicalModuleKey(moduleKey, { allowLegacy: true });
-  const policies = normalizeModulePolicies(policy?.modulePolicies || policy);
+  const policies = options.normalizedPolicies || normalizeModulePolicies(policy?.modulePolicies || policy);
 
   if (!canonicalKey) {
     return {
@@ -673,7 +673,7 @@ function evaluateModuleAccess(user, moduleKey, policy, options = {}) {
     };
   }
 
-  const accountReason = accountBlockReason(user, now);
+  const accountReason = Object.prototype.hasOwnProperty.call(options, 'accountReason') ? options.accountReason : accountBlockReason(user, now);
   if (accountReason) {
     return {
       key: canonicalKey,
@@ -692,8 +692,8 @@ function evaluateModuleAccess(user, moduleKey, policy, options = {}) {
   }
 
   const globalState = policies[canonicalKey] || 'founder_only';
-  const storedStates = normalizeStaffModuleStates(user?.moduleAccessStates);
-  const legacyStates = staffModuleStateFromLegacyList(user);
+  const storedStates = options.storedStates || normalizeStaffModuleStates(user?.moduleAccessStates);
+  const legacyStates = options.legacyStates || staffModuleStateFromLegacyList(user);
   const individualState = storedStates[canonicalKey] || legacyStates[canonicalKey] || 'disabled';
   const tempGrant = temporaryModuleGrant(user, canonicalKey, now);
   const effectiveIndividualState = tempGrant?.state || individualState;
@@ -722,8 +722,17 @@ function evaluateModuleAccess(user, moduleKey, policy, options = {}) {
 }
 
 function evaluateAllModuleAccess(user, policy, options = {}) {
+  const now = options.now instanceof Date ? options.now : new Date();
+  const sharedOptions = {
+    ...options,
+    now,
+    normalizedPolicies: options.normalizedPolicies || normalizeModulePolicies(policy?.modulePolicies || policy),
+    accountReason: Object.prototype.hasOwnProperty.call(options, 'accountReason') ? options.accountReason : accountBlockReason(user, now),
+    storedStates: options.storedStates || normalizeStaffModuleStates(user?.moduleAccessStates),
+    legacyStates: options.legacyStates || staffModuleStateFromLegacyList(user),
+  };
   return CANONICAL_STAFF_MODULE_KEYS.reduce((acc, key) => {
-    acc[key] = evaluateModuleAccess(user, key, policy, options);
+    acc[key] = evaluateModuleAccess(user, key, policy, sharedOptions);
     return acc;
   }, {});
 }

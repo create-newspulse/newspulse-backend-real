@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 
 const User = require('../models/User');
-const { requireAuth } = require('../middleware/requireAuth');
+const { finishMeTiming, requireAuth, timeMeStep, timeMeStepAsync } = require('../middleware/requireAuth');
 const { logAudit } = require('../lib/audit');
 const { recordLoginSession, recordLogoutSession } = require('../lib/teamManagement');
 const { normalizeRole, requirePasswordPolicy, safeUserDto } = require('../lib/teamAccess');
@@ -27,6 +27,31 @@ function jwtSecret() {
 
 function bad(res, status, message, code) {
   return res.status(status).json({ ok: false, success: false, status, code: code || undefined, message });
+}
+
+function sessionUserDto(user) {
+  const id = user && user._id ? String(user._id) : (user && user.id ? String(user.id) : null);
+  const role = normalizeRole(user?.role) || user?.role || 'intern';
+  const isFounder = Boolean(user?.isFounder || role === 'founder');
+  return {
+    ...(id ? { _id: id, id } : {}),
+    email: user?.email || '',
+    fullName: user?.fullName || user?.name || '',
+    name: user?.fullName || user?.name || '',
+    role,
+    roleName: user?.roleName || role,
+    position: user?.position || user?.officialTitle || user?.designation || null,
+    staffId: user?.staffId || null,
+    status: user?.status || 'active',
+    accountStatus: user?.accountStatus || user?.status || 'active',
+    accessExpiresAt: user?.accessExpiresAt || null,
+    accountExpiresAt: user?.accessExpiresAt || null,
+    noExpiry: Boolean(user?.noExpiry || isFounder || user?.accessExpiresAt == null),
+    mustChangePassword: Boolean(user?.mustChangePassword || user?.mustResetPassword || user?.forceReset),
+    accessVersion: typeof user?.accessVersion === 'number' ? user.accessVersion : 0,
+    isFounder,
+    isProtected: Boolean(user?.isProtected || isFounder),
+  };
 }
 
 function signAccessToken(user) {
@@ -291,17 +316,21 @@ async function refreshHandler(req, res) {
 
 async function meHandler(req, res) {
   try {
-    const user = req._authUserDoc || (isDbReady() && req.user?.id ? await User.findById(req.user.id) : null);
-    const access = await myAccessPayload(req);
-    return res.status(200).json({
+    const user = await timeMeStepAsync(req, 'auth_me.user_reuse', async () => req._authUserDoc || (isDbReady() && req.user?.id ? await User.findById(req.user.id) : null));
+    const access = await timeMeStepAsync(req, 'auth_me.access_payload', () => myAccessPayload(req));
+    const userDto = timeMeStep(req, 'auth_me.user_dto', () => sessionUserDto(user || req.user));
+    res.status(200);
+    finishMeTiming(req, res, { result: 'ok' });
+    return res.json({
       ok: true,
       success: true,
       status: 200,
-      user: user ? safeUserDto(user) : safeUserDto(req.user),
+      user: userDto,
       access,
       effectiveModuleAccess: access.effectiveModuleAccess,
     });
   } catch (err) {
+    finishMeTiming(req, res, { status: 500, result: 'me_failed' });
     return bad(res, 500, err?.message || 'Failed to load user', 'ME_FAILED');
   }
 }

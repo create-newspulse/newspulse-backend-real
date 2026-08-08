@@ -28,6 +28,7 @@ const {
   requireAdminAuth,
   requireFounderAuth,
 } = require('../middleware/adminAuth');
+const { finishMeTiming, requireAuth, timeMeStep } = require('../middleware/requireAuth');
 
 // ✅ Admin controllers
 // communitySettings & communityReporter live under controllers/ (not controllers/admin)
@@ -550,6 +551,45 @@ router.get('/system/health', (_req, res) => {
 // PROTECTED: everything below
 // ─────────────────────────────────────────────
 
+// Session restoration is not an admin-only authorization check. It must accept
+// every active authenticated account so the client can resolve the user's role
+// before applying module-level access rules.
+router.get('/me', requireAuth, (req, res) => {
+  const user = req.user || null;
+  if (!user) return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+  const sessionUser = timeMeStep(req, 'admin_me.response_shape', () => {
+    const role = String(user.role || '').toLowerCase();
+    const isFounder = Boolean(user.isFounder || role === 'founder');
+
+    return {
+      id: user.id || 'unknown',
+      email: user.email || '',
+      name: user.fullName || user.name || '',
+      role,
+      staffId: user.staffId || null,
+      status: user.status || 'active',
+      accountStatus: user.accountStatus || user.status || 'active',
+      accessExpiresAt: user.accessExpiresAt || null,
+      noExpiry: isFounder || Boolean(user.noExpiry || user.accessExpiresAt == null),
+      mustChangePassword: Boolean(user.mustChangePassword),
+      isFounder,
+      isProtected: isFounder || Boolean(user.isProtected),
+    };
+  });
+
+  res.status(200);
+  finishMeTiming(req, res, { result: 'ok' });
+  return res.json({
+    ok: true,
+    success: true,
+    status: 200,
+    authenticated: true,
+    user: sessionUser,
+    // Preserve the legacy shape used by older admin clients.
+    admin: sessionUser,
+  });
+});
+
 router.use((req, res, next) => {
   // Legacy namespace: let server.js handle /admin/* (tests rely on /admin/login, /admin/refresh, /admin/metrics).
   // Exiting the router here prevents this file from shadowing those handlers.
@@ -557,21 +597,6 @@ router.use((req, res, next) => {
   if (req.path === '/viral-videos' || req.path.startsWith('/viral-videos/')) return next('router');
   if (req.path === '/seed-founder' || req.path === '/bootstrap-founder') return next('router');
   return requireAdminAuth(req, res, next);
-});
-
-// GET /api/admin/me
-router.get('/me', (req, res) => {
-  const a = req.admin || null;
-  if (!a) return res.status(401).json({ ok: false, message: 'Unauthorized' });
-  return res.status(200).json({
-    ok: true,
-    authenticated: true,
-    admin: {
-      id: a.id || 'unknown',
-      email: a.email || '',
-      role: String(a.role || '').toLowerCase(),
-    },
-  });
 });
 
 // GET /api/admin/stats

@@ -586,6 +586,56 @@ test('/auth/me and direct route authorization use latest effective access', asyn
   assert.equal(direct.status, 403);
 });
 
+test('/auth/me returns 200 for no-expiry staff when role preset and optional access data are missing', async () => {
+  const app = buildAccessApp();
+  currentUser = makeUser({
+    _id: STAFF_ID,
+    email: 'minimal-staff@example.com',
+    name: 'Minimal Staff',
+    role: 'editor',
+    noExpiry: true,
+    accessExpiresAt: null,
+  });
+  delete currentUser.moduleAccessStates;
+  delete currentUser.moduleAccessOverride;
+  delete currentUser.specialRightsOverride;
+  delete currentUser.taskRightsOverride;
+  delete currentUser.accountControlRightsOverride;
+  Role.findOne = () => queryResult(null);
+  const token = signToken({ sub: currentUser._id, email: currentUser.email, role: currentUser.role, name: currentUser.name });
+
+  const me = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${token}`);
+
+  assert.equal(me.status, 200);
+  assert.equal(me.body.user.email, currentUser.email);
+  assert.equal(me.body.user.noExpiry, true);
+  assert.equal(me.body.effectiveModuleAccess.dashboard.allowed, true);
+  assert.equal(me.body.effectiveModuleAccess.financeDesk.allowed, false);
+});
+
+test('/auth/me does not crash Founder session restore when optional policy lookup fails', async () => {
+  const app = buildAccessApp();
+  const token = signToken({ sub: FOUNDER_ID, role: 'founder', email: founderUser.email, name: founderUser.name });
+  let policyLookups = 0;
+  SiteSettings.findOne = async () => { policyLookups += 1; throw new Error('policy lookup unavailable'); };
+
+  const me = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${token}`);
+
+  assert.equal(me.status, 200);
+  assert.equal(me.body.ok, true);
+  assert.equal(me.body.user.role, 'founder');
+  assert.equal(me.body.effectiveModuleAccess.safeZone.allowed, true);
+  assert.equal(me.body.effectiveModuleAccess.financeDesk.allowed, true);
+  assert.equal(me.body.access.modules.includes('safeZone'), true);
+  assert.equal(policyLookups, 0);
+  const bodyText = JSON.stringify(me.body);
+  assert.equal(bodyText.includes('passwordHash'), false);
+  assert.equal(bodyText.includes('resetPasswordToken'), false);
+  assert.equal(bodyText.includes('accessToken'), false);
+  assert.equal(bodyText.includes('refreshToken'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(me.body, 'token'), false);
+});
+
 test('staff module access update increments accessVersion and returns saved record', async () => {
   const adminTeamRoutes = require('../routes/adminTeam.routes');
   const app = express();

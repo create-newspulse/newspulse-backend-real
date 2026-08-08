@@ -234,6 +234,40 @@ const bcrypt = require('bcrypt');
 const fs = require('fs');
 const multer = require('multer');
 
+function _isMongoConnectivityError(err) {
+  const name = String(err?.name || '');
+  const code = String(err?.code || '');
+  const message = String(err?.message || '');
+  if (name === 'MongoNetworkTimeoutError' || name === 'MongoServerSelectionError' || name === 'MongoNetworkError') return true;
+  if (code === 'ETIMEDOUT' || code === 'ECONNRESET' || code === 'ENOTFOUND' || code === 'ECONNREFUSED') return true;
+  return /connection timed out|server selection timed out|connection .* was cleared/i.test(message);
+}
+
+if (require.main === module) {
+  process.on('unhandledRejection', (reason) => {
+    if (_isMongoConnectivityError(reason)) {
+      console.warn('[runtime] Suppressed unhandled Mongo rejection', {
+        name: reason?.name,
+        message: reason?.message || String(reason),
+      });
+      return;
+    }
+    console.error('[runtime] Unhandled rejection', reason);
+  });
+
+  process.on('uncaughtException', (err) => {
+    if (_isMongoConnectivityError(err)) {
+      console.warn('[runtime] Suppressed uncaught Mongo connectivity exception', {
+        name: err?.name,
+        message: err?.message || String(err),
+      });
+      return;
+    }
+    console.error('[runtime] Uncaught exception', err);
+    process.exit(1);
+  });
+}
+
 function _logStartupDbStatus(label) {
   try {
     const env = String(process.env.NODE_ENV || 'development').toLowerCase();

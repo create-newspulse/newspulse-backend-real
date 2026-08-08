@@ -2,7 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 
 const Role = require('../models/Role');
-const { requireAuth } = require('../middleware/requireAuth');
+const { countMeQuery, requireAuth, timeMeStep, timeMeStepAsync } = require('../middleware/requireAuth');
 const { logAudit } = require('../lib/audit');
 const {
   ADMIN_MODULE_KEYS,
@@ -11,6 +11,8 @@ const {
 } = require('../lib/teamAccess');
 const {
   CANONICAL_ADMIN_MODULE_KEYS,
+  CANONICAL_STAFF_MODULE_KEYS,
+  defaultModulePolicies,
   evaluateAllModuleAccess,
   evaluateModuleAccess,
   getFounderModulePolicy,
@@ -68,13 +70,52 @@ function buildSpecialRightsSummary(user) {
   };
 }
 
+let cachedFounderModuleAccess = null;
+
+function isFounderUser(user) {
+  return Boolean(user?.isFounder || normalizeRole(user?.role) === 'founder');
+}
+
+function founderModuleAccess() {
+  if (!cachedFounderModuleAccess) {
+    cachedFounderModuleAccess = CANONICAL_STAFF_MODULE_KEYS.reduce((acc, key) => {
+      acc[key] = Object.freeze({
+        key,
+        canonicalKey: key,
+        visible: true,
+        allowed: true,
+        reasonCode: 'ALLOWED',
+        globalState: key === 'dashboard' ? 'available' : 'founder_only',
+        individualState: 'enabled',
+        temporaryExpiresAt: null,
+      });
+      return acc;
+    }, {});
+  }
+  return Object.fromEntries(Object.entries(cachedFounderModuleAccess).map(([key, value]) => [key, { ...value }]));
+}
+
+async function getSessionModulePolicy(req = null) {
+  try {
+    countMeQuery(req, 'policy');
+    return await getFounderModulePolicy({ defaultWhenDbUnavailable: true });
+  } catch (_err) {
+    return { modulePolicies: defaultModulePolicies(), version: 0, updatedAt: null, updatedBy: null, auditReason: null };
+  }
+}
+
 async function myAccessPayload(req) {
   const user = req._authUserDoc || req.user;
-  const policy = await getFounderModulePolicy({ defaultWhenDbUnavailable: true });
-  const effectiveModuleAccess = evaluateAllModuleAccess(user, policy);
-  const allowedModules = CANONICAL_ADMIN_MODULE_KEYS.filter((key) => effectiveModuleAccess[key]?.allowed);
+  let effectiveModuleAccess;
+  if (isFounderUser(user)) {
+    effectiveModuleAccess = timeMeStep(req, 'access.founder_fast_path', () => founderModuleAccess());
+  } else {
+    const policy = await timeMeStepAsync(req, 'access.policy_lookup', () => getSessionModulePolicy(req));
+    effectiveModuleAccess = timeMeStep(req, 'access.effective_module_access', () => evaluateAllModuleAccess(user, policy));
+  }
+  const allowedModules = timeMeStep(req, 'access.allowed_modules', () => CANONICAL_ADMIN_MODULE_KEYS.filter((key) => effectiveModuleAccess[key]?.allowed));
 
-  return {
+  return timeMeStep(req, 'access.response_shape', () => ({
     identity: buildIdentity(user),
     role: normalizeRole(user?.role) || user?.role || null,
     position: user?.position || user?.designation || null,
@@ -85,7 +126,7 @@ async function myAccessPayload(req) {
     effectiveModuleAccess,
     modules: allowedModules,
     specialRights: buildSpecialRightsSummary(user),
-  };
+  }));
 }
 
 router.get('/me', async (req, res) => {

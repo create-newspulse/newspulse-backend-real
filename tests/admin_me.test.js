@@ -12,7 +12,7 @@ test('GET /api/admin/me returns 401 JSON when unauthenticated', async () => {
   assert.equal(res.status, 401);
   assert.match(String(res.headers['content-type'] || ''), /^application\/json/i);
   assert.equal(res.body.ok, false);
-  assert.equal(res.body.message, 'Unauthorized');
+  assert.equal(res.body.code, 'UNAUTHORIZED');
 });
 
 test('GET /admin-api/admin/me returns 401 JSON when unauthenticated', async () => {
@@ -20,7 +20,7 @@ test('GET /admin-api/admin/me returns 401 JSON when unauthenticated', async () =
   assert.equal(res.status, 401);
   assert.match(String(res.headers['content-type'] || ''), /^application\/json/i);
   assert.equal(res.body.ok, false);
-  assert.equal(res.body.message, 'Unauthorized');
+  assert.equal(res.body.code, 'UNAUTHORIZED');
 });
 
 test('GET /api/admin/me returns 200 when Bearer token is valid', async () => {
