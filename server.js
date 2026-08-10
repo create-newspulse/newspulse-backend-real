@@ -396,6 +396,7 @@ const publicAdsRouter = require('./routes/publicAds.routes');
 const publicSponsoredFeaturesRouter = require('./routes/publicSponsoredFeatures.routes');
 const adminAdsRouter = require('./routes/adminAds.routes');
 const adminAdsInquiriesRouter = require('./routes/adminAdsInquiries.routes');
+const adminMarketingPhase4Router = require('./routes/adminMarketingPhase4.routes');
 const publicAdsInquiryRouter = require('./routes/publicAds');
 const { submitPublicAdInquiry } = require('./controllers/adsInquiriesController');
 const { submitPublicGrievance } = require('./controllers/grievanceController');
@@ -1760,6 +1761,11 @@ app.use('/admin-api/api/analytics', articleAnalyticsRouter);
 app.use('/api/admin/analytics', adminAnalyticsRouter);
 app.use('/admin-api/admin/analytics', adminAnalyticsRouter);
 app.use('/admin-api/api/admin/analytics', adminAnalyticsRouter);
+
+// Marketing Phase 4 backend (admin-only, server-side permissions)
+app.use('/api/admin/marketing', adminMarketingPhase4Router);
+app.use('/admin-api/admin/marketing', adminMarketingPhase4Router);
+app.use('/admin-api/api/admin/marketing', adminMarketingPhase4Router);
 
 // Articles router mounted at /api and alias at root for /articles
 app.use('/api', articlesRoutes);
