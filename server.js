@@ -434,6 +434,8 @@ const publicTickerAdsRouter = require('./routes/publicTickerAds.routes');
 const publicApiBroadcastRouter = require('./routes/publicApiBroadcast.routes');
 const publicTickerRouter = require('./routes/publicTicker.routes');
 const publicWeatherRouter = require('./routes/publicWeather.routes');
+const publicPushRouter = require('./routes/publicPush.routes');
+const adminPushRouter = require('./routes/adminPush.routes');
 const debugRouter = require('./routes/_debug.routes');
 const articleAnalyticsRouter = require('./routes/articleAnalytics.routes');
 const adminAnalyticsRouter = require('./routes/adminAnalytics.routes');
@@ -1732,9 +1734,12 @@ app.use('/api/public/trending-topics', publicTrendingTopicsRouter);
 app.use('/api/public/news', publicNewsRouter);
 app.use('/api/breaking', breakingRouter);
 app.use('/api/public/weather', publicWeatherRouter);
+app.use('/api/public/push', publicPushRouter);
 // Admin panel proxy basePath support for public news
 app.use('/admin-api/public/news', publicNewsRouter);
 app.use('/admin-api/api/public/news', publicNewsRouter);
+app.use('/admin-api/public/push', publicPushRouter);
+app.use('/admin-api/api/public/push', publicPushRouter);
 
 // Admin: generate publish-time translations for News (requires admin auth)
 app.use('/api/admin/news', adminNewsTranslationsRouter);
@@ -1761,6 +1766,11 @@ app.use('/admin-api/api/analytics', articleAnalyticsRouter);
 app.use('/api/admin/analytics', adminAnalyticsRouter);
 app.use('/admin-api/admin/analytics', adminAnalyticsRouter);
 app.use('/admin-api/api/admin/analytics', adminAnalyticsRouter);
+
+// Admin push notification test/status (Founder-only)
+app.use('/api/admin/push', adminPushRouter);
+app.use('/admin-api/admin/push', adminPushRouter);
+app.use('/admin-api/api/admin/push', adminPushRouter);
 
 // Marketing Phase 4 backend (admin-only, server-side permissions)
 app.use('/api/admin/marketing', adminMarketingPhase4Router);

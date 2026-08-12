@@ -8,6 +8,9 @@ pnpm-debug.log*
 # Env & secrets
 .env
 .env.*
+firebase*.json
+serviceAccount*.json
+service-account*.json
 
 # Logs & coverage
 *.log
@@ -55,8 +58,10 @@ logs/
 # Environment files (secrets)
 # NEVER COMMIT REAL SECRETS
 ###################################
+# Environment files / secrets
 .env
 .env.local
+.env.*.local
 .env.development
 .env.test
 .env.production
@@ -65,7 +70,13 @@ logs/
 .env.production.local
 *.env
 .env.*
+# Keep template available in Git
+!.env.example
 !.env.example    # keep only the sample env file in git
+# Firebase / Google service-account credentials
+firebase*.json
+serviceAccount*.json
+service-account*.json
 
 ###################################
 # Build / coverage outputs
