@@ -2,6 +2,7 @@ const express = require('express');
 
 const {
   registerPush,
+  recordPushReceipt,
   updatePushPreferences,
   unregisterPush,
   getPushDiagnostics,
@@ -46,6 +47,7 @@ router.use(rateLimit);
 
 router.get('/diagnostics', getPushDiagnostics);
 router.post('/register', registerPush);
+router.post('/receipt', recordPushReceipt);
 router.put('/preferences', updatePushPreferences);
 router.delete('/unregister', unregisterPush);
 router.post('/unregister', unregisterPush);

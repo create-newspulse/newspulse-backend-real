@@ -103,8 +103,11 @@ function buildMessagePayload(registration, message) {
 
   const data = {
     notificationType: type,
+    type: trim(message.type || type).slice(0, 40) || type,
     url,
   };
+  const deliveryLogId = trim(message.deliveryLogId);
+  if (/^[a-f0-9]{24}$/i.test(deliveryLogId)) data.deliveryLogId = deliveryLogId;
   for (const key of ['articleId', 'articleSlug', 'category', 'language']) {
     const value = trim(message[key]);
     if (value) data[key] = value.slice(0, 200);

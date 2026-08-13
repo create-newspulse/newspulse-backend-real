@@ -20,6 +20,12 @@ const pushDeliveryLogSchema = new mongoose.Schema({
   targetedCount: { type: Number, default: 0, min: 0 },
   successCount: { type: Number, default: 0, min: 0 },
   failureCount: { type: Number, default: 0, min: 0 },
+  browserReceivedCount: { type: Number, default: 0, min: 0 },
+  clickedCount: { type: Number, default: 0, min: 0 },
+  firstReceivedAt: { type: Date, default: null, index: true },
+  lastReceivedAt: { type: Date, default: null, index: true },
+  firstClickedAt: { type: Date, default: null, index: true },
+  lastClickedAt: { type: Date, default: null, index: true },
   sentAt: { type: Date, default: Date.now, index: true },
   completedAt: { type: Date, default: null, index: true },
   sentBy: {

@@ -13,7 +13,7 @@ const app = require('../server');
 
 const MODEL_METHODS = ['findOneAndUpdate', 'deleteOne', 'findOne', 'find', 'updateOne', 'countDocuments'];
 const modelOriginals = Object.fromEntries(MODEL_METHODS.map((name) => [name, PushRegistration[name]]));
-const DELIVERY_LOG_METHODS = ['create', 'find', 'findOne', 'countDocuments'];
+const DELIVERY_LOG_METHODS = ['create', 'find', 'findOne', 'updateOne', 'countDocuments'];
 const deliveryLogOriginals = Object.fromEntries(DELIVERY_LOG_METHODS.map((name) => [name, PushDeliveryLog[name]]));
 const originalSendTestPushNotification = pushMessagingService.sendTestPushNotification;
 const originalConsoleWarn = console.warn;
@@ -203,10 +203,22 @@ function installInMemoryRegistrationStore() {
 
 function installInMemoryDeliveryLogStore() {
   const logs = [];
+  let nextId = 1;
   PushDeliveryLog.create = async (value) => {
-    const doc = { _id: `push-log-${logs.length + 1}`, ...clone(value) };
+    const doc = { _id: String(nextId++).padStart(24, '0'), ...clone(value) };
     logs.push(doc);
     return clone(doc);
+  };
+  PushDeliveryLog.updateOne = async (filter, update) => {
+    const doc = logs.find((item) => matchesFilter(item, filter));
+    if (!doc) return { matchedCount: 0, modifiedCount: 0 };
+    if (update.$inc) {
+      for (const [key, value] of Object.entries(update.$inc)) setPath(doc, key, Number(getPath(doc, key) || 0) + Number(value || 0));
+    }
+    if (update.$set) {
+      for (const [key, value] of Object.entries(update.$set)) setPath(doc, key, clone(value));
+    }
+    return { matchedCount: 1, modifiedCount: 1 };
   };
   PushDeliveryLog.countDocuments = async (filter = {}) => logs.filter((doc) => matchesFilter(doc, filter)).length;
   function makeQuery(filter = {}, { one = false } = {}) {
@@ -247,7 +259,7 @@ function installInMemoryDeliveryLogStore() {
 
 function makeDeliveryLog(index, overrides = {}) {
   return {
-    _id: `seed-push-log-${index}`,
+    _id: String(index).padStart(24, '0'),
     type: index % 2 === 0 ? 'article' : 'breaking',
     title: `Push ${index}`,
     body: `Push body ${index}`,
@@ -259,6 +271,12 @@ function makeDeliveryLog(index, overrides = {}) {
     targetedCount: 1,
     successCount: 1,
     failureCount: 0,
+    browserReceivedCount: 0,
+    clickedCount: 0,
+    firstReceivedAt: null,
+    lastReceivedAt: null,
+    firstClickedAt: null,
+    lastClickedAt: null,
     sentAt: new Date(Date.UTC(2026, 7, 13, index, 0, 0)).toISOString(),
     completedAt: new Date(Date.UTC(2026, 7, 13, index, 1, 0)).toISOString(),
     lastFailureCode: null,
@@ -912,6 +930,9 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   assert.equal(response.body.failureCount, 0);
   assert.equal(sends.length, 1);
   assert.equal(sends[0].token, activeToken);
+  assert.equal(sends[0].data.deliveryLogId, String(logs[0]._id));
+  assert.equal(sends[0].data.type, 'breaking');
+  assert.equal(sends[0].data.url, 'https://www.newspulse.co.in/news/breaking');
   assert.equal(logs.length, 1);
   assert.equal(logs[0].type, 'breaking');
   assert.equal(logs[0].title, 'Breaking News');
@@ -978,6 +999,9 @@ test('POST /api/admin/push/article sends article push and diagnostics show last 
   assert.equal(response.body.targetingDebug.excludedPreferenceOffCount, 0);
   assert.equal(response.body.deliveryLogCreated, true);
   assert.equal(sends.length, 1);
+  assert.equal(sends[0].data.deliveryLogId, String(logs[0]._id));
+  assert.equal(sends[0].data.type, 'article');
+  assert.equal(sends[0].data.url, 'https://www.newspulse.co.in/news/article-slug');
   assert.equal(sends[0].data.articleId, 'article-1');
   assert.equal(sends[0].data.articleSlug, 'article-slug');
   assert.equal(sends[0].data.category, 'national');
@@ -1189,6 +1213,115 @@ test('GET /api/admin/push/history returns empty items when no delivery logs exis
   assert.deepEqual(response.body.items, []);
 });
 
+test('POST /api/public/push/receipt records received and clicked events safely', async () => {
+  const { logs } = installInMemoryDeliveryLogStore();
+  const log = await PushDeliveryLog.create(makeDeliveryLog(42, {
+    browserReceivedCount: 0,
+    clickedCount: 0,
+    firstReceivedAt: null,
+    lastReceivedAt: null,
+    firstClickedAt: null,
+    lastClickedAt: null,
+  }));
+
+  const firstReceived = await request(app)
+    .post('/api/public/push/receipt')
+    .send({ deliveryLogId: String(log._id), event: 'received' });
+  assert.equal(firstReceived.status, 200);
+  assert.equal(firstReceived.body.ok, true);
+
+  const initialFirstReceivedAt = logs[0].firstReceivedAt;
+  const initialLastReceivedAt = logs[0].lastReceivedAt;
+  assert.equal(logs[0].browserReceivedCount, 1);
+  assert.equal(Boolean(initialFirstReceivedAt), true);
+  assert.equal(Boolean(initialLastReceivedAt), true);
+
+  const secondReceived = await request(app)
+    .post('/api/public/push/receipt')
+    .send({ deliveryLogId: String(log._id), event: 'received' });
+  assert.equal(secondReceived.status, 200);
+  assert.equal(logs[0].browserReceivedCount, 2);
+  assert.equal(logs[0].firstReceivedAt, initialFirstReceivedAt);
+  assert.notEqual(logs[0].lastReceivedAt, null);
+
+  const firstClicked = await request(app)
+    .post('/api/public/push/receipt')
+    .send({ deliveryLogId: String(log._id), event: 'clicked' });
+  assert.equal(firstClicked.status, 200);
+  const initialFirstClickedAt = logs[0].firstClickedAt;
+  assert.equal(logs[0].clickedCount, 1);
+  assert.equal(Boolean(initialFirstClickedAt), true);
+  assert.equal(Boolean(logs[0].lastClickedAt), true);
+
+  const secondClicked = await request(app)
+    .post('/api/public/push/receipt')
+    .send({ deliveryLogId: String(log._id), event: 'clicked' });
+  assert.equal(secondClicked.status, 200);
+  assert.equal(logs[0].clickedCount, 2);
+  assert.equal(logs[0].firstClickedAt, initialFirstClickedAt);
+  assertNoPushSecrets(firstReceived.body);
+  assertNoPushSecrets(secondClicked.body);
+});
+
+test('POST /api/public/push/receipt preserves first timestamps and advances last timestamps', async () => {
+  const { logs } = installInMemoryDeliveryLogStore();
+  const firstReceivedAt = '2026-08-13T09:00:00.000Z';
+  const lastReceivedAt = '2026-08-13T09:01:00.000Z';
+  const firstClickedAt = '2026-08-13T09:02:00.000Z';
+  const lastClickedAt = '2026-08-13T09:03:00.000Z';
+  const log = await PushDeliveryLog.create(makeDeliveryLog(43, {
+    browserReceivedCount: 3,
+    clickedCount: 2,
+    firstReceivedAt,
+    lastReceivedAt,
+    firstClickedAt,
+    lastClickedAt,
+  }));
+
+  const received = await request(app)
+    .post('/api/public/push/receipt')
+    .send({ deliveryLogId: String(log._id), event: 'received' });
+  assert.equal(received.status, 200);
+  assert.equal(logs[0].browserReceivedCount, 4);
+  assert.equal(logs[0].firstReceivedAt, firstReceivedAt);
+  assert.notEqual(logs[0].lastReceivedAt, lastReceivedAt);
+
+  const clicked = await request(app)
+    .post('/api/public/push/receipt')
+    .send({ deliveryLogId: String(log._id), event: 'clicked' });
+  assert.equal(clicked.status, 200);
+  assert.equal(logs[0].clickedCount, 3);
+  assert.equal(logs[0].firstClickedAt, firstClickedAt);
+  assert.notEqual(logs[0].lastClickedAt, lastClickedAt);
+  assertNoPushSecrets(received.body);
+  assertNoPushSecrets(clicked.body);
+});
+
+test('POST /api/public/push/receipt rejects invalid input safely', async () => {
+  installInMemoryDeliveryLogStore();
+
+  const invalidId = await request(app)
+    .post('/api/public/push/receipt')
+    .send({ deliveryLogId: 'not-a-log-id', event: 'received' });
+  assert.equal(invalidId.status, 400);
+  assert.equal(invalidId.body.code, 'INVALID_PUSH_RECEIPT');
+
+  const invalidEvent = await request(app)
+    .post('/api/public/push/receipt')
+    .send({ deliveryLogId: '000000000000000000000001', event: 'opened' });
+  assert.equal(invalidEvent.status, 400);
+  assert.equal(invalidEvent.body.code, 'INVALID_PUSH_RECEIPT');
+
+  const missingLog = await request(app)
+    .post('/api/public/push/receipt')
+    .send({ deliveryLogId: '000000000000000000000001', event: 'received' });
+  assert.equal(missingLog.status, 404);
+  assert.equal(missingLog.body.code, 'PUSH_DELIVERY_LOG_NOT_FOUND');
+  assertNoPushSecrets(invalidId.body);
+  assertNoPushSecrets(invalidEvent.body);
+  assertNoPushSecrets(missingLog.body);
+});
+
 test('GET /api/admin/push/history returns breaking/article logs newest first without identifiers', async () => {
   const breakingToken = 'fcm-token-history-breaking:defghijklmnopqrstuvwxyz0123456789';
   const articleToken = 'fcm-token-history-article:defghijklmnopqrstuvwxyz0123456789';
@@ -1224,6 +1357,24 @@ test('GET /api/admin/push/history returns breaking/article logs newest first wit
   assert.equal(response.body.items[1].type, 'breaking');
   assert.equal(response.body.items[0].targetedCount, 2);
   assert.equal(response.body.items[0].successCount, 2);
+  logs[1].browserReceivedCount = 2;
+  logs[1].clickedCount = 1;
+  logs[1].firstReceivedAt = '2026-08-13T11:01:00.000Z';
+  logs[1].lastReceivedAt = '2026-08-13T11:02:00.000Z';
+  logs[1].firstClickedAt = '2026-08-13T11:03:00.000Z';
+  logs[1].lastClickedAt = '2026-08-13T11:04:00.000Z';
+
+  const proofResponse = await request(app)
+    .get('/api/admin/push/history?limit=10')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken('admin@newspulse.ai')}`);
+
+  assert.equal(proofResponse.status, 200);
+  assert.equal(proofResponse.body.items[0].browserReceivedCount, 2);
+  assert.equal(proofResponse.body.items[0].clickedCount, 1);
+  assert.equal(proofResponse.body.items[0].firstReceivedAt, '2026-08-13T11:01:00.000Z');
+  assert.equal(proofResponse.body.items[0].lastReceivedAt, '2026-08-13T11:02:00.000Z');
+  assert.equal(proofResponse.body.items[0].firstClickedAt, '2026-08-13T11:03:00.000Z');
+  assert.equal(proofResponse.body.items[0].lastClickedAt, '2026-08-13T11:04:00.000Z');
   assert.equal(response.body.items[0].lastFailureCode, null);
   assert.equal(response.body.items[0].lastFailureMessage, null);
   assertNoPushSecrets(response.body, [breakingToken, articleToken, process.env.FIREBASE_PRIVATE_KEY, process.env.FIREBASE_CLIENT_EMAIL]);

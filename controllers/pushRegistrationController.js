@@ -10,6 +10,7 @@ const LANGUAGES = new Set(['en', 'hi', 'gu']);
 const PLATFORMS = new Set(['web', 'android', 'ios']);
 const PUSH_HISTORY_TYPES = new Set(['all', 'breaking', 'article']);
 const PUSH_HISTORY_STATUSES = new Set(['all', 'sent', 'failed', 'no_recipients']);
+const PUSH_RECEIPT_EVENTS = new Set(['received', 'clicked']);
 const REGISTRATION_BODY_KEYS = new Set([
   'registrationId',
   'registrationType',
@@ -358,6 +359,16 @@ function validateSendBody(body = {}, allowedKeys = SEND_BODY_KEYS) {
   return { ok: true };
 }
 
+function validateReceiptBody(body = {}) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'Invalid request body' };
+  if (Object.keys(body).length > 5) return { ok: false, error: 'Invalid request body' };
+  const deliveryLogId = trim(body.deliveryLogId);
+  if (!/^[a-f0-9]{24}$/i.test(deliveryLogId)) return { ok: false, error: 'deliveryLogId is invalid' };
+  const event = trim(body.event).toLowerCase();
+  if (!PUSH_RECEIPT_EVENTS.has(event)) return { ok: false, error: 'event must be received or clicked' };
+  return { ok: true, value: { deliveryLogId, event } };
+}
+
 function normalizeSendText(value, fallback, maxLength) {
   const text = trim(value || fallback).slice(0, maxLength);
   return text || trim(fallback).slice(0, maxLength);
@@ -413,9 +424,9 @@ function buildSafeDeliveryMetadata(summary = {}) {
 
 async function createPushDeliveryLog(summary, admin) {
   try {
-    if (!PushDeliveryLog || typeof PushDeliveryLog.create !== 'function') return false;
-    if (summary.type !== 'breaking' && summary.type !== 'article') return false;
-    await PushDeliveryLog.create({
+    if (!PushDeliveryLog || typeof PushDeliveryLog.create !== 'function') return null;
+    if (summary.type !== 'breaking' && summary.type !== 'article') return null;
+    return await PushDeliveryLog.create({
       type: summary.type,
       title: summary.title,
       body: summary.body,
@@ -434,9 +445,32 @@ async function createPushDeliveryLog(summary, admin) {
       lastFailureCode: summary.lastFailureCode || null,
       lastFailureMessage: summary.lastFailureMessage || null,
     });
-    return true;
   } catch (error) {
     logPushControllerError('delivery-log', error);
+    return null;
+  }
+}
+
+async function updatePushDeliveryLog(summary = {}) {
+  try {
+    if (!summary.deliveryLogId || !PushDeliveryLog || typeof PushDeliveryLog.updateOne !== 'function') return false;
+    const set = {
+      targetedCount: summary.targetedCount,
+      successCount: summary.successCount,
+      failureCount: summary.failureCount,
+      completedAt: summary.completedAt || null,
+      lastFailureCode: summary.lastFailureCode || null,
+      lastFailureMessage: summary.lastFailureMessage || null,
+    };
+    const metadata = buildSafeDeliveryMetadata(summary);
+    if (metadata !== undefined) set.metadata = metadata;
+    await PushDeliveryLog.updateOne(
+      { _id: summary.deliveryLogId },
+      { $set: set },
+    );
+    return true;
+  } catch (error) {
+    logPushControllerError('delivery-log-update', error);
     return false;
   }
 }
@@ -515,11 +549,20 @@ async function sendToRegistrations({ type, title, body, url, registrations, mess
     sentAt,
     completedAt: null,
     deliveryLogCreated: false,
+    deliveryLogId: null,
     metadata,
   };
 
+  const deliveryLog = await createPushDeliveryLog(summary, admin);
+  if (deliveryLog?._id) {
+    summary.deliveryLogId = String(deliveryLog._id);
+    summary.deliveryLogCreated = true;
+  }
+
+  const messageWithDeliveryLog = summary.deliveryLogId ? { ...message, type, deliveryLogId: summary.deliveryLogId } : message;
+
   for (const registration of registrations || []) {
-    const result = await pushMessagingService.sendPushToRegistration(registration, message);
+    const result = await pushMessagingService.sendPushToRegistration(registration, messageWithDeliveryLog);
     if (result?.success) summary.successCount += 1;
     else {
       summary.failureCount += 1;
@@ -534,7 +577,7 @@ async function sendToRegistrations({ type, title, body, url, registrations, mess
   logFailedPushSummary(summary);
 
   summary.completedAt = new Date();
-  summary.deliveryLogCreated = await createPushDeliveryLog(summary, admin);
+  if (summary.deliveryLogId) summary.deliveryLogCreated = await updatePushDeliveryLog(summary);
   return summary;
 }
 
@@ -552,11 +595,45 @@ function serializePushDeliveryLog(log) {
     targetedCount: Number(log?.targetedCount || 0),
     successCount: Number(log?.successCount || 0),
     failureCount: Number(log?.failureCount || 0),
+    browserReceivedCount: Number(log?.browserReceivedCount || 0),
+    clickedCount: Number(log?.clickedCount || 0),
+    firstReceivedAt: toIsoString(log?.firstReceivedAt),
+    lastReceivedAt: toIsoString(log?.lastReceivedAt),
+    firstClickedAt: toIsoString(log?.firstClickedAt),
+    lastClickedAt: toIsoString(log?.lastClickedAt),
     sentAt: toIsoString(log?.sentAt),
     completedAt: toIsoString(log?.completedAt),
     lastFailureCode: safeFailureCode(log?.lastFailureCode),
     lastFailureMessage: safeFailureMessage(log?.lastFailureMessage),
   };
+}
+
+async function recordPushReceipt(req, res) {
+  try {
+    if (!ensureStorageAvailable(res)) return undefined;
+    const parsed = validateReceiptBody(req.body);
+    if (!parsed.ok) return fail(res, 400, 'INVALID_PUSH_RECEIPT', parsed.error);
+
+    const now = new Date();
+    const incrementField = parsed.value.event === 'received' ? 'browserReceivedCount' : 'clickedCount';
+    const firstAtField = parsed.value.event === 'received' ? 'firstReceivedAt' : 'firstClickedAt';
+    const lastAtField = parsed.value.event === 'received' ? 'lastReceivedAt' : 'lastClickedAt';
+
+    const existing = await PushDeliveryLog.findOne({ _id: parsed.value.deliveryLogId });
+    if (!existing) return fail(res, 404, 'PUSH_DELIVERY_LOG_NOT_FOUND', 'Delivery log not found');
+
+    const update = {
+      $inc: { [incrementField]: 1 },
+      $set: { [lastAtField]: now },
+    };
+    if (!existing[firstAtField]) update.$set[firstAtField] = now;
+
+    await PushDeliveryLog.updateOne({ _id: parsed.value.deliveryLogId }, update);
+    return ok(res);
+  } catch (error) {
+    logPushControllerError('receipt', error, req.body);
+    return fail(res, 500, 'PUSH_RECEIPT_FAILED', 'Unable to record push receipt');
+  }
 }
 
 async function latestDeliveryLog(filter, sort, select, warnings, warningCode) {
@@ -637,7 +714,7 @@ async function findRecentDeliveryLogs(filter, { skip = 0, limit = 5 } = {}) {
   if (query && typeof query.sort === 'function') query = query.sort({ sentAt: -1, createdAt: -1 });
   if (query && typeof query.skip === 'function') query = query.skip(skip);
   if (query && typeof query.limit === 'function') query = query.limit(limit);
-  if (query && typeof query.select === 'function') query = query.select('type title body url articleId articleSlug category language targetedCount successCount failureCount sentAt completedAt lastFailureCode lastFailureMessage');
+  if (query && typeof query.select === 'function') query = query.select('type title body url articleId articleSlug category language targetedCount successCount failureCount browserReceivedCount clickedCount firstReceivedAt lastReceivedAt firstClickedAt lastClickedAt sentAt completedAt lastFailureCode lastFailureMessage');
   if (query && typeof query.lean === 'function') return query.lean();
   const rows = await query;
   return Array.isArray(rows) ? rows : [];
@@ -1095,6 +1172,7 @@ module.exports = {
   registerPush,
   updatePushPreferences,
   unregisterPush,
+  recordPushReceipt,
   getPushFirebaseStatus,
   getPushDiagnostics,
   getPushHistory,
