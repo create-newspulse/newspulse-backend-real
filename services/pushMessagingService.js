@@ -230,7 +230,7 @@ async function resolveTestRegistration({ registrationId, registrationType } = {}
     return query;
   }
 
-  let query = PushRegistration.findOne({ enabled: true, status: 'active', registrationType: 'token' });
+  let query = PushRegistration.findOne({ enabled: true, status: 'active', registrationType: 'token', registrationId: { $ne: null } });
   if (query && typeof query.sort === 'function') query = query.sort({ lastRegisteredAt: -1, updatedAt: -1 });
   query = queryWithRegistrationId(query);
   if (query && typeof query.lean === 'function') return query.lean();
@@ -250,7 +250,7 @@ async function sendTestPushNotification(input = {}) {
 }
 
 function buildEligibilityFilter(kind, options = {}) {
-  const filter = { enabled: true, status: 'active', registrationType: 'token' };
+  const filter = { enabled: true, status: 'active', registrationType: 'token', registrationId: { $ne: null } };
   if (options.language) filter.language = options.language;
   if (kind === 'breaking_news') filter['preferences.breakingNews'] = true;
   if (kind === 'top_story') filter['preferences.topStories'] = true;

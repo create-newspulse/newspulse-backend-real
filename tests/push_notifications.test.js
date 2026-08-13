@@ -412,8 +412,8 @@ test('push registration upserts idempotently and preserves existing preferences'
   assert.deepEqual(stored.categories, ['technology']);
 });
 
-test('POST /api/public/push/register accepts fid payload with empty categories', async () => {
-  installInMemoryRegistrationStore();
+test('POST /api/public/push/register accepts fid payload as non-deliverable', async () => {
+  const { docs } = installInMemoryRegistrationStore();
 
   const response = await request(app)
     .post('/api/public/push/register')
@@ -433,12 +433,40 @@ test('POST /api/public/push/register accepts fid payload with empty categories',
     });
 
   assert.equal(response.status, 200);
-  assert.equal(response.body.registered, true);
+  assert.equal(response.body.registered, false);
   assert.equal(response.body.synced, true);
+  assert.equal(response.body.reason, 'missing_fcm_token');
   assert.equal(response.body.registrationType, 'fid');
   assert.equal(typeof response.body.fcmConfigured, 'boolean');
-  assert.equal(typeof response.body.deliveryReady, 'boolean');
+  assert.equal(response.body.deliveryReady, false);
+  const stored = Array.from(docs.values())[0];
+  assert.equal(stored.registrationType, 'fid');
+  assert.equal(stored.enabled, true);
+  assert.equal(stored.status, 'active');
+  assert.equal(stored.preferences.newArticleAlerts, true);
   assert.equal(JSON.stringify(response.body).includes('debug-test-registration-id-delete-me-123456'), false);
+});
+
+test('POST /api/public/push/register stores token when token and fid are both present', async () => {
+  const token = 'fcm-token-with-fid:defghijklmnopqrstuvwxyz0123456789';
+  const fid = 'firebase-installation-token-paired';
+  const { docs } = installInMemoryRegistrationStore();
+
+  const response = await request(app)
+    .post('/api/public/push/register')
+    .send({ registrationId: fid, registrationType: 'fid', token, preferences: { newArticleAlerts: true } });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.registered, true);
+  assert.equal(response.body.registrationType, 'token');
+  assert.equal(docs.size, 1);
+  const stored = Array.from(docs.values())[0];
+  assert.equal(stored.registrationId, token);
+  assert.equal(stored.registrationType, 'token');
+  assert.equal(stored.enabled, true);
+  assert.equal(stored.status, 'active');
+  assert.equal(stored.preferences.newArticleAlerts, true);
+  assertNoPushSecrets(response.body, [token, fid]);
 });
 
 test('GET /api/public/push/diagnostics returns safe missing-Firebase diagnostics with empty Mongo data', async () => {
@@ -456,13 +484,19 @@ test('GET /api/public/push/diagnostics returns safe missing-Firebase diagnostics
   assert.equal(response.body.totalRegistrations, 0);
   assert.equal(response.body.enabledRegistrations, 0);
   assert.equal(response.body.disabledRegistrations, 0);
+  assert.equal(response.body.enabledFcmTokenRegistrations, 0);
+  assert.equal(response.body.enabledFidOnlyRegistrations, 0);
   assert.equal(response.body.lastRegistrationAt, null);
   assert.equal(response.body.registrationStats.totalRegistrations, 0);
   assert.equal(response.body.registrationStats.enabledRegistrations, 0);
   assert.equal(response.body.registrationStats.disabledRegistrations, 0);
+  assert.equal(response.body.registrationStats.enabledFcmTokenRegistrations, 0);
+  assert.equal(response.body.registrationStats.enabledFidOnlyRegistrations, 0);
   assert.equal(response.body.registrations.total, 0);
   assert.equal(response.body.registrations.enabled, 0);
   assert.equal(response.body.registrations.disabled, 0);
+  assert.equal(response.body.registrations.enabledFcmTokenRegistrations, 0);
+  assert.equal(response.body.registrations.enabledFidOnlyRegistrations, 0);
   assert.equal(response.body.mongo.registrations.total, 0);
   assert.equal(response.body.deliveryReady, false);
   assert.deepEqual(response.body.supportedRegistrationTypes, ['fid', 'token']);
@@ -506,12 +540,18 @@ test('GET /api/public/push/diagnostics returns safe configured-Firebase registra
   assert.equal(response.body.totalRegistrations, 1);
   assert.equal(response.body.enabledRegistrations, 1);
   assert.equal(response.body.disabledRegistrations, 0);
+  assert.equal(response.body.enabledFcmTokenRegistrations, 1);
+  assert.equal(response.body.enabledFidOnlyRegistrations, 0);
   assert.equal(response.body.registrationStats.totalRegistrations, 1);
   assert.equal(response.body.registrationStats.enabledRegistrations, 1);
   assert.equal(response.body.registrationStats.disabledRegistrations, 0);
+  assert.equal(response.body.registrationStats.enabledFcmTokenRegistrations, 1);
+  assert.equal(response.body.registrationStats.enabledFidOnlyRegistrations, 0);
   assert.equal(response.body.registrations.total, 1);
   assert.equal(response.body.registrations.enabled, 1);
   assert.equal(response.body.registrations.disabled, 0);
+  assert.equal(response.body.registrations.enabledFcmTokenRegistrations, 1);
+  assert.equal(response.body.registrations.enabledFidOnlyRegistrations, 0);
   assert.equal(response.body.mongo.registrations.total, 1);
   assert.equal(response.body.lastRegistrationAt, '2026-08-12T10:00:00.000Z');
   assert.equal(response.body.lastSuccessfulSendAt, '2026-08-12T10:05:00.000Z');
@@ -521,8 +561,46 @@ test('GET /api/public/push/diagnostics returns safe configured-Firebase registra
   assert.equal(response.body.registrationStats.lastFailureMessage, 'Temporary Firebase outage for [redacted-registration-id]');
   assert.equal(response.body.mongo.lastFailureMessage, 'Temporary Firebase outage for [redacted-registration-id]');
   assert.equal(typeof response.body.mongoConnected, 'boolean');
-  assert.equal(response.body.deliveryReady, false);
+  assert.equal(response.body.deliveryReady, true);
   assertNoPushSecrets(response.body, [token, process.env.FIREBASE_CLIENT_EMAIL, process.env.FIREBASE_PRIVATE_KEY]);
+});
+
+test('GET /api/public/push/diagnostics reports fid-only records as non-deliverable', async () => {
+  process.env.FIREBASE_PROJECT_ID = 'news-pulse-test';
+  process.env.FIREBASE_CLIENT_EMAIL = 'firebase-adminsdk@test.iam.gserviceaccount.com';
+  process.env.FIREBASE_PRIVATE_KEY = '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n';
+  const fid = 'firebase-installation-diagnostics-only';
+  installInMemoryRegistrationStore();
+  firebaseAdmin.setFirebaseAdminModulesForTests({
+    appModule: {
+      getApps: () => [],
+      cert: () => ({}),
+      applicationDefault: () => ({}),
+      initializeApp: (options) => ({ options }),
+    },
+    messagingModule: { getMessaging: () => ({ send: async () => 'ok' }) },
+  });
+
+  const register = await request(app).post('/api/public/push/register').send({ registrationId: fid, registrationType: 'fid' });
+  assert.equal(register.status, 200);
+  assert.equal(register.body.registered, false);
+  assert.equal(register.body.reason, 'missing_fcm_token');
+  assert.equal(register.body.deliveryReady, false);
+
+  const response = await request(app).get('/api/public/push/diagnostics');
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.totalRegistrations, 1);
+  assert.equal(response.body.enabledRegistrations, 1);
+  assert.equal(response.body.enabledFcmTokenRegistrations, 0);
+  assert.equal(response.body.enabledFidOnlyRegistrations, 1);
+  assert.equal(response.body.registrationStats.enabledFcmTokenRegistrations, 0);
+  assert.equal(response.body.registrationStats.enabledFidOnlyRegistrations, 1);
+  assert.equal(response.body.registrations.enabledFcmTokenRegistrations, 0);
+  assert.equal(response.body.registrations.enabledFidOnlyRegistrations, 1);
+  assert.equal(response.body.deliveryReady, false);
+  assert.equal(response.body.warnings.includes('no_enabled_fcm_token_registrations'), true);
+  assertNoPushSecrets(response.body, [fid, process.env.FIREBASE_CLIENT_EMAIL, process.env.FIREBASE_PRIVATE_KEY]);
 });
 
 test('GET /api/public/push/diagnostics counts disabled registrations safely', async () => {
@@ -805,12 +883,14 @@ test('POST /api/admin/push/article requires confirmSend', async () => {
 test('POST /api/admin/push/breaking does not target disabled devices and creates delivery log', async () => {
   const activeToken = 'fcm-token-breaking-active:defghijklmnopqrstuvwxyz0123456789';
   const disabledToken = 'fcm-token-breaking-disabled:defghijklmnopqrstuvwxyz0123456789';
+  const activeFid = 'firebase-installation-breaking-active';
   const { docs } = installInMemoryRegistrationStore();
   const { logs } = installInMemoryDeliveryLogStore();
   const { sends } = installFirebaseSendStub();
 
   await request(app).post('/api/public/push/register').send({ token: activeToken });
   await request(app).post('/api/public/push/register').send({ token: disabledToken });
+  await request(app).post('/api/public/push/register').send({ registrationId: activeFid, registrationType: 'fid', preferences: { breakingNews: true } });
   const disabled = Array.from(docs.values()).find((item) => item.registrationId === disabledToken);
   disabled.enabled = false;
   disabled.status = 'inactive';
@@ -840,8 +920,8 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   assert.equal(logs[0].language, 'en');
   assert.equal(logs[0].targetedCount, 1);
   assert.equal(Boolean(logs[0].completedAt), true);
-  assertNoPushSecrets(response.body, [activeToken, disabledToken, process.env.FIREBASE_PRIVATE_KEY]);
-  assertNoPushSecrets(logs, [activeToken, disabledToken, process.env.FIREBASE_PRIVATE_KEY]);
+  assertNoPushSecrets(response.body, [activeToken, disabledToken, activeFid, process.env.FIREBASE_PRIVATE_KEY]);
+  assertNoPushSecrets(logs, [activeToken, disabledToken, activeFid, process.env.FIREBASE_PRIVATE_KEY]);
 });
 
 test('POST /api/admin/push/breaking rejects invalid URL', async () => {

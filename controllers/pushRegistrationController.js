@@ -136,10 +136,10 @@ function looksLikeToken(value) {
 
 function resolveRegistrationId(body = {}) {
   const entries = [
-    ['registrationId', body.registrationId],
     ['token', body.token],
     ['fcmToken', body.fcmToken],
     ['registrationToken', body.registrationToken],
+    ['registrationId', body.registrationId],
     ['fid', body.fid],
     ['firebaseInstallationId', body.firebaseInstallationId],
   ];
@@ -151,11 +151,11 @@ function resolveRegistrationId(body = {}) {
 }
 
 function inferRegistrationType(body, idInfo) {
+  if (idInfo.field === 'token' || idInfo.field === 'fcmToken' || idInfo.field === 'registrationToken') return 'token';
+  if (idInfo.field === 'fid' || idInfo.field === 'firebaseInstallationId') return 'fid';
   const explicit = normalizeRegistrationType(body.registrationType || body.type);
   if (explicit) return explicit;
   if (body.registrationType || body.type) return null;
-  if (idInfo.field === 'fid' || idInfo.field === 'firebaseInstallationId') return 'fid';
-  if (idInfo.field === 'token' || idInfo.field === 'fcmToken' || idInfo.field === 'registrationToken') return 'token';
   if (looksLikeFid(idInfo.id)) return 'fid';
   if (looksLikeToken(idInfo.id)) return 'token';
   return 'token';
@@ -303,9 +303,16 @@ function firebaseStatusResponse() {
   };
 }
 
+function isDeliverableRegistrationType(registrationType) {
+  return registrationType === 'token';
+}
+
 function pushResponseFlags(registrationType) {
   const status = firebaseStatusResponse();
-  const deliveryReady = status.configured && status.messagingAvailable && pushMessagingService.isMongoReadyForPush();
+  const deliveryReady = status.configured
+    && status.messagingAvailable
+    && pushMessagingService.isMongoReadyForPush()
+    && isDeliverableRegistrationType(registrationType);
   return {
     ...(registrationType ? { registrationType } : {}),
     fcmConfigured: status.configured,
@@ -435,7 +442,7 @@ async function createPushDeliveryLog(summary, admin) {
 }
 
 async function latestEnabledTokenRegistration() {
-  let query = PushRegistration.findOne({ enabled: true, status: 'active', registrationType: 'token' });
+  let query = PushRegistration.findOne({ enabled: true, status: 'active', registrationType: 'token', registrationId: { $ne: null } });
   if (query && typeof query.sort === 'function') query = query.sort({ lastRegisteredAt: -1, updatedAt: -1 });
   if (query && typeof query.select === 'function') query = query.select('+registrationId registrationType enabled status lastRegisteredAt updatedAt');
   if (query && typeof query.lean === 'function') return query.lean();
@@ -462,7 +469,7 @@ async function safePushCount(filter) {
 }
 
 async function buildArticleTargetingDebugCounts() {
-  const enabledFilter = { enabled: true, status: 'active', registrationType: 'token' };
+  const enabledFilter = { enabled: true, status: 'active', registrationType: 'token', registrationId: { $ne: null } };
   const eligibleFilter = { ...enabledFilter, 'preferences.newArticleAlerts': true };
   const disabledFilter = { registrationType: 'token', $or: [{ enabled: false }, { status: 'inactive' }] };
   return {
@@ -687,6 +694,7 @@ async function buildPushDiagnostics() {
   let enabledRegistrations = 0;
   let disabledRegistrations = 0;
   let enabledTokenRegistrations = 0;
+  let enabledFidOnlyRegistrations = 0;
   let lastRegistration = null;
   let lastSuccessfulSend = null;
   let lastFailure = null;
@@ -697,7 +705,8 @@ async function buildPushDiagnostics() {
     totalRegistrations = await safeCountRegistrations({}, warnings, 'registration_count_unavailable');
     enabledRegistrations = await safeCountRegistrations({ enabled: true, status: 'active' }, warnings, 'enabled_registration_count_unavailable');
     disabledRegistrations = await safeCountRegistrations({ $or: [{ enabled: false }, { status: 'inactive' }] }, warnings, 'disabled_registration_count_unavailable');
-    enabledTokenRegistrations = await safeCountRegistrations({ enabled: true, status: 'active', registrationType: 'token' }, warnings, 'enabled_token_registration_count_unavailable');
+    enabledTokenRegistrations = await safeCountRegistrations({ enabled: true, status: 'active', registrationType: 'token', registrationId: { $ne: null } }, warnings, 'enabled_token_registration_count_unavailable');
+    enabledFidOnlyRegistrations = await safeCountRegistrations({ enabled: true, status: 'active', registrationType: 'fid' }, warnings, 'enabled_fid_registration_count_unavailable');
     lastRegistration = await safeLatestRegistration({}, { lastRegisteredAt: -1 }, 'lastRegisteredAt', warnings, 'last_registration_unavailable');
     lastSuccessfulSend = await safeLatestRegistration({ lastSuccessfulSendAt: { $ne: null } }, { lastSuccessfulSendAt: -1 }, 'lastSuccessfulSendAt', warnings, 'last_successful_send_unavailable');
     lastFailure = await safeLatestRegistration({ lastFailureAt: { $ne: null } }, { lastFailureAt: -1 }, 'lastFailureAt lastFailureCode lastFailureReason', warnings, 'last_failure_unavailable');
@@ -713,13 +722,14 @@ async function buildPushDiagnostics() {
 
   const deliveryReady = firebase.configured
     && firebase.messagingAvailable
-    && mongoConnected
     && modelAvailable
     && enabledTokenRegistrations > 0;
   const registrationStats = {
     totalRegistrations,
     enabledRegistrations,
     disabledRegistrations,
+    enabledFcmTokenRegistrations: enabledTokenRegistrations,
+    enabledFidOnlyRegistrations,
     total: totalRegistrations,
     enabled: enabledRegistrations,
     disabled: disabledRegistrations,
@@ -739,6 +749,8 @@ async function buildPushDiagnostics() {
     totalRegistrations,
     enabledRegistrations,
     disabledRegistrations,
+    enabledFcmTokenRegistrations: enabledTokenRegistrations,
+    enabledFidOnlyRegistrations,
     lastRegistrationAt: registrationStats.lastRegistrationAt,
     lastSuccessfulSendAt: registrationStats.lastSuccessfulSendAt,
     lastFailureAt: registrationStats.lastFailureAt,
@@ -749,6 +761,8 @@ async function buildPushDiagnostics() {
       total: totalRegistrations,
       enabled: enabledRegistrations,
       disabled: disabledRegistrations,
+      enabledFcmTokenRegistrations: enabledTokenRegistrations,
+      enabledFidOnlyRegistrations,
     },
     mongo: {
       connected: mongoConnected,
@@ -757,6 +771,8 @@ async function buildPushDiagnostics() {
         total: totalRegistrations,
         enabled: enabledRegistrations,
         disabled: disabledRegistrations,
+        enabledFcmTokenRegistrations: enabledTokenRegistrations,
+        enabledFidOnlyRegistrations,
       },
       lastRegistrationAt: registrationStats.lastRegistrationAt,
       lastSuccessfulSendAt: registrationStats.lastSuccessfulSendAt,
@@ -824,7 +840,12 @@ async function registerPush(req, res) {
       { upsert: true, new: true },
     );
 
-    return ok(res, { registered: true, synced: true, ...pushResponseFlags(input.registrationType), fcm: firebaseStatusResponse() });
+    const flags = pushResponseFlags(input.registrationType);
+    if (!isDeliverableRegistrationType(input.registrationType)) {
+      return ok(res, { registered: false, synced: true, reason: 'missing_fcm_token', ...flags, deliveryReady: false, fcm: firebaseStatusResponse() });
+    }
+
+    return ok(res, { registered: true, synced: true, ...flags, fcm: firebaseStatusResponse() });
   } catch (error) {
     logPushControllerError('register', error, req.body);
     return fail(res, 500, 'PUSH_REGISTER_FAILED', 'Unable to register push notifications');
