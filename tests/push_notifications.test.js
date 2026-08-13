@@ -16,6 +16,7 @@ const modelOriginals = Object.fromEntries(MODEL_METHODS.map((name) => [name, Pus
 const DELIVERY_LOG_METHODS = ['create', 'find', 'findOne', 'countDocuments'];
 const deliveryLogOriginals = Object.fromEntries(DELIVERY_LOG_METHODS.map((name) => [name, PushDeliveryLog[name]]));
 const originalSendTestPushNotification = pushMessagingService.sendTestPushNotification;
+const originalConsoleWarn = console.warn;
 const envKeys = ['FIREBASE_PROJECT_ID', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY', 'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT'];
 const envOriginals = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
 
@@ -34,6 +35,7 @@ function restoreStubs() {
     PushDeliveryLog[name] = fn;
   }
   pushMessagingService.sendTestPushNotification = originalSendTestPushNotification;
+  console.warn = originalConsoleWarn;
   restoreEnv();
   firebaseAdmin.resetFirebaseAdminForTests();
 }
@@ -265,7 +267,7 @@ function makeDeliveryLog(index, overrides = {}) {
   };
 }
 
-function installFirebaseSendStub({ failCode } = {}) {
+function installFirebaseSendStub({ failCode, failMessage, failByToken } = {}) {
   process.env.FIREBASE_PROJECT_ID = 'news-pulse-test';
   process.env.FIREBASE_CLIENT_EMAIL = 'firebase-adminsdk@test.iam.gserviceaccount.com';
   process.env.FIREBASE_PRIVATE_KEY = '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n';
@@ -282,9 +284,11 @@ function installFirebaseSendStub({ failCode } = {}) {
       getMessaging: () => ({
         send: async (payload) => {
           sends.push(payload);
-          if (failCode) {
-            const error = new Error('send failed');
-            error.code = failCode;
+          const tokenFailure = failByToken && failByToken[payload.token];
+          const failure = tokenFailure || (failCode ? { code: failCode, message: failMessage } : null);
+          if (failure) {
+            const error = new Error(failure.message || 'send failed');
+            error.code = failure.code || 'messaging/internal-error';
             throw error;
           }
           return `message-${sends.length}`;
@@ -341,6 +345,24 @@ test('Firebase Admin initializes only once', () => {
   assert.equal(initCount, 1);
 });
 
+test('PushRegistration schema stores push preference shape and FCM token field', () => {
+  const registration = new PushRegistration({
+    registrationId: 'fcm-token-schema:defghijklmnopqrstuvwxyz0123456789',
+    registrationType: 'token',
+  });
+
+  assert.equal(registration.enabled, true);
+  assert.equal(registration.status, 'active');
+  assert.equal(registration.registrationId, 'fcm-token-schema:defghijklmnopqrstuvwxyz0123456789');
+  assert.equal(registration.registrationType, 'token');
+  assert.equal(registration.preferences.breakingNews, true);
+  assert.equal(registration.preferences.topStories, true);
+  assert.equal(registration.preferences.newArticleAlerts, true);
+  assert.equal(registration.preferences.categoryAlerts, true);
+  assert.equal(registration.preferences.allArticles, false);
+  assert.equal(PushRegistration.schema.path('registrationId').options.select, false);
+});
+
 test('POST /api/public/push/register validates registration ID', async () => {
   const response = await request(app)
     .post('/api/public/push/register')
@@ -379,7 +401,11 @@ test('push registration upserts idempotently and preserves existing preferences'
   assert.equal(second.status, 200);
   assert.equal(docs.size, 1);
   const stored = Array.from(docs.values())[0];
+  assert.equal(stored.enabled, true);
+  assert.equal(stored.status, 'active');
   assert.equal(stored.preferences.breakingNews, false);
+  assert.equal(stored.preferences.newArticleAlerts, true);
+  assert.equal(stored.preferences.categoryAlerts, true);
   assert.equal(stored.preferences.allArticles, true);
   assert.equal(stored.preferences.topStories, true);
   assert.equal(stored.language, 'hi');
@@ -469,6 +495,7 @@ test('GET /api/public/push/diagnostics returns safe configured-Firebase registra
   stored.lastSuccessfulSendAt = '2026-08-12T10:05:00.000Z';
   stored.lastFailureAt = '2026-08-12T10:10:00.000Z';
   stored.lastFailureCode = 'messaging/internal-error';
+  stored.lastFailureReason = `Temporary Firebase outage for ${token}`;
 
   const response = await request(app).get('/api/public/push/diagnostics');
 
@@ -490,6 +517,9 @@ test('GET /api/public/push/diagnostics returns safe configured-Firebase registra
   assert.equal(response.body.lastSuccessfulSendAt, '2026-08-12T10:05:00.000Z');
   assert.equal(response.body.lastFailureAt, '2026-08-12T10:10:00.000Z');
   assert.equal(response.body.lastFailureCode, 'messaging/internal-error');
+  assert.equal(response.body.lastFailureMessage, 'Temporary Firebase outage for [redacted-registration-id]');
+  assert.equal(response.body.registrationStats.lastFailureMessage, 'Temporary Firebase outage for [redacted-registration-id]');
+  assert.equal(response.body.mongo.lastFailureMessage, 'Temporary Firebase outage for [redacted-registration-id]');
   assert.equal(typeof response.body.mongoConnected, 'boolean');
   assert.equal(response.body.deliveryReady, false);
   assertNoPushSecrets(response.body, [token, process.env.FIREBASE_CLIENT_EMAIL, process.env.FIREBASE_PRIVATE_KEY]);
@@ -562,8 +592,12 @@ test('GET /api/admin/push/diagnostics allows admin/founder auth and returns no i
 
 test('GET /api/admin/push/status includes safe Mongo registration stats for legacy callers', async () => {
   const token = 'fcm-token-status-diag:defghijklmnopqrstuvwxyz0123456789';
-  installInMemoryRegistrationStore();
+  const { docs } = installInMemoryRegistrationStore();
   await request(app).post('/api/public/push/register').send({ token });
+  const stored = Array.from(docs.values())[0];
+  stored.lastFailureAt = '2026-08-12T12:00:00.000Z';
+  stored.lastFailureCode = 'messaging/mismatched-credential';
+  stored.lastFailureReason = `Sender ID mismatch for ${token}`;
 
   const response = await request(app)
     .get('/api/admin/push/status')
@@ -579,6 +613,10 @@ test('GET /api/admin/push/status includes safe Mongo registration stats for lega
   assert.equal(response.body.registrationStats.totalRegistrations, 1);
   assert.equal(response.body.registrations.total, 1);
   assert.equal(response.body.mongo.registrations.total, 1);
+  assert.equal(response.body.lastFailureCode, 'messaging/mismatched-credential');
+  assert.equal(response.body.lastFailureMessage, 'Sender ID mismatch for [redacted-registration-id]');
+  assert.equal(response.body.diagnostics.lastFailureCode, 'messaging/mismatched-credential');
+  assert.equal(response.body.diagnostics.lastFailureMessage, 'Sender ID mismatch for [redacted-registration-id]');
   assertNoPushSecrets(response.body, [token]);
 });
 
@@ -877,7 +915,7 @@ test('POST /api/admin/push/article sends article push and diagnostics show last 
   assertNoPushSecrets(diagnostics.body, [token, process.env.FIREBASE_PRIVATE_KEY]);
 });
 
-test('POST /api/admin/push/article targets newArticleAlerts without language or category filtering', async () => {
+test('POST /api/admin/push/article targets token registrations with newArticleAlerts only', async () => {
   const eligibleToken = 'fcm-token-article-eligible:defghijklmnopqrstuvwxyz0123456789';
   const preferenceOffToken = 'fcm-token-article-pref-off:defghijklmnopqrstuvwxyz0123456789';
   const disabledToken = 'fcm-token-article-disabled:defghijklmnopqrstuvwxyz0123456789';
@@ -886,7 +924,12 @@ test('POST /api/admin/push/article targets newArticleAlerts without language or 
   installInMemoryDeliveryLogStore();
   const { sends } = installFirebaseSendStub();
 
-  await request(app).post('/api/public/push/register').send({ token: eligibleToken, language: 'gu', categories: ['sports'] });
+  await request(app).post('/api/public/push/register').send({
+    token: eligibleToken,
+    language: 'gu',
+    preferences: { newArticleAlerts: true, categoryAlerts: false, allArticles: false },
+    categories: ['sports'],
+  });
   await request(app).post('/api/public/push/register').send({ token: preferenceOffToken, language: 'en', preferences: { newArticleAlerts: false } });
   await request(app).post('/api/public/push/register').send({ token: disabledToken, language: 'en' });
   await request(app).post('/api/public/push/register').send({ registrationId: eligibleFid, registrationType: 'fid', language: 'hi' });
@@ -909,16 +952,149 @@ test('POST /api/admin/push/article targets newArticleAlerts without language or 
     });
 
   assert.equal(response.status, 200);
-  assert.equal(response.body.targetedCount, 2);
+  assert.equal(response.body.targetedCount, 1);
   assert.equal(response.body.successCount, 1);
-  assert.equal(response.body.failureCount, 1);
-  assert.equal(response.body.targetingDebug.enabledDevices, 3);
-  assert.equal(response.body.targetingDebug.newArticleAlertEligibleDevices, 2);
+  assert.equal(response.body.failureCount, 0);
+  assert.equal(response.body.targetingDebug.enabledDevices, 2);
+  assert.equal(response.body.targetingDebug.newArticleAlertEligibleDevices, 1);
   assert.equal(response.body.targetingDebug.excludedDisabledCount, 1);
   assert.equal(response.body.targetingDebug.excludedPreferenceOffCount, 1);
+  assert.equal(response.body.targetingDebug.targetedCount, 1);
   assert.equal(sends.length, 1);
   assert.equal(sends[0].token, eligibleToken);
   assertNoPushSecrets(response.body, [eligibleToken, preferenceOffToken, disabledToken, eligibleFid, process.env.FIREBASE_PRIVATE_KEY]);
+});
+
+test('POST /api/admin/push/article records no recipients when no newArticleAlerts registrations are eligible', async () => {
+  const preferenceOffToken = 'fcm-token-article-no-recipient:defghijklmnopqrstuvwxyz0123456789';
+  installInMemoryRegistrationStore();
+  const { logs } = installInMemoryDeliveryLogStore();
+  const { sends } = installFirebaseSendStub();
+
+  await request(app).post('/api/public/push/register').send({ token: preferenceOffToken, preferences: { newArticleAlerts: false } });
+
+  const response = await request(app)
+    .post('/api/admin/push/article')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken('admin@newspulse.ai')}`)
+    .send({
+      articleId: 'article-no-recipient',
+      slug: 'article-no-recipient',
+      title: 'Article title',
+      body: 'Article summary',
+      url: 'https://www.newspulse.co.in/news/article-no-recipient',
+      category: 'national',
+      language: 'en',
+      confirmSend: true,
+    });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.sent, false);
+  assert.equal(response.body.targetedCount, 0);
+  assert.equal(response.body.successCount, 0);
+  assert.equal(response.body.failureCount, 0);
+  assert.equal(response.body.targetingDebug.enabledDevices, 1);
+  assert.equal(response.body.targetingDebug.newArticleAlertEligibleDevices, 0);
+  assert.equal(response.body.targetingDebug.excludedPreferenceOffCount, 1);
+  assert.equal(response.body.targetingDebug.targetedCount, 0);
+  assert.equal(sends.length, 0);
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].targetedCount, 0);
+  assert.equal(logs[0].metadata.targeting.targetedCount, 0);
+  assertNoPushSecrets(response.body, [preferenceOffToken]);
+  assertNoPushSecrets(logs, [preferenceOffToken]);
+});
+
+test('POST /api/admin/push/article stores safe Firebase failure code and metadata', async () => {
+  const token = 'fcm-token-article-failure:defghijklmnopqrstuvwxyz0123456789';
+  installInMemoryRegistrationStore();
+  const { logs } = installInMemoryDeliveryLogStore();
+  installFirebaseSendStub({ failCode: 'messaging/internal-error', failMessage: `Firebase rejected ${token}` });
+  const warnings = [];
+  console.warn = (...args) => { warnings.push(args.map((item) => String(item)).join(' ')); };
+
+  await request(app).post('/api/public/push/register').send({ token });
+
+  const response = await request(app)
+    .post('/api/admin/push/article')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken('admin@newspulse.ai')}`)
+    .send({
+      articleId: 'article-failure',
+      slug: 'article-failure',
+      title: 'Article title',
+      body: 'Article summary',
+      url: 'https://www.newspulse.co.in/news/article-failure',
+      category: 'national',
+      language: 'en',
+      confirmSend: true,
+    });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.sent, false);
+  assert.equal(response.body.targetedCount, 1);
+  assert.equal(response.body.failureCount, 1);
+  assert.equal(response.body.lastFailureCode, 'messaging/internal-error');
+  assert.equal(response.body.lastFailureMessage, 'Firebase rejected [redacted-registration-id]');
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].lastFailureCode, 'messaging/internal-error');
+  assert.equal(logs[0].lastFailureMessage, 'Firebase rejected [redacted-registration-id]');
+  assert.equal(logs[0].failureCount, 1);
+  assert.equal(Boolean(logs[0].completedAt), true);
+  assert.deepEqual(logs[0].metadata.firebaseFailures, [{ code: 'messaging/internal-error', message: 'Firebase rejected [redacted-registration-id]', count: 1 }]);
+  assert.equal(logs[0].metadata.targeting.enabledDevices, 1);
+  assert.equal(logs[0].metadata.targeting.newArticleAlertEligibleDevices, 1);
+  assert.equal(logs[0].metadata.targeting.targetedCount, 1);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0], 'Push send failed: code=messaging/internal-error, failures=1');
+  assert.equal(warnings[0].includes(token), false);
+  assertNoPushSecrets(response.body, [token, process.env.FIREBASE_PRIVATE_KEY, process.env.FIREBASE_CLIENT_EMAIL]);
+  assertNoPushSecrets(logs, [token, process.env.FIREBASE_PRIVATE_KEY, process.env.FIREBASE_CLIENT_EMAIL]);
+});
+
+test('invalid Firebase token disables only that registration during article push', async () => {
+  const invalidToken = 'fcm-token-invalid-article:defghijklmnopqrstuvwxyz0123456789';
+  const validToken = 'fcm-token-valid-article:defghijklmnopqrstuvwxyz0123456789';
+  const { docs } = installInMemoryRegistrationStore();
+  const { logs } = installInMemoryDeliveryLogStore();
+  installFirebaseSendStub({
+    failByToken: {
+      [invalidToken]: { code: 'messaging/registration-token-not-registered', message: 'Requested entity was not found.' },
+    },
+  });
+
+  await request(app).post('/api/public/push/register').send({ token: invalidToken });
+  await request(app).post('/api/public/push/register').send({ token: validToken });
+
+  const response = await request(app)
+    .post('/api/admin/push/article')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken('admin@newspulse.ai')}`)
+    .send({
+      articleId: 'article-invalid-token',
+      slug: 'article-invalid-token',
+      title: 'Article title',
+      body: 'Article summary',
+      url: 'https://www.newspulse.co.in/news/article-invalid-token',
+      category: 'national',
+      language: 'en',
+      confirmSend: true,
+    });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.targetedCount, 2);
+  assert.equal(response.body.successCount, 1);
+  assert.equal(response.body.failureCount, 1);
+  assert.equal(response.body.lastFailureCode, 'messaging/registration-token-not-registered');
+  const invalid = Array.from(docs.values()).find((item) => item.registrationId === invalidToken);
+  const valid = Array.from(docs.values()).find((item) => item.registrationId === validToken);
+  assert.equal(invalid.enabled, false);
+  assert.equal(invalid.status, 'inactive');
+  assert.equal(Boolean(invalid.disabledAt), true);
+  assert.equal(invalid.lastFailureCode, 'messaging/registration-token-not-registered');
+  assert.equal(valid.enabled, true);
+  assert.equal(valid.status, 'active');
+  assert.equal(Boolean(valid.lastSuccessfulSendAt), true);
+  assert.equal(logs[0].lastFailureCode, 'messaging/registration-token-not-registered');
+  assertNoPushSecrets(response.body, [invalidToken, validToken]);
+  assertNoPushSecrets(logs, [invalidToken, validToken]);
 });
 
 test('GET /api/admin/push/history returns empty items when no delivery logs exist', async () => {
@@ -968,7 +1144,36 @@ test('GET /api/admin/push/history returns breaking/article logs newest first wit
   assert.equal(response.body.items[1].type, 'breaking');
   assert.equal(response.body.items[0].targetedCount, 2);
   assert.equal(response.body.items[0].successCount, 2);
+  assert.equal(response.body.items[0].lastFailureCode, null);
+  assert.equal(response.body.items[0].lastFailureMessage, null);
   assertNoPushSecrets(response.body, [breakingToken, articleToken, process.env.FIREBASE_PRIVATE_KEY, process.env.FIREBASE_CLIENT_EMAIL]);
+});
+
+test('GET /api/admin/push/history returns safe failure code/message without identifiers', async () => {
+  const token = 'fcm-token-history-failure:defghijklmnopqrstuvwxyz0123456789';
+  installInMemoryRegistrationStore();
+  installInMemoryDeliveryLogStore();
+  installFirebaseSendStub({ failCode: 'messaging/mismatched-credential', failMessage: `Could not send to ${token}` });
+
+  await request(app).post('/api/public/push/register').send({ token });
+  const article = await request(app)
+    .post('/api/admin/push/article')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken('admin@newspulse.ai')}`)
+    .send({ articleId: 'article-history-failure', slug: 'article-history-failure', title: 'Article title', body: 'Article summary', url: 'https://www.newspulse.co.in/news/article-history-failure', category: 'national', language: 'en', confirmSend: true });
+  assert.equal(article.status, 200);
+
+  const response = await request(app)
+    .get('/api/admin/push/history?status=failed')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken('admin@newspulse.ai')}`);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.items.length, 1);
+  assert.equal(response.body.items[0].lastFailureCode, 'messaging/mismatched-credential');
+  assert.equal(response.body.items[0].lastFailureMessage, 'Could not send to [redacted-registration-id]');
+  assert.equal(response.body.items[0].failureCount, 1);
+  assert.equal(JSON.stringify(response.body).includes('registrationId'), false);
+  assert.equal(JSON.stringify(response.body).includes('firebaseInstallationId'), false);
+  assertNoPushSecrets(response.body, [token, process.env.FIREBASE_PRIVATE_KEY, process.env.FIREBASE_CLIENT_EMAIL]);
 });
 
 test('GET /api/admin/push/history defaults to latest 5 records with pagination', async () => {

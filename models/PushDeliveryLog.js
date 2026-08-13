@@ -27,6 +27,20 @@ const pushDeliveryLogSchema = new mongoose.Schema({
     email: { type: String, default: null, trim: true, lowercase: true },
     role: { type: String, default: null, trim: true },
   },
+  metadata: {
+    targeting: {
+      enabledDevices: { type: Number, default: 0, min: 0 },
+      newArticleAlertEligibleDevices: { type: Number, default: 0, min: 0 },
+      excludedDisabledCount: { type: Number, default: 0, min: 0 },
+      excludedPreferenceOffCount: { type: Number, default: 0, min: 0 },
+      targetedCount: { type: Number, default: 0, min: 0 },
+    },
+    firebaseFailures: [{
+      code: { type: String, default: null, trim: true, maxlength: 120 },
+      message: { type: String, default: null, trim: true, maxlength: 240 },
+      count: { type: Number, default: 0, min: 0 },
+    }],
+  },
   lastFailureCode: { type: String, default: null, trim: true, maxlength: 120 },
   lastFailureMessage: { type: String, default: null, trim: true, maxlength: 240 },
 }, { timestamps: true });

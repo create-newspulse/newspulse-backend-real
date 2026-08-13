@@ -86,6 +86,7 @@ function redactSensitiveText(value, body = {}) {
   const idInfo = resolveRegistrationId(body);
   if (idInfo.id) text = text.split(idInfo.id).join(maskRegistrationId(idInfo.id));
 
+  text = text.replace(/[A-Za-z0-9_-]{8,}:[A-Za-z0-9._:-]{20,}/g, '[redacted-registration-id]');
   text = text.replace(/-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/g, '[redacted-private-key]');
   text = text.replace(/("private_key"\s*:\s*")[^"]+(")/gi, '$1[redacted-private-key]$2');
   return text;
@@ -320,7 +321,7 @@ function toIsoString(value) {
 
 function safeFailureCode(value) {
   const raw = trim(value).slice(0, 120);
-  if (!raw || /private|credential|secret|token|key/i.test(raw)) return null;
+  if (!raw || /private|secret|key/i.test(raw)) return null;
   return /^[a-z0-9_./:-]+$/i.test(raw) ? raw : null;
 }
 
@@ -377,6 +378,32 @@ function buildDeliveryResponse(summary, extra = {}) {
   };
 }
 
+function safeCountValue(value) {
+  const count = Math.floor(Number(value) || 0);
+  return count > 0 ? count : 0;
+}
+
+function buildSafeDeliveryMetadata(summary = {}) {
+  const metadata = {};
+  if (summary.metadata?.targeting) {
+    metadata.targeting = {
+      enabledDevices: safeCountValue(summary.metadata.targeting.enabledDevices),
+      newArticleAlertEligibleDevices: safeCountValue(summary.metadata.targeting.newArticleAlertEligibleDevices),
+      excludedDisabledCount: safeCountValue(summary.metadata.targeting.excludedDisabledCount),
+      excludedPreferenceOffCount: safeCountValue(summary.metadata.targeting.excludedPreferenceOffCount),
+      targetedCount: safeCountValue(summary.metadata.targeting.targetedCount),
+    };
+  }
+  if (Array.isArray(summary.metadata?.firebaseFailures) && summary.metadata.firebaseFailures.length > 0) {
+    metadata.firebaseFailures = summary.metadata.firebaseFailures.map((item) => ({
+      code: safeFailureCode(item?.code),
+      message: safeFailureMessage(item?.message),
+      count: safeCountValue(item?.count),
+    })).filter((item) => item.code || item.message || item.count > 0);
+  }
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
 async function createPushDeliveryLog(summary, admin) {
   try {
     if (!PushDeliveryLog || typeof PushDeliveryLog.create !== 'function') return false;
@@ -396,6 +423,7 @@ async function createPushDeliveryLog(summary, admin) {
       sentAt: summary.sentAt,
       completedAt: summary.completedAt || null,
       sentBy: buildSentBy(admin),
+      metadata: buildSafeDeliveryMetadata(summary),
       lastFailureCode: summary.lastFailureCode || null,
       lastFailureMessage: summary.lastFailureMessage || null,
     });
@@ -434,17 +462,34 @@ async function safePushCount(filter) {
 }
 
 async function buildArticleTargetingDebugCounts() {
-  const enabledFilter = { enabled: true, status: 'active' };
+  const enabledFilter = { enabled: true, status: 'active', registrationType: 'token' };
   const eligibleFilter = { ...enabledFilter, 'preferences.newArticleAlerts': true };
+  const disabledFilter = { registrationType: 'token', $or: [{ enabled: false }, { status: 'inactive' }] };
   return {
     enabledDevices: await safePushCount(enabledFilter),
     newArticleAlertEligibleDevices: await safePushCount(eligibleFilter),
-    excludedDisabledCount: await safePushCount({ $or: [{ enabled: false }, { status: 'inactive' }] }),
+    excludedDisabledCount: await safePushCount(disabledFilter),
     excludedPreferenceOffCount: await safePushCount({ ...enabledFilter, 'preferences.newArticleAlerts': { $ne: true } }),
   };
 }
 
-async function sendToRegistrations({ type, title, body, url, registrations, message, admin }) {
+function addFailureSummary(summary, code, message) {
+  const safeCode = safeFailureCode(code) || 'push/send_failed';
+  const safeMessage = safeFailureMessage(message) || 'Push send failed';
+  if (!summary.metadata) summary.metadata = {};
+  if (!Array.isArray(summary.metadata.firebaseFailures)) summary.metadata.firebaseFailures = [];
+  const existing = summary.metadata.firebaseFailures.find((item) => item.code === safeCode && item.message === safeMessage);
+  if (existing) existing.count += 1;
+  else summary.metadata.firebaseFailures.push({ code: safeCode, message: safeMessage, count: 1 });
+}
+
+function logFailedPushSummary(summary = {}) {
+  if (!summary.failureCount) return;
+  const code = safeFailureCode(summary.lastFailureCode) || 'push/send_failed';
+  console.warn(`Push send failed: code=${code}, failures=${safeCountValue(summary.failureCount)}`);
+}
+
+async function sendToRegistrations({ type, title, body, url, registrations, message, admin, metadata = {} }) {
   const sentAt = new Date();
   const summary = {
     type,
@@ -463,6 +508,7 @@ async function sendToRegistrations({ type, title, body, url, registrations, mess
     sentAt,
     completedAt: null,
     deliveryLogCreated: false,
+    metadata,
   };
 
   for (const registration of registrations || []) {
@@ -470,10 +516,15 @@ async function sendToRegistrations({ type, title, body, url, registrations, mess
     if (result?.success) summary.successCount += 1;
     else {
       summary.failureCount += 1;
-      summary.lastFailureCode = safeSendFailureCode(result) || summary.lastFailureCode;
-      summary.lastFailureMessage = safeFailureMessage(result?.reason || result?.message || result?.code) || summary.lastFailureMessage;
+      const failureCode = safeSendFailureCode(result) || 'push/send_failed';
+      const failureMessage = safeFailureMessage(result?.message || result?.reason || result?.code) || 'Push send failed';
+      summary.lastFailureCode = failureCode || summary.lastFailureCode;
+      summary.lastFailureMessage = failureMessage || summary.lastFailureMessage;
+      addFailureSummary(summary, failureCode, failureMessage);
     }
   }
+
+  logFailedPushSummary(summary);
 
   summary.completedAt = new Date();
   summary.deliveryLogCreated = await createPushDeliveryLog(summary, admin);
@@ -649,7 +700,7 @@ async function buildPushDiagnostics() {
     enabledTokenRegistrations = await safeCountRegistrations({ enabled: true, status: 'active', registrationType: 'token' }, warnings, 'enabled_token_registration_count_unavailable');
     lastRegistration = await safeLatestRegistration({}, { lastRegisteredAt: -1 }, 'lastRegisteredAt', warnings, 'last_registration_unavailable');
     lastSuccessfulSend = await safeLatestRegistration({ lastSuccessfulSendAt: { $ne: null } }, { lastSuccessfulSendAt: -1 }, 'lastSuccessfulSendAt', warnings, 'last_successful_send_unavailable');
-    lastFailure = await safeLatestRegistration({ lastFailureAt: { $ne: null } }, { lastFailureAt: -1 }, 'lastFailureAt lastFailureCode', warnings, 'last_failure_unavailable');
+    lastFailure = await safeLatestRegistration({ lastFailureAt: { $ne: null } }, { lastFailureAt: -1 }, 'lastFailureAt lastFailureCode lastFailureReason', warnings, 'last_failure_unavailable');
     if (mongoConnected) {
       lastSuccessfulDeliveryLog = await latestDeliveryLog({ successCount: { $gt: 0 }, type: { $in: ['breaking', 'article'] } }, { sentAt: -1 }, 'sentAt completedAt successCount', warnings, 'last_successful_delivery_log_unavailable');
       lastFailureDeliveryLog = await latestDeliveryLog({ failureCount: { $gt: 0 }, type: { $in: ['breaking', 'article'] } }, { sentAt: -1 }, 'sentAt completedAt failureCount lastFailureCode lastFailureMessage', warnings, 'last_failure_delivery_log_unavailable');
@@ -676,7 +727,7 @@ async function buildPushDiagnostics() {
     lastSuccessfulSendAt: toIsoString(lastSuccessfulDeliveryLog?.sentAt || lastSuccessfulSend?.lastSuccessfulSendAt),
     lastFailureAt: toIsoString(lastFailureDeliveryLog?.sentAt || lastFailure?.lastFailureAt),
     lastFailureCode: safeFailureCode(lastFailureDeliveryLog?.lastFailureCode || lastFailure?.lastFailureCode),
-    lastFailureMessage: safeFailureMessage(lastFailureDeliveryLog?.lastFailureMessage),
+    lastFailureMessage: safeFailureMessage(lastFailureDeliveryLog?.lastFailureMessage || lastFailure?.lastFailureReason),
   };
 
   return {
@@ -997,9 +1048,10 @@ async function sendArticlePush(req, res) {
     const url = normalizeSendUrl(bodyInput.url, { articleSlug });
     if (!url) return fail(res, 400, 'INVALID_PUSH_URL', 'Push URL is not allowed');
 
-    const filter = { enabled: true, status: 'active', 'preferences.newArticleAlerts': true };
+    const filter = pushMessagingService.buildEligibilityFilter('article');
     const registrations = await findTargetRegistrations(filter);
     const targetingDebug = await buildArticleTargetingDebugCounts();
+    targetingDebug.targetedCount = registrations.length;
     const summary = await sendToRegistrations({
       type: 'article',
       title,
@@ -1008,6 +1060,7 @@ async function sendArticlePush(req, res) {
       registrations,
       message: { title, body: messageBody, url, articleId, articleSlug, category, language, notificationType: 'article' },
       admin: req.admin,
+      metadata: { targeting: targetingDebug },
     });
 
     return ok(res, buildDeliveryResponse(summary, { targetingDebug }));

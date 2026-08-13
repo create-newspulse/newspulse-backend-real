@@ -80,8 +80,13 @@ function isPermanentRegistrationError(error) {
     || code === 'messaging/invalid-registration-token';
 }
 
-function sanitizeFailureReason(error) {
-  return trim(error?.message || error).slice(0, 240) || 'Firebase send failed';
+function sanitizeFailureReason(error, registration) {
+  let message = trim(error?.message || error);
+  const registrationId = trim(registration?.registrationId);
+  if (registrationId) message = message.split(registrationId).join('[redacted-registration-id]');
+  message = message.replace(/-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/g, '[redacted-private-key]');
+  message = message.replace(/("private_key"\s*:\s*")[^"]+(")/gi, '$1[redacted-private-key]$2');
+  return message.slice(0, 240) || 'Firebase send failed';
 }
 
 function buildMessagePayload(registration, message) {
@@ -182,11 +187,13 @@ async function sendPushToRegistration(registration, message) {
     return { success: true, sent: true, messageId };
   } catch (error) {
     const permanent = isPermanentRegistrationError(error);
+    const failureCode = firebaseErrorCode(error);
+    const failureMessage = sanitizeFailureReason(error, registration);
     const update = {
       $set: {
         lastFailureAt: new Date(),
-        lastFailureCode: firebaseErrorCode(error),
-        lastFailureReason: sanitizeFailureReason(error),
+        lastFailureCode: failureCode,
+        lastFailureReason: failureMessage,
       },
     };
     if (permanent) {
@@ -200,7 +207,8 @@ async function sendPushToRegistration(registration, message) {
       sent: false,
       reason: permanent ? 'registration_invalid' : 'firebase_send_failed',
       permanent,
-      code: firebaseErrorCode(error),
+      code: failureCode,
+      message: failureMessage,
     };
   }
 }
