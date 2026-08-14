@@ -11,6 +11,9 @@ const PLATFORMS = new Set(['web', 'android', 'ios']);
 const PUSH_HISTORY_TYPES = new Set(['all', 'breaking', 'article']);
 const PUSH_HISTORY_STATUSES = new Set(['all', 'sent', 'failed', 'no_recipients']);
 const PUSH_RECEIPT_EVENTS = new Set(['received', 'clicked']);
+const NO_RECIPIENT_REASONS = new Set(['no_breaking_news_subscribers', 'no_article_alert_subscribers', 'registration_not_found', 'no_recipients']);
+const BREAKING_PUSH_TTL_SECONDS = 60;
+const ARTICLE_PUSH_TTL_SECONDS = 120;
 const REGISTRATION_BODY_KEYS = new Set([
   'registrationId',
   'registrationType',
@@ -351,6 +354,18 @@ function buildSentBy(admin = {}) {
   };
 }
 
+function safeNoRecipientReason(value) {
+  const raw = trim(value).toLowerCase();
+  return NO_RECIPIENT_REASONS.has(raw) ? raw : null;
+}
+
+function resolveDeliveryStatus(summary = {}) {
+  if (safeCountValue(summary.targetedCount) === 0) return 'no_recipients';
+  if (safeCountValue(summary.successCount) > 0) return 'sent';
+  if (safeCountValue(summary.failureCount) > 0) return 'failed';
+  return 'pending';
+}
+
 function validateSendBody(body = {}, allowedKeys = SEND_BODY_KEYS) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'Invalid request body' };
   if (Object.keys(body).length > 20) return { ok: false, error: 'Invalid request body' };
@@ -386,6 +401,8 @@ function buildDeliveryResponse(summary, extra = {}) {
   return {
     sent: summary.successCount > 0,
     type: summary.type,
+    status: summary.status || resolveDeliveryStatus(summary),
+    reason: summary.reason || null,
     targetedCount: summary.targetedCount,
     successCount: summary.successCount,
     failureCount: summary.failureCount,
@@ -435,6 +452,8 @@ async function createPushDeliveryLog(summary, admin) {
       articleSlug: summary.articleSlug || null,
       category: summary.category || null,
       language: summary.language || null,
+      status: summary.status || resolveDeliveryStatus(summary),
+      reason: safeNoRecipientReason(summary.reason),
       targetedCount: summary.targetedCount,
       successCount: summary.successCount,
       failureCount: summary.failureCount,
@@ -455,6 +474,8 @@ async function updatePushDeliveryLog(summary = {}) {
   try {
     if (!summary.deliveryLogId || !PushDeliveryLog || typeof PushDeliveryLog.updateOne !== 'function') return false;
     const set = {
+      status: summary.status || resolveDeliveryStatus(summary),
+      reason: safeNoRecipientReason(summary.reason),
       targetedCount: summary.targetedCount,
       successCount: summary.successCount,
       failureCount: summary.failureCount,
@@ -530,8 +551,9 @@ function logFailedPushSummary(summary = {}) {
   console.warn(`Push send failed: code=${code}, failures=${safeCountValue(summary.failureCount)}`);
 }
 
-async function sendToRegistrations({ type, title, body, url, registrations, message, admin, metadata = {} }) {
+async function sendToRegistrations({ type, title, body, url, registrations, message, admin, metadata = {}, noRecipientsReason = null }) {
   const sentAt = new Date();
+  const targetedCount = Array.isArray(registrations) ? registrations.length : 0;
   const summary = {
     type,
     title,
@@ -541,7 +563,9 @@ async function sendToRegistrations({ type, title, body, url, registrations, mess
     articleSlug: message?.articleSlug || null,
     category: message?.category || null,
     language: message?.language || null,
-    targetedCount: Array.isArray(registrations) ? registrations.length : 0,
+    status: targetedCount === 0 ? 'no_recipients' : 'pending',
+    reason: targetedCount === 0 ? (safeNoRecipientReason(noRecipientsReason) || 'no_recipients') : null,
+    targetedCount,
     successCount: 0,
     failureCount: 0,
     lastFailureCode: null,
@@ -577,6 +601,8 @@ async function sendToRegistrations({ type, title, body, url, registrations, mess
   logFailedPushSummary(summary);
 
   summary.completedAt = new Date();
+  summary.status = resolveDeliveryStatus(summary);
+  if (summary.status !== 'no_recipients') summary.reason = null;
   if (summary.deliveryLogId) summary.deliveryLogCreated = await updatePushDeliveryLog(summary);
   return summary;
 }
@@ -592,6 +618,8 @@ function serializePushDeliveryLog(log) {
     articleSlug: log?.articleSlug || null,
     category: log?.category || null,
     language: log?.language || null,
+    status: log?.status || resolveDeliveryStatus(log),
+    reason: safeNoRecipientReason(log?.reason),
     targetedCount: Number(log?.targetedCount || 0),
     successCount: Number(log?.successCount || 0),
     failureCount: Number(log?.failureCount || 0),
@@ -714,7 +742,7 @@ async function findRecentDeliveryLogs(filter, { skip = 0, limit = 5 } = {}) {
   if (query && typeof query.sort === 'function') query = query.sort({ sentAt: -1, createdAt: -1 });
   if (query && typeof query.skip === 'function') query = query.skip(skip);
   if (query && typeof query.limit === 'function') query = query.limit(limit);
-  if (query && typeof query.select === 'function') query = query.select('type title body url articleId articleSlug category language targetedCount successCount failureCount browserReceivedCount clickedCount firstReceivedAt lastReceivedAt firstClickedAt lastClickedAt sentAt completedAt lastFailureCode lastFailureMessage');
+  if (query && typeof query.select === 'function') query = query.select('type title body url articleId articleSlug category language status reason targetedCount successCount failureCount browserReceivedCount clickedCount firstReceivedAt lastReceivedAt firstClickedAt lastClickedAt sentAt completedAt lastFailureCode lastFailureMessage');
   if (query && typeof query.lean === 'function') return query.lean();
   const rows = await query;
   return Array.isArray(rows) ? rows : [];
@@ -770,8 +798,13 @@ async function buildPushDiagnostics() {
   let totalRegistrations = 0;
   let enabledRegistrations = 0;
   let disabledRegistrations = 0;
-  let enabledTokenRegistrations = 0;
+  let enabledFcmTokenRegistrations = 0;
   let enabledFidOnlyRegistrations = 0;
+  let breakingNewsSubscribers = 0;
+  let articleAlertSubscribers = 0;
+  let topStoriesSubscribers = 0;
+  let categoryAlertSubscribers = 0;
+  let allArticlesSubscribers = 0;
   let lastRegistration = null;
   let lastSuccessfulSend = null;
   let lastFailure = null;
@@ -782,8 +815,14 @@ async function buildPushDiagnostics() {
     totalRegistrations = await safeCountRegistrations({}, warnings, 'registration_count_unavailable');
     enabledRegistrations = await safeCountRegistrations({ enabled: true, status: 'active' }, warnings, 'enabled_registration_count_unavailable');
     disabledRegistrations = await safeCountRegistrations({ $or: [{ enabled: false }, { status: 'inactive' }] }, warnings, 'disabled_registration_count_unavailable');
-    enabledTokenRegistrations = await safeCountRegistrations({ enabled: true, status: 'active', registrationType: 'token', registrationId: { $ne: null } }, warnings, 'enabled_token_registration_count_unavailable');
-    enabledFidOnlyRegistrations = await safeCountRegistrations({ enabled: true, status: 'active', registrationType: 'fid' }, warnings, 'enabled_fid_registration_count_unavailable');
+    const enabledFcmTokenFilter = { enabled: true, status: 'active', registrationType: 'token', registrationId: { $ne: null } };
+    enabledFcmTokenRegistrations = await safeCountRegistrations(enabledFcmTokenFilter, warnings, 'enabled_token_registration_count_unavailable');
+    enabledFidOnlyRegistrations = await safeCountRegistrations({ enabled: true, status: 'active', $or: [{ registrationType: { $ne: 'token' } }, { registrationId: null }] }, warnings, 'enabled_fid_registration_count_unavailable');
+    breakingNewsSubscribers = await safeCountRegistrations({ ...enabledFcmTokenFilter, 'preferences.breakingNews': true }, warnings, 'breaking_news_subscriber_count_unavailable');
+    articleAlertSubscribers = await safeCountRegistrations({ ...enabledFcmTokenFilter, 'preferences.newArticleAlerts': true }, warnings, 'article_alert_subscriber_count_unavailable');
+    topStoriesSubscribers = await safeCountRegistrations({ ...enabledFcmTokenFilter, 'preferences.topStories': true }, warnings, 'top_stories_subscriber_count_unavailable');
+    categoryAlertSubscribers = await safeCountRegistrations({ ...enabledFcmTokenFilter, 'preferences.categoryAlerts': true }, warnings, 'category_alert_subscriber_count_unavailable');
+    allArticlesSubscribers = await safeCountRegistrations({ ...enabledFcmTokenFilter, 'preferences.allArticles': true }, warnings, 'all_articles_subscriber_count_unavailable');
     lastRegistration = await safeLatestRegistration({}, { lastRegisteredAt: -1 }, 'lastRegisteredAt', warnings, 'last_registration_unavailable');
     lastSuccessfulSend = await safeLatestRegistration({ lastSuccessfulSendAt: { $ne: null } }, { lastSuccessfulSendAt: -1 }, 'lastSuccessfulSendAt', warnings, 'last_successful_send_unavailable');
     lastFailure = await safeLatestRegistration({ lastFailureAt: { $ne: null } }, { lastFailureAt: -1 }, 'lastFailureAt lastFailureCode lastFailureReason', warnings, 'last_failure_unavailable');
@@ -795,18 +834,23 @@ async function buildPushDiagnostics() {
 
   if (totalRegistrations === 0) warnings.push('no_push_registrations');
   if (enabledRegistrations === 0) warnings.push('no_enabled_push_registrations');
-  if (enabledTokenRegistrations === 0) warnings.push('no_enabled_fcm_token_registrations');
+  if (enabledFcmTokenRegistrations === 0) warnings.push('no_enabled_fcm_token_registrations');
 
   const deliveryReady = firebase.configured
     && firebase.messagingAvailable
     && modelAvailable
-    && enabledTokenRegistrations > 0;
+    && enabledFcmTokenRegistrations > 0;
   const registrationStats = {
     totalRegistrations,
     enabledRegistrations,
     disabledRegistrations,
-    enabledFcmTokenRegistrations: enabledTokenRegistrations,
+    enabledFcmTokenRegistrations,
     enabledFidOnlyRegistrations,
+    breakingNewsSubscribers,
+    articleAlertSubscribers,
+    topStoriesSubscribers,
+    categoryAlertSubscribers,
+    allArticlesSubscribers,
     total: totalRegistrations,
     enabled: enabledRegistrations,
     disabled: disabledRegistrations,
@@ -826,8 +870,13 @@ async function buildPushDiagnostics() {
     totalRegistrations,
     enabledRegistrations,
     disabledRegistrations,
-    enabledFcmTokenRegistrations: enabledTokenRegistrations,
+    enabledFcmTokenRegistrations,
     enabledFidOnlyRegistrations,
+    breakingNewsSubscribers,
+    articleAlertSubscribers,
+    topStoriesSubscribers,
+    categoryAlertSubscribers,
+    allArticlesSubscribers,
     lastRegistrationAt: registrationStats.lastRegistrationAt,
     lastSuccessfulSendAt: registrationStats.lastSuccessfulSendAt,
     lastFailureAt: registrationStats.lastFailureAt,
@@ -838,8 +887,13 @@ async function buildPushDiagnostics() {
       total: totalRegistrations,
       enabled: enabledRegistrations,
       disabled: disabledRegistrations,
-      enabledFcmTokenRegistrations: enabledTokenRegistrations,
+      enabledFcmTokenRegistrations,
       enabledFidOnlyRegistrations,
+      breakingNewsSubscribers,
+      articleAlertSubscribers,
+      topStoriesSubscribers,
+      categoryAlertSubscribers,
+      allArticlesSubscribers,
     },
     mongo: {
       connected: mongoConnected,
@@ -848,8 +902,13 @@ async function buildPushDiagnostics() {
         total: totalRegistrations,
         enabled: enabledRegistrations,
         disabled: disabledRegistrations,
-        enabledFcmTokenRegistrations: enabledTokenRegistrations,
+        enabledFcmTokenRegistrations,
         enabledFidOnlyRegistrations,
+        breakingNewsSubscribers,
+        articleAlertSubscribers,
+        topStoriesSubscribers,
+        categoryAlertSubscribers,
+        allArticlesSubscribers,
       },
       lastRegistrationAt: registrationStats.lastRegistrationAt,
       lastSuccessfulSendAt: registrationStats.lastSuccessfulSendAt,
@@ -990,6 +1049,13 @@ async function getPushDiagnostics(_req, res) {
       totalRegistrations: 0,
       enabledRegistrations: 0,
       disabledRegistrations: 0,
+      enabledFcmTokenRegistrations: 0,
+      enabledFidOnlyRegistrations: 0,
+      breakingNewsSubscribers: 0,
+      articleAlertSubscribers: 0,
+      topStoriesSubscribers: 0,
+      categoryAlertSubscribers: 0,
+      allArticlesSubscribers: 0,
       lastRegistrationAt: null,
       lastSuccessfulSendAt: null,
       lastFailureAt: null,
@@ -1115,8 +1181,9 @@ async function sendBreakingPush(req, res) {
       body: messageBody,
       url,
       registrations,
-      message: { title, body: messageBody, url, language, notificationType: 'breaking_news' },
+      message: { title, body: messageBody, url, language, notificationType: 'breaking_news', ttlSeconds: BREAKING_PUSH_TTL_SECONDS, urgency: 'high' },
       admin: req.admin,
+      noRecipientsReason: 'no_breaking_news_subscribers',
     });
 
     return ok(res, buildDeliveryResponse(summary));
@@ -1156,9 +1223,10 @@ async function sendArticlePush(req, res) {
       body: messageBody,
       url,
       registrations,
-      message: { title, body: messageBody, url, articleId, articleSlug, category, language, notificationType: 'article' },
+      message: { title, body: messageBody, url, articleId, articleSlug, category, language, notificationType: 'article', ttlSeconds: ARTICLE_PUSH_TTL_SECONDS, urgency: 'normal' },
       admin: req.admin,
       metadata: { targeting: targetingDebug },
+      noRecipientsReason: 'no_article_alert_subscribers',
     });
 
     return ok(res, buildDeliveryResponse(summary, { targetingDebug }));

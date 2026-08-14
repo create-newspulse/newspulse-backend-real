@@ -504,18 +504,29 @@ test('GET /api/public/push/diagnostics returns safe missing-Firebase diagnostics
   assert.equal(response.body.disabledRegistrations, 0);
   assert.equal(response.body.enabledFcmTokenRegistrations, 0);
   assert.equal(response.body.enabledFidOnlyRegistrations, 0);
+  assert.equal(response.body.breakingNewsSubscribers, 0);
+  assert.equal(response.body.articleAlertSubscribers, 0);
+  assert.equal(response.body.topStoriesSubscribers, 0);
+  assert.equal(response.body.categoryAlertSubscribers, 0);
+  assert.equal(response.body.allArticlesSubscribers, 0);
   assert.equal(response.body.lastRegistrationAt, null);
   assert.equal(response.body.registrationStats.totalRegistrations, 0);
   assert.equal(response.body.registrationStats.enabledRegistrations, 0);
   assert.equal(response.body.registrationStats.disabledRegistrations, 0);
   assert.equal(response.body.registrationStats.enabledFcmTokenRegistrations, 0);
   assert.equal(response.body.registrationStats.enabledFidOnlyRegistrations, 0);
+  assert.equal(response.body.registrationStats.breakingNewsSubscribers, 0);
+  assert.equal(response.body.registrationStats.articleAlertSubscribers, 0);
   assert.equal(response.body.registrations.total, 0);
   assert.equal(response.body.registrations.enabled, 0);
   assert.equal(response.body.registrations.disabled, 0);
   assert.equal(response.body.registrations.enabledFcmTokenRegistrations, 0);
   assert.equal(response.body.registrations.enabledFidOnlyRegistrations, 0);
+  assert.equal(response.body.registrations.breakingNewsSubscribers, 0);
+  assert.equal(response.body.registrations.articleAlertSubscribers, 0);
   assert.equal(response.body.mongo.registrations.total, 0);
+  assert.equal(response.body.mongo.registrations.breakingNewsSubscribers, 0);
+  assert.equal(response.body.mongo.registrations.articleAlertSubscribers, 0);
   assert.equal(response.body.deliveryReady, false);
   assert.deepEqual(response.body.supportedRegistrationTypes, ['fid', 'token']);
   assert.equal(Array.isArray(response.body.warnings), true);
@@ -560,17 +571,34 @@ test('GET /api/public/push/diagnostics returns safe configured-Firebase registra
   assert.equal(response.body.disabledRegistrations, 0);
   assert.equal(response.body.enabledFcmTokenRegistrations, 1);
   assert.equal(response.body.enabledFidOnlyRegistrations, 0);
+  assert.equal(response.body.breakingNewsSubscribers, 1);
+  assert.equal(response.body.articleAlertSubscribers, 1);
+  assert.equal(response.body.topStoriesSubscribers, 1);
+  assert.equal(response.body.categoryAlertSubscribers, 1);
+  assert.equal(response.body.allArticlesSubscribers, 0);
   assert.equal(response.body.registrationStats.totalRegistrations, 1);
   assert.equal(response.body.registrationStats.enabledRegistrations, 1);
   assert.equal(response.body.registrationStats.disabledRegistrations, 0);
   assert.equal(response.body.registrationStats.enabledFcmTokenRegistrations, 1);
   assert.equal(response.body.registrationStats.enabledFidOnlyRegistrations, 0);
+  assert.equal(response.body.registrationStats.breakingNewsSubscribers, 1);
+  assert.equal(response.body.registrationStats.articleAlertSubscribers, 1);
+  assert.equal(response.body.registrationStats.topStoriesSubscribers, 1);
+  assert.equal(response.body.registrationStats.categoryAlertSubscribers, 1);
+  assert.equal(response.body.registrationStats.allArticlesSubscribers, 0);
   assert.equal(response.body.registrations.total, 1);
   assert.equal(response.body.registrations.enabled, 1);
   assert.equal(response.body.registrations.disabled, 0);
   assert.equal(response.body.registrations.enabledFcmTokenRegistrations, 1);
   assert.equal(response.body.registrations.enabledFidOnlyRegistrations, 0);
+  assert.equal(response.body.registrations.breakingNewsSubscribers, 1);
+  assert.equal(response.body.registrations.articleAlertSubscribers, 1);
+  assert.equal(response.body.registrations.topStoriesSubscribers, 1);
+  assert.equal(response.body.registrations.categoryAlertSubscribers, 1);
+  assert.equal(response.body.registrations.allArticlesSubscribers, 0);
   assert.equal(response.body.mongo.registrations.total, 1);
+  assert.equal(response.body.mongo.registrations.breakingNewsSubscribers, 1);
+  assert.equal(response.body.mongo.registrations.articleAlertSubscribers, 1);
   assert.equal(response.body.lastRegistrationAt, '2026-08-12T10:00:00.000Z');
   assert.equal(response.body.lastSuccessfulSendAt, '2026-08-12T10:05:00.000Z');
   assert.equal(response.body.lastFailureAt, '2026-08-12T10:10:00.000Z');
@@ -612,10 +640,16 @@ test('GET /api/public/push/diagnostics reports fid-only records as non-deliverab
   assert.equal(response.body.enabledRegistrations, 1);
   assert.equal(response.body.enabledFcmTokenRegistrations, 0);
   assert.equal(response.body.enabledFidOnlyRegistrations, 1);
+  assert.equal(response.body.breakingNewsSubscribers, 0);
+  assert.equal(response.body.articleAlertSubscribers, 0);
   assert.equal(response.body.registrationStats.enabledFcmTokenRegistrations, 0);
   assert.equal(response.body.registrationStats.enabledFidOnlyRegistrations, 1);
+  assert.equal(response.body.registrationStats.breakingNewsSubscribers, 0);
+  assert.equal(response.body.registrationStats.articleAlertSubscribers, 0);
   assert.equal(response.body.registrations.enabledFcmTokenRegistrations, 0);
   assert.equal(response.body.registrations.enabledFidOnlyRegistrations, 1);
+  assert.equal(response.body.registrations.breakingNewsSubscribers, 0);
+  assert.equal(response.body.registrations.articleAlertSubscribers, 0);
   assert.equal(response.body.deliveryReady, false);
   assert.equal(response.body.warnings.includes('no_enabled_fcm_token_registrations'), true);
   assertNoPushSecrets(response.body, [fid, process.env.FIREBASE_CLIENT_EMAIL, process.env.FIREBASE_PRIVATE_KEY]);
@@ -900,6 +934,7 @@ test('POST /api/admin/push/article requires confirmSend', async () => {
 
 test('POST /api/admin/push/breaking does not target disabled devices and creates delivery log', async () => {
   const activeToken = 'fcm-token-breaking-active:defghijklmnopqrstuvwxyz0123456789';
+  const preferenceOffToken = 'fcm-token-breaking-pref-off:defghijklmnopqrstuvwxyz0123456789';
   const disabledToken = 'fcm-token-breaking-disabled:defghijklmnopqrstuvwxyz0123456789';
   const activeFid = 'firebase-installation-breaking-active';
   const { docs } = installInMemoryRegistrationStore();
@@ -907,6 +942,7 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   const { sends } = installFirebaseSendStub();
 
   await request(app).post('/api/public/push/register').send({ token: activeToken });
+  await request(app).post('/api/public/push/register').send({ token: preferenceOffToken, preferences: { breakingNews: false } });
   await request(app).post('/api/public/push/register').send({ token: disabledToken });
   await request(app).post('/api/public/push/register').send({ registrationId: activeFid, registrationType: 'fid', preferences: { breakingNews: true } });
   const disabled = Array.from(docs.values()).find((item) => item.registrationId === disabledToken);
@@ -925,6 +961,8 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
     });
 
   assert.equal(response.status, 200);
+  assert.equal(response.body.status, 'sent');
+  assert.equal(response.body.reason, null);
   assert.equal(response.body.targetedCount, 1);
   assert.equal(response.body.successCount, 1);
   assert.equal(response.body.failureCount, 0);
@@ -933,16 +971,57 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   assert.equal(sends[0].data.deliveryLogId, String(logs[0]._id));
   assert.equal(sends[0].data.type, 'breaking');
   assert.equal(sends[0].data.url, 'https://www.newspulse.co.in/news/breaking');
+  assert.equal(sends[0].webpush.headers.TTL, '60');
+  assert.equal(sends[0].webpush.headers.Urgency, 'high');
   assert.equal(logs.length, 1);
   assert.equal(logs[0].type, 'breaking');
+  assert.equal(logs[0].status, 'sent');
+  assert.equal(logs[0].reason, null);
   assert.equal(logs[0].title, 'Breaking News');
   assert.equal(logs[0].body, 'Breaking news message');
   assert.equal(logs[0].url, 'https://www.newspulse.co.in/news/breaking');
   assert.equal(logs[0].language, 'en');
   assert.equal(logs[0].targetedCount, 1);
   assert.equal(Boolean(logs[0].completedAt), true);
-  assertNoPushSecrets(response.body, [activeToken, disabledToken, activeFid, process.env.FIREBASE_PRIVATE_KEY]);
-  assertNoPushSecrets(logs, [activeToken, disabledToken, activeFid, process.env.FIREBASE_PRIVATE_KEY]);
+  assertNoPushSecrets(response.body, [activeToken, preferenceOffToken, disabledToken, activeFid, process.env.FIREBASE_PRIVATE_KEY]);
+  assertNoPushSecrets(logs, [activeToken, preferenceOffToken, disabledToken, activeFid, process.env.FIREBASE_PRIVATE_KEY]);
+});
+
+test('POST /api/admin/push/breaking records no recipients when no breakingNews registrations are eligible', async () => {
+  const preferenceOffToken = 'fcm-token-breaking-no-recipient:defghijklmnopqrstuvwxyz0123456789';
+  const fid = 'firebase-installation-breaking-no-recipient';
+  installInMemoryRegistrationStore();
+  const { logs } = installInMemoryDeliveryLogStore();
+  const { sends } = installFirebaseSendStub();
+
+  await request(app).post('/api/public/push/register').send({ token: preferenceOffToken, preferences: { breakingNews: false } });
+  await request(app).post('/api/public/push/register').send({ registrationId: fid, registrationType: 'fid', preferences: { breakingNews: true } });
+
+  const response = await request(app)
+    .post('/api/admin/push/breaking')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken('admin@newspulse.ai')}`)
+    .send({
+      title: 'Breaking News',
+      body: 'Breaking news message',
+      url: 'https://www.newspulse.co.in/news/breaking-no-recipient',
+      language: 'en',
+      confirmSend: true,
+    });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.sent, false);
+  assert.equal(response.body.status, 'no_recipients');
+  assert.equal(response.body.reason, 'no_breaking_news_subscribers');
+  assert.equal(response.body.targetedCount, 0);
+  assert.equal(response.body.successCount, 0);
+  assert.equal(response.body.failureCount, 0);
+  assert.equal(sends.length, 0);
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].status, 'no_recipients');
+  assert.equal(logs[0].reason, 'no_breaking_news_subscribers');
+  assert.equal(logs[0].targetedCount, 0);
+  assertNoPushSecrets(response.body, [preferenceOffToken, fid, process.env.FIREBASE_PRIVATE_KEY]);
+  assertNoPushSecrets(logs, [preferenceOffToken, fid, process.env.FIREBASE_PRIVATE_KEY]);
 });
 
 test('POST /api/admin/push/breaking rejects invalid URL', async () => {
@@ -991,6 +1070,8 @@ test('POST /api/admin/push/article sends article push and diagnostics show last 
 
   assert.equal(response.status, 200);
   assert.equal(response.body.type, 'article');
+  assert.equal(response.body.status, 'sent');
+  assert.equal(response.body.reason, null);
   assert.equal(response.body.targetedCount, 1);
   assert.equal(response.body.successCount, 1);
   assert.equal(response.body.targetingDebug.enabledDevices, 1);
@@ -1005,8 +1086,12 @@ test('POST /api/admin/push/article sends article push and diagnostics show last 
   assert.equal(sends[0].data.articleId, 'article-1');
   assert.equal(sends[0].data.articleSlug, 'article-slug');
   assert.equal(sends[0].data.category, 'national');
+  assert.equal(sends[0].webpush.headers.TTL, '120');
+  assert.equal(sends[0].webpush.headers.Urgency, 'normal');
   assert.equal(logs.length, 1);
   assert.equal(logs[0].type, 'article');
+  assert.equal(logs[0].status, 'sent');
+  assert.equal(logs[0].reason, null);
   assert.equal(logs[0].articleId, 'article-1');
   assert.equal(logs[0].articleSlug, 'article-slug');
   assert.equal(logs[0].category, 'national');
@@ -1093,6 +1178,8 @@ test('POST /api/admin/push/article records no recipients when no newArticleAlert
 
   assert.equal(response.status, 200);
   assert.equal(response.body.sent, false);
+  assert.equal(response.body.status, 'no_recipients');
+  assert.equal(response.body.reason, 'no_article_alert_subscribers');
   assert.equal(response.body.targetedCount, 0);
   assert.equal(response.body.successCount, 0);
   assert.equal(response.body.failureCount, 0);
@@ -1102,6 +1189,8 @@ test('POST /api/admin/push/article records no recipients when no newArticleAlert
   assert.equal(response.body.targetingDebug.targetedCount, 0);
   assert.equal(sends.length, 0);
   assert.equal(logs.length, 1);
+  assert.equal(logs[0].status, 'no_recipients');
+  assert.equal(logs[0].reason, 'no_article_alert_subscribers');
   assert.equal(logs[0].targetedCount, 0);
   assert.equal(logs[0].metadata.targeting.targetedCount, 0);
   assertNoPushSecrets(response.body, [preferenceOffToken]);

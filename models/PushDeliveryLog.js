@@ -17,6 +17,8 @@ const pushDeliveryLogSchema = new mongoose.Schema({
   articleSlug: { type: String, default: null, trim: true, maxlength: 240, index: true },
   category: { type: String, default: null, trim: true, maxlength: 80, index: true },
   language: { type: String, default: null, trim: true, maxlength: 12, index: true },
+  status: { type: String, enum: ['pending', 'sent', 'failed', 'no_recipients'], default: 'pending', index: true },
+  reason: { type: String, default: null, trim: true, maxlength: 120 },
   targetedCount: { type: Number, default: 0, min: 0 },
   successCount: { type: Number, default: 0, min: 0 },
   failureCount: { type: Number, default: 0, min: 0 },

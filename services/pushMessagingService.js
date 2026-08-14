@@ -9,6 +9,15 @@ const {
 const NEWS_PULSE_HOSTS = new Set(['newspulse.co.in', 'www.newspulse.co.in']);
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1']);
 const NOTIFICATION_TYPES = new Set(['test', 'breaking_news', 'top_story', 'article', 'category']);
+const WEBPUSH_URGENCIES = new Set(['very-low', 'low', 'normal', 'high']);
+const DEFAULT_WEBPUSH_TTL_SECONDS = Object.freeze({
+  breaking_news: 60,
+  article: 120,
+});
+const DEFAULT_WEBPUSH_URGENCY = Object.freeze({
+  breaking_news: 'high',
+  article: 'normal',
+});
 
 function trim(value) {
   return String(value || '').trim();
@@ -89,6 +98,19 @@ function sanitizeFailureReason(error, registration) {
   return message.slice(0, 240) || 'Firebase send failed';
 }
 
+function buildWebpushHeaders(message, notificationType) {
+  const headers = {};
+  const ttlSeconds = Number.parseInt(message.ttlSeconds, 10);
+  const fallbackTtlSeconds = DEFAULT_WEBPUSH_TTL_SECONDS[notificationType];
+  const resolvedTtlSeconds = Number.isFinite(ttlSeconds) && ttlSeconds > 0 ? ttlSeconds : fallbackTtlSeconds;
+  if (resolvedTtlSeconds) headers.TTL = String(resolvedTtlSeconds);
+
+  const urgency = trim(message.urgency).toLowerCase() || DEFAULT_WEBPUSH_URGENCY[notificationType];
+  if (WEBPUSH_URGENCIES.has(urgency)) headers.Urgency = urgency;
+
+  return Object.keys(headers).length > 0 ? headers : undefined;
+}
+
 function buildMessagePayload(registration, message) {
   const title = trim(message.title).slice(0, 120) || 'News Pulse';
   const body = trim(message.body).slice(0, 240) || 'Firebase push notifications are working.';
@@ -125,6 +147,9 @@ function buildMessagePayload(registration, message) {
       },
     },
   };
+
+  const webpushHeaders = buildWebpushHeaders(message, type);
+  if (webpushHeaders) payload.webpush.headers = webpushHeaders;
 
   const image = trim(message.image);
   if (image && isApprovedPushUrl(image)) {
