@@ -13,7 +13,7 @@ const PUSH_HISTORY_STATUSES = new Set(['all', 'sent', 'failed', 'no_recipients']
 const PUSH_RECEIPT_EVENTS = new Set(['received', 'clicked']);
 const NO_RECIPIENT_REASONS = new Set(['no_breaking_news_subscribers', 'no_article_alert_subscribers', 'registration_not_found', 'no_recipients']);
 const BREAKING_PUSH_TTL_SECONDS = 60;
-const ARTICLE_PUSH_TTL_SECONDS = 120;
+const ARTICLE_PUSH_TTL_SECONDS = 900;
 const REGISTRATION_BODY_KEYS = new Set([
   'registrationId',
   'registrationType',
@@ -366,6 +366,22 @@ function resolveDeliveryStatus(summary = {}) {
   return 'pending';
 }
 
+function resolveDeliveryProofStatus(value = {}) {
+  if (safeCountValue(value.targetedCount) === 0) return 'no_recipients';
+  if (safeCountValue(value.failureCount) > 0 && safeCountValue(value.successCount) === 0) return 'failed';
+  if (safeCountValue(value.clickedCount) > 0) return 'clicked';
+  if (safeCountValue(value.browserReceivedCount) > 0) return 'received';
+  if (safeCountValue(value.successCount) > 0) return 'fcm_accepted';
+  return 'pending';
+}
+
+function safeLatencyMs(from, to) {
+  const start = from instanceof Date ? from : new Date(from);
+  const end = to instanceof Date ? to : new Date(to);
+  const diff = end.getTime() - start.getTime();
+  return Number.isFinite(diff) && diff >= 0 ? diff : null;
+}
+
 function validateSendBody(body = {}, allowedKeys = SEND_BODY_KEYS) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'Invalid request body' };
   if (Object.keys(body).length > 20) return { ok: false, error: 'Invalid request body' };
@@ -402,10 +418,19 @@ function buildDeliveryResponse(summary, extra = {}) {
     sent: summary.successCount > 0,
     type: summary.type,
     status: summary.status || resolveDeliveryStatus(summary),
+    deliveryProofStatus: resolveDeliveryProofStatus(summary),
     reason: summary.reason || null,
     targetedCount: summary.targetedCount,
     successCount: summary.successCount,
     failureCount: summary.failureCount,
+    browserReceivedCount: safeCountValue(summary.browserReceivedCount),
+    clickedCount: safeCountValue(summary.clickedCount),
+    sentAt: toIsoString(summary.sentAt),
+    completedAt: toIsoString(summary.completedAt),
+    fcmAcceptedAt: toIsoString(summary.fcmAcceptedAt),
+    fcmLatencyMs: summary.fcmLatencyMs ?? null,
+    firstBrowserReceivedLatencyMs: summary.firstBrowserReceivedLatencyMs ?? null,
+    firstClickLatencyMs: summary.firstClickLatencyMs ?? null,
     lastFailureCode: summary.lastFailureCode || null,
     lastFailureMessage: summary.lastFailureMessage || null,
     deliveryLogCreated: !!summary.deliveryLogCreated,
@@ -459,6 +484,10 @@ async function createPushDeliveryLog(summary, admin) {
       failureCount: summary.failureCount,
       sentAt: summary.sentAt,
       completedAt: summary.completedAt || null,
+      fcmAcceptedAt: summary.fcmAcceptedAt || null,
+      fcmLatencyMs: summary.fcmLatencyMs ?? null,
+      firstBrowserReceivedLatencyMs: summary.firstBrowserReceivedLatencyMs ?? null,
+      firstClickLatencyMs: summary.firstClickLatencyMs ?? null,
       sentBy: buildSentBy(admin),
       metadata: buildSafeDeliveryMetadata(summary),
       lastFailureCode: summary.lastFailureCode || null,
@@ -480,6 +509,10 @@ async function updatePushDeliveryLog(summary = {}) {
       successCount: summary.successCount,
       failureCount: summary.failureCount,
       completedAt: summary.completedAt || null,
+      fcmAcceptedAt: summary.fcmAcceptedAt || null,
+      fcmLatencyMs: summary.fcmLatencyMs ?? null,
+      firstBrowserReceivedLatencyMs: summary.firstBrowserReceivedLatencyMs ?? null,
+      firstClickLatencyMs: summary.firstClickLatencyMs ?? null,
       lastFailureCode: summary.lastFailureCode || null,
       lastFailureMessage: summary.lastFailureMessage || null,
     };
@@ -526,7 +559,7 @@ async function safePushCount(filter) {
 async function buildArticleTargetingDebugCounts() {
   const enabledFilter = { enabled: true, status: 'active', registrationType: 'token', registrationId: { $ne: null } };
   const eligibleFilter = { ...enabledFilter, 'preferences.newArticleAlerts': true };
-  const disabledFilter = { registrationType: 'token', $or: [{ enabled: false }, { status: 'inactive' }] };
+  const disabledFilter = { registrationType: 'token', $or: [{ enabled: false }, { status: { $in: ['inactive', 'disabled'] } }] };
   return {
     enabledDevices: await safePushCount(enabledFilter),
     newArticleAlertEligibleDevices: await safePushCount(eligibleFilter),
@@ -568,10 +601,16 @@ async function sendToRegistrations({ type, title, body, url, registrations, mess
     targetedCount,
     successCount: 0,
     failureCount: 0,
+    browserReceivedCount: 0,
+    clickedCount: 0,
     lastFailureCode: null,
     lastFailureMessage: null,
     sentAt,
     completedAt: null,
+    fcmAcceptedAt: null,
+    fcmLatencyMs: null,
+    firstBrowserReceivedLatencyMs: null,
+    firstClickLatencyMs: null,
     deliveryLogCreated: false,
     deliveryLogId: null,
     metadata,
@@ -587,7 +626,13 @@ async function sendToRegistrations({ type, title, body, url, registrations, mess
 
   for (const registration of registrations || []) {
     const result = await pushMessagingService.sendPushToRegistration(registration, messageWithDeliveryLog);
-    if (result?.success) summary.successCount += 1;
+    if (result?.success) {
+      summary.successCount += 1;
+      if (!summary.fcmAcceptedAt) {
+        summary.fcmAcceptedAt = new Date();
+        summary.fcmLatencyMs = safeLatencyMs(summary.sentAt, summary.fcmAcceptedAt);
+      }
+    }
     else {
       summary.failureCount += 1;
       const failureCode = safeSendFailureCode(result) || 'push/send_failed';
@@ -625,12 +670,17 @@ function serializePushDeliveryLog(log) {
     failureCount: Number(log?.failureCount || 0),
     browserReceivedCount: Number(log?.browserReceivedCount || 0),
     clickedCount: Number(log?.clickedCount || 0),
+    deliveryProofStatus: resolveDeliveryProofStatus(log),
     firstReceivedAt: toIsoString(log?.firstReceivedAt),
     lastReceivedAt: toIsoString(log?.lastReceivedAt),
     firstClickedAt: toIsoString(log?.firstClickedAt),
     lastClickedAt: toIsoString(log?.lastClickedAt),
     sentAt: toIsoString(log?.sentAt),
     completedAt: toIsoString(log?.completedAt),
+    fcmAcceptedAt: toIsoString(log?.fcmAcceptedAt),
+    fcmLatencyMs: log?.fcmLatencyMs ?? null,
+    firstBrowserReceivedLatencyMs: log?.firstBrowserReceivedLatencyMs ?? null,
+    firstClickLatencyMs: log?.firstClickLatencyMs ?? null,
     lastFailureCode: safeFailureCode(log?.lastFailureCode),
     lastFailureMessage: safeFailureMessage(log?.lastFailureMessage),
   };
@@ -654,7 +704,13 @@ async function recordPushReceipt(req, res) {
       $inc: { [incrementField]: 1 },
       $set: { [lastAtField]: now },
     };
-    if (!existing[firstAtField]) update.$set[firstAtField] = now;
+    if (!existing[firstAtField]) {
+      update.$set[firstAtField] = now;
+      const latency = safeLatencyMs(existing.sentAt, now);
+      if (latency !== null) {
+        update.$set[parsed.value.event === 'received' ? 'firstBrowserReceivedLatencyMs' : 'firstClickLatencyMs'] = latency;
+      }
+    }
 
     await PushDeliveryLog.updateOne({ _id: parsed.value.deliveryLogId }, update);
     return ok(res);
@@ -742,7 +798,7 @@ async function findRecentDeliveryLogs(filter, { skip = 0, limit = 5 } = {}) {
   if (query && typeof query.sort === 'function') query = query.sort({ sentAt: -1, createdAt: -1 });
   if (query && typeof query.skip === 'function') query = query.skip(skip);
   if (query && typeof query.limit === 'function') query = query.limit(limit);
-  if (query && typeof query.select === 'function') query = query.select('type title body url articleId articleSlug category language status reason targetedCount successCount failureCount browserReceivedCount clickedCount firstReceivedAt lastReceivedAt firstClickedAt lastClickedAt sentAt completedAt lastFailureCode lastFailureMessage');
+  if (query && typeof query.select === 'function') query = query.select('type title body url articleId articleSlug category language status reason targetedCount successCount failureCount browserReceivedCount clickedCount firstReceivedAt lastReceivedAt firstClickedAt lastClickedAt sentAt completedAt fcmAcceptedAt fcmLatencyMs firstBrowserReceivedLatencyMs firstClickLatencyMs lastFailureCode lastFailureMessage');
   if (query && typeof query.lean === 'function') return query.lean();
   const rows = await query;
   return Array.isArray(rows) ? rows : [];
@@ -814,7 +870,7 @@ async function buildPushDiagnostics() {
   if (modelAvailable && pushMessagingService.isMongoReadyForPush()) {
     totalRegistrations = await safeCountRegistrations({}, warnings, 'registration_count_unavailable');
     enabledRegistrations = await safeCountRegistrations({ enabled: true, status: 'active' }, warnings, 'enabled_registration_count_unavailable');
-    disabledRegistrations = await safeCountRegistrations({ $or: [{ enabled: false }, { status: 'inactive' }] }, warnings, 'disabled_registration_count_unavailable');
+    disabledRegistrations = await safeCountRegistrations({ $or: [{ enabled: false }, { status: { $in: ['inactive', 'disabled'] } }] }, warnings, 'disabled_registration_count_unavailable');
     const enabledFcmTokenFilter = { enabled: true, status: 'active', registrationType: 'token', registrationId: { $ne: null } };
     enabledFcmTokenRegistrations = await safeCountRegistrations(enabledFcmTokenFilter, warnings, 'enabled_token_registration_count_unavailable');
     enabledFidOnlyRegistrations = await safeCountRegistrations({ enabled: true, status: 'active', $or: [{ registrationType: { $ne: 'token' } }, { registrationId: null }] }, warnings, 'enabled_fid_registration_count_unavailable');
@@ -1014,11 +1070,23 @@ async function unregisterPush(req, res) {
     const parsed = buildRegistrationInput(req.body);
     if (!parsed.ok) return fail(res, 400, 'INVALID_PUSH_REGISTRATION', parsed.error);
 
-    const result = await PushRegistration.deleteOne({
-      registrationId: parsed.value.registrationId,
-      registrationType: parsed.value.registrationType,
-    });
-    return ok(res, { unregistered: (result?.deletedCount || 0) > 0, synced: true, ...pushResponseFlags(parsed.value.registrationType) });
+    const now = new Date();
+    const result = await PushRegistration.updateOne(
+      {
+        registrationId: parsed.value.registrationId,
+        registrationType: parsed.value.registrationType,
+      },
+      {
+        $set: {
+          enabled: false,
+          status: 'inactive',
+          disabledAt: now,
+          updatedAt: now,
+        },
+      },
+    );
+    const matchedCount = result?.matchedCount ?? result?.n ?? 0;
+    return ok(res, { unregistered: matchedCount > 0, disabled: matchedCount > 0, synced: true, ...pushResponseFlags(parsed.value.registrationType) });
   } catch (error) {
     logPushControllerError('unregister', error, req.body);
     return fail(res, 500, 'PUSH_UNREGISTER_FAILED', 'Unable to unregister push notifications');

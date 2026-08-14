@@ -176,7 +176,7 @@ async function sendPushToRegistration(registration, message) {
     return { success: false, sent: false, reason: 'registration_not_found' };
   }
 
-  if (registration.enabled === false || registration.status === 'inactive') {
+  if (registration.enabled === false || registration.status === 'inactive' || registration.status === 'disabled') {
     return { success: false, sent: false, reason: 'registration_disabled' };
   }
 

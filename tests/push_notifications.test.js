@@ -279,6 +279,10 @@ function makeDeliveryLog(index, overrides = {}) {
     lastClickedAt: null,
     sentAt: new Date(Date.UTC(2026, 7, 13, index, 0, 0)).toISOString(),
     completedAt: new Date(Date.UTC(2026, 7, 13, index, 1, 0)).toISOString(),
+    fcmAcceptedAt: null,
+    fcmLatencyMs: null,
+    firstBrowserReceivedLatencyMs: null,
+    firstClickLatencyMs: null,
     lastFailureCode: null,
     lastFailureMessage: null,
     ...overrides,
@@ -379,6 +383,24 @@ test('PushRegistration schema stores push preference shape and FCM token field',
   assert.equal(registration.preferences.categoryAlerts, true);
   assert.equal(registration.preferences.allArticles, false);
   assert.equal(PushRegistration.schema.path('registrationId').options.select, false);
+});
+
+test('PushDeliveryLog schema stores safe delivery timing fields only', () => {
+  assert.ok(PushDeliveryLog.schema.path('sentAt'));
+  assert.ok(PushDeliveryLog.schema.path('completedAt'));
+  assert.ok(PushDeliveryLog.schema.path('fcmAcceptedAt'));
+  assert.ok(PushDeliveryLog.schema.path('firstReceivedAt'));
+  assert.ok(PushDeliveryLog.schema.path('lastReceivedAt'));
+  assert.ok(PushDeliveryLog.schema.path('firstClickedAt'));
+  assert.ok(PushDeliveryLog.schema.path('lastClickedAt'));
+  assert.ok(PushDeliveryLog.schema.path('fcmLatencyMs'));
+  assert.ok(PushDeliveryLog.schema.path('firstBrowserReceivedLatencyMs'));
+  assert.ok(PushDeliveryLog.schema.path('firstClickLatencyMs'));
+  assert.equal(PushDeliveryLog.schema.path('registrationId'), undefined);
+  assert.equal(PushDeliveryLog.schema.path('registrationToken'), undefined);
+  assert.equal(PushDeliveryLog.schema.path('fcmToken'), undefined);
+  assert.equal(PushDeliveryLog.schema.path('fid'), undefined);
+  assert.equal(PushDeliveryLog.schema.path('firebaseInstallationId'), undefined);
 });
 
 test('POST /api/public/push/register validates registration ID', async () => {
@@ -810,7 +832,7 @@ test('push registration rejects invalid language and invalid categories', async 
   assert.equal(invalidCategory.status, 400);
 });
 
-test('DELETE /api/public/push/unregister removes only requested registration', async () => {
+test('DELETE /api/public/push/unregister disables only requested registration and keeps it for diagnostics', async () => {
   const firstToken = 'fcm-token-one:defghijklmnopqrstuvwxyz0123456789';
   const secondToken = 'fcm-token-two:defghijklmnopqrstuvwxyz0123456789';
   const { docs } = installInMemoryRegistrationStore();
@@ -830,8 +852,67 @@ test('DELETE /api/public/push/unregister removes only requested registration', a
   assert.equal(response.body.registrationType, 'token');
   assert.equal(typeof response.body.fcmConfigured, 'boolean');
   assert.equal(typeof response.body.deliveryReady, 'boolean');
+  assert.equal(response.body.disabled, true);
+  assert.equal(docs.size, 2);
+  const disabled = Array.from(docs.values()).find((item) => item.registrationId === firstToken);
+  const active = Array.from(docs.values()).find((item) => item.registrationId === secondToken);
+  assert.equal(disabled.enabled, false);
+  assert.equal(disabled.status, 'inactive');
+  assert.equal(Boolean(disabled.disabledAt), true);
+  assert.equal(Boolean(disabled.updatedAt), true);
+  assert.equal(active.enabled, true);
+  assert.equal(active.status, 'active');
+
+  const diagnostics = await request(app).get('/api/public/push/diagnostics');
+  assert.equal(diagnostics.status, 200);
+  assert.equal(diagnostics.body.totalRegistrations, 2);
+  assert.equal(diagnostics.body.enabledRegistrations, 1);
+  assert.equal(diagnostics.body.disabledRegistrations, 1);
+  assert.equal(diagnostics.body.registrationStats.disabledRegistrations, 1);
+  assert.equal(diagnostics.body.registrations.disabled, 1);
+  const status = await request(app)
+    .get('/api/admin/push/status')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`);
+  assert.equal(status.status, 200);
+  assert.equal(status.body.totalRegistrations, 2);
+  assert.equal(status.body.enabledRegistrations, 1);
+  assert.equal(status.body.disabledRegistrations, 1);
+  assert.equal(status.body.diagnostics.disabledRegistrations, 1);
+  assertNoPushSecrets(response.body, [firstToken, secondToken]);
+  assertNoPushSecrets(diagnostics.body, [firstToken, secondToken]);
+  assertNoPushSecrets(status.body, [firstToken, secondToken]);
+});
+
+test('POST /api/public/push/unregister disables fid-only registrations without deleting them', async () => {
+  const fid = 'firebase-installation-disable-only';
+  const { docs } = installInMemoryRegistrationStore();
+
+  await request(app).post('/api/public/push/register').send({ registrationId: fid, registrationType: 'fid' });
+
+  const response = await request(app)
+    .post('/api/public/push/unregister')
+    .send({ registrationId: fid, registrationType: 'fid' });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.unregistered, true);
+  assert.equal(response.body.disabled, true);
+  assert.equal(response.body.registrationType, 'fid');
   assert.equal(docs.size, 1);
-  assert.equal(Array.from(docs.values())[0].registrationId, secondToken);
+  const stored = Array.from(docs.values())[0];
+  assert.equal(stored.registrationId, fid);
+  assert.equal(stored.registrationType, 'fid');
+  assert.equal(stored.enabled, false);
+  assert.equal(stored.status, 'inactive');
+  assert.equal(Boolean(stored.disabledAt), true);
+
+  const diagnostics = await request(app).get('/api/public/push/diagnostics');
+  assert.equal(diagnostics.status, 200);
+  assert.equal(diagnostics.body.totalRegistrations, 1);
+  assert.equal(diagnostics.body.enabledRegistrations, 0);
+  assert.equal(diagnostics.body.disabledRegistrations, 1);
+  assert.equal(diagnostics.body.enabledFidOnlyRegistrations, 0);
+  assertNoPushSecrets(response.body, [fid]);
+  assertNoPushSecrets(diagnostics.body, [fid]);
 });
 
 test('public caller cannot access Founder-only push test route', async () => {
@@ -945,9 +1026,9 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   await request(app).post('/api/public/push/register').send({ token: preferenceOffToken, preferences: { breakingNews: false } });
   await request(app).post('/api/public/push/register').send({ token: disabledToken });
   await request(app).post('/api/public/push/register').send({ registrationId: activeFid, registrationType: 'fid', preferences: { breakingNews: true } });
-  const disabled = Array.from(docs.values()).find((item) => item.registrationId === disabledToken);
-  disabled.enabled = false;
-  disabled.status = 'inactive';
+  const unregister = await request(app).delete('/api/public/push/unregister').send({ token: disabledToken });
+  assert.equal(unregister.status, 200);
+  assert.equal(unregister.body.disabled, true);
 
   const response = await request(app)
     .post('/api/admin/push/breaking')
@@ -962,10 +1043,13 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
 
   assert.equal(response.status, 200);
   assert.equal(response.body.status, 'sent');
+  assert.equal(response.body.deliveryProofStatus, 'fcm_accepted');
   assert.equal(response.body.reason, null);
   assert.equal(response.body.targetedCount, 1);
   assert.equal(response.body.successCount, 1);
   assert.equal(response.body.failureCount, 0);
+  assert.equal(typeof response.body.fcmAcceptedAt, 'string');
+  assert.equal(typeof response.body.fcmLatencyMs, 'number');
   assert.equal(sends.length, 1);
   assert.equal(sends[0].token, activeToken);
   assert.equal(sends[0].data.deliveryLogId, String(logs[0]._id));
@@ -982,6 +1066,9 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   assert.equal(logs[0].url, 'https://www.newspulse.co.in/news/breaking');
   assert.equal(logs[0].language, 'en');
   assert.equal(logs[0].targetedCount, 1);
+  assert.equal(Boolean(logs[0].fcmAcceptedAt), true);
+  assert.equal(typeof logs[0].fcmLatencyMs, 'number');
+  assert.equal(Array.from(docs.values()).find((item) => item.registrationId === disabledToken).enabled, false);
   assert.equal(Boolean(logs[0].completedAt), true);
   assertNoPushSecrets(response.body, [activeToken, preferenceOffToken, disabledToken, activeFid, process.env.FIREBASE_PRIVATE_KEY]);
   assertNoPushSecrets(logs, [activeToken, preferenceOffToken, disabledToken, activeFid, process.env.FIREBASE_PRIVATE_KEY]);
@@ -1071,9 +1158,12 @@ test('POST /api/admin/push/article sends article push and diagnostics show last 
   assert.equal(response.status, 200);
   assert.equal(response.body.type, 'article');
   assert.equal(response.body.status, 'sent');
+  assert.equal(response.body.deliveryProofStatus, 'fcm_accepted');
   assert.equal(response.body.reason, null);
   assert.equal(response.body.targetedCount, 1);
   assert.equal(response.body.successCount, 1);
+  assert.equal(typeof response.body.fcmAcceptedAt, 'string');
+  assert.equal(typeof response.body.fcmLatencyMs, 'number');
   assert.equal(response.body.targetingDebug.enabledDevices, 1);
   assert.equal(response.body.targetingDebug.newArticleAlertEligibleDevices, 1);
   assert.equal(response.body.targetingDebug.excludedDisabledCount, 0);
@@ -1086,7 +1176,7 @@ test('POST /api/admin/push/article sends article push and diagnostics show last 
   assert.equal(sends[0].data.articleId, 'article-1');
   assert.equal(sends[0].data.articleSlug, 'article-slug');
   assert.equal(sends[0].data.category, 'national');
-  assert.equal(sends[0].webpush.headers.TTL, '120');
+  assert.equal(sends[0].webpush.headers.TTL, '900');
   assert.equal(sends[0].webpush.headers.Urgency, 'normal');
   assert.equal(logs.length, 1);
   assert.equal(logs[0].type, 'article');
@@ -1096,6 +1186,8 @@ test('POST /api/admin/push/article sends article push and diagnostics show last 
   assert.equal(logs[0].articleSlug, 'article-slug');
   assert.equal(logs[0].category, 'national');
   assert.equal(logs[0].language, 'en');
+  assert.equal(Boolean(logs[0].fcmAcceptedAt), true);
+  assert.equal(typeof logs[0].fcmLatencyMs, 'number');
 
   const diagnostics = await request(app).get('/api/public/push/diagnostics');
   assert.equal(diagnostics.status, 200);
@@ -1122,9 +1214,9 @@ test('POST /api/admin/push/article targets token registrations with newArticleAl
   await request(app).post('/api/public/push/register').send({ token: preferenceOffToken, language: 'en', preferences: { newArticleAlerts: false } });
   await request(app).post('/api/public/push/register').send({ token: disabledToken, language: 'en' });
   await request(app).post('/api/public/push/register').send({ registrationId: eligibleFid, registrationType: 'fid', language: 'hi' });
-  const disabled = Array.from(docs.values()).find((item) => item.registrationId === disabledToken);
-  disabled.enabled = false;
-  disabled.status = 'inactive';
+  const unregister = await request(app).post('/api/public/push/unregister').send({ token: disabledToken });
+  assert.equal(unregister.status, 200);
+  assert.equal(unregister.body.disabled, true);
 
   const response = await request(app)
     .post('/api/admin/push/article')
@@ -1143,6 +1235,7 @@ test('POST /api/admin/push/article targets token registrations with newArticleAl
   assert.equal(response.status, 200);
   assert.equal(response.body.targetedCount, 1);
   assert.equal(response.body.successCount, 1);
+  assert.equal(response.body.deliveryProofStatus, 'fcm_accepted');
   assert.equal(response.body.failureCount, 0);
   assert.equal(response.body.targetingDebug.enabledDevices, 2);
   assert.equal(response.body.targetingDebug.newArticleAlertEligibleDevices, 1);
@@ -1151,6 +1244,7 @@ test('POST /api/admin/push/article targets token registrations with newArticleAl
   assert.equal(response.body.targetingDebug.targetedCount, 1);
   assert.equal(sends.length, 1);
   assert.equal(sends[0].token, eligibleToken);
+  assert.equal(Array.from(docs.values()).find((item) => item.registrationId === disabledToken).enabled, false);
   assertNoPushSecrets(response.body, [eligibleToken, preferenceOffToken, disabledToken, eligibleFid, process.env.FIREBASE_PRIVATE_KEY]);
 });
 
@@ -1179,6 +1273,7 @@ test('POST /api/admin/push/article records no recipients when no newArticleAlert
   assert.equal(response.status, 200);
   assert.equal(response.body.sent, false);
   assert.equal(response.body.status, 'no_recipients');
+  assert.equal(response.body.deliveryProofStatus, 'no_recipients');
   assert.equal(response.body.reason, 'no_article_alert_subscribers');
   assert.equal(response.body.targetedCount, 0);
   assert.equal(response.body.successCount, 0);
@@ -1223,6 +1318,7 @@ test('POST /api/admin/push/article stores safe Firebase failure code and metadat
 
   assert.equal(response.status, 200);
   assert.equal(response.body.sent, false);
+  assert.equal(response.body.deliveryProofStatus, 'failed');
   assert.equal(response.body.targetedCount, 1);
   assert.equal(response.body.failureCount, 1);
   assert.equal(response.body.lastFailureCode, 'messaging/internal-error');
@@ -1274,6 +1370,7 @@ test('invalid Firebase token disables only that registration during article push
   assert.equal(response.status, 200);
   assert.equal(response.body.targetedCount, 2);
   assert.equal(response.body.successCount, 1);
+  assert.equal(response.body.deliveryProofStatus, 'fcm_accepted');
   assert.equal(response.body.failureCount, 1);
   assert.equal(response.body.lastFailureCode, 'messaging/registration-token-not-registered');
   const invalid = Array.from(docs.values()).find((item) => item.registrationId === invalidToken);
@@ -1311,6 +1408,7 @@ test('POST /api/public/push/receipt records received and clicked events safely',
     lastReceivedAt: null,
     firstClickedAt: null,
     lastClickedAt: null,
+    sentAt: new Date(Date.now() - 10_000).toISOString(),
   }));
 
   const firstReceived = await request(app)
@@ -1324,6 +1422,8 @@ test('POST /api/public/push/receipt records received and clicked events safely',
   assert.equal(logs[0].browserReceivedCount, 1);
   assert.equal(Boolean(initialFirstReceivedAt), true);
   assert.equal(Boolean(initialLastReceivedAt), true);
+  assert.equal(typeof logs[0].firstBrowserReceivedLatencyMs, 'number');
+  assert.ok(logs[0].firstBrowserReceivedLatencyMs >= 0);
 
   const secondReceived = await request(app)
     .post('/api/public/push/receipt')
@@ -1341,6 +1441,8 @@ test('POST /api/public/push/receipt records received and clicked events safely',
   assert.equal(logs[0].clickedCount, 1);
   assert.equal(Boolean(initialFirstClickedAt), true);
   assert.equal(Boolean(logs[0].lastClickedAt), true);
+  assert.equal(typeof logs[0].firstClickLatencyMs, 'number');
+  assert.ok(logs[0].firstClickLatencyMs >= 0);
 
   const secondClicked = await request(app)
     .post('/api/public/push/receipt')
@@ -1460,10 +1562,15 @@ test('GET /api/admin/push/history returns breaking/article logs newest first wit
   assert.equal(proofResponse.status, 200);
   assert.equal(proofResponse.body.items[0].browserReceivedCount, 2);
   assert.equal(proofResponse.body.items[0].clickedCount, 1);
+  assert.equal(proofResponse.body.items[0].deliveryProofStatus, 'clicked');
   assert.equal(proofResponse.body.items[0].firstReceivedAt, '2026-08-13T11:01:00.000Z');
   assert.equal(proofResponse.body.items[0].lastReceivedAt, '2026-08-13T11:02:00.000Z');
   assert.equal(proofResponse.body.items[0].firstClickedAt, '2026-08-13T11:03:00.000Z');
   assert.equal(proofResponse.body.items[0].lastClickedAt, '2026-08-13T11:04:00.000Z');
+  assert.equal(typeof proofResponse.body.items[0].fcmLatencyMs, 'number');
+  assert.equal(proofResponse.body.items[0].firstBrowserReceivedLatencyMs, null);
+  assert.equal(proofResponse.body.items[0].firstClickLatencyMs, null);
+  assert.equal(response.body.items[0].deliveryProofStatus, 'fcm_accepted');
   assert.equal(response.body.items[0].lastFailureCode, null);
   assert.equal(response.body.items[0].lastFailureMessage, null);
   assertNoPushSecrets(response.body, [breakingToken, articleToken, process.env.FIREBASE_PRIVATE_KEY, process.env.FIREBASE_CLIENT_EMAIL]);

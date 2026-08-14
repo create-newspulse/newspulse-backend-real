@@ -29,7 +29,7 @@ const pushRegistrationSchema = new mongoose.Schema({
   registrationType: { type: String, enum: ['fid', 'token'], required: true, index: true },
   platform: { type: String, enum: ['web', 'android', 'ios'], default: 'web', index: true },
   enabled: { type: Boolean, default: true, index: true },
-  status: { type: String, enum: ['active', 'inactive'], default: 'active', index: true },
+  status: { type: String, enum: ['active', 'inactive', 'disabled'], default: 'active', index: true },
   preferences: { type: preferenceSchema, default: () => ({ ...DEFAULT_PUSH_PREFERENCES }) },
   categories: { type: [String], default: [], index: true },
   language: { type: String, enum: ['en', 'hi', 'gu'], default: 'en', index: true },

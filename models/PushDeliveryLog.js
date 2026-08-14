@@ -30,6 +30,10 @@ const pushDeliveryLogSchema = new mongoose.Schema({
   lastClickedAt: { type: Date, default: null, index: true },
   sentAt: { type: Date, default: Date.now, index: true },
   completedAt: { type: Date, default: null, index: true },
+  fcmAcceptedAt: { type: Date, default: null, index: true },
+  fcmLatencyMs: { type: Number, default: null, min: 0 },
+  firstBrowserReceivedLatencyMs: { type: Number, default: null, min: 0 },
+  firstClickLatencyMs: { type: Number, default: null, min: 0 },
   sentBy: {
     id: { type: String, default: null, trim: true },
     email: { type: String, default: null, trim: true, lowercase: true },
