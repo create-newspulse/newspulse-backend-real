@@ -289,7 +289,7 @@ function makeDeliveryLog(index, overrides = {}) {
   };
 }
 
-function installFirebaseSendStub({ failCode, failMessage, failByToken } = {}) {
+function installFirebaseSendStub({ failCode, failMessage, failByToken, onSend } = {}) {
   process.env.FIREBASE_PROJECT_ID = 'news-pulse-test';
   process.env.FIREBASE_CLIENT_EMAIL = 'firebase-adminsdk@test.iam.gserviceaccount.com';
   process.env.FIREBASE_PRIVATE_KEY = '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n';
@@ -306,6 +306,7 @@ function installFirebaseSendStub({ failCode, failMessage, failByToken } = {}) {
       getMessaging: () => ({
         send: async (payload) => {
           sends.push(payload);
+          if (typeof onSend === 'function') onSend(payload);
           const tokenFailure = failByToken && failByToken[payload.token];
           const failure = tokenFailure || (failCode ? { code: failCode, message: failMessage } : null);
           if (failure) {
@@ -1020,7 +1021,15 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   const activeFid = 'firebase-installation-breaking-active';
   const { docs } = installInMemoryRegistrationStore();
   const { logs } = installInMemoryDeliveryLogStore();
-  const { sends } = installFirebaseSendStub();
+  const sendObservations = [];
+  const { sends } = installFirebaseSendStub({
+    onSend: (payload) => {
+      sendObservations.push({
+        deliveryLogId: payload.data.deliveryLogId,
+        deliveryLogExistsBeforeSend: logs.some((item) => String(item._id) === payload.data.deliveryLogId),
+      });
+    },
+  });
 
   await request(app).post('/api/public/push/register').send({ token: activeToken });
   await request(app).post('/api/public/push/register').send({ token: preferenceOffToken, preferences: { breakingNews: false } });
@@ -1052,20 +1061,27 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   assert.equal(typeof response.body.fcmLatencyMs, 'number');
   assert.equal(sends.length, 1);
   assert.equal(sends[0].token, activeToken);
+  assert.equal(sends[0].notification.title, '🔴 Breaking News');
+  assert.equal(sends[0].notification.body, 'Breaking news message');
   assert.equal(sends[0].data.deliveryLogId, String(logs[0]._id));
   assert.equal(sends[0].data.type, 'breaking');
-  assert.equal(sends[0].data.url, 'https://www.newspulse.co.in/news/breaking');
-  assert.equal(sends[0].webpush.headers.TTL, '60');
+  assert.equal(sends[0].data.url, 'https://www.newspulse.co.in/');
+  assert.equal(sends[0].webpush.fcmOptions.link, 'https://www.newspulse.co.in/');
+  assert.equal(sends[0].webpush.headers.TTL, '120');
   assert.equal(sends[0].webpush.headers.Urgency, 'high');
+  assert.deepEqual(sendObservations, [{ deliveryLogId: String(logs[0]._id), deliveryLogExistsBeforeSend: true }]);
   assert.equal(logs.length, 1);
   assert.equal(logs[0].type, 'breaking');
   assert.equal(logs[0].status, 'sent');
   assert.equal(logs[0].reason, null);
-  assert.equal(logs[0].title, 'Breaking News');
+  assert.equal(logs[0].title, '🔴 Breaking News');
   assert.equal(logs[0].body, 'Breaking news message');
-  assert.equal(logs[0].url, 'https://www.newspulse.co.in/news/breaking');
+  assert.equal(logs[0].url, 'https://www.newspulse.co.in/');
   assert.equal(logs[0].language, 'en');
   assert.equal(logs[0].targetedCount, 1);
+  assert.equal(logs[0].hasDeliveryLogId, true);
+  assert.equal(logs[0].payloadType, 'breaking');
+  assert.equal(logs[0].ttlSeconds, 120);
   assert.equal(Boolean(logs[0].fcmAcceptedAt), true);
   assert.equal(typeof logs[0].fcmLatencyMs, 'number');
   assert.equal(Array.from(docs.values()).find((item) => item.registrationId === disabledToken).enabled, false);
@@ -1111,10 +1127,11 @@ test('POST /api/admin/push/breaking records no recipients when no breakingNews r
   assertNoPushSecrets(logs, [preferenceOffToken, fid, process.env.FIREBASE_PRIVATE_KEY]);
 });
 
-test('POST /api/admin/push/breaking rejects invalid URL', async () => {
+test('POST /api/admin/push/breaking ignores unsafe submitted URL and uses safe root URL', async () => {
   const { sends } = installFirebaseSendStub();
   const { logs } = installInMemoryDeliveryLogStore();
   installInMemoryRegistrationStore();
+  await request(app).post('/api/public/push/register').send({ token: 'fcm-token-breaking-safe-url:defghijklmnopqrstuvwxyz0123456789' });
 
   const response = await request(app)
     .post('/api/admin/push/breaking')
@@ -1127,10 +1144,15 @@ test('POST /api/admin/push/breaking rejects invalid URL', async () => {
       confirmSend: true,
     });
 
-  assert.equal(response.status, 400);
-  assert.equal(response.body.code, 'INVALID_PUSH_URL');
-  assert.equal(sends.length, 0);
-  assert.equal(logs.length, 0);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.targetedCount, 1);
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].data.url, 'https://www.newspulse.co.in/');
+  assert.equal(sends[0].webpush.fcmOptions.link, 'https://www.newspulse.co.in/');
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].url, 'https://www.newspulse.co.in/');
+  assertNoPushSecrets(response.body, ['fcm-token-breaking-safe-url:defghijklmnopqrstuvwxyz0123456789']);
+  assertNoPushSecrets(logs, ['fcm-token-breaking-safe-url:defghijklmnopqrstuvwxyz0123456789']);
 });
 
 test('POST /api/admin/push/article sends article push and diagnostics show last success', async () => {
@@ -1548,6 +1570,10 @@ test('GET /api/admin/push/history returns breaking/article logs newest first wit
   assert.equal(response.body.items[1].type, 'breaking');
   assert.equal(response.body.items[0].targetedCount, 2);
   assert.equal(response.body.items[0].successCount, 2);
+  assert.equal(response.body.items[1].hasDeliveryLogId, true);
+  assert.equal(response.body.items[1].payloadType, 'breaking');
+  assert.equal(response.body.items[1].ttlSeconds, 120);
+  assert.equal(response.body.items[1].browserReceivedCount, 0);
   logs[1].browserReceivedCount = 2;
   logs[1].clickedCount = 1;
   logs[1].firstReceivedAt = '2026-08-13T11:01:00.000Z';

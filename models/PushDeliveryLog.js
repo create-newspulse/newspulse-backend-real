@@ -34,6 +34,9 @@ const pushDeliveryLogSchema = new mongoose.Schema({
   fcmLatencyMs: { type: Number, default: null, min: 0 },
   firstBrowserReceivedLatencyMs: { type: Number, default: null, min: 0 },
   firstClickLatencyMs: { type: Number, default: null, min: 0 },
+  hasDeliveryLogId: { type: Boolean, default: false },
+  payloadType: { type: String, enum: ['breaking', 'article'], default: null, index: true },
+  ttlSeconds: { type: Number, default: null, min: 0 },
   sentBy: {
     id: { type: String, default: null, trim: true },
     email: { type: String, default: null, trim: true, lowercase: true },

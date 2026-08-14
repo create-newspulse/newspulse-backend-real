@@ -12,7 +12,7 @@ const PUSH_HISTORY_TYPES = new Set(['all', 'breaking', 'article']);
 const PUSH_HISTORY_STATUSES = new Set(['all', 'sent', 'failed', 'no_recipients']);
 const PUSH_RECEIPT_EVENTS = new Set(['received', 'clicked']);
 const NO_RECIPIENT_REASONS = new Set(['no_breaking_news_subscribers', 'no_article_alert_subscribers', 'registration_not_found', 'no_recipients']);
-const BREAKING_PUSH_TTL_SECONDS = 60;
+const BREAKING_PUSH_TTL_SECONDS = 120;
 const ARTICLE_PUSH_TTL_SECONDS = 900;
 const REGISTRATION_BODY_KEYS = new Set([
   'registrationId',
@@ -413,6 +413,10 @@ function normalizeSendUrl(value, options = {}) {
   return pushMessagingService.normalizePushUrl(value, options);
 }
 
+function canonicalBreakingPushUrl() {
+  return normalizeSendUrl('https://www.newspulse.co.in/');
+}
+
 function buildDeliveryResponse(summary, extra = {}) {
   return {
     sent: summary.successCount > 0,
@@ -431,6 +435,9 @@ function buildDeliveryResponse(summary, extra = {}) {
     fcmLatencyMs: summary.fcmLatencyMs ?? null,
     firstBrowserReceivedLatencyMs: summary.firstBrowserReceivedLatencyMs ?? null,
     firstClickLatencyMs: summary.firstClickLatencyMs ?? null,
+    hasDeliveryLogId: !!summary.hasDeliveryLogId,
+    payloadType: summary.payloadType || null,
+    ttlSeconds: summary.ttlSeconds ?? null,
     lastFailureCode: summary.lastFailureCode || null,
     lastFailureMessage: summary.lastFailureMessage || null,
     deliveryLogCreated: !!summary.deliveryLogCreated,
@@ -488,6 +495,9 @@ async function createPushDeliveryLog(summary, admin) {
       fcmLatencyMs: summary.fcmLatencyMs ?? null,
       firstBrowserReceivedLatencyMs: summary.firstBrowserReceivedLatencyMs ?? null,
       firstClickLatencyMs: summary.firstClickLatencyMs ?? null,
+      hasDeliveryLogId: !!summary.hasDeliveryLogId,
+      payloadType: summary.payloadType || summary.type,
+      ttlSeconds: summary.ttlSeconds ?? null,
       sentBy: buildSentBy(admin),
       metadata: buildSafeDeliveryMetadata(summary),
       lastFailureCode: summary.lastFailureCode || null,
@@ -513,6 +523,9 @@ async function updatePushDeliveryLog(summary = {}) {
       fcmLatencyMs: summary.fcmLatencyMs ?? null,
       firstBrowserReceivedLatencyMs: summary.firstBrowserReceivedLatencyMs ?? null,
       firstClickLatencyMs: summary.firstClickLatencyMs ?? null,
+      hasDeliveryLogId: !!summary.hasDeliveryLogId,
+      payloadType: summary.payloadType || summary.type,
+      ttlSeconds: summary.ttlSeconds ?? null,
       lastFailureCode: summary.lastFailureCode || null,
       lastFailureMessage: summary.lastFailureMessage || null,
     };
@@ -611,6 +624,9 @@ async function sendToRegistrations({ type, title, body, url, registrations, mess
     fcmLatencyMs: null,
     firstBrowserReceivedLatencyMs: null,
     firstClickLatencyMs: null,
+    hasDeliveryLogId: false,
+    payloadType: type,
+    ttlSeconds: Number.parseInt(message?.ttlSeconds, 10) || null,
     deliveryLogCreated: false,
     deliveryLogId: null,
     metadata,
@@ -620,6 +636,7 @@ async function sendToRegistrations({ type, title, body, url, registrations, mess
   if (deliveryLog?._id) {
     summary.deliveryLogId = String(deliveryLog._id);
     summary.deliveryLogCreated = true;
+    summary.hasDeliveryLogId = true;
   }
 
   const messageWithDeliveryLog = summary.deliveryLogId ? { ...message, type, deliveryLogId: summary.deliveryLogId } : message;
@@ -681,6 +698,9 @@ function serializePushDeliveryLog(log) {
     fcmLatencyMs: log?.fcmLatencyMs ?? null,
     firstBrowserReceivedLatencyMs: log?.firstBrowserReceivedLatencyMs ?? null,
     firstClickLatencyMs: log?.firstClickLatencyMs ?? null,
+    hasDeliveryLogId: !!(log?.hasDeliveryLogId || log?._id),
+    payloadType: log?.payloadType || log?.type || null,
+    ttlSeconds: log?.ttlSeconds ?? null,
     lastFailureCode: safeFailureCode(log?.lastFailureCode),
     lastFailureMessage: safeFailureMessage(log?.lastFailureMessage),
   };
@@ -798,7 +818,7 @@ async function findRecentDeliveryLogs(filter, { skip = 0, limit = 5 } = {}) {
   if (query && typeof query.sort === 'function') query = query.sort({ sentAt: -1, createdAt: -1 });
   if (query && typeof query.skip === 'function') query = query.skip(skip);
   if (query && typeof query.limit === 'function') query = query.limit(limit);
-  if (query && typeof query.select === 'function') query = query.select('type title body url articleId articleSlug category language status reason targetedCount successCount failureCount browserReceivedCount clickedCount firstReceivedAt lastReceivedAt firstClickedAt lastClickedAt sentAt completedAt fcmAcceptedAt fcmLatencyMs firstBrowserReceivedLatencyMs firstClickLatencyMs lastFailureCode lastFailureMessage');
+  if (query && typeof query.select === 'function') query = query.select('type title body url articleId articleSlug category language status reason targetedCount successCount failureCount browserReceivedCount clickedCount firstReceivedAt lastReceivedAt firstClickedAt lastClickedAt sentAt completedAt fcmAcceptedAt fcmLatencyMs firstBrowserReceivedLatencyMs firstClickLatencyMs hasDeliveryLogId payloadType ttlSeconds lastFailureCode lastFailureMessage');
   if (query && typeof query.lean === 'function') return query.lean();
   const rows = await query;
   return Array.isArray(rows) ? rows : [];
@@ -1235,10 +1255,10 @@ async function sendBreakingPush(req, res) {
 
     const language = normalizeLanguage(bodyInput.language);
     if (language === null) return fail(res, 400, 'INVALID_PUSH_SEND', 'language must be en, hi, or gu');
-    const title = normalizeSendText(bodyInput.title, 'Breaking News', 120);
+    const title = '🔴 Breaking News';
     const messageBody = normalizeSendText(bodyInput.body, '', 240);
     if (!messageBody) return fail(res, 400, 'INVALID_PUSH_SEND', 'body is required');
-    const url = normalizeSendUrl(bodyInput.url);
+    const url = canonicalBreakingPushUrl();
     if (!url) return fail(res, 400, 'INVALID_PUSH_URL', 'Push URL is not allowed');
 
     const filter = pushMessagingService.buildEligibilityFilter('breaking_news', { language });

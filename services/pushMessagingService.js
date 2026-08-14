@@ -11,7 +11,7 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1']);
 const NOTIFICATION_TYPES = new Set(['test', 'breaking_news', 'top_story', 'article', 'category']);
 const WEBPUSH_URGENCIES = new Set(['very-low', 'low', 'normal', 'high']);
 const DEFAULT_WEBPUSH_TTL_SECONDS = Object.freeze({
-  breaking_news: 60,
+  breaking_news: 120,
   article: 120,
 });
 const DEFAULT_WEBPUSH_URGENCY = Object.freeze({
