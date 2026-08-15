@@ -510,6 +510,34 @@ test('POST /api/public/push/register stores token when token and fid are both pr
   assertNoPushSecrets(response.body, [token, fid]);
 });
 
+test('token registration with breakingNews=true increments breaking subscribers safely', async () => {
+  const token = 'fcm-token-breaking-register:defghijklmnopqrstuvwxyz0123456789';
+  const { docs } = installInMemoryRegistrationStore();
+
+  const register = await request(app)
+    .post('/api/public/push/register')
+    .send({ token, preferences: { breakingNews: true, newArticleAlerts: false } });
+
+  assert.equal(register.status, 200);
+  assert.equal(register.body.registrationType, 'token');
+  assert.equal(docs.size, 1);
+  const stored = Array.from(docs.values())[0];
+  assert.equal(stored.registrationType, 'token');
+  assert.equal(stored.enabled, true);
+  assert.equal(stored.status, 'active');
+  assert.equal(stored.preferences.breakingNews, true);
+  assert.equal(stored.preferences.newArticleAlerts, false);
+
+  const diagnostics = await request(app).get('/api/public/push/diagnostics');
+  assert.equal(diagnostics.status, 200);
+  assert.equal(diagnostics.body.enabledFcmTokenRegistrations, 1);
+  assert.equal(diagnostics.body.deliverablePushDevices, 1);
+  assert.equal(diagnostics.body.breakingNewsSubscribers, 1);
+  assert.equal(diagnostics.body.articleAlertSubscribers, 0);
+  assertNoPushSecrets(register.body, [token]);
+  assertNoPushSecrets(diagnostics.body, [token]);
+});
+
 test('GET /api/public/push/diagnostics returns safe missing-Firebase diagnostics with empty Mongo data', async () => {
   for (const key of envKeys) delete process.env[key];
   firebaseAdmin.resetFirebaseAdminForTests();
@@ -817,6 +845,52 @@ test('PUT /api/public/push/preferences updates only allow-listed fields', async 
   assert.deepEqual(stored.categories, ['sports']);
 });
 
+test('PUT /api/public/push/preferences updates token breakingNews without duplicates or preference loss', async () => {
+  const token = 'fcm-token-pref-breaking:defghijklmnopqrstuvwxyz0123456789';
+  const fid = 'firebase-installation-pref-breaking';
+  const { docs } = installInMemoryRegistrationStore();
+
+  await request(app).post('/api/public/push/register').send({ registrationId: fid, registrationType: 'fid', preferences: { breakingNews: true } });
+  await request(app).post('/api/public/push/register').send({ token, preferences: { breakingNews: false, newArticleAlerts: true, topStories: false } });
+
+  const enable = await request(app)
+    .put('/api/public/push/preferences')
+    .send({ registrationId: fid, registrationType: 'fid', token, preferences: { breakingNews: true } });
+
+  assert.equal(enable.status, 200);
+  assert.equal(enable.body.registrationType, 'token');
+  assert.equal(docs.size, 2);
+  const tokenRecord = Array.from(docs.values()).find((item) => item.registrationId === token);
+  const fidRecord = Array.from(docs.values()).find((item) => item.registrationId === fid);
+  assert.equal(tokenRecord.registrationType, 'token');
+  assert.equal(tokenRecord.enabled, true);
+  assert.equal(tokenRecord.status, 'active');
+  assert.equal(tokenRecord.preferences.breakingNews, true);
+  assert.equal(tokenRecord.preferences.newArticleAlerts, true);
+  assert.equal(tokenRecord.preferences.topStories, false);
+  assert.equal(fidRecord.preferences.breakingNews, true);
+
+  let diagnostics = await request(app).get('/api/public/push/diagnostics');
+  assert.equal(diagnostics.body.breakingNewsSubscribers, 1);
+  assert.equal(diagnostics.body.articleAlertSubscribers, 1);
+  assert.equal(diagnostics.body.enabledFidOnlyRegistrations, 1);
+
+  const disable = await request(app)
+    .put('/api/public/push/preferences')
+    .send({ token, preferences: { breakingNews: false } });
+
+  assert.equal(disable.status, 200);
+  assert.equal(docs.size, 2);
+  assert.equal(tokenRecord.preferences.breakingNews, false);
+  assert.equal(tokenRecord.preferences.newArticleAlerts, true);
+  diagnostics = await request(app).get('/api/public/push/diagnostics');
+  assert.equal(diagnostics.body.breakingNewsSubscribers, 0);
+  assert.equal(diagnostics.body.articleAlertSubscribers, 1);
+  assertNoPushSecrets(enable.body, [token, fid]);
+  assertNoPushSecrets(disable.body, [token, fid]);
+  assertNoPushSecrets(diagnostics.body, [token, fid]);
+});
+
 test('push registration rejects invalid language and invalid categories', async () => {
   installInMemoryRegistrationStore();
 
@@ -1016,6 +1090,7 @@ test('POST /api/admin/push/article requires confirmSend', async () => {
 
 test('POST /api/admin/push/breaking does not target disabled devices and creates delivery log', async () => {
   const activeToken = 'fcm-token-breaking-active:defghijklmnopqrstuvwxyz0123456789';
+  const otherLanguageToken = 'fcm-token-breaking-other-language:defghijklmnopqrstuvwxyz0123456789';
   const preferenceOffToken = 'fcm-token-breaking-pref-off:defghijklmnopqrstuvwxyz0123456789';
   const disabledToken = 'fcm-token-breaking-disabled:defghijklmnopqrstuvwxyz0123456789';
   const activeFid = 'firebase-installation-breaking-active';
@@ -1032,6 +1107,7 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   });
 
   await request(app).post('/api/public/push/register').send({ token: activeToken });
+  await request(app).post('/api/public/push/register').send({ token: otherLanguageToken, language: 'gu', preferences: { breakingNews: true } });
   await request(app).post('/api/public/push/register').send({ token: preferenceOffToken, preferences: { breakingNews: false } });
   await request(app).post('/api/public/push/register').send({ token: disabledToken });
   await request(app).post('/api/public/push/register').send({ registrationId: activeFid, registrationType: 'fid', preferences: { breakingNews: true } });
@@ -1054,13 +1130,20 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   assert.equal(response.body.status, 'sent');
   assert.equal(response.body.deliveryProofStatus, 'fcm_accepted');
   assert.equal(response.body.reason, null);
-  assert.equal(response.body.targetedCount, 1);
-  assert.equal(response.body.successCount, 1);
+  assert.equal(response.body.targetedCount, 2);
+  assert.equal(response.body.successCount, 2);
   assert.equal(response.body.failureCount, 0);
+  assert.equal(response.body.targetingDebug.enabledDevices, 3);
+  assert.equal(response.body.targetingDebug.deliverablePushDevices, 3);
+  assert.equal(response.body.targetingDebug.breakingNewsSubscribers, 2);
+  assert.equal(response.body.targetingDebug.excludedPreferenceOffCount, 1);
+  assert.equal(response.body.targetingDebug.excludedDisabledCount, 1);
+  assert.equal(response.body.targetingDebug.excludedFidOnlyCount, 1);
+  assert.equal(response.body.targetingDebug.targetedCount, 2);
   assert.equal(typeof response.body.fcmAcceptedAt, 'string');
   assert.equal(typeof response.body.fcmLatencyMs, 'number');
-  assert.equal(sends.length, 1);
-  assert.equal(sends[0].token, activeToken);
+  assert.equal(sends.length, 2);
+  assert.deepEqual(new Set(sends.map((item) => item.token)), new Set([activeToken, otherLanguageToken]));
   assert.equal(sends[0].notification.title, '🔴 Breaking News');
   assert.equal(sends[0].notification.body, 'Breaking news message');
   assert.equal(sends[0].data.deliveryLogId, String(logs[0]._id));
@@ -1071,7 +1154,10 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   assert.equal(sends[0].webpush.fcmOptions.link, 'https://www.newspulse.co.in/');
   assert.equal(sends[0].webpush.headers.TTL, '120');
   assert.equal(sends[0].webpush.headers.Urgency, 'high');
-  assert.deepEqual(sendObservations, [{ deliveryLogId: String(logs[0]._id), deliveryLogExistsBeforeSend: true }]);
+  assert.deepEqual(sendObservations, [
+    { deliveryLogId: String(logs[0]._id), deliveryLogExistsBeforeSend: true },
+    { deliveryLogId: String(logs[0]._id), deliveryLogExistsBeforeSend: true },
+  ]);
   assert.equal(logs.length, 1);
   assert.equal(logs[0].type, 'breaking');
   assert.equal(logs[0].status, 'sent');
@@ -1080,16 +1166,18 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   assert.equal(logs[0].body, 'Breaking news message');
   assert.equal(logs[0].url, 'https://www.newspulse.co.in/');
   assert.equal(logs[0].language, 'en');
-  assert.equal(logs[0].targetedCount, 1);
+  assert.equal(logs[0].targetedCount, 2);
   assert.equal(logs[0].hasDeliveryLogId, true);
   assert.equal(logs[0].payloadType, 'breaking');
   assert.equal(logs[0].ttlSeconds, 120);
+  assert.equal(logs[0].metadata.targeting.breakingNewsSubscribers, 2);
+  assert.equal(logs[0].metadata.targeting.excludedFidOnlyCount, 1);
   assert.equal(Boolean(logs[0].fcmAcceptedAt), true);
   assert.equal(typeof logs[0].fcmLatencyMs, 'number');
   assert.equal(Array.from(docs.values()).find((item) => item.registrationId === disabledToken).enabled, false);
   assert.equal(Boolean(logs[0].completedAt), true);
-  assertNoPushSecrets(response.body, [activeToken, preferenceOffToken, disabledToken, activeFid, process.env.FIREBASE_PRIVATE_KEY]);
-  assertNoPushSecrets(logs, [activeToken, preferenceOffToken, disabledToken, activeFid, process.env.FIREBASE_PRIVATE_KEY]);
+  assertNoPushSecrets(response.body, [activeToken, otherLanguageToken, preferenceOffToken, disabledToken, activeFid, process.env.FIREBASE_PRIVATE_KEY]);
+  assertNoPushSecrets(logs, [activeToken, otherLanguageToken, preferenceOffToken, disabledToken, activeFid, process.env.FIREBASE_PRIVATE_KEY]);
 });
 
 test('POST /api/admin/push/breaking records no recipients when no breakingNews registrations are eligible', async () => {
@@ -1120,11 +1208,17 @@ test('POST /api/admin/push/breaking records no recipients when no breakingNews r
   assert.equal(response.body.targetedCount, 0);
   assert.equal(response.body.successCount, 0);
   assert.equal(response.body.failureCount, 0);
+  assert.equal(response.body.targetingDebug.breakingNewsSubscribers, 0);
+  assert.equal(response.body.targetingDebug.excludedPreferenceOffCount, 1);
+  assert.equal(response.body.targetingDebug.excludedFidOnlyCount, 1);
+  assert.equal(response.body.targetingDebug.targetedCount, 0);
   assert.equal(sends.length, 0);
   assert.equal(logs.length, 1);
   assert.equal(logs[0].status, 'no_recipients');
   assert.equal(logs[0].reason, 'no_breaking_news_subscribers');
   assert.equal(logs[0].targetedCount, 0);
+  assert.equal(logs[0].metadata.targeting.breakingNewsSubscribers, 0);
+  assert.equal(logs[0].metadata.targeting.excludedFidOnlyCount, 1);
   assertNoPushSecrets(response.body, [preferenceOffToken, fid, process.env.FIREBASE_PRIVATE_KEY]);
   assertNoPushSecrets(logs, [preferenceOffToken, fid, process.env.FIREBASE_PRIVATE_KEY]);
 });

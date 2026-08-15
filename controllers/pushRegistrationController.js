@@ -450,16 +450,24 @@ function safeCountValue(value) {
   return count > 0 ? count : 0;
 }
 
+function safeTargetingDebug(value = {}) {
+  return {
+    enabledDevices: safeCountValue(value.enabledDevices),
+    deliverablePushDevices: safeCountValue(value.deliverablePushDevices),
+    breakingNewsSubscribers: safeCountValue(value.breakingNewsSubscribers),
+    articleAlertSubscribers: safeCountValue(value.articleAlertSubscribers),
+    newArticleAlertEligibleDevices: safeCountValue(value.newArticleAlertEligibleDevices),
+    excludedDisabledCount: safeCountValue(value.excludedDisabledCount),
+    excludedPreferenceOffCount: safeCountValue(value.excludedPreferenceOffCount),
+    excludedFidOnlyCount: safeCountValue(value.excludedFidOnlyCount),
+    targetedCount: safeCountValue(value.targetedCount),
+  };
+}
+
 function buildSafeDeliveryMetadata(summary = {}) {
   const metadata = {};
   if (summary.metadata?.targeting) {
-    metadata.targeting = {
-      enabledDevices: safeCountValue(summary.metadata.targeting.enabledDevices),
-      newArticleAlertEligibleDevices: safeCountValue(summary.metadata.targeting.newArticleAlertEligibleDevices),
-      excludedDisabledCount: safeCountValue(summary.metadata.targeting.excludedDisabledCount),
-      excludedPreferenceOffCount: safeCountValue(summary.metadata.targeting.excludedPreferenceOffCount),
-      targetedCount: safeCountValue(summary.metadata.targeting.targetedCount),
-    };
+    metadata.targeting = safeTargetingDebug(summary.metadata.targeting);
   }
   if (Array.isArray(summary.metadata?.firebaseFailures) && summary.metadata.firebaseFailures.length > 0) {
     metadata.firebaseFailures = summary.metadata.firebaseFailures.map((item) => ({
@@ -575,9 +583,26 @@ async function buildArticleTargetingDebugCounts() {
   const disabledFilter = { registrationType: 'token', $or: [{ enabled: false }, { status: { $in: ['inactive', 'disabled'] } }] };
   return {
     enabledDevices: await safePushCount(enabledFilter),
+    deliverablePushDevices: await safePushCount(enabledFilter),
+    articleAlertSubscribers: await safePushCount(eligibleFilter),
     newArticleAlertEligibleDevices: await safePushCount(eligibleFilter),
     excludedDisabledCount: await safePushCount(disabledFilter),
     excludedPreferenceOffCount: await safePushCount({ ...enabledFilter, 'preferences.newArticleAlerts': { $ne: true } }),
+    excludedFidOnlyCount: await safePushCount({ enabled: true, status: 'active', $or: [{ registrationType: { $ne: 'token' } }, { registrationId: null }] }),
+  };
+}
+
+async function buildBreakingTargetingDebugCounts() {
+  const enabledFilter = { enabled: true, status: 'active', registrationType: 'token', registrationId: { $ne: null } };
+  const eligibleFilter = { ...enabledFilter, 'preferences.breakingNews': true };
+  const disabledFilter = { registrationType: 'token', $or: [{ enabled: false }, { status: { $in: ['inactive', 'disabled'] } }] };
+  return {
+    enabledDevices: await safePushCount(enabledFilter),
+    deliverablePushDevices: await safePushCount(enabledFilter),
+    breakingNewsSubscribers: await safePushCount(eligibleFilter),
+    excludedDisabledCount: await safePushCount(disabledFilter),
+    excludedPreferenceOffCount: await safePushCount({ ...enabledFilter, 'preferences.breakingNews': { $ne: true } }),
+    excludedFidOnlyCount: await safePushCount({ enabled: true, status: 'active', $or: [{ registrationType: { $ne: 'token' } }, { registrationId: null }] }),
   };
 }
 
@@ -701,6 +726,7 @@ function serializePushDeliveryLog(log) {
     hasDeliveryLogId: !!(log?.hasDeliveryLogId || log?._id),
     payloadType: log?.payloadType || log?.type || null,
     ttlSeconds: log?.ttlSeconds ?? null,
+    targetingDebug: log?.metadata?.targeting ? safeTargetingDebug(log.metadata.targeting) : undefined,
     lastFailureCode: safeFailureCode(log?.lastFailureCode),
     lastFailureMessage: safeFailureMessage(log?.lastFailureMessage),
   };
@@ -818,7 +844,7 @@ async function findRecentDeliveryLogs(filter, { skip = 0, limit = 5 } = {}) {
   if (query && typeof query.sort === 'function') query = query.sort({ sentAt: -1, createdAt: -1 });
   if (query && typeof query.skip === 'function') query = query.skip(skip);
   if (query && typeof query.limit === 'function') query = query.limit(limit);
-  if (query && typeof query.select === 'function') query = query.select('type title body url articleId articleSlug category language status reason targetedCount successCount failureCount browserReceivedCount clickedCount firstReceivedAt lastReceivedAt firstClickedAt lastClickedAt sentAt completedAt fcmAcceptedAt fcmLatencyMs firstBrowserReceivedLatencyMs firstClickLatencyMs hasDeliveryLogId payloadType ttlSeconds lastFailureCode lastFailureMessage');
+  if (query && typeof query.select === 'function') query = query.select('type title body url articleId articleSlug category language status reason targetedCount successCount failureCount browserReceivedCount clickedCount firstReceivedAt lastReceivedAt firstClickedAt lastClickedAt sentAt completedAt fcmAcceptedAt fcmLatencyMs firstBrowserReceivedLatencyMs firstClickLatencyMs hasDeliveryLogId payloadType ttlSeconds metadata.targeting lastFailureCode lastFailureMessage');
   if (query && typeof query.lean === 'function') return query.lean();
   const rows = await query;
   return Array.isArray(rows) ? rows : [];
@@ -921,6 +947,7 @@ async function buildPushDiagnostics() {
     enabledRegistrations,
     disabledRegistrations,
     enabledFcmTokenRegistrations,
+    deliverablePushDevices: enabledFcmTokenRegistrations,
     enabledFidOnlyRegistrations,
     breakingNewsSubscribers,
     articleAlertSubscribers,
@@ -947,6 +974,7 @@ async function buildPushDiagnostics() {
     enabledRegistrations,
     disabledRegistrations,
     enabledFcmTokenRegistrations,
+    deliverablePushDevices: enabledFcmTokenRegistrations,
     enabledFidOnlyRegistrations,
     breakingNewsSubscribers,
     articleAlertSubscribers,
@@ -964,6 +992,7 @@ async function buildPushDiagnostics() {
       enabled: enabledRegistrations,
       disabled: disabledRegistrations,
       enabledFcmTokenRegistrations,
+      deliverablePushDevices: enabledFcmTokenRegistrations,
       enabledFidOnlyRegistrations,
       breakingNewsSubscribers,
       articleAlertSubscribers,
@@ -979,6 +1008,7 @@ async function buildPushDiagnostics() {
         enabled: enabledRegistrations,
         disabled: disabledRegistrations,
         enabledFcmTokenRegistrations,
+        deliverablePushDevices: enabledFcmTokenRegistrations,
         enabledFidOnlyRegistrations,
         breakingNewsSubscribers,
         articleAlertSubscribers,
@@ -1138,6 +1168,7 @@ async function getPushDiagnostics(_req, res) {
       enabledRegistrations: 0,
       disabledRegistrations: 0,
       enabledFcmTokenRegistrations: 0,
+      deliverablePushDevices: 0,
       enabledFidOnlyRegistrations: 0,
       breakingNewsSubscribers: 0,
       articleAlertSubscribers: 0,
@@ -1261,8 +1292,10 @@ async function sendBreakingPush(req, res) {
     const url = canonicalBreakingPushUrl();
     if (!url) return fail(res, 400, 'INVALID_PUSH_URL', 'Push URL is not allowed');
 
-    const filter = pushMessagingService.buildEligibilityFilter('breaking_news', { language });
+    const filter = pushMessagingService.buildEligibilityFilter('breaking_news');
     const registrations = await findTargetRegistrations(filter);
+    const targetingDebug = await buildBreakingTargetingDebugCounts();
+    targetingDebug.targetedCount = registrations.length;
     const summary = await sendToRegistrations({
       type: 'breaking',
       title,
@@ -1271,10 +1304,11 @@ async function sendBreakingPush(req, res) {
       registrations,
       message: { title, body: messageBody, url, language, notificationType: 'breaking_news', ttlSeconds: BREAKING_PUSH_TTL_SECONDS, urgency: 'high' },
       admin: req.admin,
+      metadata: { targeting: targetingDebug },
       noRecipientsReason: 'no_breaking_news_subscribers',
     });
 
-    return ok(res, buildDeliveryResponse(summary));
+    return ok(res, buildDeliveryResponse(summary, { targetingDebug }));
   } catch (error) {
     logPushControllerError('breaking-send', error, req.body);
     return fail(res, 500, 'PUSH_BREAKING_FAILED', 'Unable to send breaking push');

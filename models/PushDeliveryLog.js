@@ -45,9 +45,13 @@ const pushDeliveryLogSchema = new mongoose.Schema({
   metadata: {
     targeting: {
       enabledDevices: { type: Number, default: 0, min: 0 },
+      deliverablePushDevices: { type: Number, default: 0, min: 0 },
+      breakingNewsSubscribers: { type: Number, default: 0, min: 0 },
+      articleAlertSubscribers: { type: Number, default: 0, min: 0 },
       newArticleAlertEligibleDevices: { type: Number, default: 0, min: 0 },
       excludedDisabledCount: { type: Number, default: 0, min: 0 },
       excludedPreferenceOffCount: { type: Number, default: 0, min: 0 },
+      excludedFidOnlyCount: { type: Number, default: 0, min: 0 },
       targetedCount: { type: Number, default: 0, min: 0 },
     },
     firebaseFailures: [{
