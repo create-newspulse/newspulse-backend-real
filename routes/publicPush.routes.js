@@ -10,7 +10,8 @@ const {
 
 const router = express.Router();
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
-const RATE_LIMIT_MAX = 60;
+const PUBLIC_MUTATION_RATE_LIMIT_MAX = 90;
+const PUBLIC_RECEIPT_RATE_LIMIT_MAX = 240;
 const BODY_LIMIT_BYTES = 16 * 1024;
 const buckets = new Map();
 
@@ -27,29 +28,30 @@ function requireSmallBody(req, res, next) {
   return next();
 }
 
-function rateLimit(req, res, next) {
-  const now = Date.now();
-  const key = `${req.method}:${req.path}:${getClientKey(req)}`;
-  const bucket = buckets.get(key);
-  if (!bucket || now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
-    buckets.set(key, { windowStart: now, count: 1 });
+function rateLimit(maxRequests) {
+  return function publicPushRateLimit(req, res, next) {
+    const now = Date.now();
+    const key = `${req.method}:${req.path}:${getClientKey(req)}`;
+    const bucket = buckets.get(key);
+    if (!bucket || now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+      buckets.set(key, { windowStart: now, count: 1 });
+      return next();
+    }
+    bucket.count += 1;
+    if (bucket.count > maxRequests) {
+      return res.status(429).json({ ok: false, success: false, status: 429, code: 'RATE_LIMITED', message: 'Too many requests' });
+    }
     return next();
-  }
-  bucket.count += 1;
-  if (bucket.count > RATE_LIMIT_MAX) {
-    return res.status(429).json({ ok: false, success: false, status: 429, code: 'RATE_LIMITED', message: 'Too many requests' });
-  }
-  return next();
+  };
 }
 
 router.use(requireSmallBody);
-router.use(rateLimit);
 
 router.get('/diagnostics', getPushDiagnostics);
-router.post('/register', registerPush);
-router.post('/receipt', recordPushReceipt);
-router.put('/preferences', updatePushPreferences);
-router.delete('/unregister', unregisterPush);
-router.post('/unregister', unregisterPush);
+router.post('/register', rateLimit(PUBLIC_MUTATION_RATE_LIMIT_MAX), registerPush);
+router.post('/receipt', rateLimit(PUBLIC_RECEIPT_RATE_LIMIT_MAX), recordPushReceipt);
+router.put('/preferences', rateLimit(PUBLIC_MUTATION_RATE_LIMIT_MAX), updatePushPreferences);
+router.delete('/unregister', rateLimit(PUBLIC_MUTATION_RATE_LIMIT_MAX), unregisterPush);
+router.post('/unregister', rateLimit(PUBLIC_MUTATION_RATE_LIMIT_MAX), unregisterPush);
 
 module.exports = router;

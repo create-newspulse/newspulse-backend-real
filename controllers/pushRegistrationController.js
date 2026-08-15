@@ -13,7 +13,7 @@ const PUSH_HISTORY_STATUSES = new Set(['all', 'sent', 'failed', 'no_recipients']
 const PUSH_RECEIPT_EVENTS = new Set(['received', 'clicked']);
 const NO_RECIPIENT_REASONS = new Set(['no_breaking_news_subscribers', 'no_article_alert_subscribers', 'registration_not_found', 'no_recipients']);
 const BREAKING_PUSH_TTL_SECONDS = 120;
-const ARTICLE_PUSH_TTL_SECONDS = 900;
+const ARTICLE_PUSH_TTL_SECONDS = 1800;
 const REGISTRATION_BODY_KEYS = new Set([
   'registrationId',
   'registrationType',
@@ -1219,7 +1219,7 @@ async function sendLatestTestPush(req, res) {
     const registration = await latestEnabledTokenRegistration();
     const title = 'News Pulse';
     const body = 'Firebase push notifications are working.';
-    const url = normalizeSendUrl('http://localhost:3000');
+    const url = normalizeSendUrl('https://www.newspulse.co.in/');
     if (!url) return fail(res, 400, 'INVALID_PUSH_URL', 'Push URL is not allowed');
 
     const summary = await sendToRegistrations({

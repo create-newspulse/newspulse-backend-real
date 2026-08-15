@@ -1065,6 +1065,8 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   assert.equal(sends[0].notification.body, 'Breaking news message');
   assert.equal(sends[0].data.deliveryLogId, String(logs[0]._id));
   assert.equal(sends[0].data.type, 'breaking');
+  assert.equal(sends[0].data.title, '🔴 Breaking News');
+  assert.equal(sends[0].data.body, 'Breaking news message');
   assert.equal(sends[0].data.url, 'https://www.newspulse.co.in/');
   assert.equal(sends[0].webpush.fcmOptions.link, 'https://www.newspulse.co.in/');
   assert.equal(sends[0].webpush.headers.TTL, '120');
@@ -1194,11 +1196,13 @@ test('POST /api/admin/push/article sends article push and diagnostics show last 
   assert.equal(sends.length, 1);
   assert.equal(sends[0].data.deliveryLogId, String(logs[0]._id));
   assert.equal(sends[0].data.type, 'article');
+  assert.equal(sends[0].data.title, 'Article title');
+  assert.equal(sends[0].data.body, 'Article summary');
   assert.equal(sends[0].data.url, 'https://www.newspulse.co.in/news/article-slug');
   assert.equal(sends[0].data.articleId, 'article-1');
   assert.equal(sends[0].data.articleSlug, 'article-slug');
   assert.equal(sends[0].data.category, 'national');
-  assert.equal(sends[0].webpush.headers.TTL, '900');
+  assert.equal(sends[0].webpush.headers.TTL, '1800');
   assert.equal(sends[0].webpush.headers.Urgency, 'normal');
   assert.equal(logs.length, 1);
   assert.equal(logs[0].type, 'article');

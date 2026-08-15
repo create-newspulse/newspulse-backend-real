@@ -7,12 +7,12 @@ const {
 } = require('../lib/firebaseAdmin');
 
 const NEWS_PULSE_HOSTS = new Set(['newspulse.co.in', 'www.newspulse.co.in']);
-const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1']);
 const NOTIFICATION_TYPES = new Set(['test', 'breaking_news', 'top_story', 'article', 'category']);
 const WEBPUSH_URGENCIES = new Set(['very-low', 'low', 'normal', 'high']);
 const DEFAULT_WEBPUSH_TTL_SECONDS = Object.freeze({
   breaking_news: 120,
-  article: 120,
+  breaking: 120,
+  article: 1800,
 });
 const DEFAULT_WEBPUSH_URGENCY = Object.freeze({
   breaking_news: 'high',
@@ -30,11 +30,6 @@ function maskRegistrationId(value) {
   return `${raw.slice(0, 6)}...${raw.slice(-6)}`;
 }
 
-function isLocalLike() {
-  const env = String(process.env.NODE_ENV || 'development').toLowerCase();
-  return env !== 'production' && !process.env.RENDER && !process.env.RENDER_SERVICE_ID;
-}
-
 function getFrontendBaseUrl() {
   const raw = trim(
     process.env.PUBLIC_FRONTEND_URL
@@ -50,11 +45,9 @@ function getFrontendBaseUrl() {
 function isApprovedPushUrl(url) {
   try {
     const parsed = new URL(String(url || ''));
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+    if (parsed.protocol !== 'https:') return false;
     const host = parsed.hostname.toLowerCase();
-    if (NEWS_PULSE_HOSTS.has(host)) return parsed.protocol === 'https:';
-    if (isLocalLike() && LOCAL_HOSTS.has(host)) return true;
-    return false;
+    return NEWS_PULSE_HOSTS.has(host);
   } catch (_) {
     return false;
   }
@@ -126,6 +119,8 @@ function buildMessagePayload(registration, message) {
   const data = {
     notificationType: type,
     type: trim(message.type || type).slice(0, 40) || type,
+    title,
+    body,
     url,
   };
   const deliveryLogId = trim(message.deliveryLogId);
@@ -272,7 +267,7 @@ async function sendTestPushNotification(input = {}) {
   return sendPushToRegistration(registration, {
     title: input.title || 'News Pulse',
     body: input.body || 'Firebase push notifications are working.',
-    url: input.url || (isLocalLike() ? 'http://localhost:3000' : getFrontendBaseUrl()),
+    url: input.url || getFrontendBaseUrl(),
     notificationType: 'test',
   });
 }
