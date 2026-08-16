@@ -1046,6 +1046,14 @@ test('public caller cannot access Founder-only push test route', async () => {
   assert.equal(response.status, 401);
 });
 
+test('public caller cannot access Founder-only push cleanup preview route', async () => {
+  const response = await request(app)
+    .get('/api/admin/push/registrations/cleanup-preview');
+
+  assert.equal(response.status, 401);
+  assertNoPushSecrets(response.body);
+});
+
 test('admin role cannot access Founder-only push test route', async () => {
   const response = await request(app)
     .post('/api/admin/push/test')
@@ -1053,6 +1061,15 @@ test('admin role cannot access Founder-only push test route', async () => {
     .send({ title: 'News Pulse' });
 
   assert.equal(response.status, 403);
+});
+
+test('admin role cannot access Founder-only push cleanup preview route', async () => {
+  const response = await request(app)
+    .get('/api/admin/push/registrations/cleanup-preview')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken('admin@newspulse.ai')}`);
+
+  assert.equal(response.status, 403);
+  assertNoPushSecrets(response.body);
 });
 
 test('Founder can invoke one-device push test route without leaking registration ID', async () => {
@@ -1070,6 +1087,41 @@ test('Founder can invoke one-device push test route without leaking registration
   assert.equal(response.status, 200);
   assert.equal(response.body.sent, true);
   assert.equal(JSON.stringify(response.body).includes(token), false);
+});
+
+test('Founder can preview push registration cleanup as dry-run without deleting or leaking identifiers', async () => {
+  const token = 'fcm-token-cleanup-preview:defghijklmnopqrstuvwxyz0123456789';
+  const fid = 'firebase-installation-cleanup-preview';
+  const { docs } = installInMemoryRegistrationStore();
+  let deleteManyCalls = 0;
+
+  await request(app).post('/api/public/push/register').send({ token });
+  await request(app).post('/api/public/push/register').send({ registrationId: fid, registrationType: 'fid' });
+  const fidRecord = Array.from(docs.values()).find((item) => item.registrationId === fid);
+  fidRecord.updatedAt = '2026-07-01T00:00:00.000Z';
+  PushRegistration.deleteMany = async () => {
+    deleteManyCalls += 1;
+    throw new Error('cleanup preview must not delete');
+  };
+
+  const response = await request(app)
+    .get('/api/admin/push/registrations/cleanup-preview')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.ok, true);
+  assert.equal(response.body.success, true);
+  assert.equal(response.body.dryRun, true);
+  assert.equal(response.body.retentionDays, 30);
+  assert.equal(typeof response.body.cutoff, 'string');
+  assert.equal(response.body.eligibleCount, 1);
+  assert.equal(response.body.deletedCount, 0);
+  assert.equal(response.body.message, 'Old non-deliverable push records were found. Real cleanup should be run only after Founder verification.');
+  assert.equal(deleteManyCalls, 0);
+  assert.equal(docs.size, 2);
+  assertNoPushSecrets(response.body, [token, fid]);
+  assert.equal(JSON.stringify(response.body).includes('registrationId'), false);
+  assert.equal(JSON.stringify(response.body).includes('firebaseInstallationId'), false);
 });
 
 test('POST /api/admin/push/test-latest sends to one latest enabled device only', async () => {

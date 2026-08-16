@@ -5,6 +5,7 @@ const {
   getPushFirebaseStatus,
   getPushDiagnostics,
   getPushHistory,
+  getPushRegistrationCleanupPreview,
   sendTestPush,
   sendLatestTestPush,
   sendBreakingPush,
@@ -16,6 +17,7 @@ const router = express.Router();
 router.get('/status', requireFounderAuth, getPushFirebaseStatus);
 router.get('/diagnostics', requireFounderOrAdmin, getPushDiagnostics);
 router.get('/history', requireFounderOrAdmin, getPushHistory);
+router.get('/registrations/cleanup-preview', requireFounderAuth, getPushRegistrationCleanupPreview);
 router.post('/test', requireFounderAuth, sendTestPush);
 router.post('/test-latest', requireFounderOrAdmin, sendLatestTestPush);
 router.post('/breaking', requireFounderOrAdmin, sendBreakingPush);

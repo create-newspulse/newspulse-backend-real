@@ -2,6 +2,7 @@ const PushRegistration = require('../models/PushRegistration');
 const PushDeliveryLog = require('../models/PushDeliveryLog');
 const { getFirebaseAdminStatus } = require('../lib/firebaseAdmin');
 const pushMessagingService = require('../services/pushMessagingService');
+const { cleanupNonDeliverablePushRegistrations } = require('../services/pushRegistrationCleanup');
 const mongoose = require('mongoose');
 
 const PREFERENCE_KEYS = PushRegistration.PREFERENCE_KEYS;
@@ -1331,6 +1332,27 @@ async function getPushHistory(req, res) {
   }
 }
 
+async function getPushRegistrationCleanupPreview(_req, res) {
+  try {
+    if (!ensureStorageAvailable(res)) return undefined;
+    const result = await cleanupNonDeliverablePushRegistrations({ dryRun: true });
+    const eligibleCount = safeCountValue(result.eligibleCount);
+    return ok(res, {
+      dryRun: true,
+      retentionDays: result.retentionDays,
+      cutoff: toIsoString(result.cutoff),
+      eligibleCount,
+      deletedCount: 0,
+      message: eligibleCount > 0
+        ? 'Old non-deliverable push records were found. Real cleanup should be run only after Founder verification.'
+        : 'Safe dry-run completed. No records were deleted.',
+    });
+  } catch (error) {
+    logPushControllerError('registration-cleanup-preview', error);
+    return fail(res, 500, 'PUSH_CLEANUP_PREVIEW_FAILED', 'Unable to preview push registration cleanup');
+  }
+}
+
 async function sendTestPush(req, res) {
   try {
     if (!ensureStorageAvailable(res)) return undefined;
@@ -1497,6 +1519,7 @@ module.exports = {
   getPushFirebaseStatus,
   getPushDiagnostics,
   getPushHistory,
+  getPushRegistrationCleanupPreview,
   sendTestPush,
   sendLatestTestPush,
   sendBreakingPush,
