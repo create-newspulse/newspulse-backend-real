@@ -9,6 +9,7 @@ const PushRegistration = require('../models/PushRegistration');
 const PushDeliveryLog = require('../models/PushDeliveryLog');
 const firebaseAdmin = require('../lib/firebaseAdmin');
 const pushMessagingService = require('../services/pushMessagingService');
+const pushRegistrationController = require('../controllers/pushRegistrationController');
 const app = require('../server');
 
 const MODEL_METHODS = ['findOneAndUpdate', 'deleteOne', 'findOne', 'find', 'updateOne', 'countDocuments'];
@@ -35,6 +36,7 @@ function restoreStubs() {
     PushDeliveryLog[name] = fn;
   }
   pushMessagingService.sendTestPushNotification = originalSendTestPushNotification;
+  if (typeof pushRegistrationController.__resetPushAntiSpamForTests === 'function') pushRegistrationController.__resetPushAntiSpamForTests();
   console.warn = originalConsoleWarn;
   restoreEnv();
   firebaseAdmin.resetFirebaseAdminForTests();
@@ -272,9 +274,13 @@ function makeDeliveryLog(index, overrides = {}) {
     successCount: 1,
     failureCount: 0,
     browserReceivedCount: 0,
+    notificationShownCount: 0,
     clickedCount: 0,
+    displayFailedCount: 0,
     firstReceivedAt: null,
     lastReceivedAt: null,
+    firstShownAt: null,
+    lastShownAt: null,
     firstClickedAt: null,
     lastClickedAt: null,
     sentAt: new Date(Date.UTC(2026, 7, 13, index, 0, 0)).toISOString(),
@@ -282,9 +288,11 @@ function makeDeliveryLog(index, overrides = {}) {
     fcmAcceptedAt: null,
     fcmLatencyMs: null,
     firstBrowserReceivedLatencyMs: null,
+    firstNotificationShownLatencyMs: null,
     firstClickLatencyMs: null,
     lastFailureCode: null,
     lastFailureMessage: null,
+    lastDisplayFailureReason: null,
     ...overrides,
   };
 }
@@ -392,11 +400,17 @@ test('PushDeliveryLog schema stores safe delivery timing fields only', () => {
   assert.ok(PushDeliveryLog.schema.path('fcmAcceptedAt'));
   assert.ok(PushDeliveryLog.schema.path('firstReceivedAt'));
   assert.ok(PushDeliveryLog.schema.path('lastReceivedAt'));
+  assert.ok(PushDeliveryLog.schema.path('notificationShownCount'));
+  assert.ok(PushDeliveryLog.schema.path('displayFailedCount'));
+  assert.ok(PushDeliveryLog.schema.path('firstShownAt'));
+  assert.ok(PushDeliveryLog.schema.path('lastShownAt'));
   assert.ok(PushDeliveryLog.schema.path('firstClickedAt'));
   assert.ok(PushDeliveryLog.schema.path('lastClickedAt'));
   assert.ok(PushDeliveryLog.schema.path('fcmLatencyMs'));
   assert.ok(PushDeliveryLog.schema.path('firstBrowserReceivedLatencyMs'));
+  assert.ok(PushDeliveryLog.schema.path('firstNotificationShownLatencyMs'));
   assert.ok(PushDeliveryLog.schema.path('firstClickLatencyMs'));
+  assert.ok(PushDeliveryLog.schema.path('lastDisplayFailureReason'));
   assert.equal(PushDeliveryLog.schema.path('registrationId'), undefined);
   assert.equal(PushDeliveryLog.schema.path('registrationToken'), undefined);
   assert.equal(PushDeliveryLog.schema.path('fcmToken'), undefined);
@@ -1147,6 +1161,19 @@ test('POST /api/admin/push/breaking does not target disabled devices and creates
   assert.equal(sends[0].notification.title, '🔴 Breaking News');
   assert.equal(sends[0].notification.body, 'Breaking news message');
   assert.equal(sends[0].data.deliveryLogId, String(logs[0]._id));
+  assert.deepEqual({
+    deliveryLogId: sends[0].data.deliveryLogId,
+    type: sends[0].data.type,
+    title: sends[0].data.title,
+    body: sends[0].data.body,
+    url: sends[0].data.url,
+  }, {
+    deliveryLogId: String(logs[0]._id),
+    type: 'breaking',
+    title: '🔴 Breaking News',
+    body: 'Breaking news message',
+    url: 'https://www.newspulse.co.in/',
+  });
   assert.equal(sends[0].data.type, 'breaking');
   assert.equal(sends[0].data.title, '🔴 Breaking News');
   assert.equal(sends[0].data.body, 'Breaking news message');
@@ -1223,6 +1250,82 @@ test('POST /api/admin/push/breaking records no recipients when no breakingNews r
   assertNoPushSecrets(logs, [preferenceOffToken, fid, process.env.FIREBASE_PRIVATE_KEY]);
 });
 
+test('POST /api/admin/push/breaking blocks duplicate breaking text within cooldown', async () => {
+  const token = 'fcm-token-breaking-duplicate:defghijklmnopqrstuvwxyz0123456789';
+  installInMemoryRegistrationStore();
+  const { logs } = installInMemoryDeliveryLogStore();
+  const { sends } = installFirebaseSendStub();
+  const auth = `Bearer ${makeOpaqueAdminToken('breaking-duplicate@newspulse.ai')}`;
+
+  await request(app).post('/api/public/push/register').send({ token });
+
+  const first = await request(app)
+    .post('/api/admin/push/breaking')
+    .set('Authorization', auth)
+    .send({ body: 'Duplicate breaking text', language: 'en', confirmSend: true });
+  const duplicate = await request(app)
+    .post('/api/admin/push/breaking')
+    .set('Authorization', auth)
+    .send({ body: 'Duplicate breaking text', language: 'en', confirmSend: true });
+
+  assert.equal(first.status, 200);
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.body.code, 'DUPLICATE_PUSH_BLOCKED');
+  assert.equal(duplicate.body.message, 'Duplicate push blocked. Please wait before sending again.');
+  assert.equal(sends.length, 1);
+  assert.equal(logs.length, 1);
+  assertNoPushSecrets(duplicate.body, [token]);
+});
+
+test('POST /api/admin/push/breaking allows different breaking text before cooldown', async () => {
+  const token = 'fcm-token-breaking-different:defghijklmnopqrstuvwxyz0123456789';
+  installInMemoryRegistrationStore();
+  const { logs } = installInMemoryDeliveryLogStore();
+  const { sends } = installFirebaseSendStub();
+  const auth = `Bearer ${makeOpaqueAdminToken('breaking-different@newspulse.ai')}`;
+
+  await request(app).post('/api/public/push/register').send({ token });
+
+  const first = await request(app)
+    .post('/api/admin/push/breaking')
+    .set('Authorization', auth)
+    .send({ body: 'Different breaking text A', language: 'en', confirmSend: true });
+  const second = await request(app)
+    .post('/api/admin/push/breaking')
+    .set('Authorization', auth)
+    .send({ body: 'Different breaking text B', language: 'en', confirmSend: true });
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(sends.length, 2);
+  assert.equal(logs.length, 2);
+  assertNoPushSecrets([first.body, second.body], [token]);
+});
+
+test('POST /api/admin/push/breaking rate limits after three sends per admin and IP', async () => {
+  const token = 'fcm-token-breaking-rate:defghijklmnopqrstuvwxyz0123456789';
+  installInMemoryRegistrationStore();
+  const { logs } = installInMemoryDeliveryLogStore();
+  const { sends } = installFirebaseSendStub();
+  const auth = `Bearer ${makeOpaqueAdminToken('breaking-rate@newspulse.ai')}`;
+
+  await request(app).post('/api/public/push/register').send({ token });
+
+  const responses = [];
+  for (let index = 1; index <= 4; index += 1) {
+    responses.push(await request(app)
+      .post('/api/admin/push/breaking')
+      .set('Authorization', auth)
+      .send({ body: `Breaking rate text ${index}`, language: 'en', confirmSend: true }));
+  }
+
+  assert.deepEqual(responses.map((item) => item.status), [200, 200, 200, 429]);
+  assert.equal(responses[3].body.code, 'PUSH_RATE_LIMITED');
+  assert.equal(sends.length, 3);
+  assert.equal(logs.length, 3);
+  assertNoPushSecrets(responses.map((item) => item.body), [token]);
+});
+
 test('POST /api/admin/push/breaking ignores unsafe submitted URL and uses safe root URL', async () => {
   const { sends } = installFirebaseSendStub();
   const { logs } = installInMemoryDeliveryLogStore();
@@ -1289,6 +1392,19 @@ test('POST /api/admin/push/article sends article push and diagnostics show last 
   assert.equal(response.body.deliveryLogCreated, true);
   assert.equal(sends.length, 1);
   assert.equal(sends[0].data.deliveryLogId, String(logs[0]._id));
+  assert.deepEqual({
+    deliveryLogId: sends[0].data.deliveryLogId,
+    type: sends[0].data.type,
+    title: sends[0].data.title,
+    body: sends[0].data.body,
+    url: sends[0].data.url,
+  }, {
+    deliveryLogId: String(logs[0]._id),
+    type: 'article',
+    title: 'Article title',
+    body: 'Article summary',
+    url: 'https://www.newspulse.co.in/news/article-slug',
+  });
   assert.equal(sends[0].data.type, 'article');
   assert.equal(sends[0].data.title, 'Article title');
   assert.equal(sends[0].data.body, 'Article summary');
@@ -1314,6 +1430,95 @@ test('POST /api/admin/push/article sends article push and diagnostics show last 
   assert.equal(typeof diagnostics.body.lastSuccessfulSendAt, 'string');
   assertNoPushSecrets(response.body, [token, process.env.FIREBASE_PRIVATE_KEY]);
   assertNoPushSecrets(diagnostics.body, [token, process.env.FIREBASE_PRIVATE_KEY]);
+});
+
+test('POST /api/admin/push/article blocks duplicate articleId or slug within cooldown', async () => {
+  const token = 'fcm-token-article-duplicate:defghijklmnopqrstuvwxyz0123456789';
+  installInMemoryRegistrationStore();
+  const { logs } = installInMemoryDeliveryLogStore();
+  const { sends } = installFirebaseSendStub();
+  const auth = `Bearer ${makeOpaqueAdminToken('article-duplicate@newspulse.ai')}`;
+
+  await request(app).post('/api/public/push/register').send({ token });
+
+  const payload = {
+    articleId: 'article-duplicate-id',
+    slug: 'article-duplicate-slug',
+    title: 'Duplicate article title',
+    body: 'Duplicate article summary',
+    url: 'https://www.newspulse.co.in/news/article-duplicate-slug',
+    category: 'national',
+    language: 'en',
+    confirmSend: true,
+  };
+  const first = await request(app).post('/api/admin/push/article').set('Authorization', auth).send(payload);
+  const duplicate = await request(app).post('/api/admin/push/article').set('Authorization', auth).send({ ...payload, body: 'Updated summary' });
+
+  assert.equal(first.status, 200);
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.body.code, 'DUPLICATE_PUSH_BLOCKED');
+  assert.equal(duplicate.body.message, 'Duplicate push blocked. Please wait before sending again.');
+  assert.equal(sends.length, 1);
+  assert.equal(logs.length, 1);
+  assertNoPushSecrets(duplicate.body, [token]);
+});
+
+test('POST /api/admin/push/article allows different articles before cooldown', async () => {
+  const token = 'fcm-token-article-different:defghijklmnopqrstuvwxyz0123456789';
+  installInMemoryRegistrationStore();
+  const { logs } = installInMemoryDeliveryLogStore();
+  const { sends } = installFirebaseSendStub();
+  const auth = `Bearer ${makeOpaqueAdminToken('article-different@newspulse.ai')}`;
+
+  await request(app).post('/api/public/push/register').send({ token });
+
+  const first = await request(app)
+    .post('/api/admin/push/article')
+    .set('Authorization', auth)
+    .send({ articleId: 'article-different-1', slug: 'article-different-1', title: 'Article one', body: 'Article one summary', url: 'https://www.newspulse.co.in/news/article-different-1', category: 'national', language: 'en', confirmSend: true });
+  const second = await request(app)
+    .post('/api/admin/push/article')
+    .set('Authorization', auth)
+    .send({ articleId: 'article-different-2', slug: 'article-different-2', title: 'Article two', body: 'Article two summary', url: 'https://www.newspulse.co.in/news/article-different-2', category: 'national', language: 'en', confirmSend: true });
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(sends.length, 2);
+  assert.equal(logs.length, 2);
+  assertNoPushSecrets([first.body, second.body], [token]);
+});
+
+test('POST /api/admin/push/article rate limits after ten sends per admin and IP', async () => {
+  const token = 'fcm-token-article-rate:defghijklmnopqrstuvwxyz0123456789';
+  installInMemoryRegistrationStore();
+  const { logs } = installInMemoryDeliveryLogStore();
+  const { sends } = installFirebaseSendStub();
+  const auth = `Bearer ${makeOpaqueAdminToken('article-rate@newspulse.ai')}`;
+
+  await request(app).post('/api/public/push/register').send({ token });
+
+  const responses = [];
+  for (let index = 1; index <= 11; index += 1) {
+    responses.push(await request(app)
+      .post('/api/admin/push/article')
+      .set('Authorization', auth)
+      .send({
+        articleId: `article-rate-${index}`,
+        slug: `article-rate-${index}`,
+        title: `Article rate ${index}`,
+        body: `Article rate summary ${index}`,
+        url: `https://www.newspulse.co.in/news/article-rate-${index}`,
+        category: 'national',
+        language: 'en',
+        confirmSend: true,
+      }));
+  }
+
+  assert.deepEqual(responses.map((item) => item.status), [200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 429]);
+  assert.equal(responses[10].body.code, 'PUSH_RATE_LIMITED');
+  assert.equal(sends.length, 10);
+  assert.equal(logs.length, 10);
+  assertNoPushSecrets(responses.map((item) => item.body), [token]);
 });
 
 test('POST /api/admin/push/article targets token registrations with newArticleAlerts only', async () => {
@@ -1519,13 +1724,18 @@ test('GET /api/admin/push/history returns empty items when no delivery logs exis
   assert.deepEqual(response.body.items, []);
 });
 
-test('POST /api/public/push/receipt records received and clicked events safely', async () => {
+test('POST /api/public/push/receipt records received, shown, clicked, and display_failed events safely', async () => {
+  const token = 'fcm-token-receipt-secret:defghijklmnopqrstuvwxyz0123456789';
   const { logs } = installInMemoryDeliveryLogStore();
   const log = await PushDeliveryLog.create(makeDeliveryLog(42, {
     browserReceivedCount: 0,
+    notificationShownCount: 0,
     clickedCount: 0,
+    displayFailedCount: 0,
     firstReceivedAt: null,
     lastReceivedAt: null,
+    firstShownAt: null,
+    lastShownAt: null,
     firstClickedAt: null,
     lastClickedAt: null,
     sentAt: new Date(Date.now() - 10_000).toISOString(),
@@ -1553,6 +1763,24 @@ test('POST /api/public/push/receipt records received and clicked events safely',
   assert.equal(logs[0].firstReceivedAt, initialFirstReceivedAt);
   assert.notEqual(logs[0].lastReceivedAt, null);
 
+  const firstShown = await request(app)
+    .post('/api/public/push/receipt')
+    .send({ deliveryLogId: String(log._id), event: 'shown' });
+  assert.equal(firstShown.status, 200);
+  const initialFirstShownAt = logs[0].firstShownAt;
+  assert.equal(logs[0].notificationShownCount, 1);
+  assert.equal(Boolean(initialFirstShownAt), true);
+  assert.equal(Boolean(logs[0].lastShownAt), true);
+  assert.equal(typeof logs[0].firstNotificationShownLatencyMs, 'number');
+  assert.ok(logs[0].firstNotificationShownLatencyMs >= 0);
+
+  const secondShown = await request(app)
+    .post('/api/public/push/receipt')
+    .send({ deliveryLogId: String(log._id), event: 'shown' });
+  assert.equal(secondShown.status, 200);
+  assert.equal(logs[0].notificationShownCount, 2);
+  assert.equal(logs[0].firstShownAt, initialFirstShownAt);
+
   const firstClicked = await request(app)
     .post('/api/public/push/receipt')
     .send({ deliveryLogId: String(log._id), event: 'clicked' });
@@ -1570,21 +1798,36 @@ test('POST /api/public/push/receipt records received and clicked events safely',
   assert.equal(secondClicked.status, 200);
   assert.equal(logs[0].clickedCount, 2);
   assert.equal(logs[0].firstClickedAt, initialFirstClickedAt);
-  assertNoPushSecrets(firstReceived.body);
-  assertNoPushSecrets(secondClicked.body);
+
+  const displayFailed = await request(app)
+    .post('/api/public/push/receipt')
+    .send({ deliveryLogId: String(log._id), event: 'display_failed', reason: `Permission denied for token=${token}` });
+  assert.equal(displayFailed.status, 200);
+  assert.equal(logs[0].displayFailedCount, 1);
+  assert.equal(logs[0].lastDisplayFailureReason, 'Permission denied for token=[redacted]');
+  assertNoPushSecrets(firstReceived.body, [token]);
+  assertNoPushSecrets(secondShown.body, [token]);
+  assertNoPushSecrets(secondClicked.body, [token]);
+  assertNoPushSecrets(displayFailed.body, [token]);
+  assertNoPushSecrets(logs, [token]);
 });
 
 test('POST /api/public/push/receipt preserves first timestamps and advances last timestamps', async () => {
   const { logs } = installInMemoryDeliveryLogStore();
   const firstReceivedAt = '2026-08-13T09:00:00.000Z';
   const lastReceivedAt = '2026-08-13T09:01:00.000Z';
+  const firstShownAt = '2026-08-13T09:01:30.000Z';
+  const lastShownAt = '2026-08-13T09:01:45.000Z';
   const firstClickedAt = '2026-08-13T09:02:00.000Z';
   const lastClickedAt = '2026-08-13T09:03:00.000Z';
   const log = await PushDeliveryLog.create(makeDeliveryLog(43, {
     browserReceivedCount: 3,
+    notificationShownCount: 2,
     clickedCount: 2,
     firstReceivedAt,
     lastReceivedAt,
+    firstShownAt,
+    lastShownAt,
     firstClickedAt,
     lastClickedAt,
   }));
@@ -1597,6 +1840,14 @@ test('POST /api/public/push/receipt preserves first timestamps and advances last
   assert.equal(logs[0].firstReceivedAt, firstReceivedAt);
   assert.notEqual(logs[0].lastReceivedAt, lastReceivedAt);
 
+  const shown = await request(app)
+    .post('/api/public/push/receipt')
+    .send({ deliveryLogId: String(log._id), event: 'shown' });
+  assert.equal(shown.status, 200);
+  assert.equal(logs[0].notificationShownCount, 3);
+  assert.equal(logs[0].firstShownAt, firstShownAt);
+  assert.notEqual(logs[0].lastShownAt, lastShownAt);
+
   const clicked = await request(app)
     .post('/api/public/push/receipt')
     .send({ deliveryLogId: String(log._id), event: 'clicked' });
@@ -1605,6 +1856,7 @@ test('POST /api/public/push/receipt preserves first timestamps and advances last
   assert.equal(logs[0].firstClickedAt, firstClickedAt);
   assert.notEqual(logs[0].lastClickedAt, lastClickedAt);
   assertNoPushSecrets(received.body);
+  assertNoPushSecrets(shown.body);
   assertNoPushSecrets(clicked.body);
 });
 
@@ -1673,11 +1925,17 @@ test('GET /api/admin/push/history returns breaking/article logs newest first wit
   assert.equal(response.body.items[1].ttlSeconds, 120);
   assert.equal(response.body.items[1].browserReceivedCount, 0);
   logs[1].browserReceivedCount = 2;
+  logs[1].notificationShownCount = 1;
   logs[1].clickedCount = 1;
+  logs[1].displayFailedCount = 1;
   logs[1].firstReceivedAt = '2026-08-13T11:01:00.000Z';
   logs[1].lastReceivedAt = '2026-08-13T11:02:00.000Z';
+  logs[1].firstShownAt = '2026-08-13T11:02:30.000Z';
+  logs[1].lastShownAt = '2026-08-13T11:02:45.000Z';
   logs[1].firstClickedAt = '2026-08-13T11:03:00.000Z';
   logs[1].lastClickedAt = '2026-08-13T11:04:00.000Z';
+  logs[1].firstNotificationShownLatencyMs = 150000;
+  logs[1].lastDisplayFailureReason = 'permission denied';
 
   const proofResponse = await request(app)
     .get('/api/admin/push/history?limit=10')
@@ -1685,19 +1943,53 @@ test('GET /api/admin/push/history returns breaking/article logs newest first wit
 
   assert.equal(proofResponse.status, 200);
   assert.equal(proofResponse.body.items[0].browserReceivedCount, 2);
+  assert.equal(proofResponse.body.items[0].notificationShownCount, 1);
   assert.equal(proofResponse.body.items[0].clickedCount, 1);
+  assert.equal(proofResponse.body.items[0].displayFailedCount, 1);
   assert.equal(proofResponse.body.items[0].deliveryProofStatus, 'clicked');
   assert.equal(proofResponse.body.items[0].firstReceivedAt, '2026-08-13T11:01:00.000Z');
   assert.equal(proofResponse.body.items[0].lastReceivedAt, '2026-08-13T11:02:00.000Z');
+  assert.equal(proofResponse.body.items[0].firstShownAt, '2026-08-13T11:02:30.000Z');
+  assert.equal(proofResponse.body.items[0].lastShownAt, '2026-08-13T11:02:45.000Z');
   assert.equal(proofResponse.body.items[0].firstClickedAt, '2026-08-13T11:03:00.000Z');
   assert.equal(proofResponse.body.items[0].lastClickedAt, '2026-08-13T11:04:00.000Z');
   assert.equal(typeof proofResponse.body.items[0].fcmLatencyMs, 'number');
   assert.equal(proofResponse.body.items[0].firstBrowserReceivedLatencyMs, null);
+  assert.equal(proofResponse.body.items[0].firstNotificationShownLatencyMs, 150000);
   assert.equal(proofResponse.body.items[0].firstClickLatencyMs, null);
+  assert.equal(proofResponse.body.items[0].lastDisplayFailureReason, 'permission denied');
   assert.equal(response.body.items[0].deliveryProofStatus, 'fcm_accepted');
   assert.equal(response.body.items[0].lastFailureCode, null);
   assert.equal(response.body.items[0].lastFailureMessage, null);
+  assert.equal(JSON.stringify(proofResponse.body).includes('registrationId'), false);
+  assert.equal(JSON.stringify(proofResponse.body).includes('firebaseInstallationId'), false);
   assertNoPushSecrets(response.body, [breakingToken, articleToken, process.env.FIREBASE_PRIVATE_KEY, process.env.FIREBASE_CLIENT_EMAIL]);
+  assertNoPushSecrets(proofResponse.body, [breakingToken, articleToken, process.env.FIREBASE_PRIVATE_KEY, process.env.FIREBASE_CLIENT_EMAIL]);
+});
+
+test('GET /api/admin/push/history reports shown proof status before clicks', async () => {
+  installInMemoryRegistrationStore();
+  const { logs } = installInMemoryDeliveryLogStore();
+  logs.push(makeDeliveryLog(44, {
+    browserReceivedCount: 1,
+    notificationShownCount: 1,
+    clickedCount: 0,
+    firstShownAt: '2026-08-13T12:01:00.000Z',
+    lastShownAt: '2026-08-13T12:01:30.000Z',
+    firstNotificationShownLatencyMs: 60000,
+  }));
+
+  const response = await request(app)
+    .get('/api/admin/push/history')
+    .set('Authorization', `Bearer ${makeOpaqueAdminToken('admin@newspulse.ai')}`);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.items[0].deliveryProofStatus, 'shown');
+  assert.equal(response.body.items[0].notificationShownCount, 1);
+  assert.equal(response.body.items[0].firstShownAt, '2026-08-13T12:01:00.000Z');
+  assert.equal(response.body.items[0].lastShownAt, '2026-08-13T12:01:30.000Z');
+  assert.equal(response.body.items[0].firstNotificationShownLatencyMs, 60000);
+  assertNoPushSecrets(response.body);
 });
 
 test('GET /api/admin/push/history returns safe failure code/message without identifiers', async () => {

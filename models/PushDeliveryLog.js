@@ -23,9 +23,13 @@ const pushDeliveryLogSchema = new mongoose.Schema({
   successCount: { type: Number, default: 0, min: 0 },
   failureCount: { type: Number, default: 0, min: 0 },
   browserReceivedCount: { type: Number, default: 0, min: 0 },
+  notificationShownCount: { type: Number, default: 0, min: 0 },
   clickedCount: { type: Number, default: 0, min: 0 },
+  displayFailedCount: { type: Number, default: 0, min: 0 },
   firstReceivedAt: { type: Date, default: null, index: true },
   lastReceivedAt: { type: Date, default: null, index: true },
+  firstShownAt: { type: Date, default: null, index: true },
+  lastShownAt: { type: Date, default: null, index: true },
   firstClickedAt: { type: Date, default: null, index: true },
   lastClickedAt: { type: Date, default: null, index: true },
   sentAt: { type: Date, default: Date.now, index: true },
@@ -33,6 +37,7 @@ const pushDeliveryLogSchema = new mongoose.Schema({
   fcmAcceptedAt: { type: Date, default: null, index: true },
   fcmLatencyMs: { type: Number, default: null, min: 0 },
   firstBrowserReceivedLatencyMs: { type: Number, default: null, min: 0 },
+  firstNotificationShownLatencyMs: { type: Number, default: null, min: 0 },
   firstClickLatencyMs: { type: Number, default: null, min: 0 },
   hasDeliveryLogId: { type: Boolean, default: false },
   payloadType: { type: String, enum: ['breaking', 'article'], default: null, index: true },
@@ -62,6 +67,7 @@ const pushDeliveryLogSchema = new mongoose.Schema({
   },
   lastFailureCode: { type: String, default: null, trim: true, maxlength: 120 },
   lastFailureMessage: { type: String, default: null, trim: true, maxlength: 240 },
+  lastDisplayFailureReason: { type: String, default: null, trim: true, maxlength: 120 },
 }, { timestamps: true });
 
 pushDeliveryLogSchema.index({ type: 1, sentAt: -1 });

@@ -10,10 +10,16 @@ const LANGUAGES = new Set(['en', 'hi', 'gu']);
 const PLATFORMS = new Set(['web', 'android', 'ios']);
 const PUSH_HISTORY_TYPES = new Set(['all', 'breaking', 'article']);
 const PUSH_HISTORY_STATUSES = new Set(['all', 'sent', 'failed', 'no_recipients']);
-const PUSH_RECEIPT_EVENTS = new Set(['received', 'clicked']);
+const PUSH_RECEIPT_EVENTS = new Set(['received', 'shown', 'clicked', 'display_failed']);
 const NO_RECIPIENT_REASONS = new Set(['no_breaking_news_subscribers', 'no_article_alert_subscribers', 'registration_not_found', 'no_recipients']);
 const BREAKING_PUSH_TTL_SECONDS = 120;
 const ARTICLE_PUSH_TTL_SECONDS = 1800;
+const DUPLICATE_PUSH_BLOCK_MESSAGE = 'Duplicate push blocked. Please wait before sending again.';
+const BREAKING_PUSH_RATE_LIMIT = Object.freeze({ max: 3, windowMs: 5 * 60 * 1000 });
+const ARTICLE_PUSH_RATE_LIMIT = Object.freeze({ max: 10, windowMs: 15 * 60 * 1000 });
+const BREAKING_DUPLICATE_WINDOW_MS = 5 * 60 * 1000;
+const ARTICLE_DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
+const adminPushRateBuckets = new Map();
 const REGISTRATION_BODY_KEYS = new Set([
   'registrationId',
   'registrationType',
@@ -74,6 +80,35 @@ function ok(res, body = {}) {
 
 function trim(value) {
   return String(value || '').trim();
+}
+
+function getClientKey(req = {}) {
+  const forwarded = String(req.headers?.['x-forwarded-for'] || '').split(',')[0].trim();
+  return forwarded || req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
+function getAdminRateIdentity(req = {}) {
+  const admin = req.admin && typeof req.admin === 'object' ? req.admin : {};
+  return trim(admin.id) || trim(admin.email).toLowerCase() || trim(admin.role) || 'unknown-admin';
+}
+
+function checkAdminPushRateLimit(req, type, options) {
+  const now = Date.now();
+  const key = `${type}:${getAdminRateIdentity(req)}:${getClientKey(req)}`;
+  const bucket = adminPushRateBuckets.get(key);
+  if (!bucket || now - bucket.windowStart > options.windowMs) {
+    adminPushRateBuckets.set(key, { windowStart: now, count: 1 });
+    return { ok: true };
+  }
+  bucket.count += 1;
+  if (bucket.count > options.max) {
+    return { ok: false, retryAfterMs: Math.max(0, options.windowMs - (now - bucket.windowStart)) };
+  }
+  return { ok: true };
+}
+
+function resetPushAntiSpamForTests() {
+  adminPushRateBuckets.clear();
 }
 
 function maskRegistrationId(value) {
@@ -370,6 +405,7 @@ function resolveDeliveryProofStatus(value = {}) {
   if (safeCountValue(value.targetedCount) === 0) return 'no_recipients';
   if (safeCountValue(value.failureCount) > 0 && safeCountValue(value.successCount) === 0) return 'failed';
   if (safeCountValue(value.clickedCount) > 0) return 'clicked';
+  if (safeCountValue(value.notificationShownCount) > 0) return 'shown';
   if (safeCountValue(value.browserReceivedCount) > 0) return 'received';
   if (safeCountValue(value.successCount) > 0) return 'fcm_accepted';
   return 'pending';
@@ -396,8 +432,18 @@ function validateReceiptBody(body = {}) {
   const deliveryLogId = trim(body.deliveryLogId);
   if (!/^[a-f0-9]{24}$/i.test(deliveryLogId)) return { ok: false, error: 'deliveryLogId is invalid' };
   const event = trim(body.event).toLowerCase();
-  if (!PUSH_RECEIPT_EVENTS.has(event)) return { ok: false, error: 'event must be received or clicked' };
-  return { ok: true, value: { deliveryLogId, event } };
+  if (!PUSH_RECEIPT_EVENTS.has(event)) return { ok: false, error: 'event must be received, shown, clicked, or display_failed' };
+  return { ok: true, value: { deliveryLogId, event, reason: safeDisplayFailureReason(body.reason) } };
+}
+
+function safeDisplayFailureReason(value) {
+  const raw = trim(value).replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ');
+  if (!raw) return null;
+  return raw
+    .replace(/[A-Za-z0-9_-]{8,}:[A-Za-z0-9._:-]{20,}/g, '[redacted-registration-id]')
+    .replace(/\b(fid|fcm|token|registrationId|registration_id)\b\s*[:=]\s*\S+/gi, '$1=[redacted]')
+    .replace(/\b[A-Za-z0-9_-]{16,}\b/g, '[redacted-id]')
+    .slice(0, 120);
 }
 
 function normalizeSendText(value, fallback, maxLength) {
@@ -417,6 +463,36 @@ function canonicalBreakingPushUrl() {
   return normalizeSendUrl('https://www.newspulse.co.in/');
 }
 
+async function findRecentDeliveryLog(filter) {
+  if (!PushDeliveryLog || typeof PushDeliveryLog.findOne !== 'function') return null;
+  let query = PushDeliveryLog.findOne(filter);
+  if (query && typeof query.sort === 'function') query = query.sort({ sentAt: -1, createdAt: -1 });
+  if (query && typeof query.select === 'function') query = query.select('_id type sentAt');
+  if (query && typeof query.lean === 'function') return query.lean();
+  return query;
+}
+
+async function hasRecentDuplicateBreakingPush(body) {
+  const safeBody = trim(body).slice(0, 240);
+  if (!safeBody) return false;
+  const since = new Date(Date.now() - BREAKING_DUPLICATE_WINDOW_MS);
+  const recent = await findRecentDeliveryLog({ type: 'breaking', body: safeBody, sentAt: { $gte: since } });
+  return !!recent;
+}
+
+async function hasRecentDuplicateArticlePush({ articleId, articleSlug, url }) {
+  const since = new Date(Date.now() - ARTICLE_DUPLICATE_WINDOW_MS);
+  const clauses = [];
+  const safeArticleId = trim(articleId).slice(0, 200);
+  const safeArticleSlug = trim(articleSlug).slice(0, 200);
+  if (safeArticleId) clauses.push({ articleId: safeArticleId });
+  if (safeArticleSlug) clauses.push({ articleSlug: safeArticleSlug });
+  if (clauses.length === 0) clauses.push({ url });
+  const filter = { type: 'article', sentAt: { $gte: since }, ...(clauses.length === 1 ? clauses[0] : { $or: clauses }) };
+  const recent = await findRecentDeliveryLog(filter);
+  return !!recent;
+}
+
 function buildDeliveryResponse(summary, extra = {}) {
   return {
     sent: summary.successCount > 0,
@@ -428,18 +504,22 @@ function buildDeliveryResponse(summary, extra = {}) {
     successCount: summary.successCount,
     failureCount: summary.failureCount,
     browserReceivedCount: safeCountValue(summary.browserReceivedCount),
+    notificationShownCount: safeCountValue(summary.notificationShownCount),
     clickedCount: safeCountValue(summary.clickedCount),
+    displayFailedCount: safeCountValue(summary.displayFailedCount),
     sentAt: toIsoString(summary.sentAt),
     completedAt: toIsoString(summary.completedAt),
     fcmAcceptedAt: toIsoString(summary.fcmAcceptedAt),
     fcmLatencyMs: summary.fcmLatencyMs ?? null,
     firstBrowserReceivedLatencyMs: summary.firstBrowserReceivedLatencyMs ?? null,
+    firstNotificationShownLatencyMs: summary.firstNotificationShownLatencyMs ?? null,
     firstClickLatencyMs: summary.firstClickLatencyMs ?? null,
     hasDeliveryLogId: !!summary.hasDeliveryLogId,
     payloadType: summary.payloadType || null,
     ttlSeconds: summary.ttlSeconds ?? null,
     lastFailureCode: summary.lastFailureCode || null,
     lastFailureMessage: summary.lastFailureMessage || null,
+    lastDisplayFailureReason: safeDisplayFailureReason(summary.lastDisplayFailureReason),
     deliveryLogCreated: !!summary.deliveryLogCreated,
     ...extra,
   };
@@ -640,14 +720,18 @@ async function sendToRegistrations({ type, title, body, url, registrations, mess
     successCount: 0,
     failureCount: 0,
     browserReceivedCount: 0,
+    notificationShownCount: 0,
     clickedCount: 0,
+    displayFailedCount: 0,
     lastFailureCode: null,
     lastFailureMessage: null,
+    lastDisplayFailureReason: null,
     sentAt,
     completedAt: null,
     fcmAcceptedAt: null,
     fcmLatencyMs: null,
     firstBrowserReceivedLatencyMs: null,
+    firstNotificationShownLatencyMs: null,
     firstClickLatencyMs: null,
     hasDeliveryLogId: false,
     payloadType: type,
@@ -711,10 +795,14 @@ function serializePushDeliveryLog(log) {
     successCount: Number(log?.successCount || 0),
     failureCount: Number(log?.failureCount || 0),
     browserReceivedCount: Number(log?.browserReceivedCount || 0),
+    notificationShownCount: Number(log?.notificationShownCount || 0),
     clickedCount: Number(log?.clickedCount || 0),
+    displayFailedCount: Number(log?.displayFailedCount || 0),
     deliveryProofStatus: resolveDeliveryProofStatus(log),
     firstReceivedAt: toIsoString(log?.firstReceivedAt),
     lastReceivedAt: toIsoString(log?.lastReceivedAt),
+    firstShownAt: toIsoString(log?.firstShownAt),
+    lastShownAt: toIsoString(log?.lastShownAt),
     firstClickedAt: toIsoString(log?.firstClickedAt),
     lastClickedAt: toIsoString(log?.lastClickedAt),
     sentAt: toIsoString(log?.sentAt),
@@ -722,6 +810,7 @@ function serializePushDeliveryLog(log) {
     fcmAcceptedAt: toIsoString(log?.fcmAcceptedAt),
     fcmLatencyMs: log?.fcmLatencyMs ?? null,
     firstBrowserReceivedLatencyMs: log?.firstBrowserReceivedLatencyMs ?? null,
+    firstNotificationShownLatencyMs: log?.firstNotificationShownLatencyMs ?? null,
     firstClickLatencyMs: log?.firstClickLatencyMs ?? null,
     hasDeliveryLogId: !!(log?.hasDeliveryLogId || log?._id),
     payloadType: log?.payloadType || log?.type || null,
@@ -729,6 +818,7 @@ function serializePushDeliveryLog(log) {
     targetingDebug: log?.metadata?.targeting ? safeTargetingDebug(log.metadata.targeting) : undefined,
     lastFailureCode: safeFailureCode(log?.lastFailureCode),
     lastFailureMessage: safeFailureMessage(log?.lastFailureMessage),
+    lastDisplayFailureReason: safeDisplayFailureReason(log?.lastDisplayFailureReason),
   };
 }
 
@@ -739,22 +829,50 @@ async function recordPushReceipt(req, res) {
     if (!parsed.ok) return fail(res, 400, 'INVALID_PUSH_RECEIPT', parsed.error);
 
     const now = new Date();
-    const incrementField = parsed.value.event === 'received' ? 'browserReceivedCount' : 'clickedCount';
-    const firstAtField = parsed.value.event === 'received' ? 'firstReceivedAt' : 'firstClickedAt';
-    const lastAtField = parsed.value.event === 'received' ? 'lastReceivedAt' : 'lastClickedAt';
+    const eventConfig = {
+      received: {
+        incrementField: 'browserReceivedCount',
+        firstAtField: 'firstReceivedAt',
+        lastAtField: 'lastReceivedAt',
+        latencyField: 'firstBrowserReceivedLatencyMs',
+      },
+      shown: {
+        incrementField: 'notificationShownCount',
+        firstAtField: 'firstShownAt',
+        lastAtField: 'lastShownAt',
+        latencyField: 'firstNotificationShownLatencyMs',
+      },
+      clicked: {
+        incrementField: 'clickedCount',
+        firstAtField: 'firstClickedAt',
+        lastAtField: 'lastClickedAt',
+        latencyField: 'firstClickLatencyMs',
+      },
+    }[parsed.value.event];
 
     const existing = await PushDeliveryLog.findOne({ _id: parsed.value.deliveryLogId });
     if (!existing) return fail(res, 404, 'PUSH_DELIVERY_LOG_NOT_FOUND', 'Delivery log not found');
 
+    if (parsed.value.event === 'display_failed') {
+      const update = {
+        $inc: { displayFailedCount: 1 },
+        $set: {},
+      };
+      if (parsed.value.reason) update.$set.lastDisplayFailureReason = parsed.value.reason;
+      if (Object.keys(update.$set).length === 0) delete update.$set;
+      await PushDeliveryLog.updateOne({ _id: parsed.value.deliveryLogId }, update);
+      return ok(res);
+    }
+
     const update = {
-      $inc: { [incrementField]: 1 },
-      $set: { [lastAtField]: now },
+      $inc: { [eventConfig.incrementField]: 1 },
+      $set: { [eventConfig.lastAtField]: now },
     };
-    if (!existing[firstAtField]) {
-      update.$set[firstAtField] = now;
+    if (!existing[eventConfig.firstAtField]) {
+      update.$set[eventConfig.firstAtField] = now;
       const latency = safeLatencyMs(existing.sentAt, now);
       if (latency !== null) {
-        update.$set[parsed.value.event === 'received' ? 'firstBrowserReceivedLatencyMs' : 'firstClickLatencyMs'] = latency;
+        update.$set[eventConfig.latencyField] = latency;
       }
     }
 
@@ -844,7 +962,7 @@ async function findRecentDeliveryLogs(filter, { skip = 0, limit = 5 } = {}) {
   if (query && typeof query.sort === 'function') query = query.sort({ sentAt: -1, createdAt: -1 });
   if (query && typeof query.skip === 'function') query = query.skip(skip);
   if (query && typeof query.limit === 'function') query = query.limit(limit);
-  if (query && typeof query.select === 'function') query = query.select('type title body url articleId articleSlug category language status reason targetedCount successCount failureCount browserReceivedCount clickedCount firstReceivedAt lastReceivedAt firstClickedAt lastClickedAt sentAt completedAt fcmAcceptedAt fcmLatencyMs firstBrowserReceivedLatencyMs firstClickLatencyMs hasDeliveryLogId payloadType ttlSeconds metadata.targeting lastFailureCode lastFailureMessage');
+  if (query && typeof query.select === 'function') query = query.select('type title body url articleId articleSlug category language status reason targetedCount successCount failureCount browserReceivedCount notificationShownCount clickedCount displayFailedCount firstReceivedAt lastReceivedAt firstShownAt lastShownAt firstClickedAt lastClickedAt sentAt completedAt fcmAcceptedAt fcmLatencyMs firstBrowserReceivedLatencyMs firstNotificationShownLatencyMs firstClickLatencyMs hasDeliveryLogId payloadType ttlSeconds metadata.targeting lastFailureCode lastFailureMessage lastDisplayFailureReason');
   if (query && typeof query.lean === 'function') return query.lean();
   const rows = await query;
   return Array.isArray(rows) ? rows : [];
@@ -1291,6 +1409,12 @@ async function sendBreakingPush(req, res) {
     if (!messageBody) return fail(res, 400, 'INVALID_PUSH_SEND', 'body is required');
     const url = canonicalBreakingPushUrl();
     if (!url) return fail(res, 400, 'INVALID_PUSH_URL', 'Push URL is not allowed');
+    if (await hasRecentDuplicateBreakingPush(messageBody)) {
+      return fail(res, 409, 'DUPLICATE_PUSH_BLOCKED', DUPLICATE_PUSH_BLOCK_MESSAGE);
+    }
+
+    const rateLimit = checkAdminPushRateLimit(req, 'breaking', BREAKING_PUSH_RATE_LIMIT);
+    if (!rateLimit.ok) return fail(res, 429, 'PUSH_RATE_LIMITED', 'Breaking push rate limit exceeded. Please wait before sending again.');
 
     const filter = pushMessagingService.buildEligibilityFilter('breaking_news');
     const registrations = await findTargetRegistrations(filter);
@@ -1334,6 +1458,12 @@ async function sendArticlePush(req, res) {
     const articleId = trim(bodyInput.articleId).slice(0, 200) || undefined;
     const url = normalizeSendUrl(bodyInput.url, { articleSlug });
     if (!url) return fail(res, 400, 'INVALID_PUSH_URL', 'Push URL is not allowed');
+    if (await hasRecentDuplicateArticlePush({ articleId, articleSlug, url })) {
+      return fail(res, 409, 'DUPLICATE_PUSH_BLOCKED', DUPLICATE_PUSH_BLOCK_MESSAGE);
+    }
+
+    const rateLimit = checkAdminPushRateLimit(req, 'article', ARTICLE_PUSH_RATE_LIMIT);
+    if (!rateLimit.ok) return fail(res, 429, 'PUSH_RATE_LIMITED', 'Article push rate limit exceeded. Please wait before sending again.');
 
     const filter = pushMessagingService.buildEligibilityFilter('article');
     const registrations = await findTargetRegistrations(filter);
@@ -1373,4 +1503,5 @@ module.exports = {
   buildRegistrationInput,
   buildPreferenceInput,
   buildPushDiagnostics,
+  __resetPushAntiSpamForTests: resetPushAntiSpamForTests,
 };
