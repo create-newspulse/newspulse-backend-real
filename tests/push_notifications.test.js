@@ -9,10 +9,15 @@ const PushRegistration = require('../models/PushRegistration');
 const PushDeliveryLog = require('../models/PushDeliveryLog');
 const firebaseAdmin = require('../lib/firebaseAdmin');
 const pushMessagingService = require('../services/pushMessagingService');
+const {
+  buildNonDeliverablePushRegistrationCleanupFilter,
+  cleanupNonDeliverablePushRegistrations,
+} = require('../services/pushRegistrationCleanup');
+const { parseCleanupArgs } = require('../scripts/cleanup-non-deliverable-push-registrations');
 const pushRegistrationController = require('../controllers/pushRegistrationController');
 const app = require('../server');
 
-const MODEL_METHODS = ['findOneAndUpdate', 'deleteOne', 'findOne', 'find', 'updateOne', 'countDocuments'];
+const MODEL_METHODS = ['findOneAndUpdate', 'deleteOne', 'deleteMany', 'findOne', 'find', 'updateOne', 'countDocuments'];
 const modelOriginals = Object.fromEntries(MODEL_METHODS.map((name) => [name, PushRegistration[name]]));
 const DELIVERY_LOG_METHODS = ['create', 'find', 'findOne', 'updateOne', 'countDocuments'];
 const deliveryLogOriginals = Object.fromEntries(DELIVERY_LOG_METHODS.map((name) => [name, PushDeliveryLog[name]]));
@@ -69,29 +74,52 @@ function getPath(target, path) {
 
 function matchesCondition(value, condition) {
   if (condition && typeof condition === 'object' && !Array.isArray(condition)) {
+    let matchedOperator = false;
     if (Object.prototype.hasOwnProperty.call(condition, '$ne')) {
-      return condition.$ne === null ? value !== null && value !== undefined : value !== condition.$ne;
+      matchedOperator = true;
+      if (!(condition.$ne === null ? value !== null && value !== undefined : value !== condition.$ne)) return false;
+    }
+    if (Object.prototype.hasOwnProperty.call(condition, '$exists')) {
+      matchedOperator = true;
+      if (Boolean(value !== undefined) !== Boolean(condition.$exists)) return false;
     }
     if (Object.prototype.hasOwnProperty.call(condition, '$gt')) {
-      return Number(value || 0) > Number(condition.$gt || 0);
+      matchedOperator = true;
+      if (!(Number(value || 0) > Number(condition.$gt || 0))) return false;
     }
     if (Object.prototype.hasOwnProperty.call(condition, '$gte')) {
-      return new Date(value || 0).getTime() >= new Date(condition.$gte || 0).getTime();
+      matchedOperator = true;
+      if (!(new Date(value || 0).getTime() >= new Date(condition.$gte || 0).getTime())) return false;
     }
     if (Object.prototype.hasOwnProperty.call(condition, '$lte')) {
-      return new Date(value || 0).getTime() <= new Date(condition.$lte || 0).getTime();
+      matchedOperator = true;
+      if (!(new Date(value || 0).getTime() <= new Date(condition.$lte || 0).getTime())) return false;
     }
     if (Object.prototype.hasOwnProperty.call(condition, '$in')) {
-      return Array.isArray(condition.$in) && condition.$in.includes(value);
+      matchedOperator = true;
+      if (!(Array.isArray(condition.$in) && condition.$in.includes(value))) return false;
     }
+    if (Object.prototype.hasOwnProperty.call(condition, '$nin')) {
+      matchedOperator = true;
+      if (!(Array.isArray(condition.$nin) && !condition.$nin.includes(value))) return false;
+    }
+    if (matchedOperator) return true;
   }
   return value === condition;
 }
 
 function matchesFilter(doc, filter = {}) {
   for (const [key, condition] of Object.entries(filter || {})) {
+    if (key === '$and') {
+      if (!Array.isArray(condition) || !condition.every((item) => matchesFilter(doc, item))) return false;
+      continue;
+    }
     if (key === '$or') {
       if (!Array.isArray(condition) || !condition.some((item) => matchesFilter(doc, item))) return false;
+      continue;
+    }
+    if (key === '$nor') {
+      if (!Array.isArray(condition) || condition.some((item) => matchesFilter(doc, item))) return false;
       continue;
     }
     if (!matchesCondition(getPath(doc, key), condition)) return false;
@@ -160,6 +188,12 @@ function installInMemoryRegistrationStore() {
     const key = keyFor(filter);
     const existed = docs.delete(key);
     return { deletedCount: existed ? 1 : 0 };
+  };
+
+  PushRegistration.deleteMany = async (filter = {}) => {
+    const rows = Array.from(docs.values()).filter((doc) => matchesFilter(doc, filter));
+    for (const doc of rows) docs.delete(keyFor(doc));
+    return { deletedCount: rows.length };
   };
 
   PushRegistration.updateOne = async (filter, update) => {
@@ -1270,8 +1304,8 @@ test('POST /api/admin/push/breaking blocks duplicate breaking text within cooldo
 
   assert.equal(first.status, 200);
   assert.equal(duplicate.status, 409);
-  assert.equal(duplicate.body.code, 'DUPLICATE_PUSH_BLOCKED');
-  assert.equal(duplicate.body.message, 'Duplicate push blocked. Please wait before sending again.');
+  assert.equal(duplicate.body.code, 'duplicate_push_blocked');
+  assert.equal(duplicate.body.message, 'Duplicate push blocked. Please wait before sending this alert again.');
   assert.equal(sends.length, 1);
   assert.equal(logs.length, 1);
   assertNoPushSecrets(duplicate.body, [token]);
@@ -1320,7 +1354,8 @@ test('POST /api/admin/push/breaking rate limits after three sends per admin and 
   }
 
   assert.deepEqual(responses.map((item) => item.status), [200, 200, 200, 429]);
-  assert.equal(responses[3].body.code, 'PUSH_RATE_LIMITED');
+  assert.equal(responses[3].body.code, 'push_rate_limited');
+  assert.equal(responses[3].body.message, 'Push blocked to prevent notification spam. Please wait and try again.');
   assert.equal(sends.length, 3);
   assert.equal(logs.length, 3);
   assertNoPushSecrets(responses.map((item) => item.body), [token]);
@@ -1413,7 +1448,7 @@ test('POST /api/admin/push/article sends article push and diagnostics show last 
   assert.equal(sends[0].data.articleSlug, 'article-slug');
   assert.equal(sends[0].data.category, 'national');
   assert.equal(sends[0].webpush.headers.TTL, '1800');
-  assert.equal(sends[0].webpush.headers.Urgency, 'normal');
+  assert.equal(sends[0].webpush.headers.Urgency, 'high');
   assert.equal(logs.length, 1);
   assert.equal(logs[0].type, 'article');
   assert.equal(logs[0].status, 'sent');
@@ -1456,8 +1491,8 @@ test('POST /api/admin/push/article blocks duplicate articleId or slug within coo
 
   assert.equal(first.status, 200);
   assert.equal(duplicate.status, 409);
-  assert.equal(duplicate.body.code, 'DUPLICATE_PUSH_BLOCKED');
-  assert.equal(duplicate.body.message, 'Duplicate push blocked. Please wait before sending again.');
+  assert.equal(duplicate.body.code, 'duplicate_push_blocked');
+  assert.equal(duplicate.body.message, 'Duplicate push blocked. Please wait before sending this alert again.');
   assert.equal(sends.length, 1);
   assert.equal(logs.length, 1);
   assertNoPushSecrets(duplicate.body, [token]);
@@ -1515,7 +1550,8 @@ test('POST /api/admin/push/article rate limits after ten sends per admin and IP'
   }
 
   assert.deepEqual(responses.map((item) => item.status), [200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 429]);
-  assert.equal(responses[10].body.code, 'PUSH_RATE_LIMITED');
+  assert.equal(responses[10].body.code, 'push_rate_limited');
+  assert.equal(responses[10].body.message, 'Push blocked to prevent notification spam. Please wait and try again.');
   assert.equal(sends.length, 10);
   assert.equal(logs.length, 10);
   assertNoPushSecrets(responses.map((item) => item.body), [token]);
@@ -2088,6 +2124,141 @@ test('PushDeliveryLog retention defaults to 30 days and only applies to delivery
 
   const registrationTtlIndex = PushRegistration.schema.indexes().find(([, options]) => options?.name === 'push_delivery_log_retention_ttl' || options?.expireAfterSeconds);
   assert.equal(registrationTtlIndex, undefined);
+});
+
+test('active enabled token registration is never cleanup eligible even if createdAt is old', () => {
+  const { filter, retentionDays, cutoff } = buildNonDeliverablePushRegistrationCleanupFilter({
+    now: new Date('2026-08-17T00:00:00.000Z'),
+    env: {},
+  });
+  const activeToken = {
+    registrationId: 'fcm-token-active-cleanup:defghijklmnopqrstuvwxyz0123456789',
+    registrationType: 'token',
+    enabled: true,
+    status: 'active',
+    createdAt: '2026-06-01T00:00:00.000Z',
+    updatedAt: '2026-07-01T00:00:00.000Z',
+    lastRegisteredAt: '2026-07-01T00:00:00.000Z',
+    lastFailureCode: 'messaging/registration-token-not-registered',
+  };
+
+  assert.equal(retentionDays, 30);
+  assert.equal(cutoff.toISOString(), '2026-07-18T00:00:00.000Z');
+  assert.equal(matchesFilter(activeToken, filter), false);
+});
+
+test('recently disabled old-createdAt token is not cleanup eligible until disabledAt is old', () => {
+  const { filter } = buildNonDeliverablePushRegistrationCleanupFilter({ now: new Date('2026-08-17T00:00:00.000Z') });
+  const recentlyDisabled = {
+    registrationId: 'fcm-token-recently-disabled:defghijklmnopqrstuvwxyz0123456789',
+    registrationType: 'token',
+    enabled: false,
+    status: 'inactive',
+    disabledAt: '2026-08-17T00:00:00.000Z',
+    createdAt: '2026-06-01T00:00:00.000Z',
+    updatedAt: '2026-06-01T00:00:00.000Z',
+  };
+  const oldDisabled = { ...recentlyDisabled, disabledAt: '2026-07-01T00:00:00.000Z' };
+
+  assert.equal(matchesFilter(recentlyDisabled, filter), false);
+  assert.equal(matchesFilter(oldDisabled, filter), true);
+});
+
+test('fid-only, missing-token, and invalid-token old records are cleanup eligible', () => {
+  const { filter } = buildNonDeliverablePushRegistrationCleanupFilter({ now: new Date('2026-08-17T00:00:00.000Z') });
+  const oldFidOnly = {
+    registrationId: 'firebase-installation-old-fid-only',
+    registrationType: 'fid',
+    enabled: true,
+    status: 'active',
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const missingToken = {
+    registrationId: '',
+    registrationType: 'token',
+    enabled: true,
+    status: 'active',
+    createdAt: '2026-07-01T00:00:00.000Z',
+  };
+  const invalidToken = {
+    registrationId: 'fcm-token-invalid-cleanup:defghijklmnopqrstuvwxyz0123456789',
+    registrationType: 'token',
+    enabled: false,
+    status: 'inactive',
+    disabledAt: '2026-07-01T00:00:00.000Z',
+    updatedAt: '2026-07-01T00:00:00.000Z',
+    lastFailureCode: 'messaging/invalid-registration-token',
+  };
+
+  assert.equal(matchesFilter(oldFidOnly, filter), true);
+  assert.equal(matchesFilter(missingToken, filter), true);
+  assert.equal(matchesFilter(invalidToken, filter), true);
+});
+
+test('cleanup deletes only old non-deliverable registrations and keeps active or recently disabled tokens', async () => {
+  const activeToken = 'fcm-token-cleanup-active:defghijklmnopqrstuvwxyz0123456789';
+  const disabledToken = 'fcm-token-cleanup-disabled:defghijklmnopqrstuvwxyz0123456789';
+  const recentDisabledToken = 'fcm-token-cleanup-recent-disabled:defghijklmnopqrstuvwxyz0123456789';
+  const oldFid = 'firebase-installation-cleanup-old-fid';
+  const { docs } = installInMemoryRegistrationStore();
+
+  await request(app).post('/api/public/push/register').send({ token: activeToken });
+  await request(app).post('/api/public/push/register').send({ token: disabledToken });
+  await request(app).post('/api/public/push/register').send({ token: recentDisabledToken });
+  await request(app).post('/api/public/push/register').send({ registrationId: oldFid, registrationType: 'fid' });
+
+  const active = Array.from(docs.values()).find((item) => item.registrationId === activeToken);
+  const disabled = Array.from(docs.values()).find((item) => item.registrationId === disabledToken);
+  const recentDisabled = Array.from(docs.values()).find((item) => item.registrationId === recentDisabledToken);
+  const fid = Array.from(docs.values()).find((item) => item.registrationId === oldFid);
+
+  active.createdAt = '2026-06-01T00:00:00.000Z';
+  active.updatedAt = '2026-06-01T00:00:00.000Z';
+  active.lastRegisteredAt = '2026-06-01T00:00:00.000Z';
+
+  disabled.enabled = false;
+  disabled.status = 'inactive';
+  disabled.disabledAt = '2026-07-01T00:00:00.000Z';
+  disabled.updatedAt = '2026-07-01T00:00:00.000Z';
+  disabled.lastFailureCode = 'messaging/registration-token-not-registered';
+
+  recentDisabled.enabled = false;
+  recentDisabled.status = 'inactive';
+  recentDisabled.disabledAt = '2026-08-17T00:00:00.000Z';
+  recentDisabled.createdAt = '2026-06-01T00:00:00.000Z';
+  recentDisabled.updatedAt = '2026-06-01T00:00:00.000Z';
+
+  fid.updatedAt = '2026-07-01T00:00:00.000Z';
+  docs.set('token:', {
+    _id: 'missing-token-cleanup',
+    registrationId: '',
+    registrationType: 'token',
+    enabled: true,
+    status: 'active',
+    createdAt: '2026-07-01T00:00:00.000Z',
+  });
+
+  const { filter } = buildNonDeliverablePushRegistrationCleanupFilter({ now: new Date('2026-08-17T00:00:00.000Z') });
+  assert.equal(matchesFilter(active, filter), false);
+  assert.equal(matchesFilter(disabled, filter), true);
+  assert.equal(matchesFilter(recentDisabled, filter), false);
+
+  const result = await cleanupNonDeliverablePushRegistrations({ now: new Date('2026-08-17T00:00:00.000Z') });
+
+  assert.equal(result.retentionDays, 30);
+  assert.equal(result.eligibleCount, 3);
+  assert.equal(result.deletedCount, 3);
+  assert.equal(docs.size, 2);
+  assert.equal(Boolean(Array.from(docs.values()).find((item) => item.registrationId === activeToken)), true);
+  assert.equal(Boolean(Array.from(docs.values()).find((item) => item.registrationId === recentDisabledToken)), true);
+  assertNoPushSecrets(result, [activeToken, disabledToken, recentDisabledToken, oldFid]);
+});
+
+test('cleanup script defaults to dry-run and requires --confirm for delete', () => {
+  assert.deepEqual(parseCleanupArgs([]), { confirm: false, dryRun: true });
+  assert.deepEqual(parseCleanupArgs(['--dry-run']), { confirm: false, dryRun: true });
+  assert.deepEqual(parseCleanupArgs(['--confirm']), { confirm: true, dryRun: false });
+  assert.deepEqual(parseCleanupArgs(['--confirm', '--dry-run']), { confirm: true, dryRun: true });
 });
 
 test('Firebase send success updates registration health', async () => {

@@ -14,7 +14,8 @@ const PUSH_RECEIPT_EVENTS = new Set(['received', 'shown', 'clicked', 'display_fa
 const NO_RECIPIENT_REASONS = new Set(['no_breaking_news_subscribers', 'no_article_alert_subscribers', 'registration_not_found', 'no_recipients']);
 const BREAKING_PUSH_TTL_SECONDS = 120;
 const ARTICLE_PUSH_TTL_SECONDS = 1800;
-const DUPLICATE_PUSH_BLOCK_MESSAGE = 'Duplicate push blocked. Please wait before sending again.';
+const PUSH_RATE_LIMIT_MESSAGE = 'Push blocked to prevent notification spam. Please wait and try again.';
+const DUPLICATE_PUSH_BLOCK_MESSAGE = 'Duplicate push blocked. Please wait before sending this alert again.';
 const BREAKING_PUSH_RATE_LIMIT = Object.freeze({ max: 3, windowMs: 5 * 60 * 1000 });
 const ARTICLE_PUSH_RATE_LIMIT = Object.freeze({ max: 10, windowMs: 15 * 60 * 1000 });
 const BREAKING_DUPLICATE_WINDOW_MS = 5 * 60 * 1000;
@@ -76,6 +77,10 @@ function fail(res, status, code, message) {
 
 function ok(res, body = {}) {
   return res.status(200).json({ ok: true, success: true, ...body });
+}
+
+function pushSafetyBlock(res, status, code, message) {
+  return res.status(status).json({ ok: false, success: false, code, message });
 }
 
 function trim(value) {
@@ -1409,12 +1414,10 @@ async function sendBreakingPush(req, res) {
     if (!messageBody) return fail(res, 400, 'INVALID_PUSH_SEND', 'body is required');
     const url = canonicalBreakingPushUrl();
     if (!url) return fail(res, 400, 'INVALID_PUSH_URL', 'Push URL is not allowed');
-    if (await hasRecentDuplicateBreakingPush(messageBody)) {
-      return fail(res, 409, 'DUPLICATE_PUSH_BLOCKED', DUPLICATE_PUSH_BLOCK_MESSAGE);
-    }
+    if (await hasRecentDuplicateBreakingPush(messageBody)) return pushSafetyBlock(res, 409, 'duplicate_push_blocked', DUPLICATE_PUSH_BLOCK_MESSAGE);
 
     const rateLimit = checkAdminPushRateLimit(req, 'breaking', BREAKING_PUSH_RATE_LIMIT);
-    if (!rateLimit.ok) return fail(res, 429, 'PUSH_RATE_LIMITED', 'Breaking push rate limit exceeded. Please wait before sending again.');
+    if (!rateLimit.ok) return pushSafetyBlock(res, 429, 'push_rate_limited', PUSH_RATE_LIMIT_MESSAGE);
 
     const filter = pushMessagingService.buildEligibilityFilter('breaking_news');
     const registrations = await findTargetRegistrations(filter);
@@ -1458,12 +1461,10 @@ async function sendArticlePush(req, res) {
     const articleId = trim(bodyInput.articleId).slice(0, 200) || undefined;
     const url = normalizeSendUrl(bodyInput.url, { articleSlug });
     if (!url) return fail(res, 400, 'INVALID_PUSH_URL', 'Push URL is not allowed');
-    if (await hasRecentDuplicateArticlePush({ articleId, articleSlug, url })) {
-      return fail(res, 409, 'DUPLICATE_PUSH_BLOCKED', DUPLICATE_PUSH_BLOCK_MESSAGE);
-    }
+    if (await hasRecentDuplicateArticlePush({ articleId, articleSlug, url })) return pushSafetyBlock(res, 409, 'duplicate_push_blocked', DUPLICATE_PUSH_BLOCK_MESSAGE);
 
     const rateLimit = checkAdminPushRateLimit(req, 'article', ARTICLE_PUSH_RATE_LIMIT);
-    if (!rateLimit.ok) return fail(res, 429, 'PUSH_RATE_LIMITED', 'Article push rate limit exceeded. Please wait before sending again.');
+    if (!rateLimit.ok) return pushSafetyBlock(res, 429, 'push_rate_limited', PUSH_RATE_LIMIT_MESSAGE);
 
     const filter = pushMessagingService.buildEligibilityFilter('article');
     const registrations = await findTargetRegistrations(filter);
@@ -1475,7 +1476,7 @@ async function sendArticlePush(req, res) {
       body: messageBody,
       url,
       registrations,
-      message: { title, body: messageBody, url, articleId, articleSlug, category, language, notificationType: 'article', ttlSeconds: ARTICLE_PUSH_TTL_SECONDS, urgency: 'normal' },
+      message: { title, body: messageBody, url, articleId, articleSlug, category, language, notificationType: 'article', ttlSeconds: ARTICLE_PUSH_TTL_SECONDS, urgency: 'high' },
       admin: req.admin,
       metadata: { targeting: targetingDebug },
       noRecipientsReason: 'no_article_alert_subscribers',
