@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const request = require('supertest');
 const mongoose = require('mongoose');
+const axios = require('axios');
 
 process.env.NODE_ENV = 'test';
 process.env.NEWSPULSE_ENABLE_TOGGLE_QUERY_IN_TESTS = '1';
@@ -15,6 +16,7 @@ const CommunityFeatureSettings = require('../models/CommunityFeatureSettings');
 const CommunitySettings = require('../models/CommunitySettings');
 const SystemSettings = require('../models/SystemSettings');
 const ReporterContact = require('../models/ReporterContact');
+const ReporterSession = require('../models/ReporterSession');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const OtpToken = require('../models/OtpToken');
 const reporterPortalRouter = require('../routes/reporterPortal');
@@ -25,6 +27,7 @@ let communityFeatureDoc;
 let communitySettingsDoc;
 let systemSettingsDoc;
 let reporterDoc;
+let reporterSessionStore;
 let otpStore;
 let submissionStore;
 let submissionSeq;
@@ -51,6 +54,19 @@ function buildReporterDoc(data) {
       const next = clone(this);
       delete next.save;
       reporterDoc = next;
+      return this;
+    },
+  };
+}
+
+function buildReporterSessionDoc(data) {
+  return {
+    ...clone(data),
+    save: async function save() {
+      const next = clone(this);
+      delete next.save;
+      const index = reporterSessionStore.findIndex((item) => item.tokenHash === next.tokenHash);
+      if (index >= 0) reporterSessionStore[index] = next;
       return this;
     },
   };
@@ -233,6 +249,33 @@ ReporterContact.findOneAndUpdate = async (filter, update) => {
   return buildReporterDoc(reporterDoc);
 };
 
+ReporterSession.create = async (payload) => {
+  const doc = {
+    _id: `reporter-session-${reporterSessionStore.length + 1}`,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    revokedAt: null,
+    ...clone(payload),
+  };
+  reporterSessionStore.push(clone(doc));
+  return buildReporterSessionDoc(doc);
+};
+
+ReporterSession.findOne = async (filter) => {
+  const match = reporterSessionStore.find((item) => matchesFilter(item, filter)) || null;
+  return match ? buildReporterSessionDoc(match) : null;
+};
+
+ReporterSession.updateMany = async (filter, update) => {
+  let modifiedCount = 0;
+  reporterSessionStore = reporterSessionStore.map((item) => {
+    if (!matchesFilter(item, filter)) return item;
+    modifiedCount += 1;
+    return { ...item, ...(update && update.$set ? clone(update.$set) : {}) };
+  });
+  return { acknowledged: true, modifiedCount };
+};
+
 OtpToken.updateMany = async (filter, update) => {
   otpStore = otpStore.map((item) => {
     if (normalizeEmail(item.email) !== normalizeEmail(filter.email)) return item;
@@ -413,6 +456,7 @@ test.beforeEach(() => {
     status: 'active',
     lastPortalLoginAt: null,
   };
+  reporterSessionStore = [];
   otpStore = [];
   submissionSeq = 10;
   submissionStore = [
@@ -483,6 +527,12 @@ test('reporter portal OTP login, session, and own submissions are scoped to repo
   assert.strictEqual(verifyRes.statusCode, 200);
   assert.strictEqual(verifyRes.body.ok, true);
   assert.ok(verifyRes.body.token);
+  assert.strictEqual(verifyRes.body.sessionToken, verifyRes.body.token);
+  assert.strictEqual(verifyRes.body.tokenType, 'reporter_session');
+  assert.strictEqual(reporterSessionStore.length, 1);
+  assert.strictEqual(reporterSessionStore[0].email, 'reporter@example.com');
+  assert.strictEqual(typeof reporterSessionStore[0].tokenHash, 'string');
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(reporterSessionStore[0], 'token'), false);
   assert.deepStrictEqual(verifyRes.body.summary, {
     totalSubmissions: 2,
     pending: 1,
@@ -498,6 +548,7 @@ test('reporter portal OTP login, session, and own submissions are scoped to repo
   assert.strictEqual(sessionRes.statusCode, 200);
   assert.strictEqual(sessionRes.body.reporter.email, 'reporter@example.com');
   assert.strictEqual(sessionRes.body.summary.totalSubmissions, 2);
+  assert.ok(sessionRes.body.session.expiresAt);
 
   const submissionsRes = await request(app)
     .get('/api/reporter-portal/submissions')
@@ -519,6 +570,72 @@ test('reporter portal OTP login, session, and own submissions are scoped to repo
     rejected: 0,
     published: 0,
   });
+});
+
+test('reporter B cannot see reporter A submissions', async () => {
+  reporterDoc = {
+    _id: '507f191e810c19729de860bb',
+    fullName: 'Other Reporter',
+    email: 'other@example.com',
+    emailLower: 'other@example.com',
+    reporterType: 'community',
+    verificationLevel: 'community_default',
+    portalAccessEnabled: true,
+    portalAuthVersion: 0,
+    status: 'active',
+    lastPortalLoginAt: null,
+  };
+
+  const otpRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'other@example.com' });
+  const verifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'other@example.com', otp: otpRes.body.devCode });
+
+  const submissionsRes = await request(app)
+    .get('/api/reporter-portal/submissions')
+    .set('Authorization', `Bearer ${verifyRes.body.token}`);
+
+  assert.strictEqual(submissionsRes.statusCode, 200);
+  assert.strictEqual(submissionsRes.body.total, 1);
+  assert.deepStrictEqual(submissionsRes.body.items.map((item) => item.id), ['507f1f77bcf86cd799439013']);
+
+  const reporterADetailRes = await request(app)
+    .get('/api/reporter-portal/submissions/507f1f77bcf86cd799439011')
+    .set('Authorization', `Bearer ${verifyRes.body.token}`);
+
+  assert.strictEqual(reporterADetailRes.statusCode, 404);
+  assert.strictEqual(reporterADetailRes.body.code, 'SUBMISSION_NOT_FOUND');
+});
+
+test('reporter portal rejects expired opaque reporter sessions', async () => {
+  const otpRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'reporter@example.com' });
+  const verifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'reporter@example.com', otp: otpRes.body.devCode });
+
+  assert.strictEqual(verifyRes.statusCode, 200);
+  assert.strictEqual(reporterSessionStore.length, 1);
+  reporterSessionStore[0].expiresAt = new Date(Date.now() - 1000).toISOString();
+
+  const sessionRes = await request(app)
+    .get('/api/reporter-portal/auth/session')
+    .set('Authorization', `Bearer ${verifyRes.body.sessionToken}`);
+
+  assert.strictEqual(sessionRes.statusCode, 401);
+  assert.strictEqual(sessionRes.body.code, 'SESSION_EXPIRED');
+});
+
+test('reporter portal rejects invalid opaque reporter sessions', async () => {
+  const sessionRes = await request(app)
+    .get('/api/reporter-portal/auth/session')
+    .set('Authorization', 'Bearer rps_invalid-session-token');
+
+  assert.strictEqual(sessionRes.statusCode, 401);
+  assert.strictEqual(sessionRes.body.code, 'REPORTER_SESSION_MISSING');
 });
 
 test('reporter portal auth session and submissions work with localhost cookie auth', async () => {
@@ -667,6 +784,38 @@ test('reporter auth compatibility routes map to the secure reporter portal flow'
   assert.strictEqual(expiredSessionRes.body.code, 'REPORTER_SESSION_MISSING');
 });
 
+test('reporter-auth session accepts valid session credential even when an old challenge cookie is still present', async () => {
+  reporterDoc.email = 'compat.stale.challenge@example.com';
+  reporterDoc.emailLower = 'compat.stale.challenge@example.com';
+
+  const otpRes = await request(app)
+    .post('/api/reporter-auth/request-code')
+    .send({ email: 'compat.stale.challenge@example.com' });
+
+  assert.strictEqual(otpRes.statusCode, 200);
+  const staleChallengeCookie = otpRes.headers['set-cookie']
+    .filter((value) => value.includes('reporter_portal_login_challenge='))
+    .map((value) => value.split(';')[0])
+    .join('; ');
+  assert.ok(staleChallengeCookie.includes('reporter_portal_login_challenge='));
+
+  const verifyRes = await request(app)
+    .post('/api/reporter-auth/verify-code')
+    .set('Cookie', staleChallengeCookie)
+    .send({ email: 'compat.stale.challenge@example.com', code: otpRes.body.devCode });
+
+  assert.strictEqual(verifyRes.statusCode, 200);
+  assert.ok(verifyRes.body.sessionToken);
+
+  const sessionRes = await request(app)
+    .get('/api/reporter-auth/session')
+    .set('Cookie', `${staleChallengeCookie}; reporter_portal_session=${verifyRes.body.sessionToken}`);
+
+  assert.strictEqual(sessionRes.statusCode, 200);
+  assert.strictEqual(sessionRes.body.ok, true);
+  assert.strictEqual(sessionRes.body.reporter.email, 'compat.stale.challenge@example.com');
+});
+
 test('reporter portal can create and edit only allowed submissions on shared CommunitySubmission records', async () => {
   const otpRes = await request(app)
     .post('/api/reporter-portal/auth/request-login-otp')
@@ -684,6 +833,8 @@ test('reporter portal can create and edit only allowed submissions on shared Com
       headline: 'Portal Draft',
       story: 'Draft story body',
       category: 'Regional',
+      reporterId: '507f191e810c19729de860ff',
+      reporterAccountId: '507f191e810c19729de860ff',
     });
 
   assert.strictEqual(createRes.statusCode, 201);
@@ -693,6 +844,7 @@ test('reporter portal can create and edit only allowed submissions on shared Com
   const createdId = createRes.body.item.id;
   const storedCreated = submissionStore.find((item) => String(item._id) === String(createdId));
   assert.strictEqual(String(storedCreated.reporterId), reporterDoc._id);
+  assert.strictEqual(String(storedCreated.reporterAccountId), reporterDoc._id);
   assert.strictEqual(storedCreated.reporterEmailNorm, 'reporter@example.com');
 
   const patchRes = await request(app)
@@ -819,7 +971,65 @@ test('legacy reporter story endpoints no longer allow unauthenticated email-base
     .query({ email: 'reporter@example.com' });
 
   assert.strictEqual(res.statusCode, 401);
-  assert.strictEqual(res.body.code, 'REPORTER_SESSION_MISSING');
+  assert.strictEqual(res.body.code, 'REPORTER_SESSION_REQUIRED');
+});
+
+test('community reporter my-stories returns 200 with an empty list for an authenticated reporter with no linked stories', async () => {
+  submissionStore = [];
+
+  const otpRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'reporter@example.com' });
+  const verifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'reporter@example.com', otp: otpRes.body.devCode });
+
+  const res = await request(app)
+    .get('/api/community-reporter/my-stories')
+    .set('Authorization', `Bearer ${verifyRes.body.token}`);
+
+  assert.strictEqual(res.statusCode, 200);
+  assert.deepStrictEqual(res.body.submissions, []);
+  assert.deepStrictEqual(res.body.stories, []);
+});
+
+test('authenticated community reporter submissions store server-derived owner and ignore query email scoping', async () => {
+  const otpRes = await request(app)
+    .post('/api/reporter-portal/auth/request-login-otp')
+    .send({ email: 'reporter@example.com' });
+  const verifyRes = await request(app)
+    .post('/api/reporter-portal/auth/verify-login-otp')
+    .send({ email: 'reporter@example.com', otp: otpRes.body.devCode });
+  const token = verifyRes.body.token;
+
+  const createRes = await request(app)
+    .post('/api/community-reporter/submissions')
+    .set('Authorization', `Bearer ${token}`)
+    .send({
+      name: 'Spoofed Metadata Reporter',
+      email: 'spoofed@example.com',
+      location: 'Ahmedabad, Gujarat, India',
+      category: 'Regional',
+      headline: 'Authenticated Community Submission',
+      story: 'Authenticated community submission body',
+      reporterId: '507f191e810c19729de860ff',
+      reporterAccountId: '507f191e810c19729de860ff',
+    });
+
+  assert.strictEqual(createRes.statusCode, 201);
+  const storedCreated = submissionStore.find((item) => item.headline === 'Authenticated Community Submission');
+  assert.ok(storedCreated);
+  assert.strictEqual(String(storedCreated.reporterId), reporterDoc._id);
+  assert.strictEqual(String(storedCreated.reporterAccountId), reporterDoc._id);
+
+  const myStoriesRes = await request(app)
+    .get('/api/community-reporter/my-stories')
+    .query({ email: 'spoofed@example.com' })
+    .set('Authorization', `Bearer ${token}`);
+
+  assert.strictEqual(myStoriesRes.statusCode, 200);
+  assert.ok(myStoriesRes.body.submissions.some((item) => item.headline === 'Authenticated Community Submission'));
+  assert.ok(myStoriesRes.body.submissions.every((item) => item.id !== '507f1f77bcf86cd799439013'));
 });
 
 test('reporter logout invalidates the active portal token', async () => {
@@ -837,11 +1047,13 @@ test('reporter logout invalidates the active portal token', async () => {
 
   assert.strictEqual(logoutRes.statusCode, 200);
   assert.strictEqual(logoutRes.body.ok, true);
-  assert.strictEqual(reporterDoc.portalAuthVersion, 1);
+  assert.strictEqual(reporterDoc.portalAuthVersion, 0);
+  assert.ok(reporterSessionStore[0].revokedAt);
+  assert.strictEqual(reporterSessionStore[0].revokedReason, 'logout');
 
   const sessionRes = await request(app)
     .get('/api/reporter-portal/auth/session')
-    .set('Authorization', `Bearer ${token}`);
+    .set('Authorization', `Bearer ${verifyRes.body.sessionToken}`);
 
   assert.strictEqual(sessionRes.statusCode, 401);
   assert.strictEqual(sessionRes.body.code, 'REPORTER_SESSION_MISSING');
@@ -1499,6 +1711,8 @@ test('reporter portal request-code returns stable unavailable code when transpor
     assert.strictEqual(otpRes.statusCode, 503);
     assert.strictEqual(otpRes.body.code, 'REPORTER_EMAIL_UNAVAILABLE');
     assert.strictEqual(otpRes.body.backendCode, 'MAILER_NOT_CONFIGURED');
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(otpRes.body, 'developmentCode'), false);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(otpRes.body, 'devCode'), false);
     assert.ok(otpRes.body.traceId);
     assert.strictEqual(otpRes.headers['x-reporter-auth-trace'], otpRes.body.traceId);
   } finally {
@@ -1506,6 +1720,120 @@ test('reporter portal request-code returns stable unavailable code when transpor
     else process.env.EMAIL_MODE = originalEmailMode;
     if (originalRender === undefined) delete process.env.RENDER;
     else process.env.RENDER = originalRender;
+  }
+});
+
+test('local reporter OTP uses response-only development delivery even when SMTP env is present', async () => {
+  reporterDoc.email = 'local-stub@example.com';
+  reporterDoc.emailLower = 'local-stub@example.com';
+
+  const envKeys = ['EMAIL_MODE', 'SMTP_SERVICE', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM'];
+  const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  const originalConsoleLog = console.log;
+  const logs = [];
+
+  delete process.env.EMAIL_MODE;
+  process.env.SMTP_SERVICE = 'gmail';
+  process.env.SMTP_USER = 'production-mailbox@example.com';
+  process.env.SMTP_PASS = 'production-password-placeholder';
+  process.env.EMAIL_FROM = 'NewsPulse <production-mailbox@example.com>';
+
+  console.log = (...args) => {
+    logs.push(args);
+    if (args[0] === '[reporter-auth][request-code][final]') return;
+    if (args[0] === '[EMAIL][transporter-init]') return;
+  };
+
+  try {
+    const otpRes = await request(app)
+      .post('/api/reporter-portal/auth/request-login-otp')
+      .send({ email: 'local-stub@example.com' });
+
+    assert.strictEqual(otpRes.statusCode, 200);
+    assert.strictEqual(otpRes.body.ok, true);
+    assert.strictEqual(otpRes.body.delivery, 'development');
+    assert.match(otpRes.body.developmentCode, /^\d{6}$/);
+    assert.ok(otpRes.body.devCode);
+    assert.strictEqual(otpRes.body.devCode, otpRes.body.developmentCode);
+    assert.equal(logs.some((entry) => entry[0] === '[EMAIL][stub-send]'), false);
+    assert.equal(logs.some((entry) => entry[0] === '[EMAIL][transporter-init]'), false);
+
+    const verifyRes = await request(app)
+      .post('/api/reporter-portal/auth/verify-login-otp')
+      .send({ email: 'local-stub@example.com', otp: otpRes.body.developmentCode });
+
+    assert.strictEqual(verifyRes.statusCode, 200);
+    assert.strictEqual(verifyRes.body.ok, true);
+
+    const finalLog = logs.find((entry) => entry[0] === '[reporter-auth][request-code][final]')?.[1];
+    assert.ok(finalLog);
+    assert.strictEqual(finalLog.sendMethod, 'development-response');
+  } finally {
+    console.log = originalConsoleLog;
+    for (const key of envKeys) {
+      if (previousEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = previousEnv[key];
+    }
+  }
+});
+
+test('production reporter OTP invokes real delivery path and never exposes development code', async () => {
+  reporterDoc.email = 'prod-delivery@example.com';
+  reporterDoc.emailLower = 'prod-delivery@example.com';
+
+  const envKeys = [
+    'RENDER',
+    'EMAIL_MODE',
+    'REPORTER_OTP_EMAIL_PROVIDER',
+    'REPORTER_OTP_RESEND_API_KEY',
+    'REPORTER_OTP_RESEND_FROM',
+  ];
+  const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  const originalConsoleLog = console.log;
+  const originalConsoleError = console.error;
+  const originalAxiosPost = axios.post;
+  const logs = [];
+  let resendPayload = null;
+
+  process.env.RENDER = '1';
+  delete process.env.EMAIL_MODE;
+  process.env.REPORTER_OTP_EMAIL_PROVIDER = 'resend';
+  process.env.REPORTER_OTP_RESEND_API_KEY = 're_test_reporter_scope';
+  process.env.REPORTER_OTP_RESEND_FROM = 'NewsPulse Reporter <reporter@example.com>';
+
+  console.log = (...args) => { logs.push(args); };
+  console.error = (...args) => { logs.push(args); };
+  axios.post = async (_url, payload) => {
+    resendPayload = payload;
+    return { status: 200, statusText: 'OK', data: { id: 'email-test-1' } };
+  };
+
+  try {
+    const otpRes = await request(app)
+      .post('/api/reporter-portal/auth/request-login-otp')
+      .send({ email: 'prod-delivery@example.com' });
+
+    assert.strictEqual(otpRes.statusCode, 200);
+    assert.strictEqual(otpRes.body.ok, true);
+    assert.strictEqual(otpRes.body.delivery, 'email');
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(otpRes.body, 'developmentCode'), false);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(otpRes.body, 'devCode'), false);
+    assert.ok(resendPayload);
+    assert.deepStrictEqual(resendPayload.to, ['prod-delivery@example.com']);
+
+    const otpMatch = String(resendPayload.text || '').match(/\b\d{6}\b/);
+    assert.ok(otpMatch);
+    const sentOtp = otpMatch[0];
+    const serializedLogs = logs.map((entry) => entry.map((value) => typeof value === 'string' ? value : JSON.stringify(value)).join(' ')).join('\n');
+    assert.strictEqual(serializedLogs.includes(sentOtp), false);
+  } finally {
+    console.log = originalConsoleLog;
+    console.error = originalConsoleError;
+    axios.post = originalAxiosPost;
+    for (const key of envKeys) {
+      if (previousEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = previousEnv[key];
+    }
   }
 });
 
@@ -1555,7 +1883,7 @@ test('reporter portal request-code success returns traceId without regressing lo
     assert.strictEqual(finalLog.returnedStatusCode, 200);
     assert.strictEqual(finalLog.code, 'OTP_REQUEST_ACCEPTED');
     assert.strictEqual(finalLog.phase, 'send-email');
-    assert.strictEqual(finalLog.sendMethod, 'stub');
+    assert.strictEqual(finalLog.sendMethod, 'development-response');
   } finally {
     console.log = originalConsoleLog;
   }
@@ -1670,10 +1998,10 @@ test('reporter portal counts linked articles as published outcomes and exposes t
   assert.strictEqual(publishedRes.body.items[0].portalStatus, 'PUBLISHED');
 });
 
-test('reporter portal ownership lookup finds legacy mixed-case email records across fallback fields', async () => {
+test('reporter portal ownership lookup ignores email-only records and uses account ids', async () => {
   submissionStore.push({
     _id: '507f1f77bcf86cd799439099',
-    reporterId: '507f191e810c19729de860ff',
+    reporterId: null,
     reporterEmail: 'Reporter@Example.com',
     reporterEmailNorm: undefined,
     email: 'Reporter@Example.com',
@@ -1685,6 +2013,23 @@ test('reporter portal ownership lookup finds legacy mixed-case email records acr
     updatedAt: new Date('2026-04-05T09:30:00.000Z'),
     isDeleted: false,
     contact: { email: 'Reporter@Example.com', name: 'Reporter One' },
+    attachments: [],
+  });
+  submissionStore.push({
+    _id: '507f1f77bcf86cd799439098',
+    reporterAccountId: reporterDoc._id,
+    reporterId: '507f191e810c19729de860ff',
+    reporterEmail: 'other-email@example.com',
+    reporterEmailNorm: 'other-email@example.com',
+    email: 'other-email@example.com',
+    headline: 'Account Linked Story',
+    body: 'Account linked body',
+    category: 'district',
+    status: 'APPROVED',
+    createdAt: new Date('2026-04-05T09:45:00.000Z'),
+    updatedAt: new Date('2026-04-05T09:45:00.000Z'),
+    isDeleted: false,
+    contact: { email: 'other-email@example.com', name: 'Reporter One' },
     attachments: [],
   });
 
@@ -1702,5 +2047,6 @@ test('reporter portal ownership lookup finds legacy mixed-case email records acr
 
   assert.strictEqual(submissionsRes.statusCode, 200);
   assert.strictEqual(submissionsRes.body.total, 3);
-  assert.ok(submissionsRes.body.items.some((item) => item.id === '507f1f77bcf86cd799439099'));
+  assert.ok(submissionsRes.body.items.some((item) => item.id === '507f1f77bcf86cd799439098'));
+  assert.ok(!submissionsRes.body.items.some((item) => item.id === '507f1f77bcf86cd799439099'));
 });

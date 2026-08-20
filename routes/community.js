@@ -16,6 +16,10 @@ const {
   normalizeCommunityReporterCategory,
   normalizeWorkflowStatus,
 } = require('../services/communitySubmissionWorkflow');
+const {
+  buildAgeGroupValidationError,
+  normalizeAgeGroup,
+} = require('../services/communitySubmissionAgeGroup');
 const { getEffectiveCommunityAccessState } = require('../services/communityAccessToggleService');
 const router = express.Router();
 
@@ -44,6 +48,133 @@ function logYouthPulsePublic(event, payload) {
   try {
     console.log(`[YOUTH_PULSE][public] ${event}`, payload);
   } catch (_) {}
+}
+
+function normalizeCategoryAliasToken(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+const COMMUNITY_REPORTER_CATEGORY_ALIAS_MAP = (() => {
+  const entries = COMMUNITY_REPORTER_CATEGORIES.map((category) => [normalizeCategoryAliasToken(category), category]);
+  return new Map(entries.concat([
+    ['local', 'Regional'],
+    ['regional-news', 'Regional'],
+    ['civic', 'Civic Issue'],
+    ['crime', 'Crime / Police'],
+    ['police', 'Crime / Police'],
+    ['government', 'Government / Public Services'],
+    ['public-services', 'Government / Public Services'],
+    ['politics', 'Politics / Local Leadership'],
+    ['education', 'Education / School / College'],
+    ['health', 'Health / Hospital'],
+    ['weather', 'Weather / Disaster'],
+    ['disaster', 'Weather / Disaster'],
+    ['business', 'Business / Market'],
+    ['sports', 'Sports'],
+    ['youth', 'Youth / Campus'],
+    ['campus', 'Youth / Campus'],
+    ['lifestyle', 'Lifestyle / Culture'],
+    ['culture', 'Lifestyle / Culture'],
+    ['entertainment', 'Entertainment / Events'],
+    ['events', 'Entertainment / Events'],
+    ['environment', 'Environment'],
+    ['achievement', 'Achievement / Inspiration'],
+    ['inspiration', 'Achievement / Inspiration'],
+    ['general', 'General Tip'],
+    ['tip', 'General Tip'],
+    ['other', 'General Tip'],
+  ]));
+})();
+
+function normalizePublicCommunityCategory(value) {
+  const canonical = normalizeCommunityReporterCategory(value);
+  if (canonical) return canonical;
+  return COMMUNITY_REPORTER_CATEGORY_ALIAS_MAP.get(normalizeCategoryAliasToken(value)) || null;
+}
+
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function firstNonEmptyValue(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'string' && !value.trim()) continue;
+    if (typeof value !== 'string' && !String(value).trim()) continue;
+    return value;
+  }
+  return undefined;
+}
+
+function firstProvidedValue(body, keys) {
+  const groups = [body, body?.consents, body?.consent, body?.requiredConsents, body?.confirm];
+  for (const group of groups) {
+    if (!group || typeof group !== 'object') continue;
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(group, key)) return group[key];
+    }
+  }
+  return undefined;
+}
+
+function parseOptionalBoolean(value) {
+  if (value === undefined || value === null || value === '') return { ok: true, value: undefined };
+  if (typeof value === 'boolean') return { ok: true, value };
+  if (typeof value === 'number' && (value === 0 || value === 1)) return { ok: true, value: value === 1 };
+  if (typeof value === 'string') {
+    const token = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(token)) return { ok: true, value: true };
+    if (['false', '0', 'no', 'off'].includes(token)) return { ok: true, value: false };
+  }
+  return { ok: false };
+}
+
+function getPublicSubmissionConsentValues(body, fieldErrors) {
+  const definitions = [
+    ['acceptTerms', ['acceptTerms', 'acceptedTerms', 'termsAccepted', 'consent', 'confirm', 'confirmed']],
+    ['acceptedPolicy', ['acceptedPolicy', 'policyAccepted', 'privacyAccepted']],
+    ['confirmTruthful', ['confirmTruthful', 'consentTruthful', 'truthful']],
+    ['confirmRightsToShare', ['confirmRightsToShare', 'consentRightsToShare', 'rightsToShare', 'rights']],
+    ['confirmEditorialReviewAllowed', ['confirmEditorialReviewAllowed', 'consentEditorialReviewAllowed', 'editorialReviewAllowed', 'editorialReview']],
+    ['confirmNoUnsafeFalseAbusiveContent', ['confirmNoUnsafeFalseAbusiveContent', 'consentNoUnsafeFalseAbusiveContent', 'noUnsafeFalseAbusiveContent', 'safeContent']],
+  ];
+  const values = {};
+  for (const [field, keys] of definitions) {
+    const parsed = parseOptionalBoolean(firstProvidedValue(body, keys));
+    if (!parsed.ok) {
+      fieldErrors.push({ field, code: 'invalid_boolean', message: `${field} must be a boolean when provided` });
+    } else if (parsed.value !== undefined) {
+      values[field] = parsed.value;
+    }
+  }
+  return values;
+}
+
+function buildPublicSubmissionValidationResponse(fieldErrors) {
+  const normalizedErrors = fieldErrors.map((entry) => {
+    if (typeof entry === 'string') return { field: entry, code: 'invalid', message: `${entry} is invalid` };
+    return entry;
+  });
+  const fields = Array.from(new Set(normalizedErrors.map((entry) => entry.field).filter(Boolean)));
+  return {
+    success: false,
+    ok: false,
+    code: 'VALIDATION_ERROR',
+    error: 'VALIDATION_ERROR',
+    fields,
+    message: 'Required submission fields are missing or invalid.',
+    fieldErrors: normalizedErrors,
+  };
 }
 
 async function createYouthPulseSubmission(req, res) {
@@ -126,46 +257,56 @@ router.post('/submissions', async (req, res) => {
   try {
     const b = req.body || {};
     const deskMeta = inferSubmissionDeskMetadata(b);
-    const userName = (b.userName || b.reporterName || b.name || '').toString().trim();
-    const email = (b.email || b.reporterEmail || '').toString().trim().toLowerCase();
-    const headline = (b.headline || b.title || '').toString().trim();
-    const body = (b.body || b.story || b.storyText || b.content || '').toString().trim();
-    const category = (b.category || b.track || '').toString().trim();
+    const userName = firstNonEmptyString(b.userName, b.reporterName, b.name, b.fullName, b.reporter?.name);
+    const email = firstNonEmptyString(b.email, b.reporterEmail, b.reporter?.email, b.contact?.email).toLowerCase();
+    const headline = firstNonEmptyString(b.headline, b.title);
+    const body = firstNonEmptyString(b.body, b.story, b.storyText, b.content, b.storyBody);
+    const category = firstNonEmptyString(b.category, b.track);
 
-    const city = (b.city || b.location?.city || b.location || b.reporterLocation || '').toString().trim();
-    const state = (b.state || b.location?.state || '').toString().trim();
-    const country = (b.country || b.location?.country || '').toString().trim();
-    const district = (b.district || b.location?.district || '').toString().trim();
-    const ageGroup = (b.ageGroup || b.reporterAgeGroup || '').toString().trim();
-    const mediaLink = (b.mediaLink || b.mediaUrl || '').toString().trim();
+    const locationText = typeof b.location === 'string' ? b.location : '';
+    const city = firstNonEmptyString(b.city, b.location?.city, locationText, b.reporterLocation);
+    const state = firstNonEmptyString(b.state, b.location?.state);
+    const country = firstNonEmptyString(b.country, b.location?.country);
+    const district = firstNonEmptyString(b.district, b.location?.district);
+    const ageGroup = firstNonEmptyValue(b.ageGroup, b.reporterAgeGroup);
+    const normalizedAgeGroup = ageGroup !== undefined ? normalizeAgeGroup(ageGroup) : undefined;
+    const mediaLink = firstNonEmptyString(b.mediaLink, b.mediaUrl);
     const attachments = extractSubmissionAttachments(b);
     const contact = {
-      name: (b.contact?.name || b.contactName || userName).toString().trim() || undefined,
-      email: (b.contact?.email || b.contactEmail || email).toString().trim() || undefined,
-      phone: (b.contact?.phone || b.contactPhone || b.phone || '').toString().trim() || undefined,
-      preferredContact: (b.contact?.preferredContact || b.preferredContact || 'no_preference').toString().trim() || 'no_preference',
+      name: firstNonEmptyString(b.contact?.name, b.contactName, userName) || undefined,
+      email: firstNonEmptyString(b.contact?.email, b.contactEmail, email) || undefined,
+      phone: firstNonEmptyString(b.contact?.phone, b.contactPhone, b.phone) || undefined,
+      preferredContact: firstNonEmptyString(b.contact?.preferredContact, b.preferredContact, 'no_preference') || 'no_preference',
       canContactForThisStory: Boolean(b.contact?.canContactForThisStory ?? b.canContactForThisStory ?? false),
       canContactForFutureStories: Boolean(b.contact?.canContactForFutureStories ?? b.canContactForFutureStories ?? false),
     };
 
     // Basic validation
-    const errors = [];
-    if (!userName) errors.push('userName is required');
-    if (!email) errors.push('email is required');
-    if (!headline) errors.push('headline is required');
-    if (!body) errors.push('body is required');
-    if (!category) errors.push('category is required');
+    const fieldErrors = [];
+    if (!userName) fieldErrors.push({ field: 'userName', code: 'required', message: 'userName is required' });
+    if (!email) fieldErrors.push({ field: 'email', code: 'required', message: 'email is required' });
+    if (!headline) fieldErrors.push({ field: 'headline', code: 'required', message: 'headline is required' });
+    if (!body) fieldErrors.push({ field: 'body', code: 'required', message: 'body is required' });
+    if (!category) fieldErrors.push({ field: 'category', code: 'required', message: 'category is required' });
 
-    if (headline && headline.length > 200) errors.push('headline must be <= 200 chars');
-    if (body && body.length > 10000) errors.push('body must be <= 10000 chars');
+    if (headline && headline.length > 200) fieldErrors.push({ field: 'headline', code: 'too_long', message: 'headline must be <= 200 chars' });
+    if (body && body.length > 10000) fieldErrors.push({ field: 'body', code: 'too_long', message: 'body must be <= 10000 chars' });
 
-    const normalizedCategory = normalizeCommunityReporterCategory(category);
+    const normalizedCategory = normalizePublicCommunityCategory(category);
     if (category && !normalizedCategory) {
-      errors.push(`category must be one of: ${COMMUNITY_REPORTER_CATEGORIES.join(', ')}`);
+      fieldErrors.push({
+        field: 'category',
+        code: 'invalid_enum',
+        message: `category must be one of: ${COMMUNITY_REPORTER_CATEGORIES.join(', ')}`,
+        allowedValues: COMMUNITY_REPORTER_CATEGORIES,
+      });
     }
+    if (ageGroup !== undefined && !normalizedAgeGroup) fieldErrors.push(buildAgeGroupValidationError());
 
-    if (errors.length) {
-      return res.status(400).json({ success: false, ok: false, message: 'Validation failed', errors });
+    const consentValues = getPublicSubmissionConsentValues(b, fieldErrors);
+
+    if (fieldErrors.length) {
+      return res.status(400).json(buildPublicSubmissionValidationResponse(fieldErrors));
     }
 
     const ipAddress = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || req.connection?.remoteAddress || '';
@@ -181,8 +322,8 @@ router.post('/submissions', async (req, res) => {
       headline,
       body,
       category: normalizedCategory,
-      ageGroup: ageGroup || undefined,
-      reporterAgeGroup: ageGroup || undefined,
+      ageGroup: normalizedAgeGroup || undefined,
+      reporterAgeGroup: normalizedAgeGroup || undefined,
       city: city || undefined,
       state: state || undefined,
       country: country || undefined,
@@ -200,9 +341,10 @@ router.post('/submissions', async (req, res) => {
       // Defaults requested
       status: deskMeta.isYouthPulse
         ? normalizeWorkflowStatus(b.status, 'NEW')
-        : (b.status || 'PENDING_FOUNDER'),
-      sourceType: b.sourceType || 'community',
-      reporterVerificationLevel: b.reporterVerificationLevel || 'unverified',
+        : 'PENDING_FOUNDER',
+      sourceType: 'community',
+      reporterVerificationLevel: 'unverified',
+      ...consentValues,
       ipAddress,
       userAgent,
     };
@@ -238,7 +380,7 @@ router.post('/submissions', async (req, res) => {
         category: normalizedCategory,
         headline,
         body,
-        ageGroup,
+        ageGroup: normalizedAgeGroup,
       });
       saved.aiTitle = ai.aiTitle;
       saved.aiBody = ai.aiBody;
@@ -287,7 +429,12 @@ router.post('/submissions', async (req, res) => {
   } catch (err) {
     console.error('[COMMUNITY_SUBMISSION][create] error', err);
     if (err && err.name === 'ValidationError') {
-      return res.status(400).json({ success: false, ok: false, message: 'Validation error', details: err.errors });
+      const fieldErrors = Object.keys(err.errors || {}).map((field) => ({
+        field,
+        code: 'invalid_model_field',
+        message: `${field} is invalid`,
+      }));
+      return res.status(400).json(buildPublicSubmissionValidationResponse(fieldErrors));
     }
     return res.status(500).json({ success: false, ok: false, message: 'Failed to submit community story' });
   }

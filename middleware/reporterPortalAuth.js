@@ -5,6 +5,10 @@ const OtpToken = require('../models/OtpToken');
 const ReporterContact = require('../models/ReporterContact');
 const { getEffectiveCommunityAccessState } = require('../services/communityAccessToggleService');
 const { normalizeEmail } = require('../lib/normalizeEmail');
+const {
+  isReporterSessionToken,
+  validateReporterSessionToken,
+} = require('../services/reporterPortalSessionService');
 
 const REPORTER_PORTAL_COOKIE_NAME = 'reporter_portal_session';
 const REPORTER_PORTAL_LOGIN_CHALLENGE_COOKIE_NAME = 'reporter_portal_login_challenge';
@@ -60,7 +64,12 @@ function isReporterAuthCompatRequest(req) {
 
 function isReporterSubmissionsRequest(req) {
   const path = String(req?.originalUrl || req?.url || '');
-  return /\/submissions(?:$|\/|\?)/i.test(path);
+  return /\/(?:submissions|my-stories|reporter-stories)(?:$|\/|\?)/i.test(path);
+}
+
+function isCommunityReporterMyStoriesRequest(req) {
+  const path = String(req?.originalUrl || req?.url || '');
+  return /\/api\/community-reporter\/my-stories(?:$|\/|\?)/i.test(path);
 }
 
 function respondReporterSessionMissing(req, res, errorMessage) {
@@ -80,7 +89,7 @@ function respondReporterSessionMissing(req, res, errorMessage) {
 
   return res.status(401).json({
     ok: false,
-    code: 'REPORTER_SESSION_MISSING',
+    code: isCommunityReporterMyStoriesRequest(req) ? 'REPORTER_SESSION_REQUIRED' : 'REPORTER_SESSION_MISSING',
     message: 'Reporter session missing or expired.',
   });
 }
@@ -199,6 +208,12 @@ function getReporterPortalTokenDetails(req) {
 
 function getReporterPortalToken(req) {
   return getReporterPortalTokenDetails(req).token;
+}
+
+function hasReporterPortalCredentials(req) {
+  const sessionReporter = normalizeReporterSession(req?.session?.reporter);
+  if (sessionReporter.email && sessionReporter.verified) return true;
+  return !!getReporterPortalToken(req);
 }
 
 function isDbReady() {
@@ -328,16 +343,30 @@ async function requireReporterPortalAuth(req, res, next) {
       return respondReporterSessionMissing(req, res, 'No reporter token found in Authorization header or cookie');
     }
 
-    const secret = String(process.env.JWT_SECRET || '').trim();
-    if (!secret) {
-      return res.status(500).json({ ok: false, code: 'SERVER_ERROR', message: 'JWT_SECRET missing' });
-    }
+    if (isReporterSessionToken(token)) {
+      const validation = await validateReporterSessionToken(token);
+      if (!validation.ok) {
+        if (validation.reason === 'expired') {
+          return respondReporterSessionExpired(req, res, 'Reporter session expired');
+        }
+        return respondReporterSessionMissing(req, res, `Reporter session ${validation.reason || 'invalid'}`);
+      }
+      payload = validation.payload;
+      req.reporterPortalSession = validation.session;
+      req.reporterPortalTokenPayload = payload;
+      req.reporterPortalAuthModel = authModel === 'cookie-token' ? 'cookie-session' : 'bearer-session';
+    } else {
+      const secret = String(process.env.JWT_SECRET || '').trim();
+      if (!secret) {
+        return res.status(500).json({ ok: false, code: 'SERVER_ERROR', message: 'JWT_SECRET missing' });
+      }
 
-    payload = jwt.verify(token, secret);
-    if (payload.type !== 'reporter_portal') {
-      return respondReporterSessionMissing(req, res, 'Reporter token type invalid');
+      payload = jwt.verify(token, secret);
+      if (payload.type !== 'reporter_portal') {
+        return respondReporterSessionMissing(req, res, 'Reporter token type invalid');
+      }
+      req.reporterPortalTokenPayload = payload;
     }
-    req.reporterPortalTokenPayload = payload;
 
     if (!isDbReady()) {
       const fallback = normalizeReporterPayload(payload);
@@ -427,6 +456,11 @@ async function requireReporterPortalAuth(req, res, next) {
   }
 }
 
+function optionalReporterPortalAuth(req, res, next) {
+  if (!hasReporterPortalCredentials(req)) return next();
+  return requireReporterPortalAuth(req, res, next);
+}
+
 module.exports = {
   getBearerToken,
   getReporterLoginChallengeCookieToken,
@@ -434,6 +468,7 @@ module.exports = {
   getReporterPortalToken,
   REPORTER_PORTAL_COOKIE_NAME,
   REPORTER_PORTAL_LOGIN_CHALLENGE_COOKIE_NAME,
+  optionalReporterPortalAuth,
   requireReporterPortalAuth,
   requireReporterPortalOpen,
 };

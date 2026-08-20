@@ -34,6 +34,25 @@ if (!process.env.MONGODB_URI && process.env.MONGO_URI) {
   }
 }
 
+const {
+  buildAllowedCorsOrigins,
+  getConfiguredMongoDbName: _getConfiguredMongoDbNameFromEnv,
+  isLocalDevelopmentLike: _isLocalDevelopmentLikeEnv,
+  isLocalOrigin: _isLocalCorsOrigin,
+  requireLocalDatabaseIsolation,
+  validateLocalDatabaseIsolation,
+} = require('./lib/environmentSafety');
+
+if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() !== 'test') {
+  try {
+    requireLocalDatabaseIsolation(process.env);
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error(error?.message || String(error));
+    process.exit(1);
+  }
+}
+
 require('./lib/redis');
 
 const {
@@ -580,35 +599,9 @@ function _parseCorsOriginsEnv(v) {
   return normalized;
 }
 
-// Explicit allowlist (production-safe)
+// Explicit allowlist (production-safe).
 // NOTE: Do NOT use '*' when credentials are enabled.
-const allowedOrigins = (() => {
-  // Preferred: ALLOWED_ORIGINS (comma-separated). Compatibility: CORS_ORIGIN.
-  const fromEnv = _parseCorsOriginsEnv(process.env.ALLOWED_ORIGINS || process.env.CORS_ORIGIN);
-  // Always allow the official origins + local dev UIs.
-  // This supports the intended workflow: backend runs on Render, local UIs call Render.
-  const defaults = [
-    'http://localhost:3000',
-    'http://localhost:4173',
-    'http://localhost:5173',
-    'http://localhost:5174',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:4173',
-    'http://127.0.0.1:5173',
-    'http://127.0.0.1:5174',
-    'http://10.46.255.143:5173',
-    'https://www.newspulse.co.in',
-    'https://newspulse.co.in',
-    'https://admin.newspulse.co.in',
-    // Known Vercel deployments (prod)
-    'https://newspulse-admin-panel-real.vercel.app',
-    'https://newspulse-frontend-main.vercel.app',
-  ];
-
-  // Env can extend/override without breaking the required defaults.
-  const merged = [...defaults, ...fromEnv];
-  return Array.from(new Set(merged.map(s => String(s))));
-})();
+const allowedOrigins = buildAllowedCorsOrigins(process.env);
 
 const corsOptions = {
   origin(origin, callback) {
@@ -659,8 +652,7 @@ const _PUBLIC_ADS_CORS_ORIGINS = new Set([
   'https://www.newspulse.co.in',
   'https://newspulse.co.in',
   'https://admin.newspulse.co.in',
-  'http://localhost:5173',
-  'http://localhost:3000',
+  ...(_corsIsDev ? ['http://localhost:5173', 'http://localhost:3000'] : []),
 ]);
 
 // Public Broadcast Center CORS
@@ -669,8 +661,7 @@ const _PUBLIC_BROADCAST_CORS_ORIGINS = new Set([
   'https://www.newspulse.co.in',
   'https://newspulse.co.in',
   'https://admin.newspulse.co.in',
-  'http://localhost:5173',
-  'http://localhost:3000',
+  ...(_corsIsDev ? ['http://localhost:5173', 'http://localhost:3000'] : []),
 ]);
 
 const _publicAdsCorsOptions = {
@@ -1086,6 +1077,32 @@ function _mongoDbNameFromUri(uri) {
 function _resolvedMongoDbName() {
   return MONGO_DB_NAME || _mongoDbNameFromUri(MONGO_URI) || null;
 }
+
+function _logLocalStartupSummary() {
+  try {
+    if (require.main !== module) return;
+    if (!_isLocalDevelopmentLikeEnv(process.env)) return;
+
+    const dbSafety = validateLocalDatabaseIsolation(process.env);
+    const localOrigins = allowedOrigins.filter((origin) => _isLocalCorsOrigin(origin));
+    const frontendOrigins = localOrigins.filter((origin) => /:(3000)(?:$|\/)/.test(origin));
+    const adminOrigins = localOrigins.filter((origin) => /:(5173)(?:$|\/)/.test(origin));
+
+    // eslint-disable-next-line no-console
+    console.log('[startup][summary]', {
+      service: 'News Pulse Backend',
+      environment: process.env.NODE_ENV || 'development',
+      appEnv: process.env.APP_ENV || null,
+      database: dbSafety.databaseName || _getConfiguredMongoDbNameFromEnv(process.env) || 'not configured',
+      frontendOrigins,
+      adminOrigins,
+      otpDelivery: 'development/stub',
+      productionServices: 'disabled for local testing',
+    });
+  } catch (_) {}
+}
+
+_logLocalStartupSummary();
 
 // Dev-only debug endpoint to confirm environment and DB selection.
 // Returns { env, dbName } and is intentionally NOT available in production.

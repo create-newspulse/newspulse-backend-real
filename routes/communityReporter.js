@@ -19,11 +19,15 @@ const {
   normalizeDeskValue,
   normalizeWorkflowStatus,
 } = require('../services/communitySubmissionWorkflow');
+const {
+  buildAgeGroupValidationResponse,
+  normalizeAgeGroup,
+} = require('../services/communitySubmissionAgeGroup');
 const { getEffectiveCommunityAccessState } = require('../services/communityAccessToggleService');
 // NOTE: Phase-1 /submit handler is implemented inline below for clarity and
 // to keep it fully aligned with the public form payload.
 const { requireAdminAuth } = require('../middleware/adminAuth');
-const { requireReporterPortalAuth } = require('../middleware/reporterPortalAuth');
+const { optionalReporterPortalAuth, requireReporterPortalAuth } = require('../middleware/reporterPortalAuth');
 
 const router = express.Router();
 
@@ -39,19 +43,6 @@ function logReporterContactPipeline(payload) {
     console.log('[reporter-contact-pipeline]', payload);
   } catch (_) {}
 }
-const REPORTER_EMAIL_LOOKUP_FIELDS = [
-  'reporterEmailNorm',
-  'reporterEmail',
-  'email',
-  'submittedByEmail',
-  'contactEmail',
-  'authorEmail',
-  'contact.email',
-  'reporter.email',
-  'reporterProfile.email',
-  'contributor.email',
-];
-
 async function requireCommunityReporterOpen(req, res, next) {
   try {
     const state = await getEffectiveCommunityAccessState();
@@ -85,24 +76,34 @@ async function requireReporterPortalOpen(req, res, next) {
 }
 
 function buildReporterPortalOwnershipFilter(reporter) {
-  const email = String(reporter && reporter.email || '').trim().toLowerCase();
   const clauses = [];
-  const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (reporter && reporter.reporterId && mongoose.isValidObjectId(String(reporter.reporterId))) {
-    clauses.push({ reporterId: reporter.reporterId });
-  }
-  if (email) {
-    const caseInsensitive = new RegExp(`^${escapeRegex(email)}$`, 'i');
-    for (const field of REPORTER_EMAIL_LOOKUP_FIELDS) {
-      clauses.push({ [field]: email });
-      if (field !== 'reporterEmailNorm') {
-        clauses.push({ [field]: caseInsensitive });
-      }
-    }
+    const reporterAccountId = String(reporter.reporterId);
+    clauses.push({ reporterAccountId });
+    clauses.push({ reporterId: reporterAccountId });
   }
   return {
     isDeleted: { $ne: true },
-    ...(clauses.length ? { $or: clauses } : {}),
+    ...(clauses.length ? { $or: clauses } : { _id: null }),
+  };
+}
+
+function getAuthenticatedReporterOwner(req, fallbackReporterId) {
+  const reporterAccountId = req?.reporterPortal?.reporterId && mongoose.isValidObjectId(String(req.reporterPortal.reporterId))
+    ? String(req.reporterPortal.reporterId)
+    : null;
+  if (reporterAccountId) {
+    return {
+      reporterAccountId,
+      reporterId: reporterAccountId,
+      authenticated: true,
+    };
+  }
+
+  return {
+    reporterAccountId: undefined,
+    reporterId: fallbackReporterId || undefined,
+    authenticated: false,
   };
 }
 
@@ -279,8 +280,8 @@ function externalStatus(internal) {
   }
 }
 
-// POST /api/community-reporter/submissions (public, no auth)
-router.post('/submissions', requireCommunityReporterOpen, async (req, res) => {
+// POST /api/community-reporter/submissions (public; authenticated reporter ownership is optional)
+router.post('/submissions', requireCommunityReporterOpen, optionalReporterPortalAuth, async (req, res) => {
   try {
     const body = req.body || {};
     const deskMeta = inferSubmissionDeskMetadata(body);
@@ -298,6 +299,7 @@ router.post('/submissions', requireCommunityReporterOpen, async (req, res) => {
       country,
       contactEmail,
       contactPhone,
+      ageGroup,
       title,
       content,
       track,
@@ -333,6 +335,10 @@ router.post('/submissions', requireCommunityReporterOpen, async (req, res) => {
         message: 'Validation failed',
         errors: [`category must be one of: ${COMMUNITY_REPORTER_CATEGORIES.join(', ')}`],
       });
+    }
+    const normalizedAgeGroup = ageGroup ? normalizeAgeGroup(ageGroup) : undefined;
+    if (ageGroup && !normalizedAgeGroup) {
+      return res.status(400).json(buildAgeGroupValidationResponse());
     }
 
     // Parse location string ("City, State, Country") when frontend sends a single text field.
@@ -386,6 +392,7 @@ router.post('/submissions', requireCommunityReporterOpen, async (req, res) => {
     const normalizedStory = (story || content || '').trim();
     // Log reporter email used for saving
     console.log('[COMMUNITY_REPORTER][create] saving submission for reporterEmail:', (email || '').trim().toLowerCase());
+    const owner = getAuthenticatedReporterOwner(req, reporterResult ? reporterResult.contactId : undefined);
     const submission = await CommunitySubmission.create({
       // Required duplicates for model
       reporterName: (fullName || name || '').trim(),
@@ -400,6 +407,8 @@ router.post('/submissions', requireCommunityReporterOpen, async (req, res) => {
       track: deskMeta.track || undefined,
       headline: normalizedHeadline,
       body: normalizedStory,
+      ageGroup: normalizedAgeGroup || undefined,
+      reporterAgeGroup: normalizedAgeGroup || undefined,
       // Normalized location object expected by schema
       location: { city: cityNorm || null, state: stateNorm || null, country: countryNorm || null },
       reporterLocation: cityNorm || undefined,
@@ -416,7 +425,8 @@ router.post('/submissions', requireCommunityReporterOpen, async (req, res) => {
       mediaLink: (attachments[0] && attachments[0].url) || undefined,
       // Defaults
       status: deskMeta.isYouthPulse ? 'NEW' : 'PENDING_FOUNDER',
-      reporterId: reporterResult ? reporterResult.contactId : undefined,
+      reporterId: owner.reporterId,
+      reporterAccountId: owner.reporterAccountId,
       sourceType: reporterResult ? (reporterResult.contact.reporterType === 'journalist' ? 'journalist' : 'community') : (isProfessionalJournalist ? 'journalist' : 'community'),
       reporterVerificationLevel: (function () {
         if (!reporterResult || !reporterResult.contact || !reporterResult.contact.verificationLevel) return 'unverified';
@@ -540,7 +550,7 @@ router.get('/reporter-stories', requireReporterPortalOpen, requireReporterPortal
 
 // Phase 1 endpoints (public): submit + list by email
 // POST /api/community-reporter/submit
-router.post('/submit', requireCommunityReporterOpen, async (req, res) => {
+router.post('/submit', requireCommunityReporterOpen, optionalReporterPortalAuth, async (req, res) => {
   try {
     const body = req.body || {};
     const deskMeta = inferSubmissionDeskMetadata(body);
@@ -554,9 +564,13 @@ router.post('/submit', requireCommunityReporterOpen, async (req, res) => {
     const emailNorm = String(email).trim().toLowerCase();
     const headlineNorm = String(headline || title).trim();
     const storyNorm = String(story || content).trim();
-    const ageGroupNorm = String(ageGroup).trim();
+    const ageGroupNorm = normalizeAgeGroup(ageGroup);
     const normalizedCategory = normalizeCommunityReporterCategory(body.category || body.track || null);
     const attachments = extractSubmissionAttachments(body);
+
+    if (!ageGroupNorm) {
+      return res.status(400).json(buildAgeGroupValidationResponse());
+    }
 
     if (!normalizedCategory) {
       return res.status(400).json({
@@ -622,6 +636,7 @@ router.post('/submit', requireCommunityReporterOpen, async (req, res) => {
       console.error('ReporterContact upsert error:', err?.message || err);
     }
 
+    const owner = getAuthenticatedReporterOwner(req, reporterResult ? reporterResult.contactId : undefined);
     const submission = await CommunitySubmission.create({
       name: nameNorm,
       email: emailNorm,
@@ -644,7 +659,8 @@ router.post('/submit', requireCommunityReporterOpen, async (req, res) => {
       status: deskMeta.isYouthPulse ? 'NEW' : 'NEW',
       sourceType: 'community',
       reporterVerificationLevel: 'unverified',
-      reporterId: reporterResult ? reporterResult.contactId : undefined,
+      reporterId: owner.reporterId,
+      reporterAccountId: owner.reporterAccountId,
       phone: (body.phone || body.phoneNumber || body.mobile || body.mobileNumber || body.contactNumber || '').trim() || undefined,
       phoneNumber: (body.phone || body.phoneNumber || body.mobile || body.mobileNumber || body.contactNumber || '').trim() || undefined,
       mobile: (body.mobile || body.mobileNumber || '').trim() || undefined,

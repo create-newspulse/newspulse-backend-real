@@ -146,6 +146,8 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   },
   // Link to normalized reporter contact directory entry (new Verified Journalist system)
   reporterId: { type: mongoose.Schema.Types.ObjectId, ref: 'ReporterContact', index: true },
+  // Authenticated Reporter Portal account owner. This is server-derived only.
+  reporterAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'ReporterContact', default: null, index: true },
   // Snapshot of reporter source type at submission time
   sourceType: { type: String, enum: ['community', 'journalist'], default: 'community', index: true },
   // Snapshot of reporter verification level at submission time
