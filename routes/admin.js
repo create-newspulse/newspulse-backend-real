@@ -49,6 +49,7 @@ const {
   getCommunityStats,
   getCommunityReporterAnalytics,
 } = communityReporterController;
+const { getAdminMediaKit } = require('../controllers/adminMediaKitController');
 
 // ─────────────────────────────────────────────
 // In-memory rate limiter for /login
@@ -625,6 +626,9 @@ router.get('/stats', (_req, res) => {
     },
   });
 });
+
+// GET /api/admin/media-kit
+router.get('/media-kit', getAdminMediaKit);
 
 // GET /api/admin/reporters
 router.get('/reporters', listReporters);
