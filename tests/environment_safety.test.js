@@ -31,6 +31,28 @@ test('development accepts explicitly local or test database names', () => {
   assert.equal(testResult.databaseName, 'newspulse_test');
 });
 
+test('development accepts the News Pulse local database name and blocks the live test database', () => {
+  const safeLocal = validateLocalDatabaseIsolation(makeEnv({ MONGODB_DBNAME: 'newspulse_dev' }));
+  const blockedLiveTest = validateLocalDatabaseIsolation(makeEnv({ MONGODB_DBNAME: 'test', MONGODB_URI: 'mongodb://127.0.0.1:27017/test' }));
+
+  assert.equal(safeLocal.ok, true);
+  assert.equal(safeLocal.databaseName, 'newspulse_dev');
+  assert.equal(blockedLiveTest.ok, false);
+  assert.match(blockedLiveTest.failures.join('\n'), /Local development cannot use the live News Pulse database `test`/);
+});
+
+test('production-style configuration using database name test is not rejected by the local-only guard', () => {
+  const result = validateLocalDatabaseIsolation({
+    NODE_ENV: 'production',
+    RENDER: 'true',
+    MONGODB_DBNAME: 'test',
+    MONGODB_URI: 'mongodb+srv://user:pass@example.mongodb.net/test?retryWrites=true',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, true);
+});
+
 test('development refuses production-looking database names and Render dependencies', () => {
   const prodDb = validateLocalDatabaseIsolation(makeEnv({ MONGODB_URI: 'mongodb+srv://user:pass@example.mongodb.net/newspulse?retryWrites=true' }));
   const renderBackend = validateLocalDatabaseIsolation(makeEnv({ BACKEND_BASE_URL: 'https://newspulse-backend.onrender.com' }));
