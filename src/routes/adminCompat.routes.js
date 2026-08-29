@@ -8,6 +8,7 @@ const { deleteCoverByPublicId } = require('../../lib/cloudinary');
 const { deleteMediaLibraryItem, uploadMediaLibraryFile } = require('../../lib/mediaLibraryStorage');
 const { assertAllowedAdminMediaMimeType } = require('../../lib/mediaUploadValidation');
 const { createIndexedMediaRecord, verifyIndexedMediaRecordVisible } = require('../../services/mediaLibraryService');
+const { isArticleAssistantEnabledForStaff } = require('../../services/articleAssistantAccess.service');
 
 const router = express.Router();
 
@@ -74,11 +75,28 @@ function pickUploadedFile(req) {
 // --------------------- AI SUGGEST ---------------------
 // Accept any body; return safe fallback so UI works immediately.
 // Later you can connect OpenAI/Gemini inside here.
-router.post('/assist/suggest', async (req, res) => {
+function isFounderAdmin(admin) {
+  const role = String(admin && admin.role ? admin.role : '').toLowerCase();
+  return role === 'founder' || Boolean(admin && admin.isFounder);
+}
+
+// Server-side enforcement of adminPanel.articleAssistantForStaff (Founder always allowed).
+async function requireArticleAssistantAccess(req, res, next) {
+  if (isFounderAdmin(req.admin)) return next();
+  try {
+    const enabled = await isArticleAssistantEnabledForStaff();
+    if (enabled) return next();
+  } catch (_e) {
+    // Fail closed only for staff; founders already returned above.
+  }
+  return bad(res, 403, 'Article Assistant is disabled for staff.', req.originalUrl, null, 'FORBIDDEN');
+}
+
+router.post('/assist/suggest', requireAdminAuth, requireArticleAssistantAccess, async (req, res) => {
   return ok(res, { suggestions: [], version: 'v1-fallback', input: req.body || {} }, 'Suggest OK');
 });
 
-router.post('/assist/suggest/v2', async (req, res) => {
+router.post('/assist/suggest/v2', requireAdminAuth, requireArticleAssistantAccess, async (req, res) => {
   return ok(res, { suggestions: [], version: 'v2-fallback', input: req.body || {} }, 'Suggest v2 OK');
 });
 
