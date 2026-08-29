@@ -5,6 +5,7 @@ const router = express.Router();
 const { requireAdminAuth, requireFounderAuth } = require('../middleware/adminAuth');
 const { requireOwnerKey } = require('../middleware/requireOwnerKey');
 const { settingsService } = require('../services/settingsService');
+const { getNewsPulseEngineHealth } = require('../services/newsPulseEngineHealthService');
 const mongoose = require('mongoose');
 let SystemSnapshot = null;
 try { SystemSnapshot = require('../models/SystemSnapshot'); } catch (_) {}
@@ -12,6 +13,18 @@ try { SystemSnapshot = require('../models/SystemSnapshot'); } catch (_) {}
 function isDbReady() {
   return mongoose.connection.readyState === 1;
 }
+
+// GET /api/admin/news-pulse-engine/health
+// Founder-only, on-demand, read-only diagnostics snapshot. No writes, no automatic fixes.
+router.get('/news-pulse-engine/health', requireFounderAuth, async (_req, res) => {
+  try {
+    const snapshot = await getNewsPulseEngineHealth();
+    return res.status(200).json(snapshot);
+  } catch (e) {
+    console.error('[NEWS_PULSE_ENGINE][health] failed', { message: e?.message || String(e) });
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal error' });
+  }
+});
 
 // GET /admin-api/admin/system/translation-status
 // Debug endpoint for admin panel: translation providers/config health.
