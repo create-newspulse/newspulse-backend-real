@@ -1296,6 +1296,13 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
       // optional
     }
 
+    try {
+      const NewsPulseIncident = require('./models/NewsPulseIncident');
+      await NewsPulseIncident.syncIndexes();
+    } catch (e) {
+      console.warn('[startup] NewsPulseIncident index sync failed', e?.message || e);
+    }
+
 		// Cleanup old Broadcast Center items (older than 24h)
 		try {
 			const { startBroadcastCleanupJob } = require('./services/broadcastCleanup');
@@ -1324,6 +1331,16 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
       startPublishTranslationWorker({ logger: console });
     } catch (e) {
       console.warn('[startup] Translation worker failed to start', e?.message || e);
+    }
+
+    try {
+      const { startNewsPulseEngineMonitoring } = require('./services/newsPulseEngineMonitoringService');
+      const started = startNewsPulseEngineMonitoring({ logger: console });
+      if (started && started.started) {
+        console.log('[NEWS_PULSE_ENGINE][monitoring] started', { intervalMs: started.intervalMs });
+      }
+    } catch (e) {
+      console.warn('[startup] News Pulse Engine monitoring failed to start', e?.message || e);
     }
   }
 

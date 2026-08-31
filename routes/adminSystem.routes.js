@@ -6,6 +6,7 @@ const { requireAdminAuth, requireFounderAuth } = require('../middleware/adminAut
 const { requireOwnerKey } = require('../middleware/requireOwnerKey');
 const { settingsService } = require('../services/settingsService');
 const { getNewsPulseEngineHealth } = require('../services/newsPulseEngineHealthService');
+const { getMonitoringStatus, listIncidents } = require('../services/newsPulseEngineMonitoringService');
 const mongoose = require('mongoose');
 let SystemSnapshot = null;
 try { SystemSnapshot = require('../models/SystemSnapshot'); } catch (_) {}
@@ -24,6 +25,27 @@ router.get('/news-pulse-engine/health', requireFounderAuth, async (_req, res) =>
     console.error('[NEWS_PULSE_ENGINE][health] failed', { message: e?.message || String(e) });
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal error' });
   }
+});
+
+// GET /api/admin/news-pulse-engine/incidents
+// Founder-only incident history for automatic monitoring. Read-only.
+router.get('/news-pulse-engine/incidents', requireFounderAuth, async (req, res) => {
+  try {
+    const result = await listIncidents({ status: req.query.status, limit: req.query.limit });
+    if (!result.ok) {
+      return res.status(result.status || 500).json({ ok: false, success: false, status: result.status || 500, message: result.message || 'Failed to load incidents' });
+    }
+    return res.status(200).json({ ok: true, success: true, status: 200, incidents: result.incidents });
+  } catch (e) {
+    console.error('[NEWS_PULSE_ENGINE][incidents] failed', { message: e?.message || String(e) });
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal error' });
+  }
+});
+
+// GET /api/admin/news-pulse-engine/monitoring/status
+// Founder-only status for the automatic monitoring loop. Read-only.
+router.get('/news-pulse-engine/monitoring/status', requireFounderAuth, (_req, res) => {
+  return res.status(200).json({ ok: true, success: true, status: 200, data: getMonitoringStatus() });
 });
 
 // GET /admin-api/admin/system/translation-status
