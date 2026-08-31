@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const NewsPulseIncident = require('../models/NewsPulseIncident');
 const SystemSetting = require('../models/SystemSetting');
 const { getNewsPulseEngineHealth } = require('./newsPulseEngineHealthService');
+const { listAlerts, safelyCreateFounderIncidentAlert } = require('./newsPulseEngineAlertService');
 const { isProductionLike, isTestLike } = require('../lib/environmentSafety');
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
@@ -91,11 +92,11 @@ async function findOpenIncident(checkId) {
 async function updateOpenIncident(checkId, patch) {
   const open = await findOpenIncident(checkId);
   if (!open) return null;
-  await NewsPulseIncident.findByIdAndUpdate(getId(open), {
+  const updated = await NewsPulseIncident.findByIdAndUpdate(getId(open), {
     $set: patch,
     $unset: { resolvedAt: 1, durationMs: 1, expiresAt: 1 },
   }, { new: true });
-  return open;
+  return updated || { ...open, ...patch };
 }
 
 async function updateLatestState(snapshot, now) {
@@ -124,22 +125,28 @@ async function updateLatestState(snapshot, now) {
   return value;
 }
 
-async function processCheck(check, now) {
+async function maybeCreateAlert(type, incident, options = {}) {
+  return safelyCreateFounderIncidentAlert(type, incident, options);
+}
+
+async function processCheck(check, now, options = {}) {
   if (!check || !check.id) return { action: 'skipped' };
 
   const open = await findOpenIncident(check.id);
   if (isIncidentEligible(check)) {
     const patch = incidentPatchFromCheck(check, now);
     if (open) {
-      await NewsPulseIncident.findByIdAndUpdate(getId(open), {
+      const updated = await NewsPulseIncident.findByIdAndUpdate(getId(open), {
         $set: patch,
         $unset: { resolvedAt: 1, durationMs: 1, expiresAt: 1 },
       }, { new: true });
-      return { action: 'updated', checkId: check.id };
+      const incident = updated || { ...open, ...patch };
+      const alert = patch.status === 'critical' ? await maybeCreateAlert('critical', incident, options) : null;
+      return { action: 'updated', checkId: check.id, ...(alert ? { alert } : {}) };
     }
 
     try {
-      await NewsPulseIncident.create({
+      const incident = await NewsPulseIncident.create({
         checkId: check.id,
         ...patch,
         startedAt: now,
@@ -148,19 +155,21 @@ async function processCheck(check, now) {
         durationMs: null,
         expiresAt: null,
       });
-      return { action: 'opened', checkId: check.id };
+      const alert = patch.status === 'critical' ? await maybeCreateAlert('critical', incident, options) : null;
+      return { action: 'opened', checkId: check.id, ...(alert ? { alert } : {}) };
     } catch (error) {
       if (!isDuplicateKeyError(error)) throw error;
       const updated = await updateOpenIncident(check.id, patch);
       if (!updated) throw error;
-      return { action: 'updated', checkId: check.id, reason: 'duplicate_open_race' };
+      const alert = patch.status === 'critical' ? await maybeCreateAlert('critical', updated, options) : null;
+      return { action: 'updated', checkId: check.id, reason: 'duplicate_open_race', ...(alert ? { alert } : {}) };
     }
   }
 
   if (open && shouldResolveOpenIncident(check)) {
     const startedAt = open.startedAt ? new Date(open.startedAt) : now;
     const durationMs = Math.max(0, now.getTime() - startedAt.getTime());
-    await NewsPulseIncident.findByIdAndUpdate(getId(open), {
+    const resolved = await NewsPulseIncident.findByIdAndUpdate(getId(open), {
       $set: {
         state: 'resolved',
         lastSeenAt: now,
@@ -169,7 +178,16 @@ async function processCheck(check, now) {
         expiresAt: addMs(now, RESOLVED_RETENTION_MS),
       },
     }, { new: true });
-    return { action: 'resolved', checkId: check.id };
+    const incident = resolved || {
+      ...open,
+      state: 'resolved',
+      lastSeenAt: now,
+      resolvedAt: now,
+      durationMs,
+      expiresAt: addMs(now, RESOLVED_RETENTION_MS),
+    };
+    const alert = await maybeCreateAlert('recovery', incident, options);
+    return { action: 'resolved', checkId: check.id, ...(alert ? { alert } : {}) };
   }
 
   return { action: 'ignored', checkId: check.id };
@@ -185,7 +203,7 @@ async function recordHealthSnapshot(snapshot, options = {}) {
   const processed = [];
   for (const check of checks) {
     try {
-      processed.push(await processCheck(check, now));
+      processed.push(await processCheck(check, now, options));
     } catch (error) {
       processed.push({ action: 'error', checkId: check && check.id, message: error?.message || String(error) });
     }
@@ -316,6 +334,7 @@ module.exports = {
   isKnownConfigurationOnlyCheck,
   isMonitoringEnabled,
   isDuplicateKeyError,
+  listAlerts,
   listIncidents,
   recordHealthSnapshot,
   runMonitoringOnce,

@@ -1303,6 +1303,13 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
       console.warn('[startup] NewsPulseIncident index sync failed', e?.message || e);
     }
 
+    try {
+      const NewsPulseAlert = require('./models/NewsPulseAlert');
+      await NewsPulseAlert.syncIndexes();
+    } catch (e) {
+      console.warn('[startup] NewsPulseAlert index sync failed', e?.message || e);
+    }
+
 		// Cleanup old Broadcast Center items (older than 24h)
 		try {
 			const { startBroadcastCleanupJob } = require('./services/broadcastCleanup');

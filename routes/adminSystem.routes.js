@@ -6,7 +6,7 @@ const { requireAdminAuth, requireFounderAuth } = require('../middleware/adminAut
 const { requireOwnerKey } = require('../middleware/requireOwnerKey');
 const { settingsService } = require('../services/settingsService');
 const { getNewsPulseEngineHealth } = require('../services/newsPulseEngineHealthService');
-const { getMonitoringStatus, listIncidents } = require('../services/newsPulseEngineMonitoringService');
+const { getMonitoringStatus, listAlerts, listIncidents } = require('../services/newsPulseEngineMonitoringService');
 const mongoose = require('mongoose');
 let SystemSnapshot = null;
 try { SystemSnapshot = require('../models/SystemSnapshot'); } catch (_) {}
@@ -38,6 +38,21 @@ router.get('/news-pulse-engine/incidents', requireFounderAuth, async (req, res) 
     return res.status(200).json({ ok: true, success: true, status: 200, incidents: result.incidents });
   } catch (e) {
     console.error('[NEWS_PULSE_ENGINE][incidents] failed', { message: e?.message || String(e) });
+    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal error' });
+  }
+});
+
+// GET /api/admin/news-pulse-engine/alerts
+// Founder-only critical/recovery alert history for automatic monitoring. Read-only.
+router.get('/news-pulse-engine/alerts', requireFounderAuth, async (req, res) => {
+  try {
+    const result = await listAlerts({ type: req.query.type, limit: req.query.limit });
+    if (!result.ok) {
+      return res.status(result.status || 500).json({ ok: false, success: false, status: result.status || 500, message: result.message || 'Failed to load alerts' });
+    }
+    return res.status(200).json({ ok: true, success: true, status: 200, alerts: result.alerts });
+  } catch (e) {
+    console.error('[NEWS_PULSE_ENGINE][alerts] failed', { message: e?.message || String(e) });
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal error' });
   }
 });
