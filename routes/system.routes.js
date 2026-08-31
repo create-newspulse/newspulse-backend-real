@@ -71,11 +71,6 @@ router.get('/ai-health', (_req, res) => {
   });
 });
 
-// POST /api/assist/suggest/v2 → stub suggestions
-router.post('/assist/suggest/v2', (req, res) => {
-  return res.json({ ok: true, success: true, suggestions: [] });
-});
-
 // GET /monitor-hub → will be mounted under /api/system and /system
 router.get('/monitor-hub', (req, res) => {
   return res.json({

@@ -6,7 +6,6 @@ const { requireAdminAuth } = require('../middleware/adminAuth');
 const { requireAuth, requireFounder } = require('../middleware/requireAuth');
 const SystemSetting = require('../models/SystemSetting');
 const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.service');
-const { ADMIN_SETTINGS_KEY: ARTICLE_ASSISTANT_SETTINGS_KEY } = require('../services/articleAssistantAccess.service');
 
 const router = express.Router();
 
@@ -27,23 +26,9 @@ function requireFounderOrPermission(perm) {
 
 const AnyObjectSchema = z.record(z.any());
 
-// Keep in sync with services/articleAssistantAccess.service.js (single source of truth).
-const ADMIN_SETTINGS_KEY = ARTICLE_ASSISTANT_SETTINGS_KEY;
+const ADMIN_SETTINGS_KEY = 'settings_center_admin';
 const PUBLIC_SETTINGS_KEY = 'settings_center_public';
-
-// Only the Founder may change this specific Admin Panel property.
-const FOUNDER_ONLY_ADMIN_PANEL_FIELDS = new Set(['articleAssistantForStaff']);
-
-function isFounderAdmin(admin) {
-  const role = String(admin && admin.role ? admin.role : '').toLowerCase();
-  return role === 'founder' || Boolean(admin && admin.isFounder);
-}
-
-function requestChangesFounderOnlyAdminPanelField(body) {
-  const adminPanel = body && isPlainObject(body.adminPanel) ? body.adminPanel : null;
-  if (!adminPanel) return false;
-  return Object.keys(adminPanel).some((key) => FOUNDER_ONLY_ADMIN_PANEL_FIELDS.has(key));
-}
+const REMOVED_ADMIN_PANEL_FIELDS = new Set(['articleAssistantForStaff']);
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -70,8 +55,7 @@ function defaultAdminSettings() {
 }
 
 function defaultAdminPanelPayload() {
-  // Missing articleAssistantForStaff must behave as enabled (backward compatible).
-  return { articleAssistantForStaff: true };
+  return {};
 }
 
 function isPlainObject(v) {
@@ -93,6 +77,32 @@ function deepMerge(...objs) {
         out[k] = v;
       }
     }
+  }
+  return out;
+}
+
+function omitRemovedAdminPanelFields(value) {
+  if (!isPlainObject(value)) return value;
+
+  const out = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === 'adminPanel' && isPlainObject(entry)) {
+      out[key] = omitRemovedKeysDeep(entry, REMOVED_ADMIN_PANEL_FIELDS);
+    } else {
+      out[key] = entry;
+    }
+  }
+  return out;
+}
+
+function omitRemovedKeysDeep(value, removedKeys) {
+  if (Array.isArray(value)) return value.map((entry) => omitRemovedKeysDeep(entry, removedKeys));
+  if (!isPlainObject(value)) return value;
+
+  const out = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (removedKeys.has(key)) continue;
+    out[key] = omitRemovedKeysDeep(entry, removedKeys);
   }
   return out;
 }
@@ -195,8 +205,7 @@ router.get('/settings', requireAdminAuth, async (_req, res, next) => {
     }
 
     const { value, updatedAt } = await readSetting(ADMIN_SETTINGS_KEY, fallback);
-    const data = isPlainObject(value) ? { ...value } : { ...fallback };
-    // Ensure articleAssistantForStaff defaults to true when not yet persisted.
+    const data = omitRemovedAdminPanelFields(isPlainObject(value) ? { ...value } : { ...fallback });
     data.adminPanel = deepMerge(defaultAdminPanelPayload(), isPlainObject(data.adminPanel) ? data.adminPanel : {});
     return res.status(200).json({
       ok: true,
@@ -241,7 +250,9 @@ router.get('/settings/admin-panel/preview', requireAuth, requireFounderOrPermiss
     const fallback = defaultAdminSettings();
     const { value, updatedAt } = await readSetting(ADMIN_SETTINGS_KEY, fallback);
 
-    const { draft, published } = extractAdminPanelDraftPublished(value);
+    const { draft: rawDraft, published: rawPublished } = extractAdminPanelDraftPublished(value);
+    const draft = omitRemovedAdminPanelFields({ adminPanel: rawDraft }).adminPanel;
+    const published = omitRemovedAdminPanelFields({ adminPanel: rawPublished }).adminPanel;
     const effective = deepMerge(defaultAdminPanelPayload(), published, draft);
 
     const payload = stateRaw === 'draft' ? draft : (stateRaw === 'published' ? published : effective);
@@ -325,21 +336,11 @@ router.put('/settings', requireAdminAuth, async (req, res, next) => {
       return res.status(400).json({ ok: false, success: false, message: 'Invalid settings payload' });
     }
 
-    // Founder-only property: reject the whole request rather than silently dropping the field.
-    if (requestChangesFounderOnlyAdminPanelField(parsed.data) && !isFounderAdmin(req.admin)) {
-      return res.status(403).json({
-        ok: false,
-        success: false,
-        status: 403,
-        code: 'FORBIDDEN',
-        message: 'Only the Founder can change Article Assistant access for staff.',
-      });
-    }
-
     // Safe merge: never let a partial payload erase unrelated existing adminPanel settings.
     const fallback = defaultAdminSettings();
     const { value: existingValue } = await readSetting(ADMIN_SETTINGS_KEY, fallback);
-    const merged = deepMerge(isPlainObject(existingValue) ? existingValue : fallback, parsed.data);
+    const sanitizedInput = omitRemovedAdminPanelFields(parsed.data);
+    const merged = deepMerge(isPlainObject(existingValue) ? existingValue : fallback, sanitizedInput);
 
     const result = await writeSetting(ADMIN_SETTINGS_KEY, merged, req.admin);
     if (!result.ok) {
