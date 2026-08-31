@@ -9,6 +9,8 @@ process.env.NODE_ENV = 'test';
 const app = require('../server');
 const News = require('../models/News');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const ArticleAnalyticsEvent = require('../models/ArticleAnalyticsEvent');
+const ArticleAnalyticsSummary = require('../models/ArticleAnalyticsSummary');
 const firebaseAdminLib = require('../lib/firebaseAdmin');
 const User = require('../models/User');
 
@@ -83,6 +85,24 @@ function stubAnalyticsHashSalt(t, value) {
   else process.env.ANALYTICS_HASH_SALT = value;
 }
 
+function stubFirstPartyAnalyticsActivity(t, { latestEventAt = null, latestSummaryAt = null, fail = false } = {}) {
+  const prevEventFindOne = ArticleAnalyticsEvent.findOne;
+  const prevSummaryFindOne = ArticleAnalyticsSummary.findOne;
+  t.after(() => {
+    ArticleAnalyticsEvent.findOne = prevEventFindOne;
+    ArticleAnalyticsSummary.findOne = prevSummaryFindOne;
+  });
+
+  if (fail) {
+    ArticleAnalyticsEvent.findOne = () => { throw new Error('analytics lookup failed'); };
+    ArticleAnalyticsSummary.findOne = () => { throw new Error('analytics lookup failed'); };
+    return;
+  }
+
+  ArticleAnalyticsEvent.findOne = () => chainResult(latestEventAt ? { createdAt: latestEventAt } : null);
+  ArticleAnalyticsSummary.findOne = () => chainResult(latestSummaryAt ? { updatedAt: latestSummaryAt } : null);
+}
+
 function fakeResponse(status) {
   return { status, ok: status >= 200 && status < 300 };
 }
@@ -101,10 +121,11 @@ function stubFetch(t, { homepageStatus = 200, robotsStatus = 200, sitemapStatus 
   };
 }
 
-function defaultStubs(t) {
+function defaultStubs(t, analytics = {}) {
   stubPublishing(t, new Date('2026-01-01T00:00:00.000Z'));
   stubCommunitySubmission(t, { _id: 'sub-1' });
   stubFirebaseStatus(t, { configured: true, status: 'configured', projectId: 'np-project', credentialSource: 'env_service_account', messagingAvailable: true, error: null });
+  stubFirstPartyAnalyticsActivity(t, analytics);
   stubFetch(t, {});
 }
 
@@ -313,13 +334,15 @@ test('SEO robots/sitemap failure remains attention even when public website is c
   assert.equal(res.body.overallStatus, 'critical');
 });
 
-test('Analytics does not become healthy merely because ANALYTICS_ENABLED defaults to true', async (t) => {
+test('Analytics enabled with no recent first-party activity reports attention', async (t) => {
   stubDbReady(t);
   stubAdminUser(t, 'founder');
   stubPublishing(t, new Date('2026-01-01T00:00:00.000Z'));
   stubCommunitySubmission(t, { _id: 'sub-1' });
   stubFirebaseStatus(t, { configured: true, status: 'configured' });
+  stubFirstPartyAnalyticsActivity(t, {});
   stubFetch(t, {});
+  stubAnalyticsEnabled(t, true);
   stubAnalyticsHashSalt(t, undefined);
 
   const res = await request(app)
@@ -328,9 +351,12 @@ test('Analytics does not become healthy merely because ANALYTICS_ENABLED default
 
   const analyticsCheck = res.body.checks.find((c) => c.id === 'analytics');
   assert.equal(analyticsCheck.status, 'attention');
+  assert.equal(analyticsCheck.message, 'News Pulse analytics is enabled, but recent activity could not be confirmed.');
+  assert.equal(analyticsCheck.recommendation, 'Verify that consented production article traffic is reaching News Pulse analytics.');
+  assert.equal(analyticsCheck.recommendation.includes('approved analytics provider'), false);
 });
 
-test('Analytics explicitly disabled reports attention, not critical', async (t) => {
+test('Analytics disabled reports attention with first-party recommendation, not critical', async (t) => {
   stubDbReady(t);
   stubAdminUser(t, 'founder');
   stubPublishing(t, new Date('2026-01-01T00:00:00.000Z'));
@@ -345,15 +371,105 @@ test('Analytics explicitly disabled reports attention, not critical', async (t) 
 
   const analyticsCheck = res.body.checks.find((c) => c.id === 'analytics');
   assert.equal(analyticsCheck.status, 'attention');
+  assert.equal(analyticsCheck.message, 'News Pulse analytics collection is disabled.');
+  assert.equal(analyticsCheck.recommendation, 'Enable News Pulse analytics collection if first-party traffic reporting is appropriate.');
+  assert.equal(analyticsCheck.recommendation.includes('GA4'), false);
+  assert.equal(analyticsCheck.recommendation.includes('approved analytics provider'), false);
   assert.notEqual(analyticsCheck.status, 'critical');
 });
 
-test('Analytics with only ANALYTICS_HASH_SALT set still reports attention, not healthy', async (t) => {
+test('Analytics enabled with recent first-party event reports healthy', async (t) => {
+  stubDbReady(t);
+  stubAdminUser(t, 'founder');
+  defaultStubs(t, { latestEventAt: new Date(Date.now() - 60 * 1000) });
+  stubAnalyticsEnabled(t, true);
+
+  const res = await request(app)
+    .get(HEALTH_PATH)
+    .set('Authorization', `Bearer ${signAdminToken('founder')}`);
+
+  const analyticsCheck = res.body.checks.find((c) => c.id === 'analytics');
+  assert.equal(analyticsCheck.status, 'healthy');
+  assert.equal(analyticsCheck.message, 'News Pulse analytics collection is active.');
+  assert.equal(analyticsCheck.recommendation, null);
+  assert.match(analyticsCheck.technicalDetail, /latestActivityAt=/);
+  assert.equal(res.body.overallStatus, 'healthy');
+});
+
+test('Analytics enabled with recent first-party summary reports healthy', async (t) => {
+  stubDbReady(t);
+  stubAdminUser(t, 'founder');
+  defaultStubs(t, { latestSummaryAt: new Date(Date.now() - 5 * 60 * 1000) });
+  stubAnalyticsEnabled(t, true);
+
+  const res = await request(app)
+    .get(HEALTH_PATH)
+    .set('Authorization', `Bearer ${signAdminToken('founder')}`);
+
+  const analyticsCheck = res.body.checks.find((c) => c.id === 'analytics');
+  assert.equal(analyticsCheck.status, 'healthy');
+  assert.equal(analyticsCheck.message, 'News Pulse analytics collection is active.');
+  assert.equal(res.body.overallStatus, 'healthy');
+});
+
+test('Analytics health uses newest event or summary timestamp', async (t) => {
+  const staleSummary = new Date(Date.now() - 26 * 60 * 60 * 1000);
+  const recentEvent = new Date(Date.now() - 2 * 60 * 1000);
+  stubDbReady(t);
+  stubAdminUser(t, 'founder');
+  defaultStubs(t, { latestEventAt: recentEvent, latestSummaryAt: staleSummary });
+  stubAnalyticsEnabled(t, true);
+
+  const res = await request(app)
+    .get(HEALTH_PATH)
+    .set('Authorization', `Bearer ${signAdminToken('founder')}`);
+
+  const analyticsCheck = res.body.checks.find((c) => c.id === 'analytics');
+  assert.equal(analyticsCheck.status, 'healthy');
+  assert.ok(analyticsCheck.technicalDetail.includes(recentEvent.toISOString()));
+});
+
+test('Analytics enabled with stale first-party activity reports attention, not critical', async (t) => {
+  stubDbReady(t);
+  stubAdminUser(t, 'founder');
+  defaultStubs(t, { latestEventAt: new Date(Date.now() - 25 * 60 * 60 * 1000) });
+  stubAnalyticsEnabled(t, true);
+
+  const res = await request(app)
+    .get(HEALTH_PATH)
+    .set('Authorization', `Bearer ${signAdminToken('founder')}`);
+
+  const analyticsCheck = res.body.checks.find((c) => c.id === 'analytics');
+  assert.equal(analyticsCheck.status, 'attention');
+  assert.equal(analyticsCheck.message, 'News Pulse analytics is enabled, but recent activity could not be confirmed.');
+  assert.notEqual(analyticsCheck.status, 'critical');
+  assert.equal(res.body.overallStatus, 'attention');
+});
+
+test('Analytics lookup failure reports attention, not critical', async (t) => {
+  stubDbReady(t);
+  stubAdminUser(t, 'founder');
+  defaultStubs(t, { fail: true });
+  stubAnalyticsEnabled(t, true);
+
+  const res = await request(app)
+    .get(HEALTH_PATH)
+    .set('Authorization', `Bearer ${signAdminToken('founder')}`);
+
+  const analyticsCheck = res.body.checks.find((c) => c.id === 'analytics');
+  assert.equal(analyticsCheck.status, 'attention');
+  assert.equal(analyticsCheck.message, 'News Pulse analytics health could not be confirmed.');
+  assert.notEqual(analyticsCheck.status, 'critical');
+  assert.equal(res.body.overallStatus, 'attention');
+});
+
+test('Analytics with only ANALYTICS_HASH_SALT set still reports attention without recent activity', async (t) => {
   stubDbReady(t);
   stubAdminUser(t, 'founder');
   stubPublishing(t, new Date('2026-01-01T00:00:00.000Z'));
   stubCommunitySubmission(t, { _id: 'sub-1' });
   stubFirebaseStatus(t, { configured: true, status: 'configured' });
+  stubFirstPartyAnalyticsActivity(t, {});
   stubFetch(t, {});
   stubAnalyticsHashSalt(t, 'real-configured-salt');
 
@@ -488,7 +604,7 @@ test('Overall status is attention when only non-core checks need review', async 
   assert.equal(res.body.overallStatus, 'attention');
 });
 
-test('Overall status is attention when analytics cannot be confirmed, even though all other checks are healthy', async (t) => {
+test('Overall status is attention, not critical, when only analytics lacks recent activity', async (t) => {
   stubDbReady(t);
   stubAdminUser(t, 'founder');
   defaultStubs(t);
@@ -497,9 +613,8 @@ test('Overall status is attention when analytics cannot be confirmed, even thoug
     .get(HEALTH_PATH)
     .set('Authorization', `Bearer ${signAdminToken('founder')}`);
 
-  // Analytics has no authoritative provider signal today, so it stays "attention" and
-  // correctly keeps overallStatus from falsely reporting "healthy".
   const analyticsCheck = res.body.checks.find((c) => c.id === 'analytics');
   assert.equal(analyticsCheck.status, 'attention');
+  assert.notEqual(analyticsCheck.status, 'critical');
   assert.equal(res.body.overallStatus, 'attention');
 });

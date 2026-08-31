@@ -450,7 +450,7 @@ test('configuration-only states and non-critical attention do not create founder
   const store = installIncidentStore(t);
 
   const checks = [
-    check('analytics', 'attention', { message: 'Analytics integration is not configured or could not be confirmed.' }),
+    check('analytics', 'attention', { message: 'News Pulse analytics is enabled, but recent activity could not be confirmed.' }),
     check('admin-panel', 'unknown', { message: 'Admin Panel external availability is not configured for backend diagnostics.' }),
     check('seo', 'attention', { area: 'SEO', message: 'Sitemap could not be confirmed.' }),
   ];
@@ -568,12 +568,12 @@ test('founder alert delivery failure is recorded safely without stopping monitor
   assert.equal(store.alerts.length, 1);
 });
 
-test('monitoring skips known configuration-only analytics and admin panel states', async (t) => {
+test('monitoring skips known first-party analytics attention and admin panel states', async (t) => {
   stubDbReady(t);
   const store = installIncidentStore(t);
 
   const checks = [
-    check('analytics', 'attention', { message: 'Analytics integration is not configured or could not be confirmed.' }),
+    check('analytics', 'attention', { message: 'News Pulse analytics is enabled, but recent activity could not be confirmed.' }),
     check('admin-panel', 'unknown', { message: 'Admin Panel external availability is not configured for backend diagnostics.' }),
   ];
   await monitoring.recordHealthSnapshot(snapshot(checks), { now: new Date('2026-08-31T01:00:00.000Z') });

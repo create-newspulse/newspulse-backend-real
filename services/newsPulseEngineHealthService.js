@@ -4,11 +4,14 @@ const mongoose = require('mongoose');
 
 const News = require('../models/News');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const ArticleAnalyticsEvent = require('../models/ArticleAnalyticsEvent');
+const ArticleAnalyticsSummary = require('../models/ArticleAnalyticsSummary');
 const firebaseAdminLib = require('../lib/firebaseAdmin');
 const { resolveSiteUrl } = require('./seoAuditService');
 
 const HOMEPAGE_TIMEOUT_MS = 4000;
 const SEO_FILE_TIMEOUT_MS = 3000;
+const ANALYTICS_RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // Core systems drive overallStatus escalation to "critical"; optional integrations do not.
 const CORE_CHECK_IDS = new Set(['backend-api', 'database', 'public-website']);
@@ -226,13 +229,30 @@ async function checkPush() {
   });
 }
 
-// ANALYTICS_ENABLED defaults to true in code, so it alone is not reliable evidence of a
-// real configured integration. ANALYTICS_HASH_SALT is only a privacy/hashing setting for
-// the backend's own first-party analytics — it is not proof a provider is connected.
-// This backend currently has no authoritative signal for third-party analytics provider
-// connectivity, so this check can report "healthy" only once such a signal exists.
 function isAnalyticsExplicitlyDisabled() {
   return String(process.env.ANALYTICS_ENABLED || '').trim().toLowerCase() === 'false';
+}
+
+function toValidDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function newestDate(...values) {
+  return values
+    .map(toValidDate)
+    .filter(Boolean)
+    .sort((a, b) => b.getTime() - a.getTime())[0] || null;
+}
+
+async function getLatestFirstPartyAnalyticsActivityAt() {
+  const [latestSummary, latestEvent] = await Promise.all([
+    ArticleAnalyticsSummary.findOne({}).sort({ updatedAt: -1 }).select('updatedAt').lean(),
+    ArticleAnalyticsEvent.findOne({}).sort({ createdAt: -1 }).select('createdAt').lean(),
+  ]);
+
+  return newestDate(latestSummary?.updatedAt, latestEvent?.createdAt);
 }
 
 async function checkAnalytics() {
@@ -242,19 +262,54 @@ async function checkAnalytics() {
     return makeCheck({
       id: 'analytics',
       status: 'attention',
-      message: 'Analytics collection is disabled.',
-      recommendation: 'Connect an approved analytics provider if traffic reporting is required.',
+      message: 'News Pulse analytics collection is disabled.',
+      recommendation: 'Enable News Pulse analytics collection if first-party traffic reporting is appropriate.',
       latencyMs: Date.now() - startedAt,
     });
   }
 
-  return makeCheck({
-    id: 'analytics',
-    status: 'attention',
-    message: 'Analytics integration is not configured or could not be confirmed.',
-    recommendation: 'Connect an approved analytics provider if traffic reporting is required.',
-    latencyMs: Date.now() - startedAt,
-  });
+  if (!isDbReady()) {
+    return makeCheck({
+      id: 'analytics',
+      status: 'attention',
+      message: 'News Pulse analytics health could not be confirmed because the database is not ready.',
+      recommendation: 'Check MongoDB connection before verifying analytics health.',
+      latencyMs: Date.now() - startedAt,
+    });
+  }
+
+  try {
+    const latestActivityAt = await getLatestFirstPartyAnalyticsActivityAt();
+    const latestMs = latestActivityAt ? latestActivityAt.getTime() : 0;
+    const recentCutoffMs = Date.now() - ANALYTICS_RECENT_WINDOW_MS;
+
+    if (latestActivityAt && latestMs >= recentCutoffMs) {
+      return makeCheck({
+        id: 'analytics',
+        status: 'healthy',
+        message: 'News Pulse analytics collection is active.',
+        technicalDetail: `latestActivityAt=${latestActivityAt.toISOString()}; recentWindowHours=24`,
+        latencyMs: Date.now() - startedAt,
+      });
+    }
+
+    return makeCheck({
+      id: 'analytics',
+      status: 'attention',
+      message: 'News Pulse analytics is enabled, but recent activity could not be confirmed.',
+      technicalDetail: latestActivityAt ? `latestActivityAt=${latestActivityAt.toISOString()}; recentWindowHours=24` : 'latestActivityAt=null; recentWindowHours=24',
+      recommendation: 'Verify that consented production article traffic is reaching News Pulse analytics.',
+      latencyMs: Date.now() - startedAt,
+    });
+  } catch (_e) {
+    return makeCheck({
+      id: 'analytics',
+      status: 'attention',
+      message: 'News Pulse analytics health could not be confirmed.',
+      recommendation: 'Review analytics storage and retry the Engine health check.',
+      latencyMs: Date.now() - startedAt,
+    });
+  }
 }
 
 async function checkSeo() {
