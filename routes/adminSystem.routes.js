@@ -6,7 +6,6 @@ const { requireAdminAuth, requireFounderAuth } = require('../middleware/adminAut
 const { requireOwnerKey } = require('../middleware/requireOwnerKey');
 const { settingsService } = require('../services/settingsService');
 const { getNewsPulseEngineHealth } = require('../services/newsPulseEngineHealthService');
-const { analyzeNewsPulseContent } = require('../services/newsPulseContentCheckerService');
 const mongoose = require('mongoose');
 let SystemSnapshot = null;
 try { SystemSnapshot = require('../models/SystemSnapshot'); } catch (_) {}
@@ -23,29 +22,6 @@ router.get('/news-pulse-engine/health', requireFounderAuth, async (_req, res) =>
     return res.status(200).json(snapshot);
   } catch (e) {
     console.error('[NEWS_PULSE_ENGINE][health] failed', { message: e?.message || String(e) });
-    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal error' });
-  }
-});
-
-// POST /api/admin/news-pulse-engine/content-check
-// Founder-only, ephemeral editorial review. No persistence, no writes, no external AI usage.
-router.post('/news-pulse-engine/content-check', requireFounderAuth, async (req, res) => {
-  try {
-    const payload = req.body && typeof req.body === 'object' ? req.body : {};
-    const result = analyzeNewsPulseContent(payload);
-    if (!result.ok) {
-      return res.status(400).json({
-        ok: false,
-        success: false,
-        status: 400,
-        code: result.code || 'INVALID_PAYLOAD',
-        message: result.error || 'Invalid payload',
-      });
-    }
-
-    return res.status(200).json({ ok: true, success: true, status: 200, ...result });
-  } catch (e) {
-    console.error('[NEWS_PULSE_ENGINE][content-check] failed', { message: e?.message || String(e) });
     return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal error' });
   }
 });
