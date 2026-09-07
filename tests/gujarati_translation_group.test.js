@@ -175,6 +175,7 @@ test('POST /api/articles prevents duplicate translationGroupId + language record
 test('POST /api/articles/:id/publish publishes Gujarati article without changing its language', async () => {
   const id = '507f1f77bcf86cd799439221';
   const prevFindById = News.findById;
+  const prevFind = News.find;
   const prevFindOne = News.findOne;
   const prevPublicFindOneAndUpdate = PublicArticle.findOneAndUpdate;
   const prevPublicUpdateMany = PublicArticle.updateMany;
@@ -197,8 +198,31 @@ test('POST /api/articles/:id/publish publishes Gujarati article without changing
       translationGroupId: 'grp-publish-gu-1',
       sourceArticleId: '507f1f77bcf86cd799439299',
     });
+    const en = makeDoc(baseArticle({
+      _id: '507f1f77bcf86cd799439222',
+      translationGroupId: 'grp-publish-gu-1',
+      language: 'en',
+      lang: 'en',
+      originalLang: 'en',
+      status: 'draft',
+      workflowStage: 'DRAFT',
+    }));
+    const hi = makeDoc(baseArticle({
+      _id: '507f1f77bcf86cd799439223',
+      title: 'हिंदी शीर्षक',
+      description: 'हिंदी सारांश',
+      content: 'हिंदी सामग्री',
+      slug: 'hindi-title',
+      translationGroupId: 'grp-publish-gu-1',
+      language: 'hi',
+      lang: 'hi',
+      originalLang: 'hi',
+      status: 'draft',
+      workflowStage: 'DRAFT',
+    }));
 
     News.findById = async () => doc;
+    News.find = async () => [doc, en, hi];
     News.findOne = () => makeQueryResult(null);
     PublicArticle.findOneAndUpdate = () => ({ lean: async () => ({ _id: 'public-gu-1' }) });
     PublicArticle.updateMany = async () => ({ acknowledged: true, modifiedCount: 0 });
@@ -214,8 +238,10 @@ test('POST /api/articles/:id/publish publishes Gujarati article without changing
     assert.equal(doc.language, 'gu');
     assert.equal(doc.lang, 'gu');
     assert.equal(res.body.article.language, 'gu');
+    assert.deepEqual(res.body.publishedLanguages.sort(), ['en', 'gu', 'hi']);
   } finally {
     News.findById = prevFindById;
+    News.find = prevFind;
     News.findOne = prevFindOne;
     PublicArticle.findOneAndUpdate = prevPublicFindOneAndUpdate;
     PublicArticle.updateMany = prevPublicUpdateMany;
@@ -491,6 +517,8 @@ test('Publish-all-languages publishes complete EN HI GU group together', async (
   const prevFindById = News.findById;
   const prevFind = News.find;
   const prevPublicFindOneAndUpdate = PublicArticle.findOneAndUpdate;
+  const prevPublicUpdateMany = PublicArticle.updateMany;
+  const prevPushCreate = PushHistory.create;
   const saved = [];
 
   try {
@@ -529,6 +557,8 @@ test('Publish-all-languages publishes complete EN HI GU group together', async (
     News.findById = async () => en;
     News.find = async () => [en, hi, gu];
     PublicArticle.findOneAndUpdate = () => ({ lean: async () => ({ _id: 'public-sync' }) });
+    PublicArticle.updateMany = async () => ({ acknowledged: true, modifiedCount: 0 });
+    PushHistory.create = async () => ({ _id: 'push-group' });
 
     const res = await request(app)
       .post(`/api/articles/${id}/publish-all-languages`)
@@ -547,5 +577,7 @@ test('Publish-all-languages publishes complete EN HI GU group together', async (
     News.findById = prevFindById;
     News.find = prevFind;
     PublicArticle.findOneAndUpdate = prevPublicFindOneAndUpdate;
+    PublicArticle.updateMany = prevPublicUpdateMany;
+    PushHistory.create = prevPushCreate;
   }
 });
