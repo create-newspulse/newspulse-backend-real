@@ -7,13 +7,16 @@ function buildPubliclyVisibleNewsArticleFilter({ now = new Date() } = {}) {
   const nowDt = now instanceof Date ? now : new Date(now);
   return {
     $and: [
-      { status: { $regex: '^published$', $options: 'i' } },
+      { status: 'published' },
       { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
       { $or: [{ locked: { $ne: true } }, { locked: { $exists: false } }] },
       { $or: [{ embargoUntil: null }, { embargoUntil: { $exists: false } }, { embargoUntil: { $lte: nowDt } }] },
       { $or: [{ publishedAt: null }, { publishedAt: { $exists: false } }, { publishedAt: { $lte: nowDt } }] },
       // Scheduled publish safety: if publishAt exists and is in the future, hide it.
       { $or: [{ publishAt: null }, { publishAt: { $exists: false } }, { publishAt: { $lte: nowDt } }] },
+      { $or: [{ scheduledAt: null }, { scheduledAt: { $exists: false } }, { scheduledAt: { $lte: nowDt } }] },
+      { $or: [{ visibility: { $ne: 'private' } }, { visibility: { $exists: false } }] },
+      { $or: [{ isPrivate: { $ne: true } }, { isPrivate: { $exists: false } }] },
       // Some docs may only have workflow.* fields; keep public feed safe.
       { $or: [{ 'workflow.locked': { $ne: true } }, { 'workflow.locked': { $exists: false } }] },
       { $or: [{ 'workflow.embargoUntil': null }, { 'workflow.embargoUntil': { $exists: false } }, { 'workflow.embargoUntil': { $lte: nowDt } }] },
@@ -26,8 +29,13 @@ function buildPubliclyVisiblePublicArticleFilter({ now = new Date() } = {}) {
   return {
     $and: [
       { status: 'published' },
+      { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
       // Defensive: avoid future-dated publish timestamps.
       { $or: [{ publishedAt: null }, { publishedAt: { $exists: false } }, { publishedAt: { $lte: nowDt } }] },
+      { $or: [{ publishAt: null }, { publishAt: { $exists: false } }, { publishAt: { $lte: nowDt } }] },
+      { $or: [{ scheduledAt: null }, { scheduledAt: { $exists: false } }, { scheduledAt: { $lte: nowDt } }] },
+      { $or: [{ visibility: { $ne: 'private' } }, { visibility: { $exists: false } }] },
+      { $or: [{ isPrivate: { $ne: true } }, { isPrivate: { $exists: false } }] },
     ],
   };
 }

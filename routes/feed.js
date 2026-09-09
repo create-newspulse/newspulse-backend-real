@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const News = require('../models/News');
 const { createJsonCacheMiddleware, buildHomeCacheKey, normalizeCacheLang } = require('../lib/cache');
+const { buildPubliclyVisibleNewsArticleFilter } = require('../services/publicArticleVisibility.service');
 
 // GET /api/feed/for-you
 router.get('/for-you', createJsonCacheMiddleware({
@@ -24,10 +25,9 @@ router.get('/for-you', createJsonCacheMiddleware({
     const language = String(req.query.language || '').toLowerCase();
     const region = String(req.query.region || '').toLowerCase();
 
-    const filter = {};
+    const filter = buildPubliclyVisibleNewsArticleFilter();
     // Only add filters if fields exist in schema
-    if (News.schema.paths.language && language) filter.language = language;
-    if (News.schema.paths.status) filter.status = 'published';
+    if (News.schema.paths.language && language) filter.$and = (filter.$and || []).concat([{ $or: [{ language }, { lang: language }] }]);
     // Region not present in schema currently; ignore for now
 
     const items = await News.find(filter).sort({ createdAt: -1, date: -1 }).limit(limit).lean();

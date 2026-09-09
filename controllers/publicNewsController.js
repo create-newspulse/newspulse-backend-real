@@ -6,7 +6,10 @@ const { safeTranslateText, normalizeLang } = require('../services/translate/safe
 const { ensureOnDemandNewsTranslation, hasFullTranslation } = require('../services/newsOnDemandTranslation.service');
 const { translateHtmlStrict, detectLangFromContent } = require('../services/articleTranslation.service');
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
-const { buildPubliclyVisiblePublicArticleFilter } = require('../services/publicArticleVisibility.service');
+const {
+  buildPubliclyVisibleNewsArticleFilter,
+  buildPubliclyVisiblePublicArticleFilter,
+} = require('../services/publicArticleVisibility.service');
 const { getLinkedSponsoredFeatureForArticle } = require('../services/sponsoredFeatures.service');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
 const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
@@ -462,23 +465,10 @@ async function translatePublicNews(req, res) {
 }
 
 function buildPublicPublishedFilter({ category, track, q, founderOnly, type }) {
-  const now = new Date();
   const normalizedCategory = category ? normalizeCategorySlug(category) : null;
   const normalizedTrack = normalizeTrackValue(track);
 
-  const filter = {
-    $and: [
-      // Public list must only include published stories.
-      { status: { $regex: '^published$', $options: 'i' } },
-      { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
-      { $or: [{ publishedAt: null }, { publishedAt: { $exists: false } }, { publishedAt: { $lte: now } }] },
-      { $or: [{ locked: { $ne: true } }, { locked: { $exists: false } }] },
-      { $or: [{ embargoUntil: null }, { embargoUntil: { $exists: false } }, { embargoUntil: { $lte: now } }] },
-      // Some docs may only have workflow.* fields; keep public feed safe.
-      { $or: [{ 'workflow.locked': { $ne: true } }, { 'workflow.locked': { $exists: false } }] },
-      { $or: [{ 'workflow.embargoUntil': null }, { 'workflow.embargoUntil': { $exists: false } }, { 'workflow.embargoUntil': { $lte: now } }] },
-    ],
-  };
+  const filter = buildPubliclyVisibleNewsArticleFilter();
 
   if (normalizedCategory) {
     // Case-safe for older mixed-case data.

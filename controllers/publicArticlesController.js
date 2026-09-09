@@ -233,13 +233,17 @@ async function getArticleBySlug(req, res, next) {
     if (/^[0-9a-f]{24}$/i.test(slug)) return next();
 
     const slugFilter = candidates.length === 1 ? slug : { $in: candidates };
+    const baseFilter = buildPubliclyVisiblePublicArticleFilter();
     const filter = {
-      status: 'published',
-      $or: [
-        { slug: slugFilter },
-        { 'slugs.en': slugFilter },
-        { 'slugs.hi': slugFilter },
-        { 'slugs.gu': slugFilter },
+      ...baseFilter,
+      $and: [
+        ...((baseFilter && Array.isArray(baseFilter.$and)) ? baseFilter.$and : []),
+        { $or: [
+          { slug: slugFilter },
+          { 'slugs.en': slugFilter },
+          { 'slugs.hi': slugFilter },
+          { 'slugs.gu': slugFilter },
+        ] },
       ],
     };
 

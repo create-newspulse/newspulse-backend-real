@@ -6,6 +6,7 @@ const PublicArticle = require('../models/Article');
 const Article = News;
 const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
+const { optionalAdminAuth } = require('../middleware/optionalAdminAuth');
 const PushHistory = require('../models/PushHistory');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
 const { canonicalizeSlug, detectSlugLocale, getSlugCandidates, safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
@@ -1623,6 +1624,39 @@ function _pickLocaleAwareSlug(doc, requestedLang) {
   return (slugs && (slugs.en || slugs.hi || slugs.gu)) || null;
 }
 
+function _buildSlugLookupClause(slugNorm) {
+  return {
+    $or: [
+      { slug: slugNorm },
+      { 'slugs.en': slugNorm },
+      { 'slugs.hi': slugNorm },
+      { 'slugs.gu': slugNorm },
+    ],
+  };
+}
+
+function _mergePublicVisibilityWithClause(baseFilter, clause) {
+  return {
+    ...baseFilter,
+    $and: [
+      ...((baseFilter && Array.isArray(baseFilter.$and)) ? baseFilter.$and : []),
+      clause,
+    ],
+  };
+}
+
+function _buildNewsSlugLookup(slugNorm, isAdminRequest) {
+  const slugClause = _buildSlugLookupClause(slugNorm);
+  if (isAdminRequest) return slugClause;
+  return _mergePublicVisibilityWithClause(buildPubliclyVisibleNewsArticleFilter(), slugClause);
+}
+
+function _buildPublicArticleSlugLookup(slugNorm, isAdminRequest) {
+  const slugClause = _buildSlugLookupClause(slugNorm);
+  if (isAdminRequest) return slugClause;
+  return _mergePublicVisibilityWithClause(buildPubliclyVisiblePublicArticleFilter(), slugClause);
+}
+
 function _resolveImageUrlFromNewsDoc(doc) {
   if (!doc || typeof doc !== 'object') return null;
   const coverUrl =
@@ -2132,7 +2166,7 @@ router.get('/news/all', (req, res, next) => {
 });
 
 // GET /api/articles/slug/:slug → lookup by slug (admin UI compatibility)
-router.get('/articles/slug/:slug', async (req, res, next) => {
+router.get('/articles/slug/:slug', optionalAdminAuth, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-store');
     const raw = String(req.params.slug || '');
@@ -2146,16 +2180,10 @@ router.get('/articles/slug/:slug', async (req, res, next) => {
       return res.status(200).json({ exists: false });
     }
 
-    const query = {
-      $or: [
-        { slug: slugNorm },
-        { 'slugs.en': slugNorm },
-        { 'slugs.hi': slugNorm },
-        { 'slugs.gu': slugNorm },
-      ],
-    };
+    const isAdminRequest = Boolean(req.admin);
+    const query = _buildNewsSlugLookup(slugNorm, isAdminRequest);
     const doc = await News.findOne(query).lean().catch(() => null);
-    const fallback = doc ? null : await PublicArticle.findOne(query).lean().catch(() => null);
+    const fallback = doc ? null : await PublicArticle.findOne(_buildPublicArticleSlugLookup(slugNorm, isAdminRequest)).lean().catch(() => null);
     const out = doc || fallback;
     if (!out) return res.status(200).json({ exists: false });
 
@@ -2210,7 +2238,7 @@ router.get('/articles/slug/:slug', async (req, res, next) => {
 });
 
 // GET /api/articles/by-slug/:slug → alias (some admin builds use this path)
-router.get('/articles/by-slug/:slug', async (req, res, next) => {
+router.get('/articles/by-slug/:slug', optionalAdminAuth, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-store');
     const raw = String(req.params.slug || '');
@@ -2223,16 +2251,10 @@ router.get('/articles/by-slug/:slug', async (req, res, next) => {
       return res.status(200).json({ exists: false });
     }
 
-    const query = {
-      $or: [
-        { slug: slugNorm },
-        { 'slugs.en': slugNorm },
-        { 'slugs.hi': slugNorm },
-        { 'slugs.gu': slugNorm },
-      ],
-    };
+    const isAdminRequest = Boolean(req.admin);
+    const query = _buildNewsSlugLookup(slugNorm, isAdminRequest);
     const doc = await News.findOne(query).lean().catch(() => null);
-    const fallback = doc ? null : await PublicArticle.findOne(query).lean().catch(() => null);
+    const fallback = doc ? null : await PublicArticle.findOne(_buildPublicArticleSlugLookup(slugNorm, isAdminRequest)).lean().catch(() => null);
     const out = doc || fallback;
     if (!out) return res.status(200).json({ exists: false });
 
@@ -2287,7 +2309,7 @@ router.get('/articles/by-slug/:slug', async (req, res, next) => {
 });
 
 // GET /api/articles/:id → get single article by id
-router.get('/articles/:id', async (req, res, next) => {
+router.get('/articles/:id', optionalAdminAuth, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-store');
     const rawId = String(req.params.id || '').trim();
@@ -2298,12 +2320,18 @@ router.get('/articles/:id', async (req, res, next) => {
     const langQueryRaw = (req.query.lang || req.query.language || req.lang || '').toString().trim();
     const langNorm = normalizeLanguage(langQueryRaw);
 
+    const isAdminRequest = Boolean(req.admin);
+
     // Primary: CMS/admin articles stored in News collection.
-    let doc = await News.findById(rawId).catch(() => null);
+    let doc = isAdminRequest
+      ? await News.findById(rawId).catch(() => null)
+      : await News.findOne({ ...buildPubliclyVisibleNewsArticleFilter(), _id: rawId }).lean().catch(() => null);
 
     // Fallback: some deployments/edit flows reference the public Article model by id.
     if (!doc) {
-      doc = await PublicArticle.findById(rawId).catch(() => null);
+      doc = isAdminRequest
+        ? await PublicArticle.findById(rawId).catch(() => null)
+        : await PublicArticle.findOne({ ...buildPubliclyVisiblePublicArticleFilter(), _id: rawId }).lean().catch(() => null);
     }
 
     if (!doc) {

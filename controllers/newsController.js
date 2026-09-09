@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const News = require('../models/News');
 const { safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
+const { buildPubliclyVisibleNewsArticleFilter } = require('../services/publicArticleVisibility.service');
 
 function normalizeLanguage(v) {
   const s = String(v ?? '').trim().toLowerCase();
@@ -98,14 +99,14 @@ exports.createNews = async (req, res) => {
 
 exports.getNews = async (req, res) => {
   try {
-    const q = { status: { $regex: '^published$', $options: 'i' } };
+    const q = buildPubliclyVisibleNewsArticleFilter();
 
     // Filters
     const lang = normalizeLanguage(req.query.lang) || normalizeLanguage(req.query.language);
     if (lang) {
       const lower = lang;
       const upper = lang.toUpperCase();
-      q.$or = [{ lang: { $in: [lower, upper] } }, { language: { $in: [lower, upper] } }];
+      q.$and = (q.$and || []).concat([{ $or: [{ lang: { $in: [lower, upper] } }, { language: { $in: [lower, upper] } }] }]);
     }
 
     const topic = (req.query.topic !== undefined) ? String(req.query.topic || '').trim().toLowerCase() : '';
@@ -189,15 +190,21 @@ exports.getPublishedNewsBySlug = async (req, res) => {
 
     const decoded = String(safeDecodeURIComponent(raw) ?? '').trim();
 
-    const lookup = (slugValue) => ({
-      status: 'published',
-      $or: [
-        { slug: slugValue },
-        { 'slugs.en': slugValue },
-        { 'slugs.hi': slugValue },
-        { 'slugs.gu': slugValue },
-      ],
-    });
+    const lookup = (slugValue) => {
+      const base = buildPubliclyVisibleNewsArticleFilter();
+      return {
+        ...base,
+        $and: [
+          ...((base && Array.isArray(base.$and)) ? base.$and : []),
+          { $or: [
+            { slug: slugValue },
+            { 'slugs.en': slugValue },
+            { 'slugs.hi': slugValue },
+            { 'slugs.gu': slugValue },
+          ] },
+        ],
+      };
+    };
 
     const article =
       (await News.findOne(lookup(decoded)).lean()) ||

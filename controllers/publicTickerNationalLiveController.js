@@ -2,6 +2,7 @@ const BroadcastItem = require('../models/BroadcastItem');
 const Article = require('../models/Article');
 
 const { mapArticleForLang } = require('../services/mapArticleForLang');
+const { buildPubliclyVisiblePublicArticleFilter } = require('../services/publicArticleVisibility.service');
 
 const { formatIstTimeText } = require('../src/utils/istDate');
 
@@ -125,11 +126,11 @@ async function getNationalLiveTicker(req, res) {
       return res.status(200).json(liveItems.slice(0, limit));
     }
 
-    const articleFilter = {
-      status: 'published',
-      category: 'national',
-      $or: [{ publishedAt: { $gte: cutoff } }, { publishedAt: null, createdAt: { $gte: cutoff } }],
-    };
+    const articleFilter = buildPubliclyVisiblePublicArticleFilter();
+    articleFilter.category = 'national';
+    articleFilter.$and = (articleFilter.$and || []).concat([
+      { $or: [{ publishedAt: { $gte: cutoff } }, { publishedAt: null, createdAt: { $gte: cutoff } }] },
+    ]);
 
     // Fetch a few extra and filter strictly by requested lang via cached translations.
     const articleDocs = await Article.find(articleFilter)
