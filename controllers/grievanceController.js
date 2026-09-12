@@ -1,4 +1,5 @@
 const sanitizeHtml = require('sanitize-html');
+const { randomBytes } = require('crypto');
 
 const grievanceMailer = require('../lib/grievanceMailer');
 
@@ -7,6 +8,24 @@ const FAILURE_RESPONSE = { success: false, message: 'Unable to submit grievance 
 const GRIEVANCE_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const GRIEVANCE_RATE_LIMIT_MAX = 5;
 const griefRateBuckets = new Map();
+let lastReferenceTimestamp = 0;
+let referenceSequence = 0;
+
+function generateGrievanceReferenceId(date = new Date()) {
+  const timestamp = date.getTime();
+  if (timestamp === lastReferenceTimestamp) {
+    referenceSequence += 1;
+  } else {
+    lastReferenceTimestamp = timestamp;
+    referenceSequence = 0;
+  }
+
+  const year = String(date.getUTCFullYear());
+  const timePart = timestamp.toString(36).toUpperCase().padStart(8, '0');
+  const sequencePart = referenceSequence.toString(36).toUpperCase().padStart(2, '0');
+  const randomPart = randomBytes(2).toString('hex').toUpperCase();
+  return `NP-GRV-${year}-${timePart}${sequencePart}${randomPart}`;
+}
 
 function getReqIp(req) {
   const forwarded = String(req?.headers?.['x-forwarded-for'] || '');
@@ -95,8 +114,10 @@ function buildSubmission(body, req) {
   const declarationAccepted = isAcceptedDeclaration(body.declarationAccepted);
   const submittedAt = new Date().toISOString();
   const requestIp = getReqIp(req);
+  const referenceId = generateGrievanceReferenceId(new Date(submittedAt));
 
   return {
+    referenceId,
     fullName,
     email,
     phone,
@@ -151,7 +172,7 @@ async function submitPublicGrievance(req, res) {
     }
 
     await grievanceMailer.sendGrievanceMail(submission);
-    return res.status(200).json(SUCCESS_RESPONSE);
+    return res.status(200).json({ ...SUCCESS_RESPONSE, referenceId: submission.referenceId });
   } catch (error) {
     console.error('[grievance] submit failed', grievanceMailer.serializeMailError(error));
     return res.status(503).json(FAILURE_RESPONSE);

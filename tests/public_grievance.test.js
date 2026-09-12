@@ -42,13 +42,18 @@ test('POST /api/public/grievance sanitizes input and sends grievance mail', asyn
       .post('/api/public/grievance')
       .set('x-forwarded-for', '203.0.113.12')
       .send(buildPayload({
+        referenceId: 'FRONTEND-SUPPLIED-ID',
         fullName: ' Alice <b>Example</b> ',
         violationSummary: ' <script>alert(1)</script>Statement is false. ',
       }));
 
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, { success: true, message: 'Grievance submitted successfully.' });
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.message, 'Grievance submitted successfully.');
+    assert.match(res.body.referenceId, /^NP-GRV-\d{4}-[A-Z0-9]{10,}$/);
+    assert.notEqual(res.body.referenceId, 'FRONTEND-SUPPLIED-ID');
     assert.ok(mailArgs);
+    assert.equal(mailArgs.referenceId, res.body.referenceId);
     assert.equal(mailArgs.fullName, 'Alice Example');
     assert.equal(mailArgs.email, 'alice@example.com');
     assert.equal(mailArgs.violationSummary, 'Statement is false.');
@@ -113,6 +118,8 @@ test('POST /api/public/grievance rate limits repeated submissions from the same 
   };
 
   try {
+    const referenceIds = new Set();
+
     for (let index = 0; index < 5; index += 1) {
       const res = await request(app)
         .post('/api/public/grievance')
@@ -120,7 +127,11 @@ test('POST /api/public/grievance rate limits repeated submissions from the same 
         .send(buildPayload({ email: `alice${index}@example.com` }));
 
       assert.equal(res.statusCode, 200);
-      assert.deepEqual(res.body, { success: true, message: 'Grievance submitted successfully.' });
+      assert.equal(res.body.success, true);
+      assert.equal(res.body.message, 'Grievance submitted successfully.');
+      assert.match(res.body.referenceId, /^NP-GRV-\d{4}-[A-Z0-9]{10,}$/);
+      assert.equal(referenceIds.has(res.body.referenceId), false);
+      referenceIds.add(res.body.referenceId);
     }
 
     const limited = await request(app)
