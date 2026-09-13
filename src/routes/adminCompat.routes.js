@@ -6,7 +6,7 @@ const { requireAdminAuth } = require('../../middleware/adminAuth');
 
 const { deleteCoverByPublicId } = require('../../lib/cloudinary');
 const { deleteMediaLibraryItem, uploadMediaLibraryFile } = require('../../lib/mediaLibraryStorage');
-const { assertAllowedAdminMediaMimeType } = require('../../lib/mediaUploadValidation');
+const { assertAllowedAdminMediaUpload } = require('../../lib/mediaUploadValidation');
 const { createIndexedMediaRecord, verifyIndexedMediaRecordVisible } = require('../../services/mediaLibraryService');
 
 const router = express.Router();
@@ -73,7 +73,7 @@ function pickUploadedFile(req) {
 
 // --------------------- MEDIA UPLOAD ---------------------
 // supports field name: file | media | image
-router.post('/media/upload', upload.fields([
+router.post('/media/upload', requireAdminAuth, upload.fields([
   { name: 'file', maxCount: 1 },
   { name: 'media', maxCount: 1 },
   { name: 'image', maxCount: 1 },
@@ -83,14 +83,15 @@ router.post('/media/upload', upload.fields([
 
   let uploaded = null;
   try {
-    assertAllowedAdminMediaMimeType(file.mimetype);
+    const buffer = fs.readFileSync(file.path);
+    assertAllowedAdminMediaUpload(file.mimetype, buffer);
 
     uploaded = await uploadMediaLibraryFile(req, {
       ...file,
       originalname: file.originalname,
       mimetype: file.mimetype,
       size: file.size,
-      buffer: fs.readFileSync(file.path),
+      buffer,
     });
 
     try { fs.unlinkSync(file.path); } catch (_) {}

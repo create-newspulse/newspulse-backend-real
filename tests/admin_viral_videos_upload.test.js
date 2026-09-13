@@ -18,6 +18,8 @@ const CLOUD_VIDEO_NOT_CONNECTED_MESSAGE = 'Cloud video upload is not connected y
 const CLOUD_VIDEO_DISABLED_MESSAGE = 'Cloud video upload is available but disabled. Use Video URL unless enabled.';
 const CLOUDINARY_VIDEO_UPLOAD_FAILED_MESSAGE = 'Cloudinary video upload failed.';
 const THUMBNAIL_IMAGE_TYPE_NOT_ALLOWED_MESSAGE = 'Only JPG, JPEG, PNG, or WEBP thumbnail images are allowed.';
+const VALID_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]);
+const VALID_WEBP = Buffer.from('RIFF\x10\x00\x00\x00WEBPVP8 ', 'binary');
 
 function missingCloudUploadCapability(enabled = false) {
   return {
@@ -643,7 +645,7 @@ test('POST /api/admin/viral-videos/upload-thumbnail saves thumbnail images throu
   const res = await request(app)
     .post('/api/admin/viral-videos/upload-thumbnail')
     .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-    .attach('thumbnail', Buffer.from('jpgdata'), { filename: 'thumb.jpg', contentType: 'image/jpeg' });
+    .attach('thumbnail', VALID_JPEG, { filename: 'thumb.jpg', contentType: 'image/jpeg' });
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.ok, true);
@@ -689,7 +691,7 @@ test('POST /api/admin/viral-videos/thumbnail-upload accepts webp thumbnail alias
   const res = await request(app)
     .post('/api/admin/viral-videos/thumbnail-upload')
     .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-    .attach('thumbnail', Buffer.from('webpdata'), { filename: 'thumb.webp', contentType: 'image/webp' });
+    .attach('thumbnail', VALID_WEBP, { filename: 'thumb.webp', contentType: 'image/webp' });
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.ok, true);
@@ -757,7 +759,7 @@ test('POST /api/admin/viral-videos/upload-thumbnail stores poster locally when C
   const res = await request(app)
     .post('/api/admin/viral-videos/upload-thumbnail')
     .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-    .attach('thumbnail', Buffer.from('jpgdata'), { filename: 'thumb.jpg', contentType: 'image/jpeg' });
+    .attach('thumbnail', VALID_JPEG, { filename: 'thumb.jpg', contentType: 'image/jpeg' });
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.ok, true);
@@ -836,7 +838,7 @@ test('POST /api/admin/viral-videos/upload keeps thumbnail upload working for ima
   const res = await request(app)
     .post('/api/admin/viral-videos/upload')
     .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-    .attach('thumbnail', Buffer.from('jpgdata'), { filename: 'thumb.jpg', contentType: 'image/jpeg' });
+    .attach('thumbnail', VALID_JPEG, { filename: 'thumb.jpg', contentType: 'image/jpeg' });
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.ok, true);

@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
+const express = require('express');
 
 const app = require('../server');
 const cloudinary = require('../lib/cloudinary');
@@ -12,9 +13,20 @@ const {
   MEDIA_TYPE_NOT_ALLOWED_MESSAGE,
 } = require('../lib/mediaUploadValidation');
 const { deriveMediaType } = require('../services/mediaLibraryService');
+const adminCompatRoutes = require('../src/routes/adminCompat.routes');
 
 function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
   return `np.${Buffer.from(`${email}:${Date.now()}`).toString('base64')}`;
+}
+
+const VALID_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]);
+const VALID_PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
+const VALID_WEBP = Buffer.from('RIFF\x10\x00\x00\x00WEBPVP8 ', 'binary');
+const VALID_MP4 = Buffer.from('\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42', 'binary');
+
+function makeRoleJwt(role) {
+  const jwt = require('jsonwebtoken');
+  return jwt.sign({ sub: 'public-user', email: 'public@example.com', role }, process.env.JWT_SECRET || 'dev-secret-change-me');
 }
 
 test('accepted MIME type constants match required admin media formats', () => {
@@ -26,6 +38,24 @@ test('deriveMediaType stores image uploads as image and mp4 uploads as video', (
   assert.equal(deriveMediaType('image/jpeg'), 'image');
   assert.equal(deriveMediaType('image/png'), 'image');
   assert.equal(deriveMediaType('video/mp4'), 'video');
+});
+
+test('signature validation accepts current cover, media, and ad formats', () => {
+  const validation = require('../lib/mediaUploadValidation');
+
+  assert.equal(validation.assertAllowedArticleCoverUpload('image/jpeg', VALID_JPEG), 'image/jpeg');
+  assert.equal(validation.assertAllowedArticleCoverUpload('image/png', VALID_PNG), 'image/png');
+  assert.equal(validation.assertAllowedArticleCoverUpload('image/webp', VALID_WEBP), 'image/webp');
+  assert.equal(validation.assertAllowedAdminMediaUpload('video/mp4', VALID_MP4), 'video/mp4');
+  assert.equal(validation.assertAllowedAdImageUpload('image/gif', Buffer.from('GIF89a')), 'image/gif');
+});
+
+test('signature validation rejects text, mismatches, and SVG payloads', () => {
+  const validation = require('../lib/mediaUploadValidation');
+
+  assert.throws(() => validation.assertAllowedArticleCoverUpload('image/jpeg', Buffer.from('<html>nope</html>')), /does not match/);
+  assert.throws(() => validation.assertAllowedArticleCoverUpload('image/png', VALID_JPEG), /does not match/);
+  assert.throws(() => validation.assertAllowedArticleCoverUpload('image/jpeg', Buffer.from('<svg><script>alert(1)</script></svg>')), /does not match/);
 });
 
 test('Media Library image uploads use Cloudinary image resource and secure URL', async (t) => {
@@ -190,9 +220,68 @@ test('POST /admin-api/media/upload rejects unsupported MIME types', async () => 
   assert.equal(res.body.message, MEDIA_TYPE_NOT_ALLOWED_MESSAGE);
 });
 
+test('POST /admin-api/media/upload rejects MIME/signature mismatches', async () => {
+  const token = makeOpaqueAdminToken();
+
+  const res = await request(app)
+    .post('/admin-api/media/upload')
+    .set('Authorization', `Bearer ${token}`)
+    .attach('file', VALID_JPEG, {
+      filename: 'wrong.png',
+      contentType: 'image/png',
+    });
+
+  assert.equal(res.statusCode, 422);
+  assert.equal(res.body.code, 'INVALID_MEDIA_SIGNATURE');
+});
+
+test('POST /admin-api/media/upload rejects files above current size limit', async () => {
+  const token = makeOpaqueAdminToken();
+
+  const res = await request(app)
+    .post('/admin-api/media/upload')
+    .set('Authorization', `Bearer ${token}`)
+    .attach('file', Buffer.alloc((25 * 1024 * 1024) + 1), {
+      filename: 'too-large.jpg',
+      contentType: 'image/jpeg',
+    });
+
+  assert.equal(res.statusCode, 413);
+});
+
+test('compatibility /api/media/upload rejects anonymous access when mounted independently', async () => {
+  const compatApp = express();
+  compatApp.use('/api', adminCompatRoutes);
+
+  const res = await request(compatApp)
+    .post('/api/media/upload')
+    .attach('file', VALID_JPEG, {
+      filename: 'photo.jpg',
+      contentType: 'image/jpeg',
+    });
+
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.body.code, 'UNAUTHORIZED');
+});
+
+test('POST /api/media/upload rejects anonymous access', async () => {
+  const res = await request(app)
+    .post('/api/media/upload')
+    .attach('file', VALID_JPEG, {
+      filename: 'photo.jpg',
+      contentType: 'image/jpeg',
+    });
+
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.body.code, 'UNAUTHORIZED');
+});
+
 test('POST /api/uploads/cover rejects unsupported MIME types before Cloudinary upload', async () => {
+  const token = makeOpaqueAdminToken();
+
   const res = await request(app)
     .post('/api/uploads/cover')
+    .set('Authorization', `Bearer ${token}`)
     .attach('cover', Buffer.from('gif89a'), {
       filename: 'bad.gif',
       contentType: 'image/gif',
@@ -201,6 +290,45 @@ test('POST /api/uploads/cover rejects unsupported MIME types before Cloudinary u
   assert.equal(res.statusCode, 400);
   assert.equal(res.body.code, MEDIA_TYPE_NOT_ALLOWED_CODE);
   assert.equal(res.body.message, MEDIA_TYPE_NOT_ALLOWED_MESSAGE);
+});
+
+test('POST /api/uploads/cover rejects anonymous uploads', async () => {
+  const res = await request(app)
+    .post('/api/uploads/cover')
+    .attach('cover', VALID_JPEG, {
+      filename: 'cover.jpg',
+      contentType: 'image/jpeg',
+    });
+
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.body.code, 'UNAUTHORIZED');
+});
+
+test('POST cover upload aliases reject anonymous uploads', async () => {
+  for (const route of ['/admin-api/uploads/cover', '/admin-api/api/uploads/cover']) {
+    const res = await request(app)
+      .post(route)
+      .attach('cover', VALID_JPEG, {
+        filename: 'cover.jpg',
+        contentType: 'image/jpeg',
+      });
+
+    assert.equal(res.statusCode, 401, route);
+    assert.equal(res.body.code, 'UNAUTHORIZED', route);
+  }
+});
+
+test('POST /api/uploads/cover rejects non-admin bearer tokens', async () => {
+  const res = await request(app)
+    .post('/api/uploads/cover')
+    .set('Authorization', `Bearer ${makeRoleJwt('public')}`)
+    .attach('cover', VALID_JPEG, {
+      filename: 'cover.jpg',
+      contentType: 'image/jpeg',
+    });
+
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.body.code, 'FORBIDDEN');
 });
 
 test('POST /api/uploads/cover uploads article cover through shared Cloudinary service', async (t) => {
@@ -229,9 +357,12 @@ test('POST /api/uploads/cover uploads article cover through shared Cloudinary se
     };
   };
 
+  const token = makeOpaqueAdminToken();
+
   const res = await request(app)
     .post('/api/uploads/cover')
-    .attach('cover', Buffer.from('jpgdata'), {
+    .set('Authorization', `Bearer ${token}`)
+    .attach('cover', VALID_JPEG, {
       filename: 'cover.jpg',
       contentType: 'image/jpeg',
     });
@@ -250,4 +381,36 @@ test('POST /api/uploads/cover uploads article cover through shared Cloudinary se
     format: 'jpg',
     bytes: 2345,
   });
+});
+
+test('POST /api/uploads rejects anonymous legacy uploads', async () => {
+  const res = await request(app)
+    .post('/api/uploads')
+    .attach('file', VALID_PNG, {
+      filename: 'legacy.png',
+      contentType: 'image/png',
+    });
+
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.body.code, 'UNAUTHORIZED');
+});
+
+test('POST /api/uploads preserves legacy upload response for authorized callers', async () => {
+  const token = makeOpaqueAdminToken();
+
+  const res = await request(app)
+    .post('/api/uploads')
+    .set('Authorization', `Bearer ${token}`)
+    .attach('file', VALID_PNG, {
+      filename: 'legacy.png',
+      contentType: 'image/png',
+    });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.success, true);
+  assert.match(res.body.url, /\/uploads\//);
+  assert.ok(res.body.filename);
+  assert.equal(res.body.size, VALID_PNG.length);
+  assert.equal(res.body.mime, 'image/png');
 });

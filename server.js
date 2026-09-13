@@ -929,7 +929,19 @@ const _upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 },
 });
 
-app.post('/api/uploads', _upload.any(), (req, res) => {
+function _runLegacyUpload(req, res, next) {
+  _upload.any()(req, res, (err) => {
+    if (err && err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ ok: false, success: false, status: 413, code: 'FILE_TOO_LARGE', message: 'File too large' });
+    }
+    if (err) {
+      return res.status(400).json({ ok: false, success: false, status: 400, code: 'INVALID_UPLOAD', message: 'Invalid upload' });
+    }
+    return next();
+  });
+}
+
+app.post('/api/uploads', requireAdminAuth, _runLegacyUpload, (req, res) => {
   try {
     const file = Array.isArray(req.files) ? req.files[0] : null;
     if (!file) {

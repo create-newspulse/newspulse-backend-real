@@ -4,7 +4,8 @@ const multer = require('multer');
 const cloudinaryUploads = require('../lib/cloudinary');
 const { getMediaLibraryProviderStatus } = require('../lib/mediaLibraryStorage');
 const { getIndexedMediaStats, listIndexedMediaRecords } = require('../services/mediaLibraryService');
-const { assertAllowedArticleCoverMimeType } = require('../lib/mediaUploadValidation');
+const { requireAdminAuth } = require('../middleware/adminAuth');
+const { assertAllowedArticleCoverUpload } = require('../lib/mediaUploadValidation');
 
 const { shouldLog } = require('../lib/logThrottle');
 
@@ -14,6 +15,18 @@ const coverUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
 });
+
+function runCoverUpload(req, res, next) {
+  coverUpload.any()(req, res, (err) => {
+    if (err && err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ ok: false, success: false, status: 413, code: 'FILE_TOO_LARGE', message: 'File too large' });
+    }
+    if (err) {
+      return res.status(400).json({ ok: false, success: false, status: 400, code: 'INVALID_UPLOAD', message: 'Invalid upload' });
+    }
+    return next();
+  });
+}
 
 const DEFAULT_COVER_UPLOAD_NOT_CONFIGURED_MESSAGE = 'Cloudinary not configured';
 
@@ -167,7 +180,7 @@ async function handleCoverImageUpload(req, res, options = {}) {
       });
     }
 
-    const mimeType = assertAllowedArticleCoverMimeType(file.mimetype, validationMessage);
+    const mimeType = assertAllowedArticleCoverUpload(file.mimetype, file.buffer, validationMessage);
 
     if (!cloudinaryUploads.isCloudinaryConfigured()) {
       try {
@@ -248,7 +261,8 @@ async function handleCoverImageUpload(req, res, options = {}) {
 // POST /api/uploads/cover
 router.post(
   '/cover',
-  coverUpload.any(),
+  requireAdminAuth,
+  runCoverUpload,
   handleCoverImageUpload
 );
 

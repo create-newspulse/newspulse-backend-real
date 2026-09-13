@@ -27,13 +27,25 @@ const {
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const { optionalAdminAuth } = require('../middleware/optionalAdminAuth');
 const { shouldLog } = require('../lib/logThrottle');
-const { assertAllowedAdminMediaMimeType } = require('../lib/mediaUploadValidation');
+const { assertAllowedAdminMediaUpload } = require('../lib/mediaUploadValidation');
 
 const router = express.Router();
 const mediaUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 },
 });
+
+function runMediaUpload(req, res, next) {
+  mediaUpload.any()(req, res, (err) => {
+    if (err && err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ ok: false, success: false, status: 413, code: 'FILE_TOO_LARGE', message: 'File too large' });
+    }
+    if (err) {
+      return res.status(400).json({ ok: false, success: false, status: 400, code: 'INVALID_UPLOAD', message: 'Invalid upload' });
+    }
+    return next();
+  });
+}
 
 function isLocalhostDev() {
   const env = String(process.env.NODE_ENV || 'development').toLowerCase();
@@ -405,7 +417,7 @@ router.get('/stats', requireAdminAuth, async (req, res) => {
 
 // POST /api/media/upload
 // POST /admin-api/media/upload
-router.post('/upload', requireAdminAuth, mediaUpload.any(), async (req, res) => {
+router.post('/upload', requireAdminAuth, runMediaUpload, async (req, res) => {
   const providerStatus = getMediaLibraryProviderStatus();
   let uploaded = null;
   const localLog = {
@@ -432,7 +444,7 @@ router.post('/upload', requireAdminAuth, mediaUpload.any(), async (req, res) => 
       return res.status(400).json({ ok: false, success: false, message: "No file uploaded (field: file | media | image | cover)" });
     }
 
-    assertAllowedAdminMediaMimeType(file.mimetype);
+    assertAllowedAdminMediaUpload(file.mimetype, file.buffer);
 
     uploaded = await uploadMediaLibraryFile(req, file);
     localLog.storageSuccess = true;
