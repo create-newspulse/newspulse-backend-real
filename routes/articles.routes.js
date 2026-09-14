@@ -1,4 +1,5 @@
 const express = require('express');
+const multer = require('multer');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
 // CMS/admin "articles" are stored in the News collection in this codebase.
@@ -7,6 +8,16 @@ const Article = News;
 const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const { optionalAdminAuth } = require('../middleware/optionalAdminAuth');
+const {
+  ARTICLE_INLINE_IMAGE_ACCEPTED_MIME_TYPES,
+  assertAllowedArticleInlineImageUpload,
+} = require('../lib/mediaUploadValidation');
+const {
+  deleteMediaLibraryItem,
+  getMediaLibraryProviderStatus,
+  uploadMediaLibraryFile,
+} = require('../lib/mediaLibraryStorage');
+const { createIndexedMediaRecord } = require('../services/mediaLibraryService');
 const PushHistory = require('../models/PushHistory');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
 const { canonicalizeSlug, detectSlugLocale, getSlugCandidates, safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
@@ -57,6 +68,37 @@ const { logAudit } = require('../lib/audit');
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
 const router = express.Router();
+
+const articleInlineImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
+
+function runArticleInlineImageUpload(req, res, next) {
+  articleInlineImageUpload.any()(req, res, (err) => {
+    if (err && err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ ok: false, success: false, status: 413, code: 'FILE_TOO_LARGE', message: 'File too large' });
+    }
+    if (err) {
+      return res.status(400).json({ ok: false, success: false, status: 400, code: 'INVALID_UPLOAD', message: 'Invalid upload' });
+    }
+    return next();
+  });
+}
+
+function pickArticleInlineImageFile(req) {
+  if (req.file) return req.file;
+  const files = req.files;
+  if (!files) return null;
+  if (Array.isArray(files)) {
+    return files.find((file) => ['image', 'file', 'media'].includes(String(file?.fieldname || ''))) || files[0] || null;
+  }
+  for (const fieldName of ['image', 'file', 'media']) {
+    const fieldFiles = files[fieldName];
+    if (Array.isArray(fieldFiles) && fieldFiles[0]) return fieldFiles[0];
+  }
+  return null;
+}
 
 async function markPublicCopiesDraftFromNewsDoc(newsDoc, options = {}) {
   const logger = options.logger || console;
@@ -923,6 +965,73 @@ function hasArticleContentEdit(update) {
     || Object.prototype.hasOwnProperty.call(update, 'coverImage')
   ));
 }
+
+// POST /api/admin/articles/media/image -> upload inline rich-text article image
+router.post('/articles/media/image', requireAdminAuth, runArticleInlineImageUpload, async (req, res) => {
+  let uploaded = null;
+  try {
+    const file = pickArticleInlineImageFile(req);
+    if (!file || !file.buffer || !Buffer.isBuffer(file.buffer)) {
+      return res.status(400).json({ ok: false, success: false, message: "No image uploaded (field: image | file | media)" });
+    }
+
+    const mimeType = assertAllowedArticleInlineImageUpload(file.mimetype, file.buffer);
+    const providerStatus = getMediaLibraryProviderStatus();
+    if (providerStatus.provider !== 'cloudinary') {
+      return res.status(503).json({ ok: false, success: false, status: 503, code: 'MEDIA_UPLOAD_NOT_CONFIGURED', message: 'Article inline image upload requires durable Cloudinary storage' });
+    }
+
+    uploaded = await uploadMediaLibraryFile(req, {
+      ...file,
+      mimetype: mimeType,
+      size: file.size,
+      buffer: file.buffer,
+    }, {
+      allowedMimeTypes: ARTICLE_INLINE_IMAGE_ACCEPTED_MIME_TYPES,
+      validationMessage: 'Only JPG, JPEG, PNG, and WEBP inline article images are allowed.',
+    });
+
+    const durableUrl = String(uploaded?.secureUrl || uploaded?.assetUrl || uploaded?.url || '').trim();
+    if (uploaded.provider !== 'cloudinary' || !/^https:\/\//i.test(durableUrl)) {
+      if (uploaded?.id) {
+        try { await deleteMediaLibraryItem(uploaded.id); } catch (_) {}
+      }
+      return res.status(502).json({ ok: false, success: false, status: 502, code: 'MEDIA_UPLOAD_NOT_DURABLE', message: 'Article inline image upload did not return a durable HTTPS URL' });
+    }
+
+    const mediaRecord = await createIndexedMediaRecord(req, uploaded, { source: 'article-inline', mediaType: 'image' });
+
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      data: {
+        mediaId: mediaRecord.id,
+        storageId: mediaRecord.storageId || uploaded.id || null,
+        url: durableUrl,
+        width: mediaRecord.width ?? uploaded.width ?? null,
+        height: mediaRecord.height ?? uploaded.height ?? null,
+        mimeType: mediaRecord.mimeType || mimeType,
+        size: mediaRecord.size || uploaded.size || file.size,
+        provider: mediaRecord.provider || uploaded.provider,
+        source: 'article-inline',
+        uploadedBy: mediaRecord.uploadedBy || null,
+      },
+    });
+  } catch (err) {
+    if (uploaded?.id) {
+      try { await deleteMediaLibraryItem(uploaded.id); } catch (_) {}
+    }
+    const status = typeof err?.status === 'number' ? err.status : 500;
+    if (status >= 500) console.error('[articles.inlineImage.upload] error:', err?.message || err);
+    return res.status(status).json({
+      ok: false,
+      success: false,
+      status,
+      code: err?.code || undefined,
+      message: status >= 500 ? 'Inline image upload failed' : (err?.message || 'Invalid upload'),
+    });
+  }
+});
 
 // POST /api/articles/:id/translations/generate
 router.post('/articles/:id/translations/generate', requireAdminAuth, async (req, res) => {

@@ -58,6 +58,24 @@ function restoreMap(text, map) {
   return out;
 }
 
+function protectNewsPulseInlineImageBlocks(html) {
+  let index = 0;
+  const map = new Map();
+  const text = String(html || '').replace(/<figure\b[^>]*>[\s\S]*?<\/figure>/gi, (match) => {
+    const opening = match.match(/^<figure\b[^>]*>/i)?.[0] || '';
+    const hasCanonicalMarker = /\sdata-np-block\s*=\s*(['"])inline-image\1/i.test(opening) && /\sdata-np-media-id\s*=\s*(['"])[^'"]+\1/i.test(opening);
+    const hasLegacyDevelopmentMarker = /\sdata-np-inline-image\s*=\s*(['"])true\1/i.test(opening) && /\sdata-media-id\s*=\s*(['"])[^'"]+\1/i.test(opening);
+    const hasPhaseOneDraftMarker = /\sdata-np-block\s*=\s*(['"])image\1/i.test(opening) && /\sdata-media-id\s*=\s*(['"])[^'"]+\1/i.test(opening);
+    const isControlled = hasCanonicalMarker || hasLegacyDevelopmentMarker || hasPhaseOneDraftMarker;
+    if (!isControlled) return match;
+    const token = `__NP_INLINE_IMAGE_BLOCK_${index}__`;
+    index += 1;
+    map.set(token, match);
+    return token;
+  });
+  return { text, map };
+}
+
 function protectHtmlAttributes(text) {
   return protectByRegex(String(text || ''), /\s(?:href|src|alt|title|class|id|style|data-[\w-]+)=("[^"]*"|'[^']*'|[^\s>]+)/gi, 'ATTR');
 }
@@ -221,7 +239,8 @@ async function translateText(text, sourceLang, targetLang, options = {}) {
   const raw = String(text ?? '');
   if (!raw.trim()) return { ok: true, text: raw };
   const html = options.format === 'html';
-  const chunks = html ? splitHtmlIntoChunks(raw, options.maxChars) : splitTextIntoChunks(raw, options.maxChars);
+  const inlineImages = html ? protectNewsPulseInlineImageBlocks(raw) : { text: raw, map: new Map() };
+  const chunks = html ? splitHtmlIntoChunks(inlineImages.text, options.maxChars) : splitTextIntoChunks(raw, options.maxChars);
   const protectedChunks = chunks.map((chunk) => protectText(chunk, { html }));
   const res = await translateBatch(protectedChunks.map((chunk) => chunk.text), targetLang, {
     ...options,
@@ -230,7 +249,8 @@ async function translateText(text, sourceLang, targetLang, options = {}) {
   });
   if (!res.ok) return res;
   const restored = res.items.map((item, index) => restoreText(item, protectedChunks[index], targetLang));
-  return { ok: true, text: restored.join('') };
+  const restoredHtml = html ? restoreMap(restored.join(''), inlineImages.map) : restored.join('');
+  return { ok: true, text: restoredHtml };
 }
 
 async function detectLanguage(text, options = {}) {
@@ -257,6 +277,7 @@ module.exports = {
   normalizeLang,
   validateGoogleTranslationConfig,
   stableHash,
+  protectNewsPulseInlineImageBlocks,
   splitHtmlIntoChunks,
   splitTextIntoChunks,
   translateBatch,

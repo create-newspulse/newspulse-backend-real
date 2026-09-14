@@ -47,6 +47,24 @@ function makeOpaqueFounderToken() {
   return makeOpaqueAdminToken('founder@example.com');
 }
 
+function makeInlineImageBlock(overrides = {}) {
+  const mediaId = overrides.mediaId || '507f1f77bcf86cd799439811';
+  const src = overrides.src || 'https://res.cloudinary.com/demo/image/upload/v1/newspulse/media-library/inline.jpg';
+  const caption = overrides.caption || 'Caption to preserve';
+  const credit = overrides.credit || 'News Pulse Photo Desk';
+  const width = overrides.width || 1200;
+  const height = overrides.height || 675;
+  return `<figure data-np-block="inline-image" data-np-media-id="${mediaId}" data-np-width="${width}" data-np-height="${height}"><img src="${src}" alt="Inline newsroom image" width="${width}" height="${height}"><figcaption data-np-caption="true">${caption}</figcaption><div data-np-credit="true">Credit: ${credit}</div></figure>`;
+}
+
+function makeLegacyInlineImageBlock() {
+  return '<figure data-np-inline-image="true" data-media-id="legacy-media-1"><img src="https://res.cloudinary.com/demo/image/upload/v1/legacy.jpg" alt="Legacy inline image"><figcaption>Legacy caption</figcaption></figure>';
+}
+
+function countOccurrences(text, needle) {
+  return String(text || '').split(needle).length - 1;
+}
+
 test('googleTranslationService preserves protected terms, URLs, hashtags, and retries temporary errors', async () => {
   let calls = 0;
   const fetchImpl = async (_url, opts) => {
@@ -98,6 +116,85 @@ test('googleTranslationService chunks long HTML and reassembles in order', async
   assert.equal(res.text, chunks.map((item) => `[${item.slice(0, 4)}]`).join(''));
 });
 
+test('googleTranslationService preserves News Pulse controlled inline image blocks through HTML translation', async () => {
+  const imageBlock = makeInlineImageBlock();
+  const html = `<p>Before image text.</p>${imageBlock}<p>After image text.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before image text.', 'Translated before.').replace('After image text.', 'Translated after.') })) } }),
+    };
+  };
+
+  for (const targetLang of ['hi', 'gu']) {
+    const res = await googleTranslation.translateText(html, 'en', targetLang, { format: 'html', fetchImpl });
+
+    assert.equal(res.ok, true);
+    assert.equal(countOccurrences(res.text, 'data-np-block="inline-image"'), 1);
+    assert.equal(countOccurrences(res.text, 'data-np-media-id="507f1f77bcf86cd799439811"'), 1);
+    assert.equal(countOccurrences(res.text, 'https://res.cloudinary.com/demo/image/upload/v1/newspulse/media-library/inline.jpg'), 1);
+    assert.equal(countOccurrences(res.text, 'data-np-width="1200"'), 1);
+    assert.equal(countOccurrences(res.text, 'data-np-height="675"'), 1);
+    assert.match(res.text, /<img[^>]+width="1200"[^>]+height="675"/);
+    assert.ok(res.text.indexOf('<p>Translated before.</p>') < res.text.indexOf(imageBlock));
+    assert.ok(res.text.indexOf(imageBlock) < res.text.indexOf('<p>Translated after.</p>'));
+    assert.match(res.text, /<figcaption data-np-caption="true">Caption to preserve<\/figcaption>/);
+    assert.match(res.text, /<div data-np-credit="true">Credit: News Pulse Photo Desk<\/div>/);
+  }
+});
+
+test('googleTranslationService detects canonical inline image blocks before provider translation', () => {
+  const imageBlock = makeInlineImageBlock();
+  const protectedResult = googleTranslation.protectNewsPulseInlineImageBlocks(`<p>A</p>${imageBlock}<p>B</p>`);
+
+  assert.equal(protectedResult.map.size, 1);
+  assert.match(protectedResult.text, /__NP_INLINE_IMAGE_BLOCK_0__/);
+  assert.equal(protectedResult.map.get('__NP_INLINE_IMAGE_BLOCK_0__'), imageBlock);
+});
+
+test('googleTranslationService preserves legacy development inline image marker', async () => {
+  const imageBlock = makeLegacyInlineImageBlock();
+  const html = `<p>Before legacy.</p>${imageBlock}<p>After legacy.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before legacy.', 'Translated before legacy.').replace('After legacy.', 'Translated after legacy.') })) } }),
+    };
+  };
+
+  const res = await googleTranslation.translateText(html, 'en', 'hi', { format: 'html', fetchImpl });
+
+  assert.equal(res.ok, true);
+  assert.equal(countOccurrences(res.text, 'data-np-inline-image="true"'), 1);
+  assert.equal(countOccurrences(res.text, 'data-media-id="legacy-media-1"'), 1);
+  assert.equal(countOccurrences(res.text, 'https://res.cloudinary.com/demo/image/upload/v1/legacy.jpg'), 1);
+  assert.ok(res.text.indexOf('<p>Translated before legacy.</p>') < res.text.indexOf(imageBlock));
+  assert.ok(res.text.indexOf(imageBlock) < res.text.indexOf('<p>Translated after legacy.</p>'));
+});
+
+test('googleTranslationService still translates normal article HTML around uncontrolled markup', async () => {
+  const html = '<p>Normal intro.</p><figure><img src="https://example.com/plain.jpg" alt="Plain"><figcaption>Normal caption.</figcaption></figure><p>Normal outro.</p>';
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Normal intro.', 'Translated intro.').replace('Normal caption.', 'Translated caption.').replace('Normal outro.', 'Translated outro.') })) } }),
+    };
+  };
+
+  const res = await googleTranslation.translateText(html, 'en', 'hi', { format: 'html', fetchImpl });
+
+  assert.equal(res.ok, true);
+  assert.match(res.text, /Translated intro/);
+  assert.match(res.text, /Translated caption/);
+  assert.match(res.text, /Translated outro/);
+});
+
 test('English article generates Hindi and Gujarati sibling drafts only', async () => {
   const originals = { findOne: News.findOne, create: News.create, updateOne: News.updateOne };
   const prevFetch = global.fetch;
@@ -119,6 +216,44 @@ test('English article generates Hindi and Gujarati sibling drafts only', async (
     assert.ok(created.every((item) => item.translationGroupId === 'grp-auto-1'));
     assert.ok(created.every((item) => item.status === 'draft'));
     assert.ok(created.every((item) => item.translationReviewStatus === 'review_required'));
+  } finally {
+    restore(originals);
+    global.fetch = prevFetch;
+  }
+});
+
+test('generated Hindi and Gujarati article translations preserve inline image media identity', async () => {
+  const originals = { findOne: News.findOne, create: News.create, updateOne: News.updateOne };
+  const prevFetch = global.fetch;
+  const created = [];
+  const imageBlock = makeInlineImageBlock();
+  const sourceContent = `<p>Lead paragraph.</p>${imageBlock}<p>Closing paragraph.</p>`;
+
+  try {
+    News.findOne = async () => null;
+    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994398${created.length}1`, ...payload }; };
+    global.fetch = async (_url, opts) => {
+      const body = JSON.parse(String(opts.body || '{}'));
+      return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
+    };
+
+    const res = await generateArticleTranslations(makeSource({ content: sourceContent, language: 'en', lang: 'en' }), { targetLanguages: ['hi', 'gu'] });
+    assert.equal(res.ok, true);
+    assert.deepEqual(created.map((item) => item.language).sort(), ['gu', 'hi']);
+
+    for (const payload of created) {
+      assert.equal(countOccurrences(payload.content, 'data-np-block="inline-image"'), 1);
+      assert.equal(countOccurrences(payload.content, 'data-np-media-id="507f1f77bcf86cd799439811"'), 1);
+      assert.equal(countOccurrences(payload.content, 'https://res.cloudinary.com/demo/image/upload/v1/newspulse/media-library/inline.jpg'), 1);
+      assert.equal(countOccurrences(payload.content, 'data-np-width="1200"'), 1);
+      assert.equal(countOccurrences(payload.content, 'data-np-height="675"'), 1);
+      assert.match(payload.content, /<img[^>]+width="1200"[^>]+height="675"/);
+      assert.ok(payload.content.indexOf(`${payload.language}:<p>Lead paragraph.</p>`) < payload.content.indexOf(imageBlock));
+      assert.ok(payload.content.indexOf(imageBlock) < payload.content.indexOf('<p>Closing paragraph.</p>'));
+      assert.match(payload.content, /<figcaption data-np-caption="true">Caption to preserve<\/figcaption>/);
+      assert.match(payload.content, /<div data-np-credit="true">Credit: News Pulse Photo Desk<\/div>/);
+    }
   } finally {
     restore(originals);
     global.fetch = prevFetch;
