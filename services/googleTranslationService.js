@@ -58,6 +58,52 @@ function restoreMap(text, map) {
   return out;
 }
 
+function getHtmlAttribute(opening, name) {
+  const escaped = String(name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const rx = new RegExp(`\\s${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i');
+  const m = String(opening || '').match(rx);
+  if (!m) return null;
+  return m[1] !== undefined ? m[1] : (m[2] !== undefined ? m[2] : m[3]);
+}
+
+function isValidYouTubeVideoId(value) {
+  return /^[A-Za-z0-9_-]{11}$/.test(String(value || '').trim());
+}
+
+function getYouTubeVideoIdFromUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(/^(?:https?:)?\/\//i.test(raw) ? raw : `https://${raw}`);
+    const host = url.hostname.toLowerCase().replace(/^www\./, '');
+    if (host === 'youtu.be') return url.pathname.split('/').filter(Boolean)[0] || null;
+    if (host === 'youtube.com' || host === 'm.youtube.com' || host === 'youtube-nocookie.com') {
+      if (url.pathname === '/watch') return url.searchParams.get('v');
+      if (url.pathname.startsWith('/embed/') || url.pathname.startsWith('/shorts/')) {
+        return url.pathname.split('/').filter(Boolean)[1] || null;
+      }
+    }
+  } catch (_) {
+    return null;
+  }
+  return null;
+}
+
+function isSupportedYouTubeUrlForVideoId(value, videoId) {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+  const parsedVideoId = getYouTubeVideoIdFromUrl(raw);
+  return parsedVideoId === String(videoId || '').trim() && isValidYouTubeVideoId(parsedVideoId);
+}
+
+function isControlledYouTubeBlockOpening(opening) {
+  const block = getHtmlAttribute(opening, 'data-np-block');
+  if (String(block || '').trim() !== 'youtube') return false;
+  const videoId = getHtmlAttribute(opening, 'data-np-video-id');
+  if (!isValidYouTubeVideoId(videoId)) return false;
+  return isSupportedYouTubeUrlForVideoId(getHtmlAttribute(opening, 'data-np-url'), videoId);
+}
+
 function protectNewsPulseInlineImageBlocks(html) {
   let index = 0;
   const map = new Map();
@@ -74,6 +120,29 @@ function protectNewsPulseInlineImageBlocks(html) {
     return token;
   });
   return { text, map };
+}
+
+function protectNewsPulseYouTubeBlocks(html) {
+  let index = 0;
+  const map = new Map();
+  const text = String(html || '').replace(/<div\b[^>]*>[\s\S]*?<\/div>/gi, (match) => {
+    const opening = match.match(/^<div\b[^>]*>/i)?.[0] || '';
+    if (!isControlledYouTubeBlockOpening(opening)) return match;
+    const token = `__NP_YOUTUBE_BLOCK_${index}__`;
+    index += 1;
+    map.set(token, match);
+    return token;
+  });
+  return { text, map };
+}
+
+function protectNewsPulseControlledMediaBlocks(html) {
+  const inlineImages = protectNewsPulseInlineImageBlocks(html);
+  const youtubeBlocks = protectNewsPulseYouTubeBlocks(inlineImages.text);
+  return {
+    text: youtubeBlocks.text,
+    maps: [youtubeBlocks.map, inlineImages.map],
+  };
 }
 
 function protectHtmlAttributes(text) {
@@ -239,8 +308,8 @@ async function translateText(text, sourceLang, targetLang, options = {}) {
   const raw = String(text ?? '');
   if (!raw.trim()) return { ok: true, text: raw };
   const html = options.format === 'html';
-  const inlineImages = html ? protectNewsPulseInlineImageBlocks(raw) : { text: raw, map: new Map() };
-  const chunks = html ? splitHtmlIntoChunks(inlineImages.text, options.maxChars) : splitTextIntoChunks(raw, options.maxChars);
+  const controlledMedia = html ? protectNewsPulseControlledMediaBlocks(raw) : { text: raw, maps: [] };
+  const chunks = html ? splitHtmlIntoChunks(controlledMedia.text, options.maxChars) : splitTextIntoChunks(raw, options.maxChars);
   const protectedChunks = chunks.map((chunk) => protectText(chunk, { html }));
   const res = await translateBatch(protectedChunks.map((chunk) => chunk.text), targetLang, {
     ...options,
@@ -249,7 +318,9 @@ async function translateText(text, sourceLang, targetLang, options = {}) {
   });
   if (!res.ok) return res;
   const restored = res.items.map((item, index) => restoreText(item, protectedChunks[index], targetLang));
-  const restoredHtml = html ? restoreMap(restored.join(''), inlineImages.map) : restored.join('');
+  const restoredHtml = html
+    ? [...controlledMedia.maps].reverse().reduce((out, map) => restoreMap(out, map), restored.join(''))
+    : restored.join('');
   return { ok: true, text: restoredHtml };
 }
 
@@ -278,6 +349,8 @@ module.exports = {
   validateGoogleTranslationConfig,
   stableHash,
   protectNewsPulseInlineImageBlocks,
+  protectNewsPulseYouTubeBlocks,
+  protectNewsPulseControlledMediaBlocks,
   splitHtmlIntoChunks,
   splitTextIntoChunks,
   translateBatch,

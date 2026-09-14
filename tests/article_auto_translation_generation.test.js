@@ -61,6 +61,12 @@ function makeLegacyInlineImageBlock() {
   return '<figure data-np-inline-image="true" data-media-id="legacy-media-1"><img src="https://res.cloudinary.com/demo/image/upload/v1/legacy.jpg" alt="Legacy inline image"><figcaption>Legacy caption</figcaption></figure>';
 }
 
+function makeYouTubeBlock(overrides = {}) {
+  const videoId = overrides.videoId || 'SLDHOwReM-Q';
+  const url = overrides.url || `https://www.youtube.com/watch?v=${videoId}`;
+  return `<div data-np-block="youtube" data-np-video-id="${videoId}" data-np-url="${url}"></div>`;
+}
+
 function countOccurrences(text, needle) {
   return String(text || '').split(needle).length - 1;
 }
@@ -152,6 +158,100 @@ test('googleTranslationService detects canonical inline image blocks before prov
   assert.equal(protectedResult.map.size, 1);
   assert.match(protectedResult.text, /__NP_INLINE_IMAGE_BLOCK_0__/);
   assert.equal(protectedResult.map.get('__NP_INLINE_IMAGE_BLOCK_0__'), imageBlock);
+});
+
+test('googleTranslationService detects canonical YouTube blocks before provider translation', () => {
+  const youtubeBlock = makeYouTubeBlock();
+  const protectedResult = googleTranslation.protectNewsPulseYouTubeBlocks(`<p>A</p>${youtubeBlock}<p>B</p>`);
+
+  assert.equal(protectedResult.map.size, 1);
+  assert.match(protectedResult.text, /__NP_YOUTUBE_BLOCK_0__/);
+  assert.equal(protectedResult.map.get('__NP_YOUTUBE_BLOCK_0__'), youtubeBlock);
+});
+
+test('googleTranslationService recognizes supported YouTube URL forms for controlled blocks', () => {
+  const blocks = [
+    makeYouTubeBlock({ url: 'https://youtube.com/watch?v=SLDHOwReM-Q' }),
+    makeYouTubeBlock({ url: 'https://www.youtube.com/watch?v=SLDHOwReM-Q' }),
+    makeYouTubeBlock({ url: 'https://youtu.be/SLDHOwReM-Q' }),
+    makeYouTubeBlock({ url: 'https://youtube.com/shorts/SLDHOwReM-Q' }),
+    makeYouTubeBlock({ url: 'https://www.youtube-nocookie.com/embed/SLDHOwReM-Q' }),
+  ];
+
+  for (const block of blocks) {
+    const protectedResult = googleTranslation.protectNewsPulseYouTubeBlocks(block);
+    assert.equal(protectedResult.map.size, 1);
+    assert.equal(protectedResult.map.get('__NP_YOUTUBE_BLOCK_0__'), block);
+  }
+});
+
+test('googleTranslationService preserves News Pulse controlled YouTube blocks through Hindi and Gujarati HTML translation', async () => {
+  const youtubeBlock = makeYouTubeBlock({ videoId: 'SLDHOwReM-Q', url: 'https://youtu.be/SLDHOwReM-Q' });
+  const html = `<p>Before video text.</p>${youtubeBlock}<p>After video text.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before video text.', 'Translated before video.').replace('After video text.', 'Translated after video.') })) } }),
+    };
+  };
+
+  for (const targetLang of ['hi', 'gu']) {
+    const res = await googleTranslation.translateText(html, 'en', targetLang, { format: 'html', fetchImpl });
+
+    assert.equal(res.ok, true);
+    assert.equal(countOccurrences(res.text, 'data-np-block="youtube"'), 1);
+    assert.equal(countOccurrences(res.text, 'data-np-video-id="SLDHOwReM-Q"'), 1);
+    assert.equal(countOccurrences(res.text, 'data-np-url="https://youtu.be/SLDHOwReM-Q"'), 1);
+    assert.ok(res.text.indexOf('<p>Translated before video.</p>') < res.text.indexOf(youtubeBlock));
+    assert.ok(res.text.indexOf(youtubeBlock) < res.text.indexOf('<p>Translated after video.</p>'));
+  }
+});
+
+test('googleTranslationService does not preserve invalid or non-YouTube data-np blocks as controlled YouTube', () => {
+  const invalidId = '<div data-np-block="youtube" data-np-video-id="not-valid" data-np-url="https://www.youtube.com/watch?v=not-valid"></div>';
+  const missingUrl = '<div data-np-block="youtube" data-np-video-id="SLDHOwReM-Q"></div>';
+  const wrongCaseBlock = '<div data-np-block="YouTube" data-np-video-id="SLDHOwReM-Q" data-np-url="https://www.youtube.com/watch?v=SLDHOwReM-Q"></div>';
+  const unsupportedUrl = '<div data-np-block="youtube" data-np-video-id="SLDHOwReM-Q" data-np-url="https://example.com/watch?v=SLDHOwReM-Q"></div>';
+  const lookalikeDomain = '<div data-np-block="youtube" data-np-video-id="SLDHOwReM-Q" data-np-url="https://youtube.com.example.test/watch?v=SLDHOwReM-Q"></div>';
+  const javascriptUrl = '<div data-np-block="youtube" data-np-video-id="SLDHOwReM-Q" data-np-url="javascript:alert(1)"></div>';
+  const dataUrl = '<div data-np-block="youtube" data-np-video-id="SLDHOwReM-Q" data-np-url="data:text/html;base64,PHNjcmlwdD48L3NjcmlwdD4="></div>';
+  const mismatchedUrl = '<div data-np-block="youtube" data-np-video-id="SLDHOwReM-Q" data-np-url="https://www.youtube.com/watch?v=dQw4w9WgXcQ"></div>';
+  const arbitraryBlock = '<div data-np-block="iframe" data-np-video-id="SLDHOwReM-Q" data-np-url="https://www.youtube.com/watch?v=SLDHOwReM-Q"></div>';
+  const rawIframe = '<iframe src="https://www.youtube.com/embed/SLDHOwReM-Q"></iframe>';
+  const rawScript = '<script src="https://www.youtube.com/iframe_api"></script>';
+
+  for (const block of [invalidId, missingUrl, wrongCaseBlock, unsupportedUrl, lookalikeDomain, javascriptUrl, dataUrl, mismatchedUrl, arbitraryBlock, rawIframe, rawScript]) {
+    const protectedResult = googleTranslation.protectNewsPulseYouTubeBlocks(`<p>A</p>${block}<p>B</p>`);
+    assert.equal(protectedResult.map.size, 0);
+    assert.equal(protectedResult.text, `<p>A</p>${block}<p>B</p>`);
+  }
+});
+
+test('googleTranslationService preserves multiple YouTube blocks in their individual positions', async () => {
+  const firstBlock = makeYouTubeBlock({ videoId: 'SLDHOwReM-Q', url: 'https://www.youtube.com/watch?v=SLDHOwReM-Q' });
+  const secondBlock = makeYouTubeBlock({ videoId: 'dQw4w9WgXcQ', url: 'https://youtu.be/dQw4w9WgXcQ' });
+  const html = `<p>Before first.</p>${firstBlock}<p>Between videos.</p>${secondBlock}<p>After second.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before first.', 'Translated before first.').replace('Between videos.', 'Translated between videos.').replace('After second.', 'Translated after second.') })) } }),
+    };
+  };
+
+  const res = await googleTranslation.translateText(html, 'en', 'gu', { format: 'html', fetchImpl });
+
+  assert.equal(res.ok, true);
+  assert.equal(countOccurrences(res.text, 'data-np-block="youtube"'), 2);
+  assert.equal(countOccurrences(res.text, 'data-np-video-id="SLDHOwReM-Q"'), 1);
+  assert.equal(countOccurrences(res.text, 'data-np-video-id="dQw4w9WgXcQ"'), 1);
+  assert.ok(res.text.indexOf('<p>Translated before first.</p>') < res.text.indexOf(firstBlock));
+  assert.ok(res.text.indexOf(firstBlock) < res.text.indexOf('<p>Translated between videos.</p>'));
+  assert.ok(res.text.indexOf('<p>Translated between videos.</p>') < res.text.indexOf(secondBlock));
+  assert.ok(res.text.indexOf(secondBlock) < res.text.indexOf('<p>Translated after second.</p>'));
 });
 
 test('googleTranslationService preserves legacy development inline image marker', async () => {
@@ -253,6 +353,39 @@ test('generated Hindi and Gujarati article translations preserve inline image me
       assert.ok(payload.content.indexOf(imageBlock) < payload.content.indexOf('<p>Closing paragraph.</p>'));
       assert.match(payload.content, /<figcaption data-np-caption="true">Caption to preserve<\/figcaption>/);
       assert.match(payload.content, /<div data-np-credit="true">Credit: News Pulse Photo Desk<\/div>/);
+    }
+  } finally {
+    restore(originals);
+    global.fetch = prevFetch;
+  }
+});
+
+test('generated Hindi and Gujarati article translations preserve controlled YouTube media identity', async () => {
+  const originals = { findOne: News.findOne, create: News.create, updateOne: News.updateOne };
+  const prevFetch = global.fetch;
+  const created = [];
+  const youtubeBlock = makeYouTubeBlock({ videoId: 'SLDHOwReM-Q', url: 'https://www.youtube.com/embed/SLDHOwReM-Q' });
+  const sourceContent = `<p>Lead paragraph.</p>${youtubeBlock}<p>Closing paragraph.</p>`;
+
+  try {
+    News.findOne = async () => null;
+    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994399${created.length}1`, ...payload }; };
+    global.fetch = async (_url, opts) => {
+      const body = JSON.parse(String(opts.body || '{}'));
+      return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
+    };
+
+    const res = await generateArticleTranslations(makeSource({ content: sourceContent, language: 'en', lang: 'en' }), { targetLanguages: ['hi', 'gu'] });
+    assert.equal(res.ok, true);
+    assert.deepEqual(created.map((item) => item.language).sort(), ['gu', 'hi']);
+
+    for (const payload of created) {
+      assert.equal(countOccurrences(payload.content, 'data-np-block="youtube"'), 1);
+      assert.equal(countOccurrences(payload.content, 'data-np-video-id="SLDHOwReM-Q"'), 1);
+      assert.equal(countOccurrences(payload.content, 'data-np-url="https://www.youtube.com/embed/SLDHOwReM-Q"'), 1);
+      assert.ok(payload.content.indexOf(`${payload.language}:<p>Lead paragraph.</p>`) < payload.content.indexOf(youtubeBlock));
+      assert.ok(payload.content.indexOf(youtubeBlock) < payload.content.indexOf('<p>Closing paragraph.</p>'));
     }
   } finally {
     restore(originals);
