@@ -67,6 +67,13 @@ function makeYouTubeBlock(overrides = {}) {
   return `<div data-np-block="youtube" data-np-video-id="${videoId}" data-np-url="${url}"></div>`;
 }
 
+function makeXBlock(overrides = {}) {
+  const postId = overrides.postId || '1766401130046488732';
+  const username = overrides.username || 'NewsPulseAI';
+  const url = overrides.url || `https://x.com/${username}/status/${postId}`;
+  return `<div data-np-block="x" data-np-post-id="${postId}" data-np-url="${url}"></div>`;
+}
+
 function countOccurrences(text, needle) {
   return String(text || '').split(needle).length - 1;
 }
@@ -206,6 +213,102 @@ test('googleTranslationService preserves News Pulse controlled YouTube blocks th
     assert.equal(countOccurrences(res.text, 'data-np-url="https://youtu.be/SLDHOwReM-Q"'), 1);
     assert.ok(res.text.indexOf('<p>Translated before video.</p>') < res.text.indexOf(youtubeBlock));
     assert.ok(res.text.indexOf(youtubeBlock) < res.text.indexOf('<p>Translated after video.</p>'));
+  }
+});
+
+test('googleTranslationService detects canonical X blocks before provider translation', () => {
+  const xBlock = makeXBlock();
+  const protectedResult = googleTranslation.protectNewsPulseXBlocks(`<p>A</p>${xBlock}<p>B</p>`);
+
+  assert.equal(protectedResult.map.size, 1);
+  assert.match(protectedResult.text, /__NP_X_BLOCK_0__/);
+  assert.equal(protectedResult.map.get('__NP_X_BLOCK_0__'), xBlock);
+});
+
+test('googleTranslationService recognizes supported X URL forms for controlled blocks', () => {
+  const postId = '1766401130046488732';
+  const blocks = [
+    makeXBlock({ postId, url: `https://x.com/NewsPulseAI/status/${postId}` }),
+    makeXBlock({ postId, url: `https://www.x.com/NewsPulseAI/status/${postId}` }),
+    makeXBlock({ postId, url: `https://twitter.com/NewsPulseAI/status/${postId}` }),
+    makeXBlock({ postId, url: `https://www.twitter.com/NewsPulseAI/status/${postId}` }),
+    makeXBlock({ postId, url: `https://x.com/NewsPulseAI/status/${postId}?s=20` }),
+  ];
+
+  for (const block of blocks) {
+    const protectedResult = googleTranslation.protectNewsPulseXBlocks(block);
+    assert.equal(protectedResult.map.size, 1);
+    assert.equal(protectedResult.map.get('__NP_X_BLOCK_0__'), block);
+  }
+});
+
+test('googleTranslationService preserves News Pulse controlled X blocks through English, Hindi, and Gujarati HTML translation', async () => {
+  const xBlock = makeXBlock({ url: 'https://twitter.com/NewsPulseAI/status/1766401130046488732?s=20' });
+  const html = `<p>Before X post.</p>${xBlock}<p>After X post.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before X post.', `${body.target}:Before X post.`).replace('After X post.', `${body.target}:After X post.`) })) } }),
+    };
+  };
+
+  for (const targetLang of ['en', 'hi', 'gu']) {
+    const res = await googleTranslation.translateText(html, 'en', targetLang, { format: 'html', fetchImpl });
+
+    assert.equal(res.ok, true);
+    assert.equal(countOccurrences(res.text, 'data-np-block="x"'), 1);
+    assert.equal(countOccurrences(res.text, 'data-np-post-id="1766401130046488732"'), 1);
+    assert.equal(countOccurrences(res.text, 'data-np-url="https://twitter.com/NewsPulseAI/status/1766401130046488732?s=20"'), 1);
+    assert.ok(res.text.indexOf(`<p>${targetLang}:Before X post.</p>`) < res.text.indexOf(xBlock));
+    assert.ok(res.text.indexOf(xBlock) < res.text.indexOf(`<p>${targetLang}:After X post.</p>`));
+  }
+});
+
+test('googleTranslationService preserves multiple X blocks in their individual positions without duplication', async () => {
+  const firstBlock = makeXBlock({ postId: '1766401130046488732', url: 'https://x.com/NewsPulseAI/status/1766401130046488732' });
+  const secondBlock = makeXBlock({ postId: '1766401130046488733', url: 'https://twitter.com/NewsPulseAI/status/1766401130046488733?s=20' });
+  const html = `<p>Before first X.</p>${firstBlock}<p>Between X posts.</p>${secondBlock}<p>After second X.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before first X.', 'Translated before first X.').replace('Between X posts.', 'Translated between X posts.').replace('After second X.', 'Translated after second X.') })) } }),
+    };
+  };
+
+  const res = await googleTranslation.translateText(html, 'en', 'hi', { format: 'html', fetchImpl });
+
+  assert.equal(res.ok, true);
+  assert.equal(countOccurrences(res.text, 'data-np-block="x"'), 2);
+  assert.equal(countOccurrences(res.text, 'data-np-post-id="1766401130046488732"'), 1);
+  assert.equal(countOccurrences(res.text, 'data-np-post-id="1766401130046488733"'), 1);
+  assert.ok(res.text.indexOf('<p>Translated before first X.</p>') < res.text.indexOf(firstBlock));
+  assert.ok(res.text.indexOf(firstBlock) < res.text.indexOf('<p>Translated between X posts.</p>'));
+  assert.ok(res.text.indexOf('<p>Translated between X posts.</p>') < res.text.indexOf(secondBlock));
+  assert.ok(res.text.indexOf(secondBlock) < res.text.indexOf('<p>Translated after second X.</p>'));
+});
+
+test('googleTranslationService does not preserve invalid or raw X embeds as controlled X blocks', () => {
+  const invalidId = '<div data-np-block="x" data-np-post-id="not-valid" data-np-url="https://x.com/NewsPulseAI/status/not-valid"></div>';
+  const zeroId = '<div data-np-block="x" data-np-post-id="0" data-np-url="https://x.com/NewsPulseAI/status/0"></div>';
+  const mismatchedUrl = '<div data-np-block="x" data-np-post-id="1766401130046488732" data-np-url="https://x.com/NewsPulseAI/status/1766401130046488733"></div>';
+  const missingStatus = '<div data-np-block="x" data-np-post-id="1766401130046488732" data-np-url="https://x.com/NewsPulseAI/1766401130046488732"></div>';
+  const lookalikeXDomain = '<div data-np-block="x" data-np-post-id="1766401130046488732" data-np-url="https://x.com.example.com/NewsPulseAI/status/1766401130046488732"></div>';
+  const lookalikeTwitterDomain = '<div data-np-block="x" data-np-post-id="1766401130046488732" data-np-url="https://twitter.com.example.com/NewsPulseAI/status/1766401130046488732"></div>';
+  const arbitraryDomain = '<div data-np-block="x" data-np-post-id="1766401130046488732" data-np-url="https://example.com/NewsPulseAI/status/1766401130046488732"></div>';
+  const javascriptUrl = '<div data-np-block="x" data-np-post-id="1766401130046488732" data-np-url="javascript:alert(1)"></div>';
+  const dataUrl = '<div data-np-block="x" data-np-post-id="1766401130046488732" data-np-url="data:text/html;base64,PHNjcmlwdD48L3NjcmlwdD4="></div>';
+  const arbitraryBlock = '<div data-np-block="twitter" data-np-post-id="1766401130046488732" data-np-url="https://x.com/NewsPulseAI/status/1766401130046488732"></div>';
+  const rawBlockquote = '<blockquote class="twitter-tweet"><a href="https://x.com/NewsPulseAI/status/1766401130046488732"></a></blockquote>';
+  const rawScript = '<script async src="https://platform.twitter.com/widgets.js"></script>';
+
+  for (const block of [invalidId, zeroId, mismatchedUrl, missingStatus, lookalikeXDomain, lookalikeTwitterDomain, arbitraryDomain, javascriptUrl, dataUrl, arbitraryBlock, rawBlockquote, rawScript]) {
+    const protectedResult = googleTranslation.protectNewsPulseXBlocks(`<p>A</p>${block}<p>B</p>`);
+    assert.equal(protectedResult.map.size, 0);
+    assert.equal(protectedResult.text, `<p>A</p>${block}<p>B</p>`);
   }
 });
 
@@ -386,6 +489,42 @@ test('generated Hindi and Gujarati article translations preserve controlled YouT
       assert.equal(countOccurrences(payload.content, 'data-np-url="https://www.youtube.com/embed/SLDHOwReM-Q"'), 1);
       assert.ok(payload.content.indexOf(`${payload.language}:<p>Lead paragraph.</p>`) < payload.content.indexOf(youtubeBlock));
       assert.ok(payload.content.indexOf(youtubeBlock) < payload.content.indexOf('<p>Closing paragraph.</p>'));
+    }
+  } finally {
+    restore(originals);
+    global.fetch = prevFetch;
+  }
+});
+
+test('generated Hindi and Gujarati article translations preserve controlled X post identity without creating media records', async () => {
+  const originals = { findOne: News.findOne, create: News.create, updateOne: News.updateOne };
+  const prevFetch = global.fetch;
+  const created = [];
+  const xBlock = makeXBlock({ postId: '1766401130046488732', url: 'https://www.x.com/NewsPulseAI/status/1766401130046488732?s=20' });
+  const sourceContent = `<p>Lead paragraph.</p>${xBlock}<p>Closing paragraph.</p>`;
+
+  try {
+    News.findOne = async () => null;
+    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994300${created.length}1`, ...payload }; };
+    global.fetch = async (_url, opts) => {
+      const body = JSON.parse(String(opts.body || '{}'));
+      return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
+    };
+
+    const res = await generateArticleTranslations(makeSource({ content: sourceContent, language: 'en', lang: 'en' }), { targetLanguages: ['hi', 'gu'] });
+    assert.equal(res.ok, true);
+    assert.deepEqual(created.map((item) => item.language).sort(), ['gu', 'hi']);
+    assert.equal(created.length, 2);
+
+    for (const payload of created) {
+      assert.equal(countOccurrences(payload.content, 'data-np-block="x"'), 1);
+      assert.equal(countOccurrences(payload.content, 'data-np-post-id="1766401130046488732"'), 1);
+      assert.equal(countOccurrences(payload.content, 'data-np-url="https://www.x.com/NewsPulseAI/status/1766401130046488732?s=20"'), 1);
+      assert.ok(payload.content.indexOf(`${payload.language}:<p>Lead paragraph.</p>`) < payload.content.indexOf(xBlock));
+      assert.ok(payload.content.indexOf(xBlock) < payload.content.indexOf('<p>Closing paragraph.</p>'));
+      assert.equal(payload.inlineMedia, undefined);
+      assert.equal(payload.media, undefined);
     }
   } finally {
     restore(originals);

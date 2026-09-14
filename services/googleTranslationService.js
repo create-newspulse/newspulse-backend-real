@@ -104,6 +104,39 @@ function isControlledYouTubeBlockOpening(opening) {
   return isSupportedYouTubeUrlForVideoId(getHtmlAttribute(opening, 'data-np-url'), videoId);
 }
 
+function isValidXPostId(value) {
+  return /^[1-9]\d{0,19}$/.test(String(value || ''));
+}
+
+function getXPostIdFromUrl(value) {
+  const raw = String(value || '');
+  if (!raw || raw !== raw.trim()) return null;
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:') return null;
+    if (!['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com'].includes(host)) return null;
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length !== 3 || parts[1] !== 'status') return null;
+    return parts[2];
+  } catch (_) {
+    return null;
+  }
+}
+
+function isSupportedXUrlForPostId(value, postId) {
+  const parsedPostId = getXPostIdFromUrl(value);
+  return parsedPostId === String(postId || '') && isValidXPostId(parsedPostId);
+}
+
+function isControlledXBlockOpening(opening) {
+  const block = getHtmlAttribute(opening, 'data-np-block');
+  if (block !== 'x') return false;
+  const postId = getHtmlAttribute(opening, 'data-np-post-id');
+  if (!isValidXPostId(postId)) return false;
+  return isSupportedXUrlForPostId(getHtmlAttribute(opening, 'data-np-url'), postId);
+}
+
 function protectNewsPulseInlineImageBlocks(html) {
   let index = 0;
   const map = new Map();
@@ -136,12 +169,27 @@ function protectNewsPulseYouTubeBlocks(html) {
   return { text, map };
 }
 
+function protectNewsPulseXBlocks(html) {
+  let index = 0;
+  const map = new Map();
+  const text = String(html || '').replace(/<div\b[^>]*>[\s\S]*?<\/div>/gi, (match) => {
+    const opening = match.match(/^<div\b[^>]*>/i)?.[0] || '';
+    if (!isControlledXBlockOpening(opening)) return match;
+    const token = `__NP_X_BLOCK_${index}__`;
+    index += 1;
+    map.set(token, match);
+    return token;
+  });
+  return { text, map };
+}
+
 function protectNewsPulseControlledMediaBlocks(html) {
   const inlineImages = protectNewsPulseInlineImageBlocks(html);
   const youtubeBlocks = protectNewsPulseYouTubeBlocks(inlineImages.text);
+  const xBlocks = protectNewsPulseXBlocks(youtubeBlocks.text);
   return {
-    text: youtubeBlocks.text,
-    maps: [youtubeBlocks.map, inlineImages.map],
+    text: xBlocks.text,
+    maps: [xBlocks.map, youtubeBlocks.map, inlineImages.map],
   };
 }
 
@@ -350,6 +398,7 @@ module.exports = {
   stableHash,
   protectNewsPulseInlineImageBlocks,
   protectNewsPulseYouTubeBlocks,
+  protectNewsPulseXBlocks,
   protectNewsPulseControlledMediaBlocks,
   splitHtmlIntoChunks,
   splitTextIntoChunks,
