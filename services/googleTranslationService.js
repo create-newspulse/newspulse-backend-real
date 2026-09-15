@@ -137,6 +137,41 @@ function isControlledXBlockOpening(opening) {
   return isSupportedXUrlForPostId(getHtmlAttribute(opening, 'data-np-url'), postId);
 }
 
+function isValidInstagramShortcode(value) {
+  return /^[A-Za-z0-9][A-Za-z0-9_-]{3,63}$/.test(String(value || ''));
+}
+
+function getInstagramShortcodeFromUrl(value) {
+  const raw = String(value || '');
+  if (!raw || raw !== raw.trim()) return null;
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:') return null;
+    if (!['instagram.com', 'www.instagram.com'].includes(host)) return null;
+    if (url.hash) return null;
+    const match = url.pathname.match(/^\/(p|reel|tv)\/([^/]+)\/$/);
+    if (!match) return null;
+    const shortcode = match[2];
+    return isValidInstagramShortcode(shortcode) ? shortcode : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isSupportedInstagramUrlForShortcode(value, shortcode) {
+  const parsedShortcode = getInstagramShortcodeFromUrl(value);
+  return parsedShortcode === String(shortcode || '') && isValidInstagramShortcode(parsedShortcode);
+}
+
+function isControlledInstagramBlockOpening(opening) {
+  const block = getHtmlAttribute(opening, 'data-np-block');
+  if (block !== 'instagram') return false;
+  const shortcode = getHtmlAttribute(opening, 'data-np-shortcode');
+  if (!isValidInstagramShortcode(shortcode)) return false;
+  return isSupportedInstagramUrlForShortcode(getHtmlAttribute(opening, 'data-np-url'), shortcode);
+}
+
 function protectNewsPulseInlineImageBlocks(html) {
   let index = 0;
   const map = new Map();
@@ -183,13 +218,28 @@ function protectNewsPulseXBlocks(html) {
   return { text, map };
 }
 
+function protectNewsPulseInstagramBlocks(html) {
+  let index = 0;
+  const map = new Map();
+  const text = String(html || '').replace(/<div\b[^>]*>[\s\S]*?<\/div>/gi, (match) => {
+    const opening = match.match(/^<div\b[^>]*>/i)?.[0] || '';
+    if (!isControlledInstagramBlockOpening(opening)) return match;
+    const token = `__NP_INSTAGRAM_BLOCK_${index}__`;
+    index += 1;
+    map.set(token, match);
+    return token;
+  });
+  return { text, map };
+}
+
 function protectNewsPulseControlledMediaBlocks(html) {
   const inlineImages = protectNewsPulseInlineImageBlocks(html);
   const youtubeBlocks = protectNewsPulseYouTubeBlocks(inlineImages.text);
   const xBlocks = protectNewsPulseXBlocks(youtubeBlocks.text);
+  const instagramBlocks = protectNewsPulseInstagramBlocks(xBlocks.text);
   return {
-    text: xBlocks.text,
-    maps: [xBlocks.map, youtubeBlocks.map, inlineImages.map],
+    text: instagramBlocks.text,
+    maps: [instagramBlocks.map, xBlocks.map, youtubeBlocks.map, inlineImages.map],
   };
 }
 
@@ -399,6 +449,7 @@ module.exports = {
   protectNewsPulseInlineImageBlocks,
   protectNewsPulseYouTubeBlocks,
   protectNewsPulseXBlocks,
+  protectNewsPulseInstagramBlocks,
   protectNewsPulseControlledMediaBlocks,
   splitHtmlIntoChunks,
   splitTextIntoChunks,

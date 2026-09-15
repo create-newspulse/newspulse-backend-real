@@ -74,6 +74,12 @@ function makeXBlock(overrides = {}) {
   return `<div data-np-block="x" data-np-post-id="${postId}" data-np-url="${url}"></div>`;
 }
 
+function makeInstagramBlock(overrides = {}) {
+  const shortcode = overrides.shortcode || 'Cabc_123-def';
+  const url = overrides.url || `https://www.instagram.com/p/${shortcode}/`;
+  return `<div data-np-block="instagram" data-np-shortcode="${shortcode}" data-np-url="${url}"></div>`;
+}
+
 function countOccurrences(text, needle) {
   return String(text || '').split(needle).length - 1;
 }
@@ -289,6 +295,111 @@ test('googleTranslationService preserves multiple X blocks in their individual p
   assert.ok(res.text.indexOf(firstBlock) < res.text.indexOf('<p>Translated between X posts.</p>'));
   assert.ok(res.text.indexOf('<p>Translated between X posts.</p>') < res.text.indexOf(secondBlock));
   assert.ok(res.text.indexOf(secondBlock) < res.text.indexOf('<p>Translated after second X.</p>'));
+});
+
+test('googleTranslationService detects canonical Instagram blocks before provider translation', () => {
+  const instagramBlock = makeInstagramBlock();
+  const protectedResult = googleTranslation.protectNewsPulseInstagramBlocks(`<p>A</p>${instagramBlock}<p>B</p>`);
+
+  assert.equal(protectedResult.map.size, 1);
+  assert.match(protectedResult.text, /__NP_INSTAGRAM_BLOCK_0__/);
+  assert.equal(protectedResult.map.get('__NP_INSTAGRAM_BLOCK_0__'), instagramBlock);
+});
+
+test('googleTranslationService recognizes supported Instagram URL forms for controlled blocks', () => {
+  const shortcode = 'Cabc_123-def';
+  const blocks = [
+    makeInstagramBlock({ shortcode, url: `https://instagram.com/p/${shortcode}/` }),
+    makeInstagramBlock({ shortcode, url: `https://www.instagram.com/p/${shortcode}/` }),
+    makeInstagramBlock({ shortcode, url: `https://instagram.com/reel/${shortcode}/` }),
+    makeInstagramBlock({ shortcode, url: `https://www.instagram.com/reel/${shortcode}/` }),
+    makeInstagramBlock({ shortcode, url: `https://instagram.com/tv/${shortcode}/` }),
+    makeInstagramBlock({ shortcode, url: `https://www.instagram.com/tv/${shortcode}/` }),
+    makeInstagramBlock({ shortcode, url: `https://www.instagram.com/reel/${shortcode}/?igsh=abc123&utm_source=ig_web_copy_link` }),
+  ];
+
+  for (const block of blocks) {
+    const protectedResult = googleTranslation.protectNewsPulseInstagramBlocks(block);
+    assert.equal(protectedResult.map.size, 1);
+    assert.equal(protectedResult.map.get('__NP_INSTAGRAM_BLOCK_0__'), block);
+  }
+});
+
+test('googleTranslationService preserves News Pulse controlled Instagram blocks through English, Hindi, and Gujarati HTML translation', async () => {
+  const instagramBlock = makeInstagramBlock({ shortcode: 'Cabc_123-def', url: 'https://www.instagram.com/reel/Cabc_123-def/?igsh=abc123' });
+  const html = `<p>Before Instagram post.</p>${instagramBlock}<p>After Instagram post.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before Instagram post.', `${body.target}:Before Instagram post.`).replace('After Instagram post.', `${body.target}:After Instagram post.`) })) } }),
+    };
+  };
+
+  for (const targetLang of ['en', 'hi', 'gu']) {
+    const res = await googleTranslation.translateText(html, 'en', targetLang, { format: 'html', fetchImpl });
+
+    assert.equal(res.ok, true);
+    assert.equal(countOccurrences(res.text, 'data-np-block="instagram"'), 1);
+    assert.equal(countOccurrences(res.text, 'data-np-shortcode="Cabc_123-def"'), 1);
+    assert.equal(countOccurrences(res.text, 'data-np-url="https://www.instagram.com/reel/Cabc_123-def/?igsh=abc123"'), 1);
+    assert.equal(countOccurrences(res.text, instagramBlock), 1);
+    assert.ok(res.text.indexOf(`<p>${targetLang}:Before Instagram post.</p>`) < res.text.indexOf(instagramBlock));
+    assert.ok(res.text.indexOf(instagramBlock) < res.text.indexOf(`<p>${targetLang}:After Instagram post.</p>`));
+  }
+});
+
+test('googleTranslationService preserves multiple Instagram blocks in their individual positions without duplication', async () => {
+  const firstBlock = makeInstagramBlock({ shortcode: 'Cfirst_123', url: 'https://www.instagram.com/p/Cfirst_123/' });
+  const secondBlock = makeInstagramBlock({ shortcode: 'Creel-456', url: 'https://instagram.com/reel/Creel-456/?utm_source=ig_web_copy_link' });
+  const html = `<p>Before first Instagram.</p>${firstBlock}<p>Between Instagram posts.</p>${secondBlock}<p>After second Instagram.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before first Instagram.', 'Translated before first Instagram.').replace('Between Instagram posts.', 'Translated between Instagram posts.').replace('After second Instagram.', 'Translated after second Instagram.') })) } }),
+    };
+  };
+
+  const res = await googleTranslation.translateText(html, 'en', 'hi', { format: 'html', fetchImpl });
+
+  assert.equal(res.ok, true);
+  assert.equal(countOccurrences(res.text, 'data-np-block="instagram"'), 2);
+  assert.equal(countOccurrences(res.text, 'data-np-shortcode="Cfirst_123"'), 1);
+  assert.equal(countOccurrences(res.text, 'data-np-shortcode="Creel-456"'), 1);
+  assert.equal(countOccurrences(res.text, firstBlock), 1);
+  assert.equal(countOccurrences(res.text, secondBlock), 1);
+  assert.ok(res.text.indexOf('<p>Translated before first Instagram.</p>') < res.text.indexOf(firstBlock));
+  assert.ok(res.text.indexOf(firstBlock) < res.text.indexOf('<p>Translated between Instagram posts.</p>'));
+  assert.ok(res.text.indexOf('<p>Translated between Instagram posts.</p>') < res.text.indexOf(secondBlock));
+  assert.ok(res.text.indexOf(secondBlock) < res.text.indexOf('<p>Translated after second Instagram.</p>'));
+});
+
+test('googleTranslationService does not preserve invalid or raw Instagram embeds as controlled Instagram blocks', () => {
+  const malformedShortcode = '<div data-np-block="instagram" data-np-shortcode="bad.shortcode" data-np-url="https://www.instagram.com/p/bad.shortcode/"></div>';
+  const mismatchedUrl = '<div data-np-block="instagram" data-np-shortcode="Cabc_123-def" data-np-url="https://www.instagram.com/p/Cother_123/"></div>';
+  const lookalikeDomain = '<div data-np-block="instagram" data-np-shortcode="Cabc_123-def" data-np-url="https://instagram.com.example.com/p/Cabc_123-def/"></div>';
+  const arbitraryDomain = '<div data-np-block="instagram" data-np-shortcode="Cabc_123-def" data-np-url="https://example.com/p/Cabc_123-def/"></div>';
+  const javascriptUrl = '<div data-np-block="instagram" data-np-shortcode="Cabc_123-def" data-np-url="javascript:alert(1)"></div>';
+  const dataUrl = '<div data-np-block="instagram" data-np-shortcode="Cabc_123-def" data-np-url="data:text/html;base64,PHNjcmlwdD48L3NjcmlwdD4="></div>';
+  const profileUrl = '<div data-np-block="instagram" data-np-shortcode="Cabc_123-def" data-np-url="https://www.instagram.com/newspulseai/"></div>';
+  const storyUrl = '<div data-np-block="instagram" data-np-shortcode="Cabc_123-def" data-np-url="https://www.instagram.com/stories/newspulseai/Cabc_123-def/"></div>';
+  const exploreUrl = '<div data-np-block="instagram" data-np-shortcode="Cabc_123-def" data-np-url="https://www.instagram.com/explore/tags/news/"></div>';
+  const extraPathSegment = '<div data-np-block="instagram" data-np-shortcode="Cabc_123-def" data-np-url="https://www.instagram.com/p/Cabc_123-def/extra/"></div>';
+  const uppercasePath = '<div data-np-block="instagram" data-np-shortcode="Cabc_123-def" data-np-url="https://www.instagram.com/P/Cabc_123-def/"></div>';
+  const missingTrailingSlash = '<div data-np-block="instagram" data-np-shortcode="Cabc_123-def" data-np-url="https://www.instagram.com/p/Cabc_123-def"></div>';
+  const fragmentUrl = '<div data-np-block="instagram" data-np-shortcode="Cabc_123-def" data-np-url="https://www.instagram.com/p/Cabc_123-def/#comments"></div>';
+  const arbitraryBlock = '<div data-np-block="instagram-post" data-np-shortcode="Cabc_123-def" data-np-url="https://www.instagram.com/p/Cabc_123-def/"></div>';
+  const rawBlockquote = '<blockquote class="instagram-media" data-instgrm-permalink="https://www.instagram.com/p/Cabc_123-def/"></blockquote>';
+  const rawScript = '<script async src="https://www.instagram.com/embed.js"></script>';
+
+  for (const block of [malformedShortcode, mismatchedUrl, lookalikeDomain, arbitraryDomain, javascriptUrl, dataUrl, profileUrl, storyUrl, exploreUrl, extraPathSegment, uppercasePath, missingTrailingSlash, fragmentUrl, arbitraryBlock, rawBlockquote, rawScript]) {
+    const protectedResult = googleTranslation.protectNewsPulseInstagramBlocks(`<p>A</p>${block}<p>B</p>`);
+    assert.equal(protectedResult.map.size, 0);
+    assert.equal(protectedResult.text, `<p>A</p>${block}<p>B</p>`);
+  }
 });
 
 test('googleTranslationService does not preserve invalid or raw X embeds as controlled X blocks', () => {
@@ -523,6 +634,43 @@ test('generated Hindi and Gujarati article translations preserve controlled X po
       assert.equal(countOccurrences(payload.content, 'data-np-url="https://www.x.com/NewsPulseAI/status/1766401130046488732?s=20"'), 1);
       assert.ok(payload.content.indexOf(`${payload.language}:<p>Lead paragraph.</p>`) < payload.content.indexOf(xBlock));
       assert.ok(payload.content.indexOf(xBlock) < payload.content.indexOf('<p>Closing paragraph.</p>'));
+      assert.equal(payload.inlineMedia, undefined);
+      assert.equal(payload.media, undefined);
+    }
+  } finally {
+    restore(originals);
+    global.fetch = prevFetch;
+  }
+});
+
+test('generated Hindi and Gujarati article translations preserve controlled Instagram identity without creating media records', async () => {
+  const originals = { findOne: News.findOne, create: News.create, updateOne: News.updateOne };
+  const prevFetch = global.fetch;
+  const created = [];
+  const instagramBlock = makeInstagramBlock({ shortcode: 'Cabc_123-def', url: 'https://www.instagram.com/p/Cabc_123-def/?utm_source=ig_web_copy_link' });
+  const sourceContent = `<p>Lead paragraph.</p>${instagramBlock}<p>Closing paragraph.</p>`;
+
+  try {
+    News.findOne = async () => null;
+    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994301${created.length}1`, ...payload }; };
+    global.fetch = async (_url, opts) => {
+      const body = JSON.parse(String(opts.body || '{}'));
+      return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
+    };
+
+    const res = await generateArticleTranslations(makeSource({ content: sourceContent, language: 'en', lang: 'en' }), { targetLanguages: ['hi', 'gu'] });
+    assert.equal(res.ok, true);
+    assert.deepEqual(created.map((item) => item.language).sort(), ['gu', 'hi']);
+    assert.equal(created.length, 2);
+
+    for (const payload of created) {
+      assert.equal(countOccurrences(payload.content, 'data-np-block="instagram"'), 1);
+      assert.equal(countOccurrences(payload.content, 'data-np-shortcode="Cabc_123-def"'), 1);
+      assert.equal(countOccurrences(payload.content, 'data-np-url="https://www.instagram.com/p/Cabc_123-def/?utm_source=ig_web_copy_link"'), 1);
+      assert.equal(countOccurrences(payload.content, instagramBlock), 1);
+      assert.ok(payload.content.indexOf(`${payload.language}:<p>Lead paragraph.</p>`) < payload.content.indexOf(instagramBlock));
+      assert.ok(payload.content.indexOf(instagramBlock) < payload.content.indexOf('<p>Closing paragraph.</p>'));
       assert.equal(payload.inlineMedia, undefined);
       assert.equal(payload.media, undefined);
     }
