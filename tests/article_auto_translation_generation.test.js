@@ -50,11 +50,14 @@ function makeOpaqueFounderToken() {
 function makeInlineImageBlock(overrides = {}) {
   const mediaId = overrides.mediaId || '507f1f77bcf86cd799439811';
   const src = overrides.src || 'https://res.cloudinary.com/demo/image/upload/v1/newspulse/media-library/inline.jpg';
+  const alt = Object.prototype.hasOwnProperty.call(overrides, 'alt') ? overrides.alt : 'Inline newsroom image';
   const caption = overrides.caption || 'Caption to preserve';
   const credit = overrides.credit || 'News Pulse Photo Desk';
   const width = overrides.width || 1200;
   const height = overrides.height || 675;
-  return `<figure data-np-block="inline-image" data-np-media-id="${mediaId}" data-np-width="${width}" data-np-height="${height}"><img src="${src}" alt="Inline newsroom image" width="${width}" height="${height}"><figcaption data-np-caption="true">${caption}</figcaption><div data-np-credit="true">Credit: ${credit}</div></figure>`;
+  const figureDimensions = overrides.omitFigureDimensions ? '' : ` data-np-width="${width}" data-np-height="${height}"`;
+  const imageDimensions = overrides.omitImageDimensions ? '' : ` width="${width}" height="${height}"`;
+  return `<figure data-np-block="inline-image" data-np-media-id="${mediaId}"${figureDimensions}><img src="${src}" alt="${alt}"${imageDimensions}><figcaption data-np-caption="true">${caption}</figcaption><div data-np-credit="true">Credit: ${credit}</div></figure>`;
 }
 
 function makeLegacyInlineImageBlock() {
@@ -83,6 +86,20 @@ function makeInstagramBlock(overrides = {}) {
 function makeFacebookBlock(overrides = {}) {
   const url = overrides.url || 'https://www.facebook.com/NewsPulseAI/posts/123456789012345';
   return `<div data-np-block="facebook" data-np-url="${url}"></div>`;
+}
+
+function makeGalleryBlock(overrides = {}) {
+  const count = overrides.count || 2;
+  const mediaIds = overrides.mediaIds || [];
+  const figures = Array.from({ length: count }, (_, index) => makeInlineImageBlock({
+    mediaId: mediaIds[index] || `507f1f77bcf86cd799439${820 + index}`,
+    src: `https://res.cloudinary.com/demo/image/upload/v1/newspulse/media-library/gallery-${index + 1}.jpg`,
+    caption: `Gallery caption ${index + 1}`,
+    credit: `Gallery credit ${index + 1}`,
+    width: 1200 + index,
+    height: 675 + index,
+  }));
+  return `<div data-np-block="gallery">${figures.join('')}</div>`;
 }
 
 function countOccurrences(text, needle) {
@@ -176,6 +193,137 @@ test('googleTranslationService detects canonical inline image blocks before prov
   assert.equal(protectedResult.map.size, 1);
   assert.match(protectedResult.text, /__NP_INLINE_IMAGE_BLOCK_0__/);
   assert.equal(protectedResult.map.get('__NP_INLINE_IMAGE_BLOCK_0__'), imageBlock);
+});
+
+test('googleTranslationService detects controlled galleries before standalone inline image blocks', () => {
+  const galleryBlock = makeGalleryBlock({ count: 2 });
+  const inlineBlock = makeInlineImageBlock({ mediaId: '507f1f77bcf86cd799439899' });
+  const protectedGallery = googleTranslation.protectNewsPulseGalleryBlocks(`<p>A</p>${galleryBlock}<p>B</p>`);
+  const protectedMedia = googleTranslation.protectNewsPulseControlledMediaBlocks(`<p>A</p>${galleryBlock}${inlineBlock}<p>B</p>`);
+
+  assert.equal(protectedGallery.map.size, 1);
+  assert.match(protectedGallery.text, /__NP_GALLERY_BLOCK_0__/);
+  assert.equal(protectedGallery.map.get('__NP_GALLERY_BLOCK_0__'), galleryBlock);
+  assert.match(protectedMedia.text, /__NP_GALLERY_BLOCK_0____NP_INLINE_IMAGE_BLOCK_0__/);
+  assert.equal(countOccurrences(protectedMedia.text, '__NP_INLINE_IMAGE_BLOCK_'), 1);
+});
+
+test('googleTranslationService preserves controlled two-image gallery through English, Hindi, and Gujarati HTML translation', async () => {
+  const galleryBlock = makeGalleryBlock({ count: 2 });
+  const html = `<p>Before gallery.</p>${galleryBlock}<p>After gallery.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before gallery.', `${body.target}:Before gallery.`).replace('After gallery.', `${body.target}:After gallery.`) })) } }),
+    };
+  };
+
+  for (const targetLang of ['en', 'hi', 'gu']) {
+    const res = await googleTranslation.translateText(html, 'en', targetLang, { format: 'html', fetchImpl });
+
+    assert.equal(res.ok, true);
+    assert.equal(countOccurrences(res.text, 'data-np-block="gallery"'), 1);
+    assert.equal(countOccurrences(res.text, 'data-np-block="inline-image"'), 2);
+    assert.equal(countOccurrences(res.text, galleryBlock), 1);
+    assert.match(res.text, /<figcaption data-np-caption="true">Gallery caption 1<\/figcaption>/);
+    assert.match(res.text, /<div data-np-credit="true">Credit: Gallery credit 1<\/div>/);
+    assert.ok(res.text.indexOf(`<p>${targetLang}:Before gallery.</p>`) < res.text.indexOf(galleryBlock));
+    assert.ok(res.text.indexOf(galleryBlock) < res.text.indexOf(`<p>${targetLang}:After gallery.</p>`));
+  }
+});
+
+test('googleTranslationService preserves controlled twenty-image gallery without duplication', async () => {
+  const galleryBlock = makeGalleryBlock({ count: 20 });
+  const html = `<p>Before large gallery.</p>${galleryBlock}<p>After large gallery.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before large gallery.', 'Translated before large gallery.').replace('After large gallery.', 'Translated after large gallery.') })) } }),
+    };
+  };
+
+  const res = await googleTranslation.translateText(html, 'en', 'hi', { format: 'html', fetchImpl });
+
+  assert.equal(res.ok, true);
+  assert.equal(countOccurrences(res.text, 'data-np-block="gallery"'), 1);
+  assert.equal(countOccurrences(res.text, 'data-np-block="inline-image"'), 20);
+  assert.equal(countOccurrences(res.text, galleryBlock), 1);
+  assert.ok(res.text.indexOf('<p>Translated before large gallery.</p>') < res.text.indexOf(galleryBlock));
+  assert.ok(res.text.indexOf(galleryBlock) < res.text.indexOf('<p>Translated after large gallery.</p>'));
+});
+
+test('googleTranslationService preserves gallery media order and multiple gallery positions', async () => {
+  const firstGallery = makeGalleryBlock({ count: 3 });
+  const secondGallery = makeGalleryBlock({ count: 2, mediaIds: ['507f1f77bcf86cd799439901', '507f1f77bcf86cd799439902'] });
+  const html = `<p>Before first gallery.</p>${firstGallery}<p>Between galleries.</p>${secondGallery}<p>After second gallery.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before first gallery.', 'Translated before first gallery.').replace('Between galleries.', 'Translated between galleries.').replace('After second gallery.', 'Translated after second gallery.') })) } }),
+    };
+  };
+
+  const res = await googleTranslation.translateText(html, 'en', 'gu', { format: 'html', fetchImpl });
+
+  assert.equal(res.ok, true);
+  assert.equal(countOccurrences(res.text, 'data-np-block="gallery"'), 2);
+  assert.equal(countOccurrences(res.text, firstGallery), 1);
+  assert.equal(countOccurrences(res.text, secondGallery), 1);
+  assert.ok(res.text.indexOf('gallery-1.jpg') < res.text.indexOf('gallery-2.jpg'));
+  assert.ok(res.text.indexOf('gallery-2.jpg') < res.text.indexOf('gallery-3.jpg'));
+  assert.ok(res.text.indexOf('<p>Translated before first gallery.</p>') < res.text.indexOf(firstGallery));
+  assert.ok(res.text.indexOf(firstGallery) < res.text.indexOf('<p>Translated between galleries.</p>'));
+  assert.ok(res.text.indexOf('<p>Translated between galleries.</p>') < res.text.indexOf(secondGallery));
+  assert.ok(res.text.indexOf(secondGallery) < res.text.indexOf('<p>Translated after second gallery.</p>'));
+});
+
+test('googleTranslationService gallery child validation mirrors standalone inline-image contract', () => {
+  const cases = [
+    makeInlineImageBlock({ mediaId: 'media-library-asset-1' }),
+    makeInlineImageBlock({ mediaId: 'media-library-asset-2', omitFigureDimensions: true, omitImageDimensions: true }),
+    makeInlineImageBlock({ mediaId: 'media-library-asset-3', width: 1200, height: 675 }),
+    makeInlineImageBlock({ mediaId: 'media-library-asset-4', width: 'wide', height: 'tall' }),
+    makeInlineImageBlock({ mediaId: 'media-library-asset-5', alt: '' }),
+    makeInlineImageBlock({ mediaId: 'media-library-asset-6', src: 'https://images.example.test/already-supported/article-image.jpg' }),
+    makeInlineImageBlock({ mediaId: 'media-library-asset-7', src: 'javascript:alert(1)' }),
+  ];
+
+  cases.forEach((figure, index) => {
+    const standalone = googleTranslation.protectNewsPulseInlineImageBlocks(figure);
+    const sibling = makeInlineImageBlock({ mediaId: `media-library-sibling-${index}` });
+    const gallery = `<div data-np-block="gallery">${figure}${sibling}</div>`;
+    const protectedGallery = googleTranslation.protectNewsPulseGalleryBlocks(gallery);
+
+    assert.equal(standalone.map.size, 1);
+    assert.equal(standalone.map.get('__NP_INLINE_IMAGE_BLOCK_0__'), figure);
+    assert.equal(protectedGallery.map.size, 1);
+    assert.equal(protectedGallery.map.get('__NP_GALLERY_BLOCK_0__'), gallery);
+  });
+});
+
+test('googleTranslationService rejects gallery-specific invalid controlled gallery blocks', () => {
+  const oneImage = makeGalleryBlock({ count: 1 });
+  const twentyOneImages = makeGalleryBlock({ count: 21 });
+  const duplicateMediaIds = makeGalleryBlock({ count: 2, mediaIds: ['507f1f77bcf86cd799439820', '507f1f77bcf86cd799439820'] });
+  const missingMediaId = `<div data-np-block="gallery"><figure data-np-block="inline-image"><img src="https://res.cloudinary.com/demo/image/upload/v1/newspulse/media-library/gallery-1.jpg" alt="Missing media ID"></figure>${makeInlineImageBlock({ mediaId: '507f1f77bcf86cd799439821' })}</div>`;
+  const arbitraryChild = `<div data-np-block="gallery">${makeInlineImageBlock({ mediaId: '507f1f77bcf86cd799439820' })}<p>Not gallery media</p>${makeInlineImageBlock({ mediaId: '507f1f77bcf86cd799439821' })}</div>`;
+  const nestedScript = `<div data-np-block="gallery">${makeInlineImageBlock({ mediaId: '507f1f77bcf86cd799439820' })}<script>alert(1)</script>${makeInlineImageBlock({ mediaId: '507f1f77bcf86cd799439821' })}</div>`;
+  const nestedIframe = `<div data-np-block="gallery">${makeInlineImageBlock({ mediaId: '507f1f77bcf86cd799439820' })}<iframe src="https://example.com"></iframe>${makeInlineImageBlock({ mediaId: '507f1f77bcf86cd799439821' })}</div>`;
+  const nestedEmbed = `<div data-np-block="gallery">${makeInlineImageBlock({ mediaId: '507f1f77bcf86cd799439820' })}<embed src="https://example.com">${makeInlineImageBlock({ mediaId: '507f1f77bcf86cd799439821' })}</div>`;
+  const nestedObject = `<div data-np-block="gallery">${makeInlineImageBlock({ mediaId: '507f1f77bcf86cd799439820' })}<object data="https://example.com"></object>${makeInlineImageBlock({ mediaId: '507f1f77bcf86cd799439821' })}</div>`;
+  const arbitraryBlock = makeGalleryBlock({ count: 2 }).replace('data-np-block="gallery"', 'data-np-block="gallery-post"');
+
+  for (const block of [oneImage, twentyOneImages, duplicateMediaIds, missingMediaId, arbitraryChild, nestedScript, nestedIframe, nestedEmbed, nestedObject, arbitraryBlock]) {
+    const protectedResult = googleTranslation.protectNewsPulseGalleryBlocks(`<p>A</p>${block}<p>B</p>`);
+    assert.equal(protectedResult.map.size, 0);
+    assert.equal(protectedResult.text, `<p>A</p>${block}<p>B</p>`);
+  }
 });
 
 test('googleTranslationService detects canonical YouTube blocks before provider translation', () => {
@@ -675,6 +823,42 @@ test('generated Hindi and Gujarati article translations preserve inline image me
       assert.ok(payload.content.indexOf(imageBlock) < payload.content.indexOf('<p>Closing paragraph.</p>'));
       assert.match(payload.content, /<figcaption data-np-caption="true">Caption to preserve<\/figcaption>/);
       assert.match(payload.content, /<div data-np-credit="true">Credit: News Pulse Photo Desk<\/div>/);
+    }
+  } finally {
+    restore(originals);
+    global.fetch = prevFetch;
+  }
+});
+
+test('generated Hindi and Gujarati article translations preserve controlled gallery identity without creating media records', async () => {
+  const originals = { findOne: News.findOne, create: News.create, updateOne: News.updateOne };
+  const prevFetch = global.fetch;
+  const created = [];
+  const galleryBlock = makeGalleryBlock({ count: 3 });
+  const sourceContent = `<p>Lead paragraph.</p>${galleryBlock}<p>Closing paragraph.</p>`;
+
+  try {
+    News.findOne = async () => null;
+    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994303${created.length}1`, ...payload }; };
+    global.fetch = async (_url, opts) => {
+      const body = JSON.parse(String(opts.body || '{}'));
+      return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
+    };
+
+    const res = await generateArticleTranslations(makeSource({ content: sourceContent, language: 'en', lang: 'en' }), { targetLanguages: ['hi', 'gu'] });
+    assert.equal(res.ok, true);
+    assert.deepEqual(created.map((item) => item.language).sort(), ['gu', 'hi']);
+    assert.equal(created.length, 2);
+
+    for (const payload of created) {
+      assert.equal(countOccurrences(payload.content, 'data-np-block="gallery"'), 1);
+      assert.equal(countOccurrences(payload.content, 'data-np-block="inline-image"'), 3);
+      assert.equal(countOccurrences(payload.content, galleryBlock), 1);
+      assert.ok(payload.content.indexOf(`${payload.language}:<p>Lead paragraph.</p>`) < payload.content.indexOf(galleryBlock));
+      assert.ok(payload.content.indexOf(galleryBlock) < payload.content.indexOf('<p>Closing paragraph.</p>'));
+      assert.equal(payload.inlineMedia, undefined);
+      assert.equal(payload.media, undefined);
     }
   } finally {
     restore(originals);

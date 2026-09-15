@@ -222,16 +222,88 @@ function isControlledFacebookBlockOpening(opening) {
   return isSupportedFacebookUrl(getHtmlAttribute(opening, 'data-np-url'));
 }
 
+function getOpeningTag(markup, tagName) {
+  const rx = new RegExp(`^<${tagName}\\b[^>]*>`, 'i');
+  return String(markup || '').match(rx)?.[0] || '';
+}
+
+function getControlledInlineImageMediaId(opening) {
+  const tag = String(opening || '');
+  const hasCanonicalMarker = /\sdata-np-block\s*=\s*(['"])inline-image\1/i.test(tag) && /\sdata-np-media-id\s*=\s*(['"])[^'"]+\1/i.test(tag);
+  if (hasCanonicalMarker) return getHtmlAttribute(tag, 'data-np-media-id');
+  const hasLegacyDevelopmentMarker = /\sdata-np-inline-image\s*=\s*(['"])true\1/i.test(tag) && /\sdata-media-id\s*=\s*(['"])[^'"]+\1/i.test(tag);
+  if (hasLegacyDevelopmentMarker) return getHtmlAttribute(tag, 'data-media-id');
+  const hasPhaseOneDraftMarker = /\sdata-np-block\s*=\s*(['"])image\1/i.test(tag) && /\sdata-media-id\s*=\s*(['"])[^'"]+\1/i.test(tag);
+  if (hasPhaseOneDraftMarker) return getHtmlAttribute(tag, 'data-media-id');
+  return null;
+}
+
+function isControlledInlineImageOpening(opening) {
+  return getControlledInlineImageMediaId(opening) !== null;
+}
+
+function isControlledGalleryInlineImageFigure(figure) {
+  const raw = String(figure || '');
+  const opening = getOpeningTag(raw, 'figure');
+  if (!opening || !/<\/figure>$/i.test(raw)) return false;
+  return isControlledInlineImageOpening(opening);
+}
+
+function findMatchingDivEnd(html, startIndex) {
+  const rx = /<div\b[^>]*>|<\/div\s*>/gi;
+  rx.lastIndex = startIndex;
+  let depth = 0;
+  let match;
+  while ((match = rx.exec(html))) {
+    if (/^<div\b/i.test(match[0])) depth += 1;
+    else depth -= 1;
+    if (depth === 0) return rx.lastIndex;
+  }
+  return -1;
+}
+
+function isControlledGalleryBlock(block) {
+  const raw = String(block || '');
+  const opening = getOpeningTag(raw, 'div');
+  if (!opening || getHtmlAttribute(opening, 'data-np-block') !== 'gallery') return false;
+  if (/<(?:script|iframe|embed|object)\b/i.test(raw)) return false;
+  const closeStart = raw.lastIndexOf('</div>');
+  if (closeStart <= opening.length) return false;
+
+  const figures = [];
+  let cursor = opening.length;
+  while (cursor < closeStart) {
+    const whitespace = raw.slice(cursor, closeStart).match(/^\s*/)?.[0] || '';
+    cursor += whitespace.length;
+    if (cursor >= closeStart) break;
+    const rest = raw.slice(cursor, closeStart);
+    const figureOpening = rest.match(/^<figure\b[^>]*>/i)?.[0] || '';
+    if (!figureOpening) return false;
+    const figureEnd = raw.indexOf('</figure>', cursor);
+    if (figureEnd === -1 || figureEnd + '</figure>'.length > closeStart) return false;
+    const figure = raw.slice(cursor, figureEnd + '</figure>'.length);
+    if (/<figure\b/i.test(figure.slice(figureOpening.length))) return false;
+    figures.push(figure);
+    cursor = figureEnd + '</figure>'.length;
+  }
+
+  if (figures.length < 2 || figures.length > 20) return false;
+  const mediaIds = new Set();
+  for (const figure of figures) {
+    if (!isControlledGalleryInlineImageFigure(figure)) return false;
+    const mediaId = getControlledInlineImageMediaId(getOpeningTag(figure, 'figure'));
+    if (mediaIds.has(mediaId)) return false;
+    mediaIds.add(mediaId);
+  }
+  return true;
+}
+
 function protectNewsPulseInlineImageBlocks(html) {
   let index = 0;
   const map = new Map();
   const text = String(html || '').replace(/<figure\b[^>]*>[\s\S]*?<\/figure>/gi, (match) => {
     const opening = match.match(/^<figure\b[^>]*>/i)?.[0] || '';
-    const hasCanonicalMarker = /\sdata-np-block\s*=\s*(['"])inline-image\1/i.test(opening) && /\sdata-np-media-id\s*=\s*(['"])[^'"]+\1/i.test(opening);
-    const hasLegacyDevelopmentMarker = /\sdata-np-inline-image\s*=\s*(['"])true\1/i.test(opening) && /\sdata-media-id\s*=\s*(['"])[^'"]+\1/i.test(opening);
-    const hasPhaseOneDraftMarker = /\sdata-np-block\s*=\s*(['"])image\1/i.test(opening) && /\sdata-media-id\s*=\s*(['"])[^'"]+\1/i.test(opening);
-    const isControlled = hasCanonicalMarker || hasLegacyDevelopmentMarker || hasPhaseOneDraftMarker;
-    if (!isControlled) return match;
+    if (!isControlledInlineImageOpening(opening)) return match;
     const token = `__NP_INLINE_IMAGE_BLOCK_${index}__`;
     index += 1;
     map.set(token, match);
@@ -296,15 +368,47 @@ function protectNewsPulseFacebookBlocks(html) {
   return { text, map };
 }
 
+function protectNewsPulseGalleryBlocks(html) {
+  const raw = String(html || '');
+  let index = 0;
+  let lastIndex = 0;
+  let text = '';
+  const map = new Map();
+  const openingRx = /<div\b[^>]*>/gi;
+  let match;
+
+  while ((match = openingRx.exec(raw))) {
+    const opening = match[0];
+    if (getHtmlAttribute(opening, 'data-np-block') !== 'gallery') continue;
+    const end = findMatchingDivEnd(raw, match.index);
+    if (end === -1) continue;
+    const block = raw.slice(match.index, end);
+    if (!isControlledGalleryBlock(block)) {
+      openingRx.lastIndex = match.index + opening.length;
+      continue;
+    }
+    const token = `__NP_GALLERY_BLOCK_${index}__`;
+    index += 1;
+    map.set(token, block);
+    text += raw.slice(lastIndex, match.index) + token;
+    lastIndex = end;
+    openingRx.lastIndex = end;
+  }
+
+  text += raw.slice(lastIndex);
+  return { text, map };
+}
+
 function protectNewsPulseControlledMediaBlocks(html) {
-  const inlineImages = protectNewsPulseInlineImageBlocks(html);
+  const galleries = protectNewsPulseGalleryBlocks(html);
+  const inlineImages = protectNewsPulseInlineImageBlocks(galleries.text);
   const youtubeBlocks = protectNewsPulseYouTubeBlocks(inlineImages.text);
   const xBlocks = protectNewsPulseXBlocks(youtubeBlocks.text);
   const instagramBlocks = protectNewsPulseInstagramBlocks(xBlocks.text);
   const facebookBlocks = protectNewsPulseFacebookBlocks(instagramBlocks.text);
   return {
     text: facebookBlocks.text,
-    maps: [facebookBlocks.map, instagramBlocks.map, xBlocks.map, youtubeBlocks.map, inlineImages.map],
+    maps: [facebookBlocks.map, instagramBlocks.map, xBlocks.map, youtubeBlocks.map, inlineImages.map, galleries.map],
   };
 }
 
@@ -516,6 +620,7 @@ module.exports = {
   protectNewsPulseXBlocks,
   protectNewsPulseInstagramBlocks,
   protectNewsPulseFacebookBlocks,
+  protectNewsPulseGalleryBlocks,
   protectNewsPulseControlledMediaBlocks,
   splitHtmlIntoChunks,
   splitTextIntoChunks,
