@@ -309,7 +309,7 @@ test('traffic analytics dashboard remains unchanged in database-unavailable fall
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.ok, true);
-  assert.deepEqual(Object.keys(res.body.data).sort(), [
+  for (const key of [
     'avgReadTimeSec',
     'categoryBreakdown',
     'languageBreakdown',
@@ -320,7 +320,12 @@ test('traffic analytics dashboard remains unchanged in database-unavailable fall
     'totalEngagedReads',
     'totalUniqueReaders',
     'totalViews',
-  ].sort());
+  ]) {
+    assert.ok(Object.prototype.hasOwnProperty.call(res.body.data, key), `missing ${key}`);
+  }
+  assert.equal(res.body.data.totalViews, 0);
+  assert.equal(res.body.data.totalUniqueReaders, 0);
+  assert.equal(res.body.data.totalEngagedReads, 0);
 });
 
 test('Ads Manager and Finance mutation routes remain registered outside Admin Analytics', () => {

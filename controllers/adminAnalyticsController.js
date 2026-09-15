@@ -138,137 +138,330 @@ function sortBreakdown(arr, keyField) {
     .sort((a, b) => b.count - a.count);
 }
 
+function parseAnalyticsRange(query = {}) {
+  const fromToRequested = query.dateFrom !== undefined || query.dateTo !== undefined;
+  if (fromToRequested) {
+    const dateRange = parseQueryDateRange(query);
+    if (!dateRange.ok) return dateRange;
+    return {
+      ok: true,
+      scope: 'custom',
+      dateFrom: dateRange.dateFrom,
+      dateTo: dateRange.dateTo,
+    };
+  }
+
+  const raw = String(query.dateRange || query.range || query.period || '').trim().toLowerCase();
+  if (!raw || raw === 'all' || raw === 'lifetime') {
+    return { ok: true, scope: 'lifetime', dateFrom: null, dateTo: null };
+  }
+
+  const now = new Date();
+  if (raw === 'last24h' || raw === '24h') {
+    return { ok: true, scope: 'last24h', dateFrom: new Date(now.getTime() - 24 * 60 * 60_000), dateTo: now };
+  }
+  if (raw === 'today') {
+    return {
+      ok: true,
+      scope: 'today',
+      dateFrom: new Date(`${utcDateKey(now)}T00:00:00.000Z`),
+      dateTo: new Date(`${utcDateKey(now)}T23:59:59.999Z`),
+    };
+  }
+  if (raw === 'last7d' || raw === '7d') {
+    return { ok: true, scope: 'last7d', dateFrom: new Date(now.getTime() - 7 * 24 * 60 * 60_000), dateTo: now };
+  }
+  if (raw === 'last30d' || raw === '30d') {
+    return { ok: true, scope: 'last30d', dateFrom: new Date(now.getTime() - 30 * 24 * 60 * 60_000), dateTo: now };
+  }
+
+  const parts = raw.includes('..') ? raw.split('..') : raw.split(',');
+  if (parts.length === 2) {
+    const dateRange = parseQueryDateRange({ dateFrom: parts[0], dateTo: parts[1] });
+    if (!dateRange.ok) return dateRange;
+    return { ok: true, scope: 'custom', dateFrom: dateRange.dateFrom, dateTo: dateRange.dateTo };
+  }
+
+  return { ok: false, message: 'dateRange must be lifetime, today, last24h, last7d, last30d, or YYYY-MM-DD..YYYY-MM-DD' };
+}
+
+function analyticsScopePayload(range) {
+  return {
+    scope: range.scope,
+    dateRange: {
+      dateFrom: range.dateFrom ? range.dateFrom.toISOString() : null,
+      dateTo: range.dateTo ? range.dateTo.toISOString() : null,
+      semantics: range.scope === 'today' ? 'UTC calendar day' : (range.scope === 'lifetime' ? 'all stored analytics events' : 'rolling createdAt range'),
+    },
+  };
+}
+
+function analyticsEventMatch(range, extra = {}) {
+  const match = { ...extra };
+  if (range.dateFrom || range.dateTo) {
+    match.createdAt = {};
+    if (range.dateFrom) match.createdAt.$gte = range.dateFrom;
+    if (range.dateTo) match.createdAt.$lte = range.dateTo;
+  }
+  return match;
+}
+
+function eventMetricsGroup(_id) {
+  return {
+    $group: {
+      _id,
+      views: { $sum: { $cond: [{ $eq: ['$eventType', 'view'] }, 1, 0] } },
+      visitorIds: { $addToSet: { $cond: [{ $eq: ['$eventType', 'view'] }, '$visitorId', null] } },
+      engagedReads: { $sum: { $cond: [{ $eq: ['$eventType', 'engaged_read'] }, 1, 0] } },
+      totalReadTimeSec: { $sum: { $cond: [{ $eq: ['$eventType', 'heartbeat'] }, { $ifNull: ['$readTimeSec', 0] }, 0] } },
+      scroll100Count: { $sum: { $cond: [{ $eq: ['$eventType', 'scroll_100'] }, 1, 0] } },
+      slug: { $last: '$slug' },
+      category: { $last: '$category' },
+      language: { $last: '$language' },
+    },
+  };
+}
+
+function eventMetricsProject(extra = {}) {
+  return {
+    $project: {
+      ...extra,
+      views: 1,
+      visitorIds: { $setDifference: ['$visitorIds', [null, '']] },
+      uniqueReaders: { $size: { $setDifference: ['$visitorIds', [null, '']] } },
+      engagedReads: 1,
+      totalReadTimeSec: 1,
+      scroll100Count: 1,
+      slug: 1,
+      category: 1,
+      language: 1,
+      avgReadTimeSec: { $cond: [{ $gt: ['$views', 0] }, { $divide: ['$totalReadTimeSec', '$views'] }, 0] },
+      completionRate: { $cond: [{ $gt: ['$views', 0] }, { $divide: ['$scroll100Count', '$views'] }, 0] },
+    },
+  };
+}
+
+async function aggregateEventMetricsByArticle(range, articleIds = null) {
+  const match = analyticsEventMatch(range, {
+    eventType: { $in: ['view', 'engaged_read', 'heartbeat', 'scroll_100'] },
+  });
+  if (Array.isArray(articleIds)) {
+    if (!articleIds.length) return [];
+    match.articleId = { $in: articleIds };
+  }
+  return ArticleAnalyticsEvent.aggregate([
+    { $match: match },
+    eventMetricsGroup('$articleId'),
+    eventMetricsProject({ articleId: '$_id' }),
+    { $sort: { views: -1 } },
+  ]);
+}
+
+async function aggregateOverallEventMetrics(range) {
+  const rows = await ArticleAnalyticsEvent.aggregate([
+    { $match: analyticsEventMatch(range, { eventType: { $in: ['view', 'engaged_read', 'heartbeat', 'scroll_100'] } }) },
+    eventMetricsGroup(null),
+    eventMetricsProject({ _id: 0 }),
+  ]);
+  const row = rows && rows[0] ? rows[0] : null;
+  return {
+    views: row ? Number(row.views || 0) : 0,
+    uniqueReaders: row ? Number(row.uniqueReaders || 0) : 0,
+    engagedReads: row ? Number(row.engagedReads || 0) : 0,
+    totalReadTimeSec: row ? Number(row.totalReadTimeSec || 0) : 0,
+    scroll100Count: row ? Number(row.scroll100Count || 0) : 0,
+    avgReadTimeSec: row ? Number(row.avgReadTimeSec || 0) : 0,
+    completionRate: row ? Number(row.completionRate || 0) : 0,
+  };
+}
+
+function articleIdKey(value) {
+  return value == null ? '' : String(value);
+}
+
+function toAnalyticsArticleRow(article, metric = {}) {
+  const views = Number(metric.views || 0);
+  const uniqueReaders = Number(metric.uniqueReaders || 0);
+  const engagedReads = Number(metric.engagedReads || 0);
+  const totalReadTimeSec = Number(metric.totalReadTimeSec || 0);
+  const scroll100Count = Number(metric.scroll100Count || 0);
+  return {
+    articleId: articleIdKey(article?._id || article?.articleId || metric.articleId),
+    title: article?.title || null,
+    slug: article?.slug || metric.slug || null,
+    category: article?.category || metric.category || null,
+    language: article?.language || metric.language || null,
+    status: article?.status || null,
+    publishedAt: article?.publishedAt || null,
+    views,
+    readers: uniqueReaders,
+    uniqueReaders,
+    engagedReads,
+    avgReadTimeSec: views > 0 ? totalReadTimeSec / views : 0,
+    completionRate: views > 0 ? scroll100Count / views : 0,
+    totalViews: views,
+    totalUniqueReaders: uniqueReaders,
+    totalEngagedReads: engagedReads,
+  };
+}
+
+function buildArticleAnalyticsFilter(req) {
+  const filter = {};
+  const category = req.query.category && req.query.category !== 'all' ? String(req.query.category).trim() : null;
+  const language = req.query.language && req.query.language !== 'all' ? String(req.query.language).trim() : null;
+  const statusRaw = req.query.status !== undefined ? String(req.query.status || '').trim() : '';
+  const status = statusRaw && statusRaw !== 'all' ? statusRaw : null;
+
+  if (category) filter.category = category;
+  if (language) filter.language = language;
+  if (status) filter.status = status;
+  else if (statusRaw !== 'all') filter.status = 'published';
+
+  return filter;
+}
+
+function mergeCategoryMetric(categories, row) {
+  const category = row.category || 'uncategorized';
+  const existing = categories.get(category) || {
+    category,
+    views: 0,
+    uniqueReaders: 0,
+    engagedReads: 0,
+    totalReadTimeSec: 0,
+    scroll100Count: 0,
+    topArticles: [],
+    visitorIds: new Set(),
+  };
+  existing.views += Number(row.views || 0);
+  for (const visitorId of Array.isArray(row.visitorIds) ? row.visitorIds : []) {
+    if (visitorId) existing.visitorIds.add(String(visitorId));
+  }
+  existing.uniqueReaders = existing.visitorIds.size;
+  existing.engagedReads += Number(row.engagedReads || 0);
+  existing.totalReadTimeSec += Number(row.totalReadTimeSec || 0);
+  existing.scroll100Count += Number(row.scroll100Count || 0);
+  if (Number(row.views || 0) > 0) {
+    const { visitorIds: _visitorIds, ...publicRow } = row;
+    existing.topArticles.push(publicRow);
+  }
+  categories.set(category, existing);
+}
+
 async function getDashboard(req, res) {
   try {
     if (!isDbReady()) {
       return res.status(200).json({ ok: true, data: {
         totalViews: 0,
         totalUniqueReaders: 0,
+        uniqueReaders: 0,
+        uniqueVisitors: 0,
         totalEngagedReads: 0,
         avgReadTimeSec: 0,
+        completionRate: 0,
         topSources: [],
         languageBreakdown: [],
         topArticles: [],
         categoryBreakdown: [],
         last24hViews: 0,
         last7dViews: 0,
+        scope: 'lifetime',
+        dateRange: { dateFrom: null, dateTo: null, semantics: 'all stored analytics events' },
       }});
     }
+
+    const range = parseAnalyticsRange(req.query || {});
+    if (!range.ok) return res.status(400).json({ ok: false, message: range.message });
 
     const now = new Date();
     const since24h = new Date(now.getTime() - 24 * 60 * 60_000);
     const since7d = new Date(now.getTime() - 7 * 24 * 60 * 60_000);
 
-    const [totalsAgg, topSourcesAgg, langAgg, categoryAgg, last24hViews, last7dViews, topSummaries] = await Promise.all([
-      ArticleAnalyticsSummary.aggregate([
-        {
-          $group: {
-            _id: null,
-            totalViews: { $sum: '$totalViews' },
-            totalUniqueReaders: { $sum: '$totalUniqueReaders' },
-            totalEngagedReads: { $sum: '$totalEngagedReads' },
-            totalReadTimeSec: { $sum: '$totalReadTimeSec' },
-            totalScroll100: { $sum: '$scroll100Count' },
-          },
-        },
-      ]),
-      ArticleAnalyticsSummary.aggregate([
-        { $unwind: { path: '$sourceBreakdown', preserveNullAndEmptyArrays: false } },
-        {
-          $group: {
-            _id: '$sourceBreakdown.source',
-            count: { $sum: '$sourceBreakdown.count' },
-          },
-        },
+    const [totals, topSourcesAgg, langAgg, articleMetrics, last24hViews, last7dViews] = await Promise.all([
+      aggregateOverallEventMetrics(range),
+      ArticleAnalyticsEvent.aggregate([
+        { $match: analyticsEventMatch(range, { eventType: 'view' }) },
+        { $group: { _id: { $ifNull: ['$source', 'unknown'] }, count: { $sum: 1 } } },
         { $sort: { count: -1 } },
         { $limit: 10 },
       ]),
-      ArticleAnalyticsSummary.aggregate([
-        { $unwind: { path: '$languageBreakdown', preserveNullAndEmptyArrays: false } },
-        {
-          $group: {
-            _id: '$languageBreakdown.language',
-            count: { $sum: '$languageBreakdown.count' },
-          },
-        },
+      ArticleAnalyticsEvent.aggregate([
+        { $match: analyticsEventMatch(range, { eventType: 'view' }) },
+        { $group: { _id: { $ifNull: ['$language', 'unknown'] }, count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
-      ArticleAnalyticsSummary.aggregate([
-        {
-          $group: {
-            _id: '$category',
-            views: { $sum: '$totalViews' },
-            uniqueReaders: { $sum: '$totalUniqueReaders' },
-            engagedReads: { $sum: '$totalEngagedReads' },
-            totalReadTimeSec: { $sum: '$totalReadTimeSec' },
-            scroll100: { $sum: '$scroll100Count' },
-          },
-        },
-        { $sort: { views: -1 } },
-      ]),
+      aggregateEventMetricsByArticle(range),
       ArticleAnalyticsEvent.countDocuments({ eventType: 'view', createdAt: { $gte: since24h } }),
       ArticleAnalyticsEvent.countDocuments({ eventType: 'view', createdAt: { $gte: since7d } }),
-      ArticleAnalyticsSummary.find({}).sort({ totalViews: -1 }).limit(10).lean(),
     ]);
 
-    const totalsRow = totalsAgg && totalsAgg[0] ? totalsAgg[0] : null;
-    const totalViews = totalsRow ? totalsRow.totalViews : 0;
-    const totalReadTimeSec = totalsRow ? totalsRow.totalReadTimeSec : 0;
-
-    const topArticlesIds = (topSummaries || []).map((d) => d.articleId).filter(Boolean);
-    const articles = await Article.find({ _id: { $in: topArticlesIds } })
+    const articleIds = (articleMetrics || []).map((row) => row.articleId).filter(Boolean);
+    const articles = articleIds.length ? await Article.find({ _id: { $in: articleIds }, status: 'published' })
       .select('title slug category language status publishedAt')
-      .lean();
+      .lean() : [];
     const byId = new Map((articles || []).map((a) => [String(a._id), a]));
 
-    const topArticles = (topSummaries || []).map((s) => {
-      const a = byId.get(String(s.articleId)) || null;
-      return {
-        articleId: String(s.articleId),
-        title: a?.title || null,
-        slug: a?.slug || s.slug || null,
-        category: a?.category || s.category || null,
-        language: a?.language || s.language || null,
-        status: a?.status || null,
-        publishedAt: a?.publishedAt || null,
-        totalViews: s.totalViews || 0,
-        totalUniqueReaders: s.totalUniqueReaders || 0,
-        totalEngagedReads: s.totalEngagedReads || 0,
-        avgReadTimeSec: s.avgReadTimeSec || 0,
-        completionRate: s.completionRate || 0,
-      };
-    });
+    const articleRows = (articleMetrics || []).map((metric) => toAnalyticsArticleRow(byId.get(String(metric.articleId)), metric));
+    const topArticles = articleRows
+      .slice()
+      .sort((a, b) => b.views - a.views || new Date(b.publishedAt || 0) - new Date(a.publishedAt || 0))
+      .slice(0, 10);
 
-    const categoryBreakdown = (categoryAgg || []).map((c) => {
-      const views = c?.views || 0;
-      const totalRead = c?.totalReadTimeSec || 0;
-      const scroll100 = c?.scroll100 || 0;
+    const categoryMap = new Map();
+    for (const metric of articleMetrics || []) {
+      const row = toAnalyticsArticleRow(byId.get(String(metric.articleId)), metric);
+      if (row.views > 0) {
+        mergeCategoryMetric(categoryMap, {
+          ...row,
+          category: row.category,
+          visitorIds: metric.visitorIds,
+          totalReadTimeSec: metric.totalReadTimeSec,
+          scroll100Count: metric.scroll100Count,
+        });
+      }
+    }
+    const categoryBreakdown = Array.from(categoryMap.values()).map((c) => {
+      const views = c.views || 0;
+      const totalRead = c.totalReadTimeSec || 0;
+      const scroll100 = c.scroll100Count || 0;
       return {
-        category: c?._id || null,
+        category: c.category,
         views,
-        uniqueReaders: c?.uniqueReaders || 0,
-        engagedReads: c?.engagedReads || 0,
+        readers: c.uniqueReaders || 0,
+        uniqueReaders: c.uniqueReaders || 0,
+        engagedReads: c.engagedReads || 0,
         avgReadTimeSec: views > 0 ? totalRead / views : 0,
         completionRate: views > 0 ? scroll100 / views : 0,
+        topArticles: c.topArticles
+          .slice()
+          .sort((a, b) => b.views - a.views || new Date(b.publishedAt || 0) - new Date(a.publishedAt || 0))
+          .slice(0, 3),
       };
-    });
+    }).sort((a, b) => b.views - a.views);
 
     const topSources = (topSourcesAgg || []).map((x) => ({ source: x._id, count: x.count }));
     const languageBreakdown = (langAgg || []).map((x) => ({ language: x._id, count: x.count }));
+    const totalViews = totals.views;
+    const totalUniqueReaders = totals.uniqueReaders;
 
     return res.status(200).json({
       ok: true,
       data: {
         totalViews,
-        totalUniqueReaders: totalsRow ? totalsRow.totalUniqueReaders : 0,
-        totalEngagedReads: totalsRow ? totalsRow.totalEngagedReads : 0,
-        avgReadTimeSec: totalViews > 0 ? totalReadTimeSec / totalViews : 0,
+        views: totalViews,
+        totalUniqueReaders,
+        uniqueReaders: totalUniqueReaders,
+        uniqueVisitors: totalUniqueReaders,
+        totalEngagedReads: totals.engagedReads,
+        engagedReads: totals.engagedReads,
+        avgReadTimeSec: totals.avgReadTimeSec,
+        completionRate: totals.completionRate,
         topSources,
         languageBreakdown,
         topArticles,
         categoryBreakdown,
         last24hViews,
         last7dViews,
+        ...analyticsScopePayload(range),
       },
     });
   } catch (e) {
@@ -276,14 +469,19 @@ async function getDashboard(req, res) {
     return res.status(200).json({ ok: true, data: {
       totalViews: 0,
       totalUniqueReaders: 0,
+      uniqueReaders: 0,
+      uniqueVisitors: 0,
       totalEngagedReads: 0,
       avgReadTimeSec: 0,
+      completionRate: 0,
       topSources: [],
       languageBreakdown: [],
       topArticles: [],
       categoryBreakdown: [],
       last24hViews: 0,
       last7dViews: 0,
+      scope: 'lifetime',
+      dateRange: { dateFrom: null, dateTo: null, semantics: 'all stored analytics events' },
     }});
   }
 }
@@ -295,127 +493,26 @@ async function listArticles(req, res) {
     const page = Math.max(parseIntSafe(req.query.page, 1), 1);
     const pageSize = Math.min(Math.max(parseIntSafe(req.query.limit ?? req.query.pageSize, 20), 1), 100);
     const skip = (page - 1) * pageSize;
+    const range = parseAnalyticsRange(req.query || {});
+    if (!range.ok) return res.status(400).json({ ok: false, message: range.message });
 
-    const category = req.query.category && req.query.category !== 'all' ? String(req.query.category).trim() : null;
-    const language = req.query.language && req.query.language !== 'all' ? String(req.query.language).trim() : null;
-    const status = req.query.status && req.query.status !== 'all' ? String(req.query.status).trim() : null;
-
-    const dateRange = parseDateRange(req.query.dateRange);
-
-    if (dateRange && dateRange.kind === 'dateKey') {
-      // Range mode: compute from daily aggregates
-      const match = {
-        dateKey: { $gte: dateRange.startKey, $lte: dateRange.endKey },
-      };
-      if (category) match.category = category;
-      if (language) match.language = language;
-
-      const pipeline = [
-        { $match: match },
-        {
-          $group: {
-            _id: '$articleId',
-            articleId: { $first: '$articleId' },
-            slug: { $last: '$slug' },
-            category: { $last: '$category' },
-            language: { $last: '$language' },
-            views: { $sum: '$views' },
-            uniqueReaders: { $sum: '$uniqueReaders' },
-            engagedReads: { $sum: '$engagedReads' },
-            totalReadTimeSec: { $sum: '$totalReadTimeSec' },
-            scroll100Count: { $sum: '$scroll100Count' },
-          },
-        },
-        { $sort: { views: -1 } },
-        { $skip: skip },
-        { $limit: pageSize },
-      ];
-
-      const countPipeline = [
-        { $match: match },
-        { $group: { _id: '$articleId' } },
-        { $count: 'total' },
-      ];
-
-      const [rows, countRows] = await Promise.all([
-        ArticleAnalyticsDaily.aggregate(pipeline),
-        ArticleAnalyticsDaily.aggregate(countPipeline),
-      ]);
-
-      const ids = (rows || []).map((r) => r.articleId);
-      let articleFilter = { _id: { $in: ids } };
-      if (status) articleFilter.status = status;
-      const articles = await Article.find(articleFilter).select('title slug status publishedAt category language').lean();
-      const byId = new Map((articles || []).map((a) => [String(a._id), a]));
-
-      const items = (rows || [])
-        .map((r) => {
-          const a = byId.get(String(r.articleId)) || null;
-          if (status && !a) return null;
-          const views = r.views || 0;
-          return {
-            articleId: String(r.articleId),
-            title: a?.title || null,
-            slug: a?.slug || r.slug || null,
-            category: a?.category || r.category || null,
-            language: a?.language || r.language || null,
-            status: a?.status || null,
-            publishedAt: a?.publishedAt || null,
-            views,
-            uniqueReaders: r.uniqueReaders || 0,
-            engagedReads: r.engagedReads || 0,
-            avgReadTimeSec: views > 0 ? (r.totalReadTimeSec || 0) / views : 0,
-            completionRate: views > 0 ? (r.scroll100Count || 0) / views : 0,
-          };
-        })
-        .filter(Boolean);
-
-      const total = countRows && countRows[0] ? countRows[0].total : 0;
-      return res.status(200).json({ ok: true, items, total, page, pageSize });
-    }
-
-    // Default mode: use lifetime summary
-    const filter = {};
-    if (category) filter.category = category;
-    if (language) filter.language = language;
-
-    let allowedIds = null;
-    if (status) {
-      const ids = await Article.find({ status }).distinct('_id');
-      allowedIds = ids || [];
-      filter.articleId = { $in: allowedIds };
-    }
-
-    const [itemsRaw, total] = await Promise.all([
-      ArticleAnalyticsSummary.find(filter).sort({ totalViews: -1 }).skip(skip).limit(pageSize).lean(),
-      ArticleAnalyticsSummary.countDocuments(filter),
-    ]);
-
-    const ids = (itemsRaw || []).map((x) => x.articleId).filter(Boolean);
-    const articles = await Article.find({ _id: { $in: ids } })
+    const articleFilter = buildArticleAnalyticsFilter(req);
+    const articles = await Article.find(articleFilter)
       .select('title slug status publishedAt category language')
+      .sort({ publishedAt: -1, createdAt: -1 })
       .lean();
-    const byId = new Map((articles || []).map((a) => [String(a._id), a]));
+    const articleIds = (articles || []).map((article) => article._id).filter(Boolean);
+    const metrics = await aggregateEventMetricsByArticle(range, articleIds);
+    const byId = new Map((metrics || []).map((metric) => [String(metric.articleId), metric]));
 
-    const items = (itemsRaw || []).map((s) => {
-      const a = byId.get(String(s.articleId)) || null;
-      return {
-        articleId: String(s.articleId),
-        title: a?.title || null,
-        slug: a?.slug || s.slug || null,
-        category: a?.category || s.category || null,
-        language: a?.language || s.language || null,
-        status: a?.status || null,
-        publishedAt: a?.publishedAt || null,
-        totalViews: s.totalViews || 0,
-        totalUniqueReaders: s.totalUniqueReaders || 0,
-        totalEngagedReads: s.totalEngagedReads || 0,
-        avgReadTimeSec: s.avgReadTimeSec || 0,
-        completionRate: s.completionRate || 0,
-      };
-    });
+    const allItems = (articles || [])
+      .map((article) => toAnalyticsArticleRow(article, byId.get(String(article._id))))
+      .sort((a, b) => b.views - a.views || new Date(b.publishedAt || 0) - new Date(a.publishedAt || 0));
 
-    return res.status(200).json({ ok: true, items, total, page, pageSize });
+    const total = allItems.length;
+    const items = allItems.slice(skip, skip + pageSize);
+
+    return res.status(200).json({ ok: true, items, total, page, pageSize, ...analyticsScopePayload(range) });
   } catch (e) {
     console.error('[admin-analytics][articles] failed', e?.message || e);
     return res.status(200).json({ ok: true, items: [], total: 0, page: 1, pageSize: 20 });
@@ -738,53 +835,61 @@ async function listCategories(req, res) {
   try {
     if (!isDbReady()) return res.status(200).json({ ok: true, items: [] });
 
-    const rows = await ArticleAnalyticsSummary.aggregate([
-      {
-        $group: {
-          _id: '$category',
-          views: { $sum: '$totalViews' },
-          uniqueReaders: { $sum: '$totalUniqueReaders' },
-          engagedReads: { $sum: '$totalEngagedReads' },
-          totalReadTimeSec: { $sum: '$totalReadTimeSec' },
-          scroll100: { $sum: '$scroll100Count' },
-        },
-      },
-      { $sort: { views: -1 } },
-    ]);
+    const range = parseAnalyticsRange(req.query || {});
+    if (!range.ok) return res.status(400).json({ ok: false, message: range.message });
 
-    const items = [];
-    for (const r of rows || []) {
-      const category = r?._id || null;
-      if (!category) continue;
+    const metrics = await aggregateEventMetricsByArticle(range);
+    const articleIds = (metrics || []).map((row) => row.articleId).filter(Boolean);
+    const articles = articleIds.length ? await Article.find({ _id: { $in: articleIds }, status: 'published' })
+      .select('title slug status publishedAt category language')
+      .lean() : [];
+    const byId = new Map((articles || []).map((article) => [String(article._id), article]));
 
-      const views = r.views || 0;
-      const top = await ArticleAnalyticsSummary.find({ category }).sort({ totalViews: -1 }).limit(3).lean();
-      const ids = top.map((x) => x.articleId);
-      const arts = await Article.find({ _id: { $in: ids } }).select('title slug status publishedAt').lean();
-      const byId = new Map(arts.map((a) => [String(a._id), a]));
-
-      items.push({
-        category,
-        views,
-        uniqueReaders: r.uniqueReaders || 0,
-        engagedReads: r.engagedReads || 0,
-        avgReadTimeSec: views > 0 ? (r.totalReadTimeSec || 0) / views : 0,
-        completionRate: views > 0 ? (r.scroll100 || 0) / views : 0,
-        topArticles: top.map((s) => {
-          const a = byId.get(String(s.articleId)) || null;
-          return {
-            articleId: String(s.articleId),
-            title: a?.title || null,
-            slug: a?.slug || s.slug || null,
-            status: a?.status || null,
-            publishedAt: a?.publishedAt || null,
-            totalViews: s.totalViews || 0,
-          };
-        }),
-      });
+    const categories = new Map();
+    for (const metric of metrics || []) {
+      const article = byId.get(String(metric.articleId));
+      if (!article) continue;
+      const row = toAnalyticsArticleRow(article, metric);
+      if (row.views > 0) {
+        mergeCategoryMetric(categories, {
+          ...row,
+          category: article.category,
+          visitorIds: metric.visitorIds,
+          totalReadTimeSec: metric.totalReadTimeSec,
+          scroll100Count: metric.scroll100Count,
+        });
+      }
     }
 
-    return res.status(200).json({ ok: true, items });
+    const items = Array.from(categories.values()).map((category) => {
+      const views = category.views || 0;
+      return {
+        category: category.category,
+        views,
+        readers: category.uniqueReaders || 0,
+        uniqueReaders: category.uniqueReaders || 0,
+        engagedReads: category.engagedReads || 0,
+        avgReadTimeSec: views > 0 ? (category.totalReadTimeSec || 0) / views : 0,
+        completionRate: views > 0 ? (category.scroll100Count || 0) / views : 0,
+        topArticles: category.topArticles
+          .slice()
+          .sort((a, b) => b.views - a.views || new Date(b.publishedAt || 0) - new Date(a.publishedAt || 0))
+          .slice(0, 3)
+          .map((article) => ({
+            articleId: article.articleId,
+            title: article.title,
+            slug: article.slug,
+            status: article.status,
+            publishedAt: article.publishedAt,
+            views: article.views,
+            readers: article.readers,
+            uniqueReaders: article.uniqueReaders,
+            totalViews: article.totalViews,
+          })),
+      };
+    }).sort((a, b) => b.views - a.views);
+
+    return res.status(200).json({ ok: true, items, ...analyticsScopePayload(range) });
   } catch (e) {
     console.error('[admin-analytics][categories] failed', e?.message || e);
     return res.status(200).json({ ok: true, items: [] });
