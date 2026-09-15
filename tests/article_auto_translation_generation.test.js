@@ -55,9 +55,10 @@ function makeInlineImageBlock(overrides = {}) {
   const credit = overrides.credit || 'News Pulse Photo Desk';
   const width = overrides.width || 1200;
   const height = overrides.height || 675;
+  const layout = Object.prototype.hasOwnProperty.call(overrides, 'layout') ? ` data-np-layout="${overrides.layout}"` : '';
   const figureDimensions = overrides.omitFigureDimensions ? '' : ` data-np-width="${width}" data-np-height="${height}"`;
   const imageDimensions = overrides.omitImageDimensions ? '' : ` width="${width}" height="${height}"`;
-  return `<figure data-np-block="inline-image" data-np-media-id="${mediaId}"${figureDimensions}><img src="${src}" alt="${alt}"${imageDimensions}><figcaption data-np-caption="true">${caption}</figcaption><div data-np-credit="true">Credit: ${credit}</div></figure>`;
+  return `<figure data-np-block="inline-image" data-np-media-id="${mediaId}"${layout}${figureDimensions}><img src="${src}" alt="${alt}"${imageDimensions}><figcaption data-np-caption="true">${caption}</figcaption><div data-np-credit="true">Credit: ${credit}</div></figure>`;
 }
 
 function makeLegacyInlineImageBlock() {
@@ -183,6 +184,40 @@ test('googleTranslationService preserves News Pulse controlled inline image bloc
     assert.ok(res.text.indexOf(imageBlock) < res.text.indexOf('<p>Translated after.</p>'));
     assert.match(res.text, /<figcaption data-np-caption="true">Caption to preserve<\/figcaption>/);
     assert.match(res.text, /<div data-np-credit="true">Credit: News Pulse Photo Desk<\/div>/);
+  }
+});
+
+test('googleTranslationService preserves optional inline image layout attribute exactly through English, Hindi, and Gujarati translation', async () => {
+  const cases = [
+    { label: 'normal', block: makeInlineImageBlock({ mediaId: 'layout-normal-id', layout: 'normal', caption: 'Normal layout caption', credit: 'Normal layout credit' }) },
+    { label: 'wide', block: makeInlineImageBlock({ mediaId: 'layout-wide-id', layout: 'wide', caption: 'Wide layout caption', credit: 'Wide layout credit' }) },
+    { label: 'full', block: makeInlineImageBlock({ mediaId: 'layout-full-id', layout: 'full', caption: 'Full layout caption', credit: 'Full layout credit' }) },
+    { label: 'missing', block: makeInlineImageBlock({ mediaId: 'layout-missing-id', caption: 'Missing layout caption', credit: 'Missing layout credit' }) },
+  ];
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before layout image.', `${body.target}:Before layout image.`).replace('After layout image.', `${body.target}:After layout image.`) })) } }),
+    };
+  };
+
+  for (const { label, block } of cases) {
+    const html = `<p>Before layout image.</p>${block}<p>After layout image.</p>`;
+    for (const targetLang of ['en', 'hi', 'gu']) {
+      const res = await googleTranslation.translateText(html, 'en', targetLang, { format: 'html', fetchImpl });
+
+      assert.equal(res.ok, true);
+      assert.equal(countOccurrences(res.text, block), 1);
+      assert.equal(countOccurrences(res.text, 'data-np-block="inline-image"'), 1);
+      if (label === 'missing') assert.equal(countOccurrences(res.text, 'data-np-layout='), 0);
+      else assert.equal(countOccurrences(res.text, `data-np-layout="${label}"`), 1);
+      assert.match(res.text, new RegExp(`<figcaption data-np-caption="true">${label[0].toUpperCase()}${label.slice(1)} layout caption<\\/figcaption>`));
+      assert.match(res.text, new RegExp(`<div data-np-credit="true">Credit: ${label[0].toUpperCase()}${label.slice(1)} layout credit<\\/div>`));
+      assert.ok(res.text.indexOf(`<p>${targetLang}:Before layout image.</p>`) < res.text.indexOf(block));
+      assert.ok(res.text.indexOf(block) < res.text.indexOf(`<p>${targetLang}:After layout image.</p>`));
+    }
   }
 });
 
