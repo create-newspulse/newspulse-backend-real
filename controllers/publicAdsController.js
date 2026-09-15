@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Ad = require('../models/Ad');
+const AdPerformanceDaily = require('../models/AdPerformanceDaily');
 const AdSettings = require('../models/AdSettings');
 const { normalizeSlot, isValidObjectId, parseDateMaybe } = require('../lib/ads');
 const { buildSlotEnabledDefaults, AD_SLOTS } = require('../src/constants/adSlots');
@@ -8,6 +9,50 @@ const DEBUG_PUBLIC_AD_SLOTS = new Set(['HOME_RIGHT_300x600', 'HOME_BILLBOARD_970
 
 function isDbReady() {
   return mongoose.connection.readyState === 1;
+}
+
+function utcDateKey(d = new Date()) {
+  return new Date(d).toISOString().slice(0, 10);
+}
+
+async function incrementDailyAdPerformance(ad, field, now = new Date()) {
+  if (!ad || !ad._id || (field !== 'impressions' && field !== 'clicks')) return;
+  const slot = normalizeSlot(ad.slot) || ad.slot;
+  if (!slot) return;
+
+  const dateKey = utcDateKey(now);
+  const update = {
+    $setOnInsert: {
+      adId: ad._id,
+      dateKey,
+      createdAt: now,
+    },
+    $set: {
+      slot,
+      updatedAt: now,
+    },
+    $inc: {
+      [field]: 1,
+    },
+  };
+
+  try {
+    await AdPerformanceDaily.updateOne({ adId: ad._id, dateKey }, update, { upsert: true });
+  } catch (error) {
+    if (String(error?.code) === '11000' || String(error?.message || '').includes('E11000')) {
+      await AdPerformanceDaily.updateOne({ adId: ad._id, dateKey }, { $set: { slot, updatedAt: now }, $inc: { [field]: 1 } });
+      return;
+    }
+    throw error;
+  }
+}
+
+async function recordDailyAdPerformanceSafely(ad, field) {
+  try {
+    await incrementDailyAdPerformance(ad, field);
+  } catch (_error) {
+    console.warn('[public-ads][daily-performance] failed');
+  }
 }
 
 const DEFAULT_SLOT_ENABLED = {
@@ -282,10 +327,11 @@ async function postImpression(req, res) {
   const updated = await Ad.findByIdAndUpdate(
     id,
     { $inc: { 'stats.impressions': 1 } },
-    { new: true, projection: { _id: 1 } },
+    { new: true, projection: { _id: 1, slot: 1 } },
   );
 
   if (!updated) return res.status(404).json({ ok: false, message: 'Not found' });
+  await recordDailyAdPerformanceSafely(updated, 'impressions');
   return res.status(200).json({ ok: true });
 }
 
@@ -298,7 +344,7 @@ async function postClick(req, res) {
     return res.status(503).json({ ok: false, message: 'Database unavailable' });
   }
 
-  const doc = await Ad.findById(id).select({ isClickable: 1 }).lean();
+  const doc = await Ad.findById(id).select({ isClickable: 1, slot: 1 }).lean();
   if (!doc) return res.status(404).json({ ok: false, message: 'Not found' });
 
   if (doc.isClickable === false) {
@@ -306,6 +352,7 @@ async function postClick(req, res) {
   }
 
   await Ad.updateOne({ _id: id }, { $inc: { 'stats.clicks': 1 } });
+  await recordDailyAdPerformanceSafely(doc, 'clicks');
   return res.status(200).json({ ok: true });
 }
 
@@ -313,4 +360,5 @@ module.exports = {
   getActiveAd,
   postImpression,
   postClick,
+  incrementDailyAdPerformance,
 };

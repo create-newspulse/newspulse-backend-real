@@ -11,6 +11,7 @@ const analyticsRouter = require('../routes/adminAnalytics.routes');
 const adminAdsRouter = require('../routes/adminAds.routes');
 const financeRouter = require('../routes/finance.routes');
 const Ad = require('../models/Ad');
+const AdPerformanceDaily = require('../models/AdPerformanceDaily');
 const FinanceRecord = require('../models/FinanceRecord');
 
 function app() {
@@ -179,23 +180,20 @@ test('ad performance aggregates impressions, clicks, CTR, and active ad count', 
 
 test('ad performance does not fake date-range slicing', async (t) => {
   stubReadyState(t, 1);
-  stubMethod(t, Ad, 'aggregate', adAggregateFromDocs([
-    { isActive: true, stats: { impressions: 10, clicks: 1 } },
-  ]));
+  stubMethod(t, Ad, 'aggregate', async () => { throw new Error('lifetime aggregate should not be used for dated ad performance'); });
+  stubMethod(t, AdPerformanceDaily, 'find', () => ({ lean: async () => [] }));
+  stubMethod(t, Ad, 'find', () => ({ select: () => ({ lean: async () => [] }) }));
 
   const res = await auth(request(app()).get('/api/admin/analytics/ad-performance?dateFrom=2026-09-01&dateTo=2026-09-15'));
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.connected, true);
-  assert.equal(res.body.scope, 'lifetime');
-  assert.equal(res.body.dateRangeSupported, false);
-  assert.deepEqual(res.body.metrics, {
-    impressions: 10,
-    clicks: 1,
-    ctr: 10,
-    totalAds: 1,
-    activeAds: 1,
-  });
+  assert.equal(res.body.scope, 'custom');
+  assert.equal(res.body.dateRangeSupported, true);
+  assert.equal(res.body.metrics.impressions, 0);
+  assert.equal(res.body.metrics.clicks, 0);
+  assert.equal(res.body.metrics.ctr, 0);
+  assert.deepEqual(res.body.dailyTrend, []);
 });
 
 test('admin analytics source routes use existing admin auth and GET-only methods', async () => {

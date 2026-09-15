@@ -5,6 +5,7 @@ const ArticleAnalyticsEvent = require('../models/ArticleAnalyticsEvent');
 const ArticleAnalyticsDaily = require('../models/ArticleAnalyticsDaily');
 const ArticleAnalyticsSummary = require('../models/ArticleAnalyticsSummary');
 const Ad = require('../models/Ad');
+const AdPerformanceDaily = require('../models/AdPerformanceDaily');
 const FinanceRecord = require('../models/FinanceRecord');
 
 const EMPTY_AD_METRICS = Object.freeze({
@@ -654,10 +655,172 @@ function roundPercentage(value) {
   return Math.round(Number(value) * 10000) / 10000;
 }
 
+function addUtcDays(date, days) {
+  const next = new Date(date);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function adPerformanceDailyRange(range) {
+  const now = range.dateTo || new Date();
+  let startKey = range.dateFrom ? utcDateKey(range.dateFrom) : null;
+  let endKey = range.dateTo ? utcDateKey(range.dateTo) : null;
+
+  if (range.scope === 'today') {
+    startKey = utcDateKey(now);
+    endKey = startKey;
+  } else if (range.scope === 'last7d') {
+    endKey = utcDateKey(now);
+    startKey = utcDateKey(addUtcDays(new Date(`${endKey}T00:00:00.000Z`), -6));
+  } else if (range.scope === 'last30d') {
+    endKey = utcDateKey(now);
+    startKey = utcDateKey(addUtcDays(new Date(`${endKey}T00:00:00.000Z`), -29));
+  } else if (range.scope === 'last24h') {
+    startKey = utcDateKey(range.dateFrom || addUtcDays(now, -1));
+    endKey = utcDateKey(now);
+  }
+
+  if (startKey && endKey && endKey < startKey) {
+    return { ok: false, message: 'dateTo must be greater than or equal to dateFrom' };
+  }
+
+  return { ok: true, startKey, endKey };
+}
+
+async function leanResult(query) {
+  return query && typeof query.lean === 'function' ? query.lean() : query;
+}
+
+async function findAdPublicSummaries(adIds) {
+  if (!adIds.length) return new Map();
+  const query = Ad.find({ _id: { $in: adIds } });
+  const selected = query && typeof query.select === 'function'
+    ? query.select({ _id: 1, title: 1, slot: 1, isActive: 1 })
+    : query;
+  const docs = await leanResult(selected);
+  return new Map((docs || []).map((ad) => [String(ad._id), ad]));
+}
+
+function toCtr(impressions, clicks) {
+  return impressions > 0 ? roundPercentage((clicks / impressions) * 100) : 0;
+}
+
+function mergeAdPerformanceRow(map, key, seed, impressions, clicks) {
+  const current = map.get(key) || { ...seed, impressions: 0, clicks: 0 };
+  current.impressions += impressions;
+  current.clicks += clicks;
+  map.set(key, current);
+  return current;
+}
+
+async function getAdPerformanceHistory(req, res, range) {
+  const dateKeys = adPerformanceDailyRange(range);
+  if (!dateKeys.ok) {
+    return res.status(400).json({ ok: false, success: false, source: 'ads_manager', connected: false, message: dateKeys.message });
+  }
+
+  const match = {};
+  if (dateKeys.startKey || dateKeys.endKey) {
+    match.dateKey = {};
+    if (dateKeys.startKey) match.dateKey.$gte = dateKeys.startKey;
+    if (dateKeys.endKey) match.dateKey.$lte = dateKeys.endKey;
+  }
+
+  const dailyRows = await leanResult(AdPerformanceDaily.find(match));
+  const adIds = Array.from(new Set((dailyRows || []).map((row) => row.adId).filter(Boolean).map((id) => String(id))));
+  const adsById = await findAdPublicSummaries(adIds);
+  const totals = { impressions: 0, clicks: 0 };
+  const daily = new Map();
+  const perAd = new Map();
+  const placements = new Map();
+
+  for (const row of dailyRows || []) {
+    const impressions = Number(row.impressions || 0);
+    const clicks = Number(row.clicks || 0);
+    const dateKey = normalizeDateKey(row.dateKey);
+    const adId = row.adId ? String(row.adId) : null;
+    const ad = adId ? adsById.get(adId) : null;
+    const slot = row.slot || (ad && ad.slot) || null;
+
+    totals.impressions += impressions;
+    totals.clicks += clicks;
+
+    if (dateKey) {
+      mergeAdPerformanceRow(daily, dateKey, { date: dateKey, dateKey }, impressions, clicks);
+    }
+    if (adId) {
+      mergeAdPerformanceRow(perAd, adId, {
+        adId,
+        title: ad && typeof ad.title === 'string' ? ad.title : '',
+        slot: ad && ad.slot ? ad.slot : slot,
+        isActive: ad ? ad.isActive === true : false,
+      }, impressions, clicks);
+    }
+    if (slot) {
+      const placement = mergeAdPerformanceRow(placements, slot, { slot, adIds: new Set() }, impressions, clicks);
+      if (adId) placement.adIds.add(adId);
+    }
+  }
+
+  const dailyTrend = Array.from(daily.values())
+    .sort((a, b) => a.dateKey.localeCompare(b.dateKey))
+    .map((row) => ({ ...row, ctr: toCtr(row.impressions, row.clicks) }));
+  const perAdRows = Array.from(perAd.values())
+    .map((row) => ({ ...row, ctr: toCtr(row.impressions, row.clicks) }))
+    .sort((a, b) => b.impressions - a.impressions || b.clicks - a.clicks || a.adId.localeCompare(b.adId));
+  const placementRows = Array.from(placements.values())
+    .map((row) => ({
+      slot: row.slot,
+      impressions: row.impressions,
+      clicks: row.clicks,
+      ctr: toCtr(row.impressions, row.clicks),
+      adsWithActivity: row.adIds.size,
+    }))
+    .sort((a, b) => b.impressions - a.impressions || a.slot.localeCompare(b.slot));
+
+  return res.status(200).json({
+    ok: true,
+    success: true,
+    source: 'ads_manager',
+    connected: true,
+    metrics: {
+      impressions: totals.impressions,
+      clicks: totals.clicks,
+      ctr: toCtr(totals.impressions, totals.clicks),
+      adsWithActivity: perAdRows.length,
+      activeAds: perAdRows.filter((row) => row.isActive).length,
+    },
+    scope: range.scope,
+    dateRangeSupported: true,
+    dateGranularity: 'day',
+    dateRange: {
+      dateFrom: dateKeys.startKey ? `${dateKeys.startKey}T00:00:00.000Z` : null,
+      dateTo: dateKeys.endKey ? `${dateKeys.endKey}T23:59:59.999Z` : null,
+      semantics: 'UTC calendar day keys from ad performance records',
+    },
+    dailyTrend,
+    perAd: perAdRows,
+    placements: placementRows,
+    topAds: {
+      byImpressions: perAdRows.slice(0, 10),
+      byClicks: perAdRows.slice().sort((a, b) => b.clicks - a.clicks || b.impressions - a.impressions || a.adId.localeCompare(b.adId)).slice(0, 10),
+      byCtr: perAdRows.slice().sort((a, b) => b.ctr - a.ctr || b.impressions - a.impressions || a.adId.localeCompare(b.adId)).slice(0, 10),
+    },
+  });
+}
+
 async function getAdPerformance(req, res) {
   try {
     if (!isDbReady()) {
       return res.status(200).json(adAnalyticsErrorPayload('Database unavailable'));
+    }
+
+    const range = parseAnalyticsRange(req.query || {});
+    if (!range.ok) {
+      return res.status(400).json({ ok: false, success: false, source: 'ads_manager', connected: false, message: range.message });
+    }
+    if (range.scope !== 'lifetime') {
+      return getAdPerformanceHistory(req, res, range);
     }
 
     const rows = await Ad.aggregate([
