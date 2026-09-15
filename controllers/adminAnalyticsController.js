@@ -4,6 +4,33 @@ const Article = require('../models/Article');
 const ArticleAnalyticsEvent = require('../models/ArticleAnalyticsEvent');
 const ArticleAnalyticsDaily = require('../models/ArticleAnalyticsDaily');
 const ArticleAnalyticsSummary = require('../models/ArticleAnalyticsSummary');
+const Ad = require('../models/Ad');
+const FinanceRecord = require('../models/FinanceRecord');
+
+const EMPTY_AD_METRICS = Object.freeze({
+  impressions: 0,
+  clicks: 0,
+  ctr: 0,
+  totalAds: 0,
+  activeAds: 0,
+});
+
+const EMPTY_REVENUE_METRICS = Object.freeze({
+  totalRevenue: 0,
+  paidAmount: 0,
+  outstandingAmount: 0,
+  recordCount: 0,
+  invoiceTotal: 0,
+  invoiceCount: 0,
+  revenueRecordCount: 0,
+  receiptCount: 0,
+  expenseTotal: 0,
+  expenseCount: 0,
+  currencyBreakdown: [],
+});
+
+const PAID_FINANCE_STATUSES = Object.freeze(['paid', 'received', 'completed', 'settled']);
+const CLOSED_UNPAID_FINANCE_STATUSES = Object.freeze(['cancelled', 'canceled', 'void', 'written_off', 'written off']);
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -22,6 +49,54 @@ function normalizeDateKey(v) {
   const s = String(v || '').trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
   return s;
+}
+
+function parseQueryDate(value, boundary) {
+  if (value === undefined || value === null || value === '') return { ok: true, value: null };
+  const raw = String(value || '').trim();
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(raw)
+    ? `${raw}T${boundary === 'end' ? '23:59:59.999' : '00:00:00.000'}Z`
+    : raw;
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return { ok: false, message: `${boundary === 'end' ? 'dateTo' : 'dateFrom'} must be a valid date` };
+  return { ok: true, value: date };
+}
+
+function parseQueryDateRange(query) {
+  const from = parseQueryDate(query && query.dateFrom, 'start');
+  if (!from.ok) return from;
+  const to = parseQueryDate(query && query.dateTo, 'end');
+  if (!to.ok) return to;
+  if (from.value && to.value && to.value.getTime() < from.value.getTime()) {
+    return { ok: false, message: 'dateTo must be greater than or equal to dateFrom' };
+  }
+  return { ok: true, dateFrom: from.value, dateTo: to.value };
+}
+
+function adAnalyticsErrorPayload(message) {
+  return {
+    ok: false,
+    success: false,
+    source: 'ads_manager',
+    connected: false,
+    metrics: { ...EMPTY_AD_METRICS },
+    scope: 'lifetime',
+    dateRangeSupported: false,
+    message,
+  };
+}
+
+function revenueAnalyticsErrorPayload(message) {
+  return {
+    ok: false,
+    success: false,
+    source: 'finance_records',
+    connected: false,
+    metrics: { ...EMPTY_REVENUE_METRICS },
+    dateRangeSupported: true,
+    dateField: 'paidAt, dueDate, createdAt',
+    message,
+  };
 }
 
 function parseDateRange(raw) {
@@ -477,6 +552,188 @@ async function getArticleDetails(req, res) {
   }
 }
 
+function roundPercentage(value) {
+  if (!Number.isFinite(Number(value))) return 0;
+  return Math.round(Number(value) * 10000) / 10000;
+}
+
+async function getAdPerformance(req, res) {
+  try {
+    if (!isDbReady()) {
+      return res.status(200).json(adAnalyticsErrorPayload('Database unavailable'));
+    }
+
+    const rows = await Ad.aggregate([
+      {
+        $group: {
+          _id: null,
+          impressions: { $sum: { $ifNull: ['$stats.impressions', 0] } },
+          clicks: { $sum: { $ifNull: ['$stats.clicks', 0] } },
+          totalAds: { $sum: 1 },
+          activeAds: { $sum: { $cond: [{ $eq: ['$isActive', true] }, 1, 0] } },
+        },
+      },
+    ]);
+
+    const row = rows && rows[0] ? rows[0] : {};
+    const impressions = Number(row.impressions || 0);
+    const clicks = Number(row.clicks || 0);
+
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      source: 'ads_manager',
+      connected: true,
+      metrics: {
+        impressions,
+        clicks,
+        ctr: impressions > 0 ? roundPercentage((clicks / impressions) * 100) : 0,
+        totalAds: Number(row.totalAds || 0),
+        activeAds: Number(row.activeAds || 0),
+      },
+      scope: 'lifetime',
+      dateRangeSupported: false,
+    });
+  } catch (_e) {
+    console.error('[admin-analytics][ad-performance] failed');
+    return res.status(200).json(adAnalyticsErrorPayload('Ad performance source unavailable'));
+  }
+}
+
+function buildRevenueAggregationPipeline(dateFrom, dateTo) {
+  const pipeline = [
+    {
+      $addFields: {
+        normalizedStatus: { $toLower: { $ifNull: ['$status', ''] } },
+        amountValue: { $ifNull: ['$amount', 0] },
+        analyticsDate: {
+          $switch: {
+            branches: [
+              { case: { $ne: ['$paidAt', null] }, then: '$paidAt' },
+              { case: { $eq: ['$type', 'invoice'] }, then: { $ifNull: ['$dueDate', '$createdAt'] } },
+            ],
+            default: '$createdAt',
+          },
+        },
+      },
+    },
+  ];
+
+  if (dateFrom || dateTo) {
+    const match = {};
+    if (dateFrom) match.$gte = dateFrom;
+    if (dateTo) match.$lte = dateTo;
+    pipeline.push({ $match: { analyticsDate: match } });
+  }
+
+  const paidCondition = {
+    $or: [
+      { $ne: ['$paidAt', null] },
+      { $in: ['$normalizedStatus', PAID_FINANCE_STATUSES] },
+    ],
+  };
+  const outstandingInvoiceCondition = {
+    $and: [
+      { $eq: ['$type', 'invoice'] },
+      { $not: [paidCondition] },
+      { $not: [{ $in: ['$normalizedStatus', CLOSED_UNPAID_FINANCE_STATUSES] }] },
+    ],
+  };
+
+  pipeline.push({
+    $facet: {
+      totals: [
+        {
+          $group: {
+            _id: null,
+            totalRevenue: { $sum: { $cond: [{ $eq: ['$type', 'revenue'] }, '$amountValue', 0] } },
+            paidAmount: { $sum: { $cond: [{ $and: [{ $in: ['$type', ['invoice', 'revenue']] }, paidCondition] }, '$amountValue', 0] } },
+            outstandingAmount: { $sum: { $cond: [outstandingInvoiceCondition, '$amountValue', 0] } },
+            recordCount: { $sum: 1 },
+            invoiceTotal: { $sum: { $cond: [{ $eq: ['$type', 'invoice'] }, '$amountValue', 0] } },
+            invoiceCount: { $sum: { $cond: [{ $eq: ['$type', 'invoice'] }, 1, 0] } },
+            revenueRecordCount: { $sum: { $cond: [{ $eq: ['$type', 'revenue'] }, 1, 0] } },
+            receiptCount: { $sum: { $cond: [{ $eq: ['$type', 'receipt'] }, 1, 0] } },
+            expenseTotal: { $sum: { $cond: [{ $eq: ['$type', 'expense'] }, '$amountValue', 0] } },
+            expenseCount: { $sum: { $cond: [{ $eq: ['$type', 'expense'] }, 1, 0] } },
+          },
+        },
+      ],
+      currencyBreakdown: [
+        {
+          $group: {
+            _id: { $ifNull: ['$currency', 'INR'] },
+            amount: { $sum: '$amountValue' },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { amount: -1, _id: 1 } },
+      ],
+    },
+  });
+
+  return pipeline;
+}
+
+async function getRevenueAnalytics(req, res) {
+  try {
+    if (!isDbReady()) {
+      return res.status(200).json(revenueAnalyticsErrorPayload('Database unavailable'));
+    }
+
+    const dateRange = parseQueryDateRange(req.query || {});
+    if (!dateRange.ok) {
+      return res.status(400).json({
+        ok: false,
+        success: false,
+        source: 'finance_records',
+        connected: false,
+        message: dateRange.message,
+      });
+    }
+
+    const rows = await FinanceRecord.aggregate(buildRevenueAggregationPipeline(dateRange.dateFrom, dateRange.dateTo));
+    const result = rows && rows[0] ? rows[0] : {};
+    const totals = result.totals && result.totals[0] ? result.totals[0] : {};
+    const currencyBreakdown = Array.isArray(result.currencyBreakdown)
+      ? result.currencyBreakdown.map((row) => ({
+        currency: row && row._id ? String(row._id) : 'INR',
+        amount: Number(row && row.amount || 0),
+        count: Number(row && row.count || 0),
+      }))
+      : [];
+
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      source: 'finance_records',
+      connected: true,
+      metrics: {
+        totalRevenue: Number(totals.totalRevenue || 0),
+        paidAmount: Number(totals.paidAmount || 0),
+        outstandingAmount: Number(totals.outstandingAmount || 0),
+        recordCount: Number(totals.recordCount || 0),
+        invoiceTotal: Number(totals.invoiceTotal || 0),
+        invoiceCount: Number(totals.invoiceCount || 0),
+        revenueRecordCount: Number(totals.revenueRecordCount || 0),
+        receiptCount: Number(totals.receiptCount || 0),
+        expenseTotal: Number(totals.expenseTotal || 0),
+        expenseCount: Number(totals.expenseCount || 0),
+        currencyBreakdown,
+      },
+      dateRangeSupported: true,
+      dateField: 'paidAt, dueDate, createdAt',
+      filters: {
+        dateFrom: dateRange.dateFrom ? dateRange.dateFrom.toISOString() : null,
+        dateTo: dateRange.dateTo ? dateRange.dateTo.toISOString() : null,
+      },
+    });
+  } catch (_e) {
+    console.error('[admin-analytics][revenue] failed');
+    return res.status(200).json(revenueAnalyticsErrorPayload('Revenue source unavailable'));
+  }
+}
+
 async function listCategories(req, res) {
   try {
     if (!isDbReady()) return res.status(200).json({ ok: true, items: [] });
@@ -538,5 +795,7 @@ module.exports = {
   getDashboard,
   listArticles,
   getArticleDetails,
+  getAdPerformance,
+  getRevenueAnalytics,
   listCategories,
 };
