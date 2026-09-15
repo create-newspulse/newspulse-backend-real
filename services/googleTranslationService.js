@@ -172,6 +172,56 @@ function isControlledInstagramBlockOpening(opening) {
   return isSupportedInstagramUrlForShortcode(getHtmlAttribute(opening, 'data-np-url'), shortcode);
 }
 
+function isValidFacebookPageOrUser(value) {
+  const segment = String(value || '');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,74}$/.test(segment)) return false;
+  return !new Set([
+    'checkpoint',
+    'events',
+    'explore',
+    'groups',
+    'login',
+    'marketplace',
+    'permalink.php',
+    'profile.php',
+    'stories',
+    'watch',
+  ]).has(segment.toLowerCase());
+}
+
+function isValidFacebookPostId(value) {
+  return /^(?:[1-9]\d{4,30}|pfbid[A-Za-z0-9_-]{10,120})$/.test(String(value || ''));
+}
+
+function isSupportedFacebookUrl(value) {
+  const raw = decodeHtmlEntities(String(value || ''));
+  if (!raw || raw !== raw.trim()) return false;
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:') return false;
+    if (!['facebook.com', 'www.facebook.com'].includes(host)) return false;
+    if (url.hash) return false;
+
+    if (url.pathname === '/permalink.php') {
+      return isValidFacebookPostId(url.searchParams.get('story_fbid'))
+        && /^[1-9]\d{4,30}$/.test(String(url.searchParams.get('id') || ''));
+    }
+
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length !== 3 || parts[1] !== 'posts') return false;
+    return isValidFacebookPageOrUser(parts[0]) && isValidFacebookPostId(parts[2]);
+  } catch (_) {
+    return false;
+  }
+}
+
+function isControlledFacebookBlockOpening(opening) {
+  const block = getHtmlAttribute(opening, 'data-np-block');
+  if (block !== 'facebook') return false;
+  return isSupportedFacebookUrl(getHtmlAttribute(opening, 'data-np-url'));
+}
+
 function protectNewsPulseInlineImageBlocks(html) {
   let index = 0;
   const map = new Map();
@@ -232,14 +282,29 @@ function protectNewsPulseInstagramBlocks(html) {
   return { text, map };
 }
 
+function protectNewsPulseFacebookBlocks(html) {
+  let index = 0;
+  const map = new Map();
+  const text = String(html || '').replace(/<div\b[^>]*>[\s\S]*?<\/div>/gi, (match) => {
+    const opening = match.match(/^<div\b[^>]*>/i)?.[0] || '';
+    if (!isControlledFacebookBlockOpening(opening)) return match;
+    const token = `__NP_FACEBOOK_BLOCK_${index}__`;
+    index += 1;
+    map.set(token, match);
+    return token;
+  });
+  return { text, map };
+}
+
 function protectNewsPulseControlledMediaBlocks(html) {
   const inlineImages = protectNewsPulseInlineImageBlocks(html);
   const youtubeBlocks = protectNewsPulseYouTubeBlocks(inlineImages.text);
   const xBlocks = protectNewsPulseXBlocks(youtubeBlocks.text);
   const instagramBlocks = protectNewsPulseInstagramBlocks(xBlocks.text);
+  const facebookBlocks = protectNewsPulseFacebookBlocks(instagramBlocks.text);
   return {
-    text: instagramBlocks.text,
-    maps: [instagramBlocks.map, xBlocks.map, youtubeBlocks.map, inlineImages.map],
+    text: facebookBlocks.text,
+    maps: [facebookBlocks.map, instagramBlocks.map, xBlocks.map, youtubeBlocks.map, inlineImages.map],
   };
 }
 
@@ -450,6 +515,7 @@ module.exports = {
   protectNewsPulseYouTubeBlocks,
   protectNewsPulseXBlocks,
   protectNewsPulseInstagramBlocks,
+  protectNewsPulseFacebookBlocks,
   protectNewsPulseControlledMediaBlocks,
   splitHtmlIntoChunks,
   splitTextIntoChunks,

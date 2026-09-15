@@ -80,6 +80,11 @@ function makeInstagramBlock(overrides = {}) {
   return `<div data-np-block="instagram" data-np-shortcode="${shortcode}" data-np-url="${url}"></div>`;
 }
 
+function makeFacebookBlock(overrides = {}) {
+  const url = overrides.url || 'https://www.facebook.com/NewsPulseAI/posts/123456789012345';
+  return `<div data-np-block="facebook" data-np-url="${url}"></div>`;
+}
+
 function countOccurrences(text, needle) {
   return String(text || '').split(needle).length - 1;
 }
@@ -402,6 +407,109 @@ test('googleTranslationService does not preserve invalid or raw Instagram embeds
   }
 });
 
+test('googleTranslationService detects canonical Facebook blocks before provider translation', () => {
+  const facebookBlock = makeFacebookBlock();
+  const protectedResult = googleTranslation.protectNewsPulseFacebookBlocks(`<p>A</p>${facebookBlock}<p>B</p>`);
+
+  assert.equal(protectedResult.map.size, 1);
+  assert.match(protectedResult.text, /__NP_FACEBOOK_BLOCK_0__/);
+  assert.equal(protectedResult.map.get('__NP_FACEBOOK_BLOCK_0__'), facebookBlock);
+});
+
+test('googleTranslationService recognizes supported Facebook URL forms for controlled blocks', () => {
+  const blocks = [
+    makeFacebookBlock({ url: 'https://www.facebook.com/NewsPulseAI/posts/123456789012345' }),
+    makeFacebookBlock({ url: 'https://facebook.com/NewsPulseAI/posts/pfbid02abcDEF_1234567890' }),
+    makeFacebookBlock({ url: 'https://www.facebook.com/NewsPulseAI/posts/123456789012345?utm_source=newspulse&locale=en_GB' }),
+    makeFacebookBlock({ url: 'https://www.facebook.com/permalink.php?story_fbid=123456789012345&id=987654321098765' }),
+    makeFacebookBlock({ url: 'https://www.facebook.com/permalink.php?story_fbid=123456789012345&amp;id=987654321098765' }),
+    makeFacebookBlock({ url: 'https://www.facebook.com/permalink.php?story_fbid=pfbid02abcDEF_1234567890&id=987654321098765&utm_source=newspulse' }),
+  ];
+
+  for (const block of blocks) {
+    const protectedResult = googleTranslation.protectNewsPulseFacebookBlocks(block);
+    assert.equal(protectedResult.map.size, 1);
+    assert.equal(protectedResult.map.get('__NP_FACEBOOK_BLOCK_0__'), block);
+  }
+});
+
+test('googleTranslationService preserves News Pulse controlled Facebook blocks through English, Hindi, and Gujarati HTML translation', async () => {
+  const facebookBlock = makeFacebookBlock({ url: 'https://www.facebook.com/NewsPulseAI/posts/123456789012345?utm_source=newspulse' });
+  const html = `<p>Before Facebook post.</p>${facebookBlock}<p>After Facebook post.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before Facebook post.', `${body.target}:Before Facebook post.`).replace('After Facebook post.', `${body.target}:After Facebook post.`) })) } }),
+    };
+  };
+
+  for (const targetLang of ['en', 'hi', 'gu']) {
+    const res = await googleTranslation.translateText(html, 'en', targetLang, { format: 'html', fetchImpl });
+
+    assert.equal(res.ok, true);
+    assert.equal(countOccurrences(res.text, 'data-np-block="facebook"'), 1);
+    assert.equal(countOccurrences(res.text, 'data-np-url="https://www.facebook.com/NewsPulseAI/posts/123456789012345?utm_source=newspulse"'), 1);
+    assert.equal(countOccurrences(res.text, facebookBlock), 1);
+    assert.ok(res.text.indexOf(`<p>${targetLang}:Before Facebook post.</p>`) < res.text.indexOf(facebookBlock));
+    assert.ok(res.text.indexOf(facebookBlock) < res.text.indexOf(`<p>${targetLang}:After Facebook post.</p>`));
+  }
+});
+
+test('googleTranslationService preserves multiple Facebook blocks in their individual positions without duplication', async () => {
+  const firstBlock = makeFacebookBlock({ url: 'https://www.facebook.com/NewsPulseAI/posts/123456789012345' });
+  const secondBlock = makeFacebookBlock({ url: 'https://www.facebook.com/permalink.php?story_fbid=223456789012345&id=987654321098765' });
+  const html = `<p>Before first Facebook.</p>${firstBlock}<p>Between Facebook posts.</p>${secondBlock}<p>After second Facebook.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before first Facebook.', 'Translated before first Facebook.').replace('Between Facebook posts.', 'Translated between Facebook posts.').replace('After second Facebook.', 'Translated after second Facebook.') })) } }),
+    };
+  };
+
+  const res = await googleTranslation.translateText(html, 'en', 'gu', { format: 'html', fetchImpl });
+
+  assert.equal(res.ok, true);
+  assert.equal(countOccurrences(res.text, 'data-np-block="facebook"'), 2);
+  assert.equal(countOccurrences(res.text, firstBlock), 1);
+  assert.equal(countOccurrences(res.text, secondBlock), 1);
+  assert.ok(res.text.indexOf('<p>Translated before first Facebook.</p>') < res.text.indexOf(firstBlock));
+  assert.ok(res.text.indexOf(firstBlock) < res.text.indexOf('<p>Translated between Facebook posts.</p>'));
+  assert.ok(res.text.indexOf('<p>Translated between Facebook posts.</p>') < res.text.indexOf(secondBlock));
+  assert.ok(res.text.indexOf(secondBlock) < res.text.indexOf('<p>Translated after second Facebook.</p>'));
+});
+
+test('googleTranslationService does not preserve invalid or raw Facebook embeds as controlled Facebook blocks', () => {
+  const lookalikeDomain = '<div data-np-block="facebook" data-np-url="https://facebook.com.example.com/NewsPulseAI/posts/123456789012345"></div>';
+  const arbitraryDomain = '<div data-np-block="facebook" data-np-url="https://example.com/NewsPulseAI/posts/123456789012345"></div>';
+  const mDotDomain = '<div data-np-block="facebook" data-np-url="https://m.facebook.com/NewsPulseAI/posts/123456789012345"></div>';
+  const javascriptUrl = '<div data-np-block="facebook" data-np-url="javascript:alert(1)"></div>';
+  const dataUrl = '<div data-np-block="facebook" data-np-url="data:text/html;base64,PHNjcmlwdD48L3NjcmlwdD4="></div>';
+  const profileRootUrl = '<div data-np-block="facebook" data-np-url="https://www.facebook.com/NewsPulseAI"></div>';
+  const loginUrl = '<div data-np-block="facebook" data-np-url="https://www.facebook.com/login/"></div>';
+  const checkpointUrl = '<div data-np-block="facebook" data-np-url="https://www.facebook.com/checkpoint/"></div>';
+  const groupsUrl = '<div data-np-block="facebook" data-np-url="https://www.facebook.com/groups/123456789012345/posts/223456789012345/"></div>';
+  const storiesUrl = '<div data-np-block="facebook" data-np-url="https://www.facebook.com/stories/NewsPulseAI/123456789012345/"></div>';
+  const marketplaceUrl = '<div data-np-block="facebook" data-np-url="https://www.facebook.com/marketplace/item/123456789012345/"></div>';
+  const arbitraryPath = '<div data-np-block="facebook" data-np-url="https://www.facebook.com/NewsPulseAI/videos/123456789012345"></div>';
+  const malformedPostId = '<div data-np-block="facebook" data-np-url="https://www.facebook.com/NewsPulseAI/posts/not-a-post"></div>';
+  const missingPermalinkStory = '<div data-np-block="facebook" data-np-url="https://www.facebook.com/permalink.php?id=987654321098765"></div>';
+  const missingPermalinkId = '<div data-np-block="facebook" data-np-url="https://www.facebook.com/permalink.php?story_fbid=123456789012345"></div>';
+  const malformedPermalink = '<div data-np-block="facebook" data-np-url="https://www.facebook.com/permalink.php?story_fbid=not-a-post&id=987654321098765"></div>';
+  const arbitraryBlock = '<div data-np-block="facebook-post" data-np-url="https://www.facebook.com/NewsPulseAI/posts/123456789012345"></div>';
+  const rawIframe = '<iframe src="https://www.facebook.com/plugins/post.php?href=https%3A%2F%2Fwww.facebook.com%2FNewsPulseAI%2Fposts%2F123456789012345"></iframe>';
+  const rawScript = '<script async src="https://connect.facebook.net/en_US/sdk.js"></script>';
+
+  for (const block of [lookalikeDomain, arbitraryDomain, mDotDomain, javascriptUrl, dataUrl, profileRootUrl, loginUrl, checkpointUrl, groupsUrl, storiesUrl, marketplaceUrl, arbitraryPath, malformedPostId, missingPermalinkStory, missingPermalinkId, malformedPermalink, arbitraryBlock, rawIframe, rawScript]) {
+    const protectedResult = googleTranslation.protectNewsPulseFacebookBlocks(`<p>A</p>${block}<p>B</p>`);
+    assert.equal(protectedResult.map.size, 0);
+    assert.equal(protectedResult.text, `<p>A</p>${block}<p>B</p>`);
+  }
+});
+
 test('googleTranslationService does not preserve invalid or raw X embeds as controlled X blocks', () => {
   const invalidId = '<div data-np-block="x" data-np-post-id="not-valid" data-np-url="https://x.com/NewsPulseAI/status/not-valid"></div>';
   const zeroId = '<div data-np-block="x" data-np-post-id="0" data-np-url="https://x.com/NewsPulseAI/status/0"></div>';
@@ -671,6 +779,42 @@ test('generated Hindi and Gujarati article translations preserve controlled Inst
       assert.equal(countOccurrences(payload.content, instagramBlock), 1);
       assert.ok(payload.content.indexOf(`${payload.language}:<p>Lead paragraph.</p>`) < payload.content.indexOf(instagramBlock));
       assert.ok(payload.content.indexOf(instagramBlock) < payload.content.indexOf('<p>Closing paragraph.</p>'));
+      assert.equal(payload.inlineMedia, undefined);
+      assert.equal(payload.media, undefined);
+    }
+  } finally {
+    restore(originals);
+    global.fetch = prevFetch;
+  }
+});
+
+test('generated Hindi and Gujarati article translations preserve controlled Facebook identity without creating media records', async () => {
+  const originals = { findOne: News.findOne, create: News.create, updateOne: News.updateOne };
+  const prevFetch = global.fetch;
+  const created = [];
+  const facebookBlock = makeFacebookBlock({ url: 'https://www.facebook.com/permalink.php?story_fbid=123456789012345&id=987654321098765&utm_source=newspulse' });
+  const sourceContent = `<p>Lead paragraph.</p>${facebookBlock}<p>Closing paragraph.</p>`;
+
+  try {
+    News.findOne = async () => null;
+    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994302${created.length}1`, ...payload }; };
+    global.fetch = async (_url, opts) => {
+      const body = JSON.parse(String(opts.body || '{}'));
+      return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
+    };
+
+    const res = await generateArticleTranslations(makeSource({ content: sourceContent, language: 'en', lang: 'en' }), { targetLanguages: ['hi', 'gu'] });
+    assert.equal(res.ok, true);
+    assert.deepEqual(created.map((item) => item.language).sort(), ['gu', 'hi']);
+    assert.equal(created.length, 2);
+
+    for (const payload of created) {
+      assert.equal(countOccurrences(payload.content, 'data-np-block="facebook"'), 1);
+      assert.equal(countOccurrences(payload.content, 'data-np-url="https://www.facebook.com/permalink.php?story_fbid=123456789012345&id=987654321098765&utm_source=newspulse"'), 1);
+      assert.equal(countOccurrences(payload.content, facebookBlock), 1);
+      assert.ok(payload.content.indexOf(`${payload.language}:<p>Lead paragraph.</p>`) < payload.content.indexOf(facebookBlock));
+      assert.ok(payload.content.indexOf(facebookBlock) < payload.content.indexOf('<p>Closing paragraph.</p>'));
       assert.equal(payload.inlineMedia, undefined);
       assert.equal(payload.media, undefined);
     }
