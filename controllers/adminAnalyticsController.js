@@ -321,6 +321,16 @@ function buildArticleAnalyticsFilter(req) {
   return filter;
 }
 
+function buildActiveArticleRecordFilter(base = {}) {
+  const clauses = [];
+  if (base && Object.keys(base).length) clauses.push(base);
+  clauses.push(
+    { $or: [{ status: { $ne: 'deleted' } }, { status: { $exists: false } }] },
+    { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] }
+  );
+  return { $and: clauses };
+}
+
 function mergeCategoryMetric(categories, row) {
   const category = row.category || 'uncategorized';
   const existing = categories.get(category) || {
@@ -396,8 +406,8 @@ async function getDashboard(req, res) {
     ]);
 
     const articleIds = (articleMetrics || []).map((row) => row.articleId).filter(Boolean);
-    const articles = articleIds.length ? await Article.find({ _id: { $in: articleIds }, status: 'published' })
-      .select('title slug category language status publishedAt')
+    const articles = articleIds.length ? await Article.find(buildActiveArticleRecordFilter({ _id: { $in: articleIds }, status: 'published' }))
+      .select('title slug category language status publishedAt deletedAt')
       .lean() : [];
     const byId = new Map((articles || []).map((a) => [String(a._id), a]));
 
@@ -497,9 +507,9 @@ async function listArticles(req, res) {
     const range = parseAnalyticsRange(req.query || {});
     if (!range.ok) return res.status(400).json({ ok: false, message: range.message });
 
-    const articleFilter = buildArticleAnalyticsFilter(req);
+    const articleFilter = buildActiveArticleRecordFilter(buildArticleAnalyticsFilter(req));
     const articles = await Article.find(articleFilter)
-      .select('title slug status publishedAt category language')
+      .select('title slug status publishedAt category language deletedAt')
       .sort({ publishedAt: -1, createdAt: -1 })
       .lean();
     const articleIds = (articles || []).map((article) => article._id).filter(Boolean);
@@ -1003,8 +1013,8 @@ async function listCategories(req, res) {
 
     const metrics = await aggregateEventMetricsByArticle(range);
     const articleIds = (metrics || []).map((row) => row.articleId).filter(Boolean);
-    const articles = articleIds.length ? await Article.find({ _id: { $in: articleIds }, status: 'published' })
-      .select('title slug status publishedAt category language')
+    const articles = articleIds.length ? await Article.find(buildActiveArticleRecordFilter({ _id: { $in: articleIds }, status: 'published' }))
+      .select('title slug status publishedAt category language deletedAt')
       .lean() : [];
     const byId = new Map((articles || []).map((article) => [String(article._id), article]));
 

@@ -75,7 +75,14 @@ function makeQuery(values) {
 }
 
 function matchesFilter(doc, filter = {}) {
-  if (filter.status && doc.status !== filter.status) return false;
+  if (filter.$and && !filter.$and.every((clause) => matchesFilter(doc, clause))) return false;
+  if (filter.$or && !filter.$or.some((clause) => matchesFilter(doc, clause))) return false;
+  if (filter.status && typeof filter.status === 'object') {
+    if (filter.status.$ne !== undefined && doc.status === filter.status.$ne) return false;
+    if (filter.status.$exists === false && doc.status !== undefined) return false;
+  } else if (filter.status && doc.status !== filter.status) return false;
+  if (filter.deletedAt === null && doc.deletedAt !== null && doc.deletedAt !== undefined) return false;
+  if (filter.deletedAt && filter.deletedAt.$exists === false && doc.deletedAt !== undefined) return false;
   if (filter.category && doc.category !== filter.category) return false;
   if (filter.language && doc.language !== filter.language) return false;
   if (filter._id && filter._id.$in) {
@@ -278,6 +285,30 @@ test('article rows return real zero values for published articles without analyt
   assert.equal(byId.get(gujaratiId).engagedReads, 0);
   assert.equal(byId.get(gujaratiId).avgReadTimeSec, 0);
   assert.equal(byId.get(gujaratiId).completionRate, 0);
+});
+
+test('active analytics article list excludes deleted rows without destroying historical metrics', async (t) => {
+  const deletedId = '507f1f77bcf86cd799439199';
+  const archivedId = '507f1f77bcf86cd799439198';
+  installAnalyticsStubs(t, [
+    article(regionalId, { category: 'regional', language: 'en', status: 'draft', publishedAt: null }),
+    article(archivedId, { category: 'regional', language: 'en', status: 'archived' }),
+    article(deletedId, { category: 'regional', language: 'en', status: 'deleted', deletedAt: new Date('2026-09-12T00:00:00.000Z') }),
+  ], [
+    event(regionalId, 'view', 'reader-a'),
+    event(archivedId, 'view', 'reader-b'),
+    event(deletedId, 'view', 'reader-c'),
+  ]);
+
+  const articles = await auth(request(app()).get('/api/admin/analytics/articles?status=all'));
+  const dashboard = await auth(request(app()).get('/api/admin/analytics/dashboard'));
+  const ids = new Set(articles.body.items.map((item) => item.articleId));
+
+  assert.equal(ids.has(regionalId), true);
+  assert.equal(ids.has(archivedId), true);
+  assert.equal(ids.has(deletedId), false);
+  assert.equal(articles.body.total, 2);
+  assert.equal(dashboard.body.data.totalViews, 3);
 });
 
 test('EN, HI, and GU articles remain supported and date ranges filter by event createdAt', async (t) => {

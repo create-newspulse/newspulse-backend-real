@@ -106,8 +106,7 @@ async function markPublicCopiesDraftFromNewsDoc(newsDoc, options = {}) {
   try {
     if (!newsDoc) return;
 
-    const groupKey = normalizeTranslationGroupKey(newsDoc.translationKey)
-      || normalizeTranslationGroupKey(newsDoc.translationGroupId);
+    const groupKey = getArticleTranslationGroupKey(newsDoc);
     const slugSet = new Set();
 
     if (newsDoc.slug) slugSet.add(String(newsDoc.slug).trim());
@@ -143,6 +142,37 @@ async function markPublicCopiesDraftFromNewsDoc(newsDoc, options = {}) {
       logger.warn?.('[publicCopies][markDraft] failed', { message: e?.message || String(e) });
     } catch (_) {}
   }
+}
+
+function getArticleTranslationGroupKey(docLike) {
+  return normalizeTranslationGroupKey(docLike?.translationGroupId)
+    || normalizeTranslationGroupKey(docLike?.translationKey);
+}
+
+function getArticleIdString(docLike) {
+  const raw = docLike?._id || docLike?.id || '';
+  return String(raw || '').trim();
+}
+
+async function findArticleDeleteTargets(seedDoc) {
+  if (!seedDoc) return [];
+  const seedId = getArticleIdString(seedDoc);
+  const groupKey = getArticleTranslationGroupKey(seedDoc);
+  if (!groupKey) return seedId ? [seedDoc] : [];
+
+  const groupDocs = await News.find({
+    $or: [{ translationGroupId: groupKey }, { translationKey: groupKey }],
+  })
+    .select('workflowStage slug slugs title coverImage coverImageUrl imageURL translationGroupId translationKey sourceArticleId status lang language originalLang')
+    .lean();
+
+  const byId = new Map();
+  for (const doc of Array.isArray(groupDocs) ? groupDocs : []) {
+    const id = getArticleIdString(doc);
+    if (id) byId.set(id, doc);
+  }
+  if (seedId && !byId.has(seedId)) byId.set(seedId, seedDoc);
+  return Array.from(byId.values());
 }
 
 function isAutoTranslateOnReadEnabled() {
@@ -3609,74 +3639,88 @@ router.post('/articles/:id/archive', requireAdminAuth, async (req, res) => {
 router.delete('/articles/:id', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    const before = await News.findById(id).select('workflowStage slug title coverImage coverImageUrl imageURL').lean();
+    const before = await News.findById(id).select('workflowStage slug slugs title coverImage coverImageUrl imageURL translationGroupId translationKey sourceArticleId status lang language originalLang').lean();
     if (!before) {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
     }
 
     const now = new Date();
-    const fromStage = String(before.workflowStage || 'DRAFT');
     const actor = getActor(req);
+    const targets = await findArticleDeleteTargets(before);
+    const deletedDocs = [];
+    const deletedIds = [];
 
-    const doc = await News.findByIdAndUpdate(
-      id,
-      {
-        $set: {
-          status: 'deleted',
-          deletedAt: now,
-          workflowStage: 'REJECTED',
-          workflowUpdatedAt: now,
-        },
-        $push: {
-          workflowHistory: {
-            at: now,
-            byUserId: actor.byUserId,
-            byRole: actor.byRole,
-            action: 'REJECT',
-            fromStage,
-            toStage: 'REJECTED',
-            note: 'Deleted',
+    for (const target of targets) {
+      const targetId = getArticleIdString(target);
+      if (!targetId) continue;
+      const fromStage = String(target.workflowStage || 'DRAFT');
+      const doc = await News.findByIdAndUpdate(
+        targetId,
+        {
+          $set: {
+            status: 'deleted',
+            deletedAt: now,
+            workflowStage: 'REJECTED',
+            workflowUpdatedAt: now,
+          },
+          $push: {
+            workflowHistory: {
+              at: now,
+              byUserId: actor.byUserId,
+              byRole: actor.byRole,
+              action: 'REJECT',
+              fromStage,
+              toStage: 'REJECTED',
+              note: 'Deleted',
+            },
           },
         },
-      },
-      { new: true, runValidators: false }
-    );
+        { new: true, runValidators: false }
+      );
 
-    if (!doc) {
+      if (!doc) continue;
+      deletedDocs.push(doc);
+      deletedIds.push(String(doc._id || targetId));
+
+      if (_isSourceTranslationDoc(doc, targetId)) {
+        Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
+        if (typeof doc.save === 'function') await doc.save({ validateModifiedOnly: true });
+      }
+
+      await syncArticleFromNews(doc);
+      await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_DELETED', doc, {
+        oldValue: 'draft',
+        newValue: 'deleted',
+        reason: req.body?.reason,
+      });
+
+      try {
+        await PushHistory.create({
+          articleId: doc._id,
+          type: 'publish',
+          action: 'delete',
+          slug: doc.slug,
+          title: doc.title,
+          channel: 'SITE',
+          at: now,
+          byUserId: actor.byUserId,
+          status: 'SUCCESS',
+          meta: { source: 'delete', oldStatus: 'draft', newStatus: 'deleted', oldStage: fromStage, newStage: doc.workflowStage },
+        });
+      } catch (e) {
+        console.warn('[pushHistory] create failed', e?.message || e);
+      }
+    }
+
+    if (!deletedDocs.length) {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
     }
 
-    if (_isSourceTranslationDoc(doc)) {
-      Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
-      if (typeof doc.save === 'function') await doc.save({ validateModifiedOnly: true });
-    }
+    const sourceDoc = deletedDocs.find((doc) => _isSourceTranslationDoc(doc, doc?._id));
+    if (sourceDoc) await syncMasterArticleGroup(sourceDoc, { reason: 'article_delete', invalidate: true });
+    await markPublicCopiesDraftFromNewsDoc(sourceDoc || deletedDocs[0]);
 
-    await syncArticleFromNews(doc);
-    await syncMasterArticleGroup(doc, { reason: 'article_delete', invalidate: true });
-    await markPublicCopiesDraftFromNewsDoc(doc);
-    await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_DELETED', doc, {
-      oldValue: 'draft',
-      newValue: 'deleted',
-      reason: req.body?.reason,
-    });
-
-    try {
-      await PushHistory.create({
-        articleId: doc._id,
-        type: 'publish',
-        action: 'delete',
-        slug: doc.slug,
-        title: doc.title,
-        channel: 'SITE',
-        at: now,
-        byUserId: actor.byUserId,
-        status: 'SUCCESS',
-        meta: { source: 'delete', oldStatus: 'draft', newStatus: 'deleted', oldStage: fromStage, newStage: doc.workflowStage },
-      });
-    } catch (e) {
-      console.warn('[pushHistory] create failed', e?.message || e);
-    }
-
+    const doc = deletedDocs.find((item) => String(item?._id || '') === String(id)) || deletedDocs[0];
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
     invalidateArticleCaches().catch(() => {});
     return res.status(200).json({
@@ -3684,6 +3728,8 @@ router.delete('/articles/:id', requireAdminAuth, async (req, res) => {
       success: true,
       status: 200,
       message: 'Article deleted',
+      deletedCount: deletedDocs.length,
+      deletedIds,
       data: { article: withCoverImageUrl(obj) },
       article: withCoverImageUrl(obj),
     });

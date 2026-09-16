@@ -30,10 +30,13 @@ function makeQueryResult(doc, capture) {
 }
 
 function makeFindResult(docs) {
-  return {
+  const query = {
     select() { return this; },
     lean: async () => docs,
+    then(resolve, reject) { return Promise.resolve(docs).then(resolve, reject); },
+    catch(reject) { return Promise.resolve(docs).catch(reject); },
   };
+  return query;
 }
 
 function makeDoc(obj) {
@@ -458,6 +461,143 @@ test('Updating Gujarati article does not modify English or Hindi siblings', asyn
     News.findById = prevFindById;
     News.findByIdAndUpdate = prevFindByIdAndUpdate;
     News.findOne = prevFindOne;
+  }
+});
+
+test('DELETE /api/articles/:id soft-deletes every member of a multilingual translation group', async () => {
+  const enId = '507f1f77bcf86cd799439271';
+  const hiId = '507f1f77bcf86cd799439272';
+  const guId = '507f1f77bcf86cd799439273';
+  const otherId = '507f1f77bcf86cd799439274';
+  const groupKey = 'grp-delete-all-langs';
+  const prevFindById = News.findById;
+  const prevFind = News.find;
+  const prevFindByIdAndUpdate = News.findByIdAndUpdate;
+  const prevPublicFindOneAndUpdate = PublicArticle.findOneAndUpdate;
+  const prevPublicUpdateMany = PublicArticle.updateMany;
+  const prevPushCreate = PushHistory.create;
+  const publicSyncUpdates = [];
+  const publicDemotions = [];
+  const pushRows = [];
+
+  try {
+    const en = makeDoc(baseArticle({ _id: enId, translationGroupId: groupKey, translationKey: groupKey, language: 'en', lang: 'en', originalLang: 'en', sourceArticleId: enId, workflowStage: 'PUBLISHED' }));
+    const hi = makeDoc(baseArticle({ _id: hiId, translationGroupId: groupKey, translationKey: groupKey, title: 'हिंदी शीर्षक', slug: 'hindi-delete-group', language: 'hi', lang: 'hi', originalLang: 'hi', sourceArticleId: enId, workflowStage: 'PUBLISHED' }));
+    const gu = makeDoc(baseArticle({ _id: guId, translationGroupId: groupKey, translationKey: groupKey, title: 'ગુજરાતી શીર્ષક', slug: 'gujarati-delete-group', language: 'gu', lang: 'gu', originalLang: 'gu', sourceArticleId: enId, workflowStage: 'PUBLISHED' }));
+    const other = makeDoc(baseArticle({ _id: otherId, translationGroupId: 'grp-delete-other', translationKey: 'grp-delete-other', slug: 'unrelated-delete-group', sourceArticleId: otherId, workflowStage: 'PUBLISHED' }));
+    const docs = [en, hi, gu, other];
+
+    const findGroupDocs = (filter = {}) => docs.filter((doc) => {
+      if (filter._id?.$ne !== undefined && String(doc._id) === String(filter._id.$ne)) return false;
+      if (Array.isArray(filter.$or)) {
+        return filter.$or.some((clause) => clause.translationGroupId === doc.translationGroupId || clause.translationKey === doc.translationKey);
+      }
+      return true;
+    });
+
+    News.findById = (id) => makeQueryResult(docs.find((doc) => String(doc._id) === String(id)) || null);
+    News.find = (filter) => makeFindResult(findGroupDocs(filter));
+    News.findByIdAndUpdate = async (id, op) => {
+      const doc = docs.find((item) => String(item._id) === String(id));
+      if (!doc) return null;
+      Object.assign(doc, op.$set || {});
+      if (!Array.isArray(doc.workflowHistory)) doc.workflowHistory = [];
+      if (op.$push?.workflowHistory) doc.workflowHistory.push(op.$push.workflowHistory);
+      return doc;
+    };
+    PublicArticle.findOneAndUpdate = (_query, update) => {
+      publicSyncUpdates.push(update.$set || {});
+      return { lean: async () => ({ _id: `public-${publicSyncUpdates.length}` }) };
+    };
+    PublicArticle.updateMany = async (query, update) => {
+      publicDemotions.push({ query, update });
+      return { acknowledged: true, modifiedCount: 3 };
+    };
+    PushHistory.create = async (payload) => {
+      pushRows.push(payload);
+      return { _id: `push-${pushRows.length}` };
+    };
+
+    const res = await request(app)
+      .delete(`/api/articles/${guId}`)
+      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+      .send({ reason: 'delete full story' });
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.deletedCount, 3);
+    assert.deepEqual(new Set(res.body.deletedIds), new Set([enId, hiId, guId]));
+    for (const doc of [en, hi, gu]) {
+      assert.equal(doc.status, 'deleted');
+      assert.equal(doc.workflowStage, 'REJECTED');
+      assert.ok(doc.deletedAt instanceof Date);
+    }
+    assert.equal(other.status, 'published');
+    assert.equal(publicSyncUpdates.filter((update) => update.status === 'deleted' && update.deletedAt instanceof Date).length >= 3, true);
+    assert.equal(publicDemotions.length >= 1, true);
+    assert.match(JSON.stringify(publicDemotions[0].query), /grp-delete-all-langs/);
+    assert.equal(pushRows.length, 3);
+  } finally {
+    News.findById = prevFindById;
+    News.find = prevFind;
+    News.findByIdAndUpdate = prevFindByIdAndUpdate;
+    PublicArticle.findOneAndUpdate = prevPublicFindOneAndUpdate;
+    PublicArticle.updateMany = prevPublicUpdateMany;
+    PushHistory.create = prevPushCreate;
+  }
+});
+
+test('DELETE /api/articles/:id soft-deletes only the selected legacy article when no group key exists', async () => {
+  const legacyId = '507f1f77bcf86cd799439281';
+  const siblingId = '507f1f77bcf86cd799439282';
+  const prevFindById = News.findById;
+  const prevFind = News.find;
+  const prevFindByIdAndUpdate = News.findByIdAndUpdate;
+  const prevPublicFindOneAndUpdate = PublicArticle.findOneAndUpdate;
+  const prevPublicUpdateMany = PublicArticle.updateMany;
+  const prevPushCreate = PushHistory.create;
+  let findCalled = false;
+  const updatedIds = [];
+
+  try {
+    const legacy = makeDoc(baseArticle({ _id: legacyId, translationGroupId: null, translationKey: null, slug: 'legacy-delete-one', workflowStage: 'DRAFT' }));
+    const sibling = makeDoc(baseArticle({ _id: siblingId, translationGroupId: null, translationKey: null, slug: 'legacy-do-not-delete', workflowStage: 'DRAFT' }));
+    const docs = [legacy, sibling];
+
+    News.findById = (id) => makeQueryResult(docs.find((doc) => String(doc._id) === String(id)) || null);
+    News.find = () => {
+      findCalled = true;
+      return makeFindResult(docs);
+    };
+    News.findByIdAndUpdate = async (id, op) => {
+      const doc = docs.find((item) => String(item._id) === String(id));
+      if (!doc) return null;
+      updatedIds.push(String(id));
+      Object.assign(doc, op.$set || {});
+      return doc;
+    };
+    PublicArticle.findOneAndUpdate = () => ({ lean: async () => ({ _id: 'public-legacy' }) });
+    PublicArticle.updateMany = async () => ({ acknowledged: true, modifiedCount: 1 });
+    PushHistory.create = async () => ({ _id: 'push-legacy' });
+
+    const res = await request(app)
+      .delete(`/api/articles/${legacyId}`)
+      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+      .send();
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.deletedCount, 1);
+    assert.deepEqual(res.body.deletedIds, [legacyId]);
+    assert.deepEqual(updatedIds, [legacyId]);
+    assert.equal(legacy.status, 'deleted');
+    assert.equal(sibling.status, 'published');
+    assert.equal(findCalled, false);
+  } finally {
+    News.findById = prevFindById;
+    News.find = prevFind;
+    News.findByIdAndUpdate = prevFindByIdAndUpdate;
+    PublicArticle.findOneAndUpdate = prevPublicFindOneAndUpdate;
+    PublicArticle.updateMany = prevPublicUpdateMany;
+    PushHistory.create = prevPushCreate;
   }
 });
 
