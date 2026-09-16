@@ -172,6 +172,9 @@ function isControlledInstagramBlockOpening(opening) {
   return isSupportedInstagramUrlForShortcode(getHtmlAttribute(opening, 'data-np-url'), shortcode);
 }
 
+const FACEBOOK_ALLOWED_HOSTS = new Set(['facebook.com', 'www.facebook.com']);
+const FACEBOOK_SHARE_REDIRECT_HOPS = 3;
+
 function isValidFacebookPageOrUser(value) {
   const segment = String(value || '');
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,74}$/.test(segment)) return false;
@@ -193,27 +196,121 @@ function isValidFacebookPostId(value) {
   return /^(?:[1-9]\d{4,30}|pfbid[A-Za-z0-9_-]{10,120})$/.test(String(value || ''));
 }
 
-function isSupportedFacebookUrl(value) {
+function isValidFacebookReelId(value) {
+  return /^[1-9]\d{4,30}$/.test(String(value || ''));
+}
+
+function isValidFacebookShareToken(value) {
+  return /^[A-Za-z0-9_-]{4,128}$/.test(String(value || ''));
+}
+
+function isAllowedFacebookUrlObject(url) {
+  return url && url.protocol === 'https:' && FACEBOOK_ALLOWED_HOSTS.has(String(url.hostname || '').toLowerCase());
+}
+
+function normalizeFacebookCanonicalUrl(value) {
   const raw = decodeHtmlEntities(String(value || ''));
-  if (!raw || raw !== raw.trim()) return false;
+  if (!raw || raw !== raw.trim()) return null;
   try {
     const url = new URL(raw);
-    const host = url.hostname.toLowerCase();
-    if (url.protocol !== 'https:') return false;
-    if (!['facebook.com', 'www.facebook.com'].includes(host)) return false;
-    if (url.hash) return false;
+    if (!isAllowedFacebookUrlObject(url)) return null;
+    if (url.hash) return null;
 
     if (url.pathname === '/permalink.php') {
-      return isValidFacebookPostId(url.searchParams.get('story_fbid'))
-        && /^[1-9]\d{4,30}$/.test(String(url.searchParams.get('id') || ''));
+      const storyFbid = url.searchParams.get('story_fbid');
+      const id = url.searchParams.get('id');
+      if (!isValidFacebookPostId(storyFbid) || !/^[1-9]\d{4,30}$/.test(String(id || ''))) return null;
+      const params = new URLSearchParams({ story_fbid: storyFbid, id });
+      return `https://www.facebook.com/permalink.php?${params.toString()}`;
     }
 
     const parts = url.pathname.split('/').filter(Boolean);
-    if (parts.length !== 3 || parts[1] !== 'posts') return false;
-    return isValidFacebookPageOrUser(parts[0]) && isValidFacebookPostId(parts[2]);
+    if (parts.length === 2 && parts[0] === 'reel' && isValidFacebookReelId(parts[1])) {
+      return `https://www.facebook.com/reel/${parts[1]}`;
+    }
+
+    if (parts.length === 3 && parts[1] === 'posts' && isValidFacebookPageOrUser(parts[0]) && isValidFacebookPostId(parts[2])) {
+      return `https://www.facebook.com/${parts[0]}/posts/${parts[2]}`;
+    }
   } catch (_) {
-    return false;
+    return null;
   }
+  return null;
+}
+
+function getFacebookShareReelToken(value) {
+  const raw = decodeHtmlEntities(String(value || ''));
+  if (!raw || raw !== raw.trim()) return null;
+  try {
+    const url = new URL(raw);
+    if (!isAllowedFacebookUrlObject(url)) return null;
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length !== 3 || parts[0] !== 'share' || parts[1] !== 'r') return null;
+    return isValidFacebookShareToken(parts[2]) ? parts[2] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function getRedirectLocation(res) {
+  if (!res || !res.headers) return null;
+  if (typeof res.headers.get === 'function') return res.headers.get('location');
+  return res.headers.location || res.headers.Location || null;
+}
+
+async function resolveFacebookShareUrl(value, options = {}) {
+  const token = getFacebookShareReelToken(value);
+  if (!token) return { ok: false, error: 'INVALID_FACEBOOK_SHARE_URL' };
+
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  if (typeof fetchImpl !== 'function') return { ok: false, error: 'FETCH_UNAVAILABLE' };
+
+  let current = `https://www.facebook.com/share/r/${token}/`;
+  const maxRedirects = Number.isFinite(Number(options.maxRedirects)) ? Number(options.maxRedirects) : FACEBOOK_SHARE_REDIRECT_HOPS;
+
+  for (let hop = 0; hop <= maxRedirects; hop += 1) {
+    let currentUrl;
+    try {
+      currentUrl = new URL(current);
+    } catch (_) {
+      return { ok: false, error: 'UNSAFE_FACEBOOK_REDIRECT' };
+    }
+    if (!isAllowedFacebookUrlObject(currentUrl)) return { ok: false, error: 'UNSAFE_FACEBOOK_REDIRECT' };
+
+    const canonical = normalizeFacebookCanonicalUrl(current);
+    if (canonical) return { ok: true, url: canonical };
+
+    if (!getFacebookShareReelToken(current)) return { ok: false, error: 'UNSUPPORTED_FACEBOOK_SHARE_DESTINATION' };
+
+    if (hop >= maxRedirects) return { ok: false, error: 'FACEBOOK_REDIRECT_LIMIT_EXCEEDED' };
+
+    let res;
+    try {
+      res = await fetchImpl(current, { method: 'GET', redirect: 'manual', signal: options.signal });
+    } catch (_) {
+      return { ok: false, error: 'FACEBOOK_SHARE_RESOLVE_FAILED' };
+    }
+
+    const status = Number(res?.status || 0);
+    if (status < 300 || status > 399) return { ok: false, error: 'UNSUPPORTED_FACEBOOK_SHARE_DESTINATION' };
+    const location = getRedirectLocation(res);
+    if (!location) return { ok: false, error: 'UNSUPPORTED_FACEBOOK_SHARE_DESTINATION' };
+
+    let next;
+    try {
+      next = new URL(location, current);
+    } catch (_) {
+      return { ok: false, error: 'UNSAFE_FACEBOOK_REDIRECT' };
+    }
+    if (!isAllowedFacebookUrlObject(next)) return { ok: false, error: 'UNSAFE_FACEBOOK_REDIRECT' };
+    current = next.toString();
+  }
+
+  return { ok: false, error: 'FACEBOOK_REDIRECT_LIMIT_EXCEEDED' };
+}
+
+function isSupportedFacebookUrl(value) {
+  return Boolean(normalizeFacebookCanonicalUrl(value));
 }
 
 function isControlledFacebookBlockOpening(opening) {
@@ -622,6 +719,8 @@ module.exports = {
   protectNewsPulseFacebookBlocks,
   protectNewsPulseGalleryBlocks,
   protectNewsPulseControlledMediaBlocks,
+  normalizeFacebookCanonicalUrl,
+  resolveFacebookShareUrl,
   splitHtmlIntoChunks,
   splitTextIntoChunks,
   translateBatch,

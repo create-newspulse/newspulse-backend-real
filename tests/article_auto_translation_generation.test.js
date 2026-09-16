@@ -107,6 +107,13 @@ function countOccurrences(text, needle) {
   return String(text || '').split(needle).length - 1;
 }
 
+function redirectResponse(location, status = 302) {
+  return {
+    status,
+    headers: { get: (name) => (String(name || '').toLowerCase() === 'location' ? location : null) },
+  };
+}
+
 test('googleTranslationService preserves protected terms, URLs, hashtags, and retries temporary errors', async () => {
   let calls = 0;
   const fetchImpl = async (_url, opts) => {
@@ -607,6 +614,8 @@ test('googleTranslationService recognizes supported Facebook URL forms for contr
     makeFacebookBlock({ url: 'https://www.facebook.com/permalink.php?story_fbid=123456789012345&id=987654321098765' }),
     makeFacebookBlock({ url: 'https://www.facebook.com/permalink.php?story_fbid=123456789012345&amp;id=987654321098765' }),
     makeFacebookBlock({ url: 'https://www.facebook.com/permalink.php?story_fbid=pfbid02abcDEF_1234567890&id=987654321098765&utm_source=newspulse' }),
+    makeFacebookBlock({ url: 'https://www.facebook.com/reel/123456789012345/' }),
+    makeFacebookBlock({ url: 'https://facebook.com/reel/123456789012345/?utm_source=share&locale=en_GB' }),
   ];
 
   for (const block of blocks) {
@@ -614,6 +623,106 @@ test('googleTranslationService recognizes supported Facebook URL forms for contr
     assert.equal(protectedResult.map.size, 1);
     assert.equal(protectedResult.map.get('__NP_FACEBOOK_BLOCK_0__'), block);
   }
+});
+
+test('googleTranslationService canonicalizes supported Facebook URL forms and strips tracking noise', () => {
+  const cases = [
+    ['https://www.facebook.com/NewsPulseAI/posts/123456789012345?utm_source=newspulse&locale=en_GB', 'https://www.facebook.com/NewsPulseAI/posts/123456789012345'],
+    ['https://facebook.com/NewsPulseAI/posts/pfbid02abcDEF_1234567890/', 'https://www.facebook.com/NewsPulseAI/posts/pfbid02abcDEF_1234567890'],
+    ['https://www.facebook.com/permalink.php?story_fbid=123456789012345&amp;id=987654321098765&utm_source=newspulse', 'https://www.facebook.com/permalink.php?story_fbid=123456789012345&id=987654321098765'],
+    ['https://www.facebook.com/reel/123456789012345/?utm_source=share&locale=en_GB', 'https://www.facebook.com/reel/123456789012345'],
+  ];
+
+  for (const [input, expected] of cases) {
+    assert.equal(googleTranslation.normalizeFacebookCanonicalUrl(input), expected);
+  }
+});
+
+test('googleTranslationService rejects unsupported Facebook canonical paths', () => {
+  const urls = [
+    'https://www.facebook.com/share/r/abcDEF_123/',
+    'https://www.facebook.com/stories/NewsPulseAI/123456789012345/',
+    'https://www.facebook.com/groups/123456789012345/posts/223456789012345/',
+    'https://www.facebook.com/marketplace/item/123456789012345/',
+    'https://www.facebook.com/NewsPulseAI',
+    'https://www.facebook.com/watch/?v=123456789012345',
+    'https://www.facebook.com/reel/not-a-reel',
+    'https://www.facebook.com/reel/123456789012345/#comments',
+  ];
+
+  for (const url of urls) {
+    assert.equal(googleTranslation.normalizeFacebookCanonicalUrl(url), null);
+  }
+});
+
+test('googleTranslationService resolves Facebook share Reel aliases to canonical Reel URLs', async () => {
+  const calls = [];
+  const res = await googleTranslation.resolveFacebookShareUrl('https://www.facebook.com/share/r/shareToken_123/', {
+    fetchImpl: async (url, opts) => {
+      calls.push({ url, opts });
+      return redirectResponse('/reel/123456789012345/?utm_source=share');
+    },
+  });
+
+  assert.deepEqual(res, { ok: true, url: 'https://www.facebook.com/reel/123456789012345' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://www.facebook.com/share/r/shareToken_123/');
+  assert.equal(calls[0].opts.method, 'GET');
+  assert.equal(calls[0].opts.redirect, 'manual');
+});
+
+test('googleTranslationService resolves Facebook share Reel aliases to canonical post URLs', async () => {
+  const res = await googleTranslation.resolveFacebookShareUrl('https://facebook.com/share/r/postShare_123/', {
+    fetchImpl: async () => redirectResponse('https://www.facebook.com/NewsPulseAI/posts/123456789012345?utm_source=share'),
+  });
+
+  assert.deepEqual(res, { ok: true, url: 'https://www.facebook.com/NewsPulseAI/posts/123456789012345' });
+});
+
+test('googleTranslationService rejects Facebook share redirects to non-Facebook hosts', async () => {
+  const res = await googleTranslation.resolveFacebookShareUrl('https://www.facebook.com/share/r/shareToken_123/', {
+    fetchImpl: async () => redirectResponse('https://example.com/reel/123456789012345'),
+  });
+
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'UNSAFE_FACEBOOK_REDIRECT');
+});
+
+test('googleTranslationService rejects Facebook share redirects after the hop limit', async () => {
+  let calls = 0;
+  const res = await googleTranslation.resolveFacebookShareUrl('https://www.facebook.com/share/r/shareToken_123/', {
+    fetchImpl: async () => {
+      calls += 1;
+      return redirectResponse(`https://www.facebook.com/share/r/shareToken_${calls}/`);
+    },
+  });
+
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'FACEBOOK_REDIRECT_LIMIT_EXCEEDED');
+  assert.equal(calls, 3);
+});
+
+test('googleTranslationService rejects Facebook share redirects to unsupported Facebook paths', async () => {
+  const res = await googleTranslation.resolveFacebookShareUrl('https://www.facebook.com/share/r/shareToken_123/', {
+    fetchImpl: async () => redirectResponse('https://www.facebook.com/stories/NewsPulseAI/123456789012345/'),
+  });
+
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'UNSUPPORTED_FACEBOOK_SHARE_DESTINATION');
+});
+
+test('googleTranslationService rejects malformed Facebook share tokens before fetch', async () => {
+  let called = false;
+  const res = await googleTranslation.resolveFacebookShareUrl('https://www.facebook.com/share/r/bad.token/', {
+    fetchImpl: async () => {
+      called = true;
+      return redirectResponse('https://www.facebook.com/reel/123456789012345/');
+    },
+  });
+
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'INVALID_FACEBOOK_SHARE_URL');
+  assert.equal(called, false);
 });
 
 test('googleTranslationService preserves News Pulse controlled Facebook blocks through English, Hindi, and Gujarati HTML translation', async () => {
@@ -637,6 +746,46 @@ test('googleTranslationService preserves News Pulse controlled Facebook blocks t
     assert.equal(countOccurrences(res.text, facebookBlock), 1);
     assert.ok(res.text.indexOf(`<p>${targetLang}:Before Facebook post.</p>`) < res.text.indexOf(facebookBlock));
     assert.ok(res.text.indexOf(facebookBlock) < res.text.indexOf(`<p>${targetLang}:After Facebook post.</p>`));
+  }
+});
+
+test('googleTranslationService preserves News Pulse controlled Facebook Reel blocks through translation', async () => {
+  const facebookBlock = makeFacebookBlock({ url: 'https://www.facebook.com/reel/123456789012345/?utm_source=share' });
+  const html = `<p>Before Facebook Reel.</p>${facebookBlock}<p>After Facebook Reel.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before Facebook Reel.', 'Translated before Facebook Reel.').replace('After Facebook Reel.', 'Translated after Facebook Reel.') })) } }),
+    };
+  };
+
+  const res = await googleTranslation.translateText(html, 'en', 'gu', { format: 'html', fetchImpl });
+
+  assert.equal(res.ok, true);
+  assert.equal(countOccurrences(res.text, 'data-np-block="facebook"'), 1);
+  assert.equal(countOccurrences(res.text, facebookBlock), 1);
+  assert.ok(res.text.indexOf('<p>Translated before Facebook Reel.</p>') < res.text.indexOf(facebookBlock));
+  assert.ok(res.text.indexOf(facebookBlock) < res.text.indexOf('<p>Translated after Facebook Reel.</p>'));
+});
+
+test('googleTranslationService leaves other controlled social embeds unaffected while preserving Facebook Reel', async () => {
+  const youtubeBlock = makeYouTubeBlock();
+  const xBlock = makeXBlock();
+  const instagramBlock = makeInstagramBlock();
+  const facebookBlock = makeFacebookBlock({ url: 'https://www.facebook.com/reel/123456789012345/' });
+  const html = `<p>Before embeds.</p>${youtubeBlock}${xBlock}${instagramBlock}${facebookBlock}<p>After embeds.</p>`;
+  const fetchImpl = async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: q.replace('Before embeds.', 'Translated before embeds.').replace('After embeds.', 'Translated after embeds.') })) } }) };
+  };
+
+  const res = await googleTranslation.translateText(html, 'en', 'hi', { format: 'html', fetchImpl });
+
+  assert.equal(res.ok, true);
+  for (const block of [youtubeBlock, xBlock, instagramBlock, facebookBlock]) {
+    assert.equal(countOccurrences(res.text, block), 1);
   }
 });
 

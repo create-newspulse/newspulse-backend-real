@@ -62,6 +62,7 @@ const {
   markSiblingTranslationsOutdated,
   estimateBackfill,
 } = require('../services/articleTranslationGeneration.service');
+const { resolveFacebookShareUrl } = require('../services/googleTranslationService');
 const { invalidateArticleCaches } = require('../lib/cache');
 const { logAudit } = require('../lib/audit');
 
@@ -1030,6 +1031,29 @@ router.post('/articles/media/image', requireAdminAuth, runArticleInlineImageUplo
       code: err?.code || undefined,
       message: status >= 500 ? 'Inline image upload failed' : (err?.message || 'Invalid upload'),
     });
+  }
+});
+
+// POST /api/admin/articles/media/facebook/resolve -> resolve Facebook Copy Link aliases
+router.post('/articles/media/facebook/resolve', requireAdminAuth, async (req, res) => {
+  try {
+    const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+    if (!url) {
+      return res.status(400).json({ ok: false, code: 'INVALID_FACEBOOK_SHARE_URL' });
+    }
+
+    const result = await resolveFacebookShareUrl(url);
+    if (result?.ok && result.url) {
+      return res.status(200).json({ ok: true, url: result.url });
+    }
+
+    if (result?.error === 'INVALID_FACEBOOK_SHARE_URL') {
+      return res.status(400).json({ ok: false, code: 'INVALID_FACEBOOK_SHARE_URL' });
+    }
+
+    return res.status(422).json({ ok: false, code: 'FACEBOOK_SHARE_RESOLVE_FAILED' });
+  } catch (_) {
+    return res.status(422).json({ ok: false, code: 'FACEBOOK_SHARE_RESOLVE_FAILED' });
   }
 });
 
