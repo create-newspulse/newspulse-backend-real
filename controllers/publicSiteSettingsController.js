@@ -1,7 +1,10 @@
 const mongoose = require('mongoose');
 const PublicSiteSettings = require('../models/PublicSiteSettings');
+const ComplianceSettings = require('../models/ComplianceSettings');
 const { invalidatePublicSettingsCaches } = require('../lib/cache');
 const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.service');
+
+const DEFAULT_COMPLIANCE_GET_OR_CREATE = ComplianceSettings.getOrCreate;
 
 const INSPIRATION_HUB_BOOLEAN_FIELDS = [
   'enabled',
@@ -98,6 +101,10 @@ const LIVE_TV_TEXT_FIELDS = Object.freeze([
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
+}
+
+function hasNativeMongoConnection() {
+  return !!(mongoose.connection && mongoose.connection.db && typeof mongoose.connection.db.collection === 'function');
 }
 
 function hasOwn(obj, key) {
@@ -753,6 +760,46 @@ function ensurePublicSettingsResponse(settingsObj) {
   return base;
 }
 
+function getDefaultComplianceDisplayControls() {
+  const defaults = ComplianceSettings.getDefaultSettings();
+  const normalized = ComplianceSettings.normalizeSettings(defaults);
+  return {
+    showPublisherEntity: normalized.showPublisherEntity,
+    showFounderPublisher: normalized.showFounderPublisher,
+    showChiefEditor: normalized.showChiefEditor,
+  };
+}
+
+async function getComplianceDisplayControls() {
+  if (!isDbReady()) return getDefaultComplianceDisplayControls();
+
+  const canQueryComplianceSettings = hasNativeMongoConnection()
+    || ComplianceSettings.getOrCreate !== DEFAULT_COMPLIANCE_GET_OR_CREATE;
+  if (!canQueryComplianceSettings) return getDefaultComplianceDisplayControls();
+
+  try {
+    const settings = await ComplianceSettings.getOrCreate();
+    const source = settings && typeof settings.toObject === 'function' ? settings.toObject() : settings;
+    const normalized = ComplianceSettings.normalizeSettings(source || {});
+    return {
+      showPublisherEntity: normalized.showPublisherEntity,
+      showFounderPublisher: normalized.showFounderPublisher,
+      showChiefEditor: normalized.showChiefEditor,
+    };
+  } catch (_) {
+    return getDefaultComplianceDisplayControls();
+  }
+}
+
+async function buildPublishedSettingsResponse(settingsObj) {
+  const published = ensurePublicSettingsResponse(settingsObj);
+  const complianceDisplayControls = await getComplianceDisplayControls();
+  return {
+    ...published,
+    ...complianceDisplayControls,
+  };
+}
+
 function sanitizePublicSettingsResponse(settingsObj) {
   const base = cloneJsonValue(settingsObj || {});
   delete base.viralVideos;
@@ -1086,7 +1133,7 @@ async function getPublishedSettings(req, res) {
   try {
     // Public endpoint should stay stable even if DB is down.
     if (!isDbReady()) {
-      const fallback = sanitizePublicSettingsResponse(ensurePublicSettingsResponse(PublicSiteSettings.getDefaultSettings()));
+      const fallback = sanitizePublicSettingsResponse(await buildPublishedSettingsResponse(PublicSiteSettings.getDefaultSettings()));
       res.set('Cache-Control', 'no-store, max-age=0');
       return res.status(200).json({
         ok: true,
@@ -1097,7 +1144,7 @@ async function getPublishedSettings(req, res) {
       });
     }
     const settings = await PublicSiteSettings.getOrCreate();
-    const published = sanitizePublicSettingsResponse(ensurePublicSettingsResponse(settings.published || PublicSiteSettings.getDefaultSettings()));
+    const published = sanitizePublicSettingsResponse(await buildPublishedSettingsResponse(settings.published || PublicSiteSettings.getDefaultSettings()));
 
     res.set('Cache-Control', 'no-store, max-age=0');
 
@@ -1121,6 +1168,7 @@ async function getPublishedSettings(req, res) {
 }
 
 module.exports = {
+  buildPublishedSettingsResponse,
   ensureCategoryStripEnabled,
   ensurePublicSettingsResponse,
   getAdminLiveTvSettings,

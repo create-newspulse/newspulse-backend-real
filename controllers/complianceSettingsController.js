@@ -1,7 +1,8 @@
 const mongoose = require('mongoose');
 const ComplianceSettings = require('../models/ComplianceSettings');
+const { invalidatePublicSettingsCaches } = require('../lib/cache');
 
-const PUBLIC_FIELDS = [
+const ADMIN_FIELDS = [
   'founderName',
   'founderDesignation',
   'publisherEntity',
@@ -21,6 +22,11 @@ const PUBLIC_FIELDS = [
   'officerLocation',
   'updatedAt',
 ];
+
+const PUBLIC_FIELDS = ADMIN_FIELDS.filter((field) => ![
+  'grievanceOfficerLocation',
+  'officerLocation',
+].includes(field));
 
 function isDbReady() {
   return !!(mongoose.connection && mongoose.connection.readyState === 1);
@@ -76,15 +82,23 @@ function normalizeSettings(source) {
   };
 }
 
-function pickPublicFields(doc) {
+function pickFields(doc, fields) {
   const source = normalizeSettings(doc && typeof doc.toObject === 'function' ? doc.toObject() : doc);
   const output = {};
 
-  for (const field of PUBLIC_FIELDS) {
+  for (const field of fields) {
     output[field] = source && Object.prototype.hasOwnProperty.call(source, field) ? source[field] : '';
   }
 
   return output;
+}
+
+function pickAdminFields(doc) {
+  return pickFields(doc, ADMIN_FIELDS);
+}
+
+function pickPublicFields(doc) {
+  return pickFields(doc, PUBLIC_FIELDS);
 }
 
 function buildPayload(body = {}, existing = {}) {
@@ -127,7 +141,6 @@ function buildPayload(body = {}, existing = {}) {
     websiteUrl: payload.websiteUrl,
     grievanceOfficerDesignation: payload.grievanceOfficerDesignation,
     grievanceEmail: payload.grievanceEmail,
-    grievanceOfficerLocation: payload.grievanceOfficerLocation,
     chiefEditorDesignation: payload.chiefEditorDesignation,
   })) {
     if (!value) errors.push(`${field} is required`);
@@ -145,7 +158,7 @@ async function getAdminComplianceSettings(_req, res) {
     if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Database unavailable' });
 
     const settings = await getSettingsDocument();
-    return res.status(200).json({ ok: true, item: pickPublicFields(settings) });
+    return res.status(200).json({ ok: true, item: pickAdminFields(settings) });
   } catch (error) {
     return res.status(500).json({ ok: false, message: error?.message || 'Failed to load compliance settings' });
   }
@@ -180,7 +193,9 @@ async function updateAdminComplianceSettings(req, res) {
       },
     );
 
-    return res.status(200).json({ ok: true, item: pickPublicFields(settings) });
+    invalidatePublicSettingsCaches().catch(() => {});
+
+    return res.status(200).json({ ok: true, item: pickAdminFields(settings) });
   } catch (error) {
     return res.status(500).json({ ok: false, message: error?.message || 'Failed to update compliance settings' });
   }
