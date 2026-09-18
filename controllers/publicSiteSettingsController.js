@@ -767,6 +767,7 @@ function getDefaultComplianceDisplayControls() {
     showPublisherEntity: normalized.showPublisherEntity,
     showFounderPublisher: normalized.showFounderPublisher,
     showChiefEditor: normalized.showChiefEditor,
+    srbRegistration: normalized.srbRegistration,
   };
 }
 
@@ -785,6 +786,7 @@ async function getComplianceDisplayControls() {
       showPublisherEntity: normalized.showPublisherEntity,
       showFounderPublisher: normalized.showFounderPublisher,
       showChiefEditor: normalized.showChiefEditor,
+      srbRegistration: normalized.srbRegistration,
     };
   } catch (_) {
     return getDefaultComplianceDisplayControls();
@@ -794,16 +796,19 @@ async function getComplianceDisplayControls() {
 async function buildPublishedSettingsResponse(settingsObj) {
   const published = ensurePublicSettingsResponse(settingsObj);
   const complianceDisplayControls = await getComplianceDisplayControls();
-  return {
+  const response = {
     ...published,
     ...complianceDisplayControls,
   };
+  delete response.srbRegistrationHistory;
+  return response;
 }
 
 function sanitizePublicSettingsResponse(settingsObj) {
   const base = cloneJsonValue(settingsObj || {});
   delete base.viralVideos;
   delete base.viralVideosEnabled;
+  delete base.srbRegistrationHistory;
 
   if (base.homepage && typeof base.homepage === 'object' && base.homepage.modules && typeof base.homepage.modules === 'object') {
     delete base.homepage.modules.viralVideos;

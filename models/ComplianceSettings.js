@@ -1,5 +1,14 @@
 const mongoose = require('mongoose');
 
+const DEFAULT_SRB_REGISTRATION = {
+  organization: 'Working Journalist Media Council (WJMC)',
+  publisher: 'News Pulse (Digital)',
+  status: 'Registered',
+  registrationNumber: 'WJMC/7489/462-26',
+  issueDate: '2026-09-14',
+  validUntil: '2027-09-14',
+};
+
 const DEFAULT_COMPLIANCE_SETTINGS = {
   founderName: 'Kiran Parmar',
   founderDesignation: 'Founder, News Pulse',
@@ -15,7 +24,18 @@ const DEFAULT_COMPLIANCE_SETTINGS = {
   chiefEditorName: '',
   chiefEditorDesignation: 'Chief Editor',
   editorialEmail: '',
+  srbRegistration: DEFAULT_SRB_REGISTRATION,
+  srbRegistrationHistory: [],
 };
+
+const SRB_REGISTRATION_FIELDS = [
+  'organization',
+  'publisher',
+  'status',
+  'registrationNumber',
+  'issueDate',
+  'validUntil',
+];
 
 function normalizeOptionalString(value) {
   if (value === undefined || value === null) return '';
@@ -42,6 +62,47 @@ function firstDefined(source, keys) {
   return undefined;
 }
 
+function cloneJsonValue(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeSrbRegistration(source = {}, fallback = DEFAULT_SRB_REGISTRATION) {
+  const raw = isPlainObject(source) ? source : {};
+  const normalized = {};
+  for (const field of SRB_REGISTRATION_FIELDS) {
+    normalized[field] = normalizeOptionalString(raw[field]) || normalizeOptionalString(fallback && fallback[field]);
+  }
+  return normalized;
+}
+
+function normalizeSrbRegistrationHistory(source = []) {
+  if (!Array.isArray(source)) return [];
+  return source
+    .filter((entry) => isPlainObject(entry))
+    .map((entry) => ({
+      ...normalizeSrbRegistration(entry, {}),
+      archivedAt: normalizeOptionalString(entry.archivedAt),
+    }));
+}
+
+function comparableValue(value) {
+  if (value && typeof value.toObject === 'function') return value.toObject();
+  return value;
+}
+
+function valuesEqual(left, right) {
+  const normalizedLeft = comparableValue(left);
+  const normalizedRight = comparableValue(right);
+  if (isPlainObject(normalizedLeft) || Array.isArray(normalizedLeft) || isPlainObject(normalizedRight) || Array.isArray(normalizedRight)) {
+    return JSON.stringify(normalizedLeft) === JSON.stringify(normalizedRight);
+  }
+  return normalizedLeft === normalizedRight;
+}
+
 function resolveStoredSettings(source = {}) {
   return {
     founderName: normalizeOptionalString(source.founderName) || DEFAULT_COMPLIANCE_SETTINGS.founderName,
@@ -62,8 +123,35 @@ function resolveStoredSettings(source = {}) {
     chiefEditorName: normalizeOptionalString(source.chiefEditorName),
     chiefEditorDesignation: normalizeOptionalString(source.chiefEditorDesignation) || DEFAULT_COMPLIANCE_SETTINGS.chiefEditorDesignation,
     editorialEmail: normalizeOptionalString(source.editorialEmail),
+    srbRegistration: normalizeSrbRegistration(source.srbRegistration, DEFAULT_COMPLIANCE_SETTINGS.srbRegistration),
+    srbRegistrationHistory: normalizeSrbRegistrationHistory(source.srbRegistrationHistory),
   };
 }
+
+const SrbRegistrationSchema = new mongoose.Schema(
+  {
+    organization: { type: String, trim: true, default: DEFAULT_SRB_REGISTRATION.organization },
+    publisher: { type: String, trim: true, default: DEFAULT_SRB_REGISTRATION.publisher },
+    status: { type: String, trim: true, default: DEFAULT_SRB_REGISTRATION.status },
+    registrationNumber: { type: String, trim: true, default: DEFAULT_SRB_REGISTRATION.registrationNumber },
+    issueDate: { type: String, trim: true, default: DEFAULT_SRB_REGISTRATION.issueDate },
+    validUntil: { type: String, trim: true, default: DEFAULT_SRB_REGISTRATION.validUntil },
+  },
+  { _id: false }
+);
+
+const SrbRegistrationHistorySchema = new mongoose.Schema(
+  {
+    organization: { type: String, trim: true, default: '' },
+    publisher: { type: String, trim: true, default: '' },
+    status: { type: String, trim: true, default: '' },
+    registrationNumber: { type: String, trim: true, default: '' },
+    issueDate: { type: String, trim: true, default: '' },
+    validUntil: { type: String, trim: true, default: '' },
+    archivedAt: { type: String, trim: true, default: '' },
+  },
+  { _id: false }
+);
 
 const ComplianceSettingsSchema = new mongoose.Schema(
   {
@@ -140,6 +228,14 @@ const ComplianceSettingsSchema = new mongoose.Schema(
       trim: true,
       default: DEFAULT_COMPLIANCE_SETTINGS.editorialEmail,
     },
+    srbRegistration: {
+      type: SrbRegistrationSchema,
+      default: () => cloneJsonValue(DEFAULT_COMPLIANCE_SETTINGS.srbRegistration),
+    },
+    srbRegistrationHistory: {
+      type: [SrbRegistrationHistorySchema],
+      default: () => [],
+    },
     officerName: {
       type: String,
       trim: true,
@@ -160,7 +256,7 @@ const ComplianceSettingsSchema = new mongoose.Schema(
 );
 
 ComplianceSettingsSchema.statics.getDefaultSettings = function getDefaultSettings() {
-  return { ...DEFAULT_COMPLIANCE_SETTINGS };
+  return cloneJsonValue(DEFAULT_COMPLIANCE_SETTINGS);
 };
 
 ComplianceSettingsSchema.statics.normalizeSettings = function normalizeSettings(source = {}) {
@@ -180,7 +276,7 @@ ComplianceSettingsSchema.statics.getOrCreate = async function getOrCreate() {
   const normalized = resolveStoredSettings(typeof settings.toObject === 'function' ? settings.toObject() : settings);
   let dirty = false;
   for (const [field, value] of Object.entries(normalized)) {
-    if (settings[field] !== value) {
+    if (!valuesEqual(settings[field], value)) {
       settings[field] = value;
       dirty = true;
     }
