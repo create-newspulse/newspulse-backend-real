@@ -948,6 +948,15 @@ function _debugPublicCategoryListing(payload) {
   } catch (_) {}
 }
 
+function _resultCountMetadata(result) {
+  return { resultCount: Array.isArray(result) ? result.length : 0 };
+}
+
+function _countResultMetadata(result) {
+  const countResult = Number(result || 0);
+  return { countResult: Number.isFinite(countResult) && countResult >= 0 ? countResult : 0 };
+}
+
 function _pickBestLocalizedGroupedNewsDoc(groupDocs, requestedLang) {
   if (!Array.isArray(groupDocs) || !groupDocs.length) return null;
 
@@ -1006,7 +1015,10 @@ async function _resolveGroupedCategoryNewsItems({
   normalizedCategoryKey,
   timingContext,
 }) {
-  const matchedDocs = await timeAsync('mongo.publicNews.category.matched', timingContext, () => (
+  const matchedDocs = await timeAsync('mongo.publicNews.category.matched.find', {
+    ...timingContext,
+    getResultMetadata: _resultCountMetadata,
+  }, () => (
     applyPublicNewsCategoryCollation(News.find(categoryFilter).select(PUBLIC_FEED_SELECT).sort(sort)).lean()
   ));
   const lookups = (matchedDocs || []).map((doc) => getPublicContentLookup(doc));
@@ -1027,7 +1039,10 @@ async function _resolveGroupedCategoryNewsItems({
         { $or: siblingClauses },
       ],
     };
-    siblingDocs = await timeAsync('mongo.publicNews.category.siblings', timingContext, () => (
+    siblingDocs = await timeAsync('mongo.publicNews.category.siblings.find', {
+      ...timingContext,
+      getResultMetadata: _resultCountMetadata,
+    }, () => (
       News.find(siblingFilter).select(PUBLIC_FEED_SELECT).sort(sort).lean()
     ));
   }
@@ -1469,10 +1484,18 @@ async function listPublicNews(req, res) {
       totalPages = resolved.totalPages;
     } else {
       const skip = (page - 1) * limit;
-      const [itemsRaw, count] = await timeAsync('mongo.publicNews.latest.findAndCount', { req, res }, () => Promise.all([
-        News.find(filter).select(PUBLIC_FEED_SELECT).sort(sort).skip(skip).limit(limit).lean(),
-        News.countDocuments(filter),
-      ]));
+      const [itemsRaw, count] = await Promise.all([
+        timeAsync('mongo.publicNews.latest.find', {
+          req,
+          res,
+          getResultMetadata: _resultCountMetadata,
+        }, () => News.find(filter).select(PUBLIC_FEED_SELECT).sort(sort).skip(skip).limit(limit).lean()),
+        timeAsync('mongo.publicNews.latest.count', {
+          req,
+          res,
+          getResultMetadata: _countResultMetadata,
+        }, () => News.countDocuments(filter)),
+      ]);
 
       items = _preparePublicNewsFeedItems(itemsRaw || [], desired, { fallbackToBase: fallbackEnabled });
       if (!items.length && isPlainLatestRequest && Number(count || 0) > limit) {

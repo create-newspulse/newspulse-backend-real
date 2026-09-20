@@ -23,6 +23,10 @@ const News = require('../models/News');
 const { getPublicCategoryMatchValues, getCanonicalPublicCategoryKey } = require('../lib/categories');
 const { buildPubliclyVisibleNewsArticleFilter } = require('../services/publicArticleVisibility.service');
 const { normalizeLang } = require('../services/mapArticleForLang');
+const {
+  getPublicContentLookup,
+  buildPublicContentSiblingOrClauses,
+} = require('../services/publicCategoryListing.service');
 
 const REQUIRED_PUBLIC_NEWS_INDEXES = Object.freeze([
   'public_news_latest_status_published_created',
@@ -42,6 +46,7 @@ function parseArgs(argv) {
     lang: 'gu',
     category: 'business',
     limit: 30,
+    page: 1,
   };
 
   for (const arg of argv) {
@@ -60,6 +65,10 @@ function parseArgs(argv) {
     if (key === 'limit') {
       const parsed = Number.parseInt(value, 10);
       if (Number.isFinite(parsed) && parsed > 0) args.limit = Math.min(parsed, 100);
+    }
+    if (key === 'page') {
+      const parsed = Number.parseInt(value, 10);
+      if (Number.isFinite(parsed) && parsed > 0) args.page = parsed;
     }
   }
 
@@ -220,21 +229,65 @@ function buildCategoryFilter({ category }) {
   return buildPublicPublishedFilter({ category: normalizedCategory });
 }
 
-function collectPlanStages(node, stages = []) {
+function collectPlanStages(node, stages = [], seen = new WeakSet()) {
   if (!node || typeof node !== 'object') return stages;
+  if (seen.has(node)) return stages;
+  seen.add(node);
 
   if (node.stage) stages.push(node.stage);
-  if (node.inputStage) collectPlanStages(node.inputStage, stages);
+  if (node.inputStage) collectPlanStages(node.inputStage, stages, seen);
   if (node.inputStages) {
-    for (const child of node.inputStages) collectPlanStages(child, stages);
+    for (const child of node.inputStages) collectPlanStages(child, stages, seen);
   }
   if (node.shards) {
-    for (const shard of node.shards) collectPlanStages(shard.winningPlan || shard.executionStages || shard, stages);
+    for (const shard of node.shards) collectPlanStages(shard.winningPlan || shard.executionStages || shard, stages, seen);
   }
-  if (node.queryPlan) collectPlanStages(node.queryPlan, stages);
-  if (node.winningPlan) collectPlanStages(node.winningPlan, stages);
+  if (node.queryPlan) collectPlanStages(node.queryPlan, stages, seen);
+  if (node.winningPlan) collectPlanStages(node.winningPlan, stages, seen);
+
+  for (const value of Object.values(node)) {
+    if (value && typeof value === 'object') {
+      if (Array.isArray(value)) {
+        for (const child of value) collectPlanStages(child, stages, seen);
+      } else {
+        collectPlanStages(value, stages, seen);
+      }
+    }
+  }
 
   return stages;
+}
+
+function findExecutionStats(node, seen = new WeakSet()) {
+  if (!node || typeof node !== 'object') return null;
+  if (seen.has(node)) return null;
+  seen.add(node);
+
+  if (node.executionStats && typeof node.executionStats === 'object') return node.executionStats;
+  if (
+    Object.prototype.hasOwnProperty.call(node, 'nReturned')
+    || Object.prototype.hasOwnProperty.call(node, 'executionTimeMillis')
+    || Object.prototype.hasOwnProperty.call(node, 'totalKeysExamined')
+    || Object.prototype.hasOwnProperty.call(node, 'totalDocsExamined')
+  ) {
+    return node;
+  }
+
+  for (const value of Object.values(node)) {
+    if (value && typeof value === 'object') {
+      if (Array.isArray(value)) {
+        for (const child of value) {
+          const found = findExecutionStats(child, seen);
+          if (found) return found;
+        }
+      } else {
+        const found = findExecutionStats(value, seen);
+        if (found) return found;
+      }
+    }
+  }
+
+  return null;
 }
 
 function collectIndexNames(node, names = []) {
@@ -256,10 +309,10 @@ function collectIndexNames(node, names = []) {
 
 function summarizeExplain(explain) {
   const queryPlanner = explain && explain.queryPlanner ? explain.queryPlanner : {};
-  const executionStats = explain && explain.executionStats ? explain.executionStats : {};
+  const executionStats = findExecutionStats(explain) || {};
   const winningPlan = queryPlanner.winningPlan || null;
-  const stages = Array.from(new Set(collectPlanStages(winningPlan)));
-  const winningIndexNames = Array.from(new Set(collectIndexNames(winningPlan)));
+  const stages = Array.from(new Set(collectPlanStages(winningPlan || explain)));
+  const winningIndexNames = Array.from(new Set(collectIndexNames(explain)));
 
   return {
     winningIndexNames,
@@ -273,18 +326,158 @@ function summarizeExplain(explain) {
   };
 }
 
-async function explainFind({ collection, label, filter, sort, limit, collation }) {
-  let cursor = collection.find(filter, { projection: { _id: 1 } }).sort(sort).limit(limit);
+async function explainFind({ collection, label, filter, sort, skip, limit, collation }) {
+  let cursor = collection.find(filter, { projection: { _id: 1 } });
+  if (sort) cursor = cursor.sort(sort);
+  if (skip) cursor = cursor.skip(skip);
+  if (limit) cursor = cursor.limit(limit);
   if (collation) cursor = cursor.collation(collation);
   const explain = await cursor.explain('executionStats');
   return {
     label,
+    operation: 'find',
     filterShape: filter,
-    sort,
-    limit,
+    ...(sort ? { sort } : {}),
+    ...(skip ? { skip } : {}),
+    ...(limit ? { limit } : {}),
     ...(collation ? { collation } : {}),
     summary: summarizeExplain(explain),
   };
+}
+
+async function explainCountDocuments({ collection, label, filter, collation, productionOperation = true }) {
+  const pipeline = [{ $match: filter }, { $count: 'count' }];
+  const cursor = collection.aggregate(pipeline, {
+    ...(collation ? { collation } : {}),
+  });
+  const explain = await cursor.explain('executionStats');
+  return {
+    label,
+    operation: 'countDocuments',
+    productionOperation,
+    filterShape: filter,
+    ...(collation ? { collation } : {}),
+    summary: summarizeExplain(explain),
+  };
+}
+
+async function collectCategorySiblingClauses({ collection, categoryFilter, collation }) {
+  let cursor = collection.find(categoryFilter, {
+    projection: {
+      _id: 0,
+      translationKey: 1,
+      translationGroupId: 1,
+      slug: 1,
+      slugs: 1,
+    },
+  });
+  if (collation) cursor = cursor.collation(collation);
+  const matchedDocs = await cursor.toArray();
+  const lookups = (matchedDocs || []).map((doc) => getPublicContentLookup(doc));
+  const groupKeys = Array.from(new Set(lookups.map((entry) => entry.groupKey).filter(Boolean)));
+  const canonicalSlugs = Array.from(new Set(
+    lookups
+      .filter((entry) => !entry.groupKey && entry.canonicalSlug)
+      .map((entry) => entry.canonicalSlug)
+  ));
+
+  return {
+    matchedLookupCount: Array.isArray(matchedDocs) ? matchedDocs.length : 0,
+    groupKeyCount: groupKeys.length,
+    canonicalSlugCount: canonicalSlugs.length,
+    siblingClauses: buildPublicContentSiblingOrClauses({ groupKeys, canonicalSlugs }),
+  };
+}
+
+function buildCategorySiblingFilter({ baseFilter, siblingClauses }) {
+  if (!Array.isArray(siblingClauses) || !siblingClauses.length) return null;
+  return {
+    ...baseFilter,
+    $and: [
+      ...((baseFilter && Array.isArray(baseFilter.$and)) ? baseFilter.$and : []),
+      { $or: siblingClauses },
+    ],
+  };
+}
+
+async function buildExplainDiagnostics({ collection, args }) {
+  const sort = { publishedAt: -1, createdAt: -1 };
+  const desiredLang = normalizeLanguage(args.lang) || 'gu';
+  const categoryKey = getCanonicalPublicCategoryKey(args.category) || args.category;
+  const latestFilter = buildLatestFilter({ lang: args.lang });
+  const categoryFilter = buildCategoryFilter({ category: args.category });
+  const skip = (Math.max(Number(args.page || 1), 1) - 1) * args.limit;
+  const explain = [
+    await explainFind({
+      collection,
+      label: `latest.find:${desiredLang}`,
+      filter: latestFilter,
+      sort,
+      skip,
+      limit: args.limit,
+    }),
+    await explainCountDocuments({
+      collection,
+      label: `latest.count:${desiredLang}`,
+      filter: latestFilter,
+    }),
+    await explainFind({
+      collection,
+      label: `category.matched.find:${categoryKey}`,
+      filter: categoryFilter,
+      sort,
+      collation: PUBLIC_NEWS_CATEGORY_COLLATION,
+    }),
+    await explainCountDocuments({
+      collection,
+      label: `category.matched.count:${categoryKey}`,
+      filter: categoryFilter,
+      collation: PUBLIC_NEWS_CATEGORY_COLLATION,
+      productionOperation: false,
+    }),
+  ];
+
+  const siblingInputs = await collectCategorySiblingClauses({
+    collection,
+    categoryFilter,
+    collation: PUBLIC_NEWS_CATEGORY_COLLATION,
+  });
+  const siblingFilter = buildCategorySiblingFilter({
+    baseFilter: buildPublicPublishedFilter({}),
+    siblingClauses: siblingInputs.siblingClauses,
+  });
+
+  if (siblingFilter) {
+    explain.push({
+      ...(await explainFind({
+        collection,
+        label: `category.siblings.find:${categoryKey}`,
+        filter: siblingFilter,
+        sort,
+      })),
+      siblingLookupMetadata: {
+        matchedLookupCount: siblingInputs.matchedLookupCount,
+        groupKeyCount: siblingInputs.groupKeyCount,
+        canonicalSlugCount: siblingInputs.canonicalSlugCount,
+        siblingClauseCount: siblingInputs.siblingClauses.length,
+      },
+    });
+  } else {
+    explain.push({
+      label: `category.siblings.find:${categoryKey}`,
+      operation: 'find',
+      skipped: true,
+      reason: 'no sibling clauses were produced from category matched documents',
+      siblingLookupMetadata: {
+        matchedLookupCount: siblingInputs.matchedLookupCount,
+        groupKeyCount: siblingInputs.groupKeyCount,
+        canonicalSlugCount: siblingInputs.canonicalSlugCount,
+        siblingClauseCount: 0,
+      },
+    });
+  }
+
+  return explain;
 }
 
 async function main() {
@@ -334,24 +527,7 @@ async function main() {
   };
 
   if (args.explain) {
-    const sort = { publishedAt: -1, createdAt: -1 };
-    output.explain = [
-      await explainFind({
-        collection,
-        label: `latest:${normalizeLanguage(args.lang) || 'gu'}`,
-        filter: buildLatestFilter({ lang: args.lang }),
-        sort,
-        limit: args.limit,
-      }),
-      await explainFind({
-        collection,
-        label: `category:${getCanonicalPublicCategoryKey(args.category) || args.category}`,
-        filter: buildCategoryFilter({ category: args.category }),
-        sort,
-        limit: args.limit,
-        collation: PUBLIC_NEWS_CATEGORY_COLLATION,
-      }),
-    ];
+    output.explain = await buildExplainDiagnostics({ collection, args });
   }
 
   console.log(JSON.stringify(output, null, 2));
@@ -371,7 +547,10 @@ if (require.main === module) {
 module.exports = {
   EXPECTED_CATEGORY_COLLATION,
   collationContainsExpected,
+  buildCategorySiblingFilter,
+  buildExplainDiagnostics,
   compareDeclaredToActual,
   indexKeyMatchesExpected,
   normalizeIndexOptions,
+  summarizeExplain,
 };
