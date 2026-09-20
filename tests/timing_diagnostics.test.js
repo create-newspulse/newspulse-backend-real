@@ -6,6 +6,7 @@ const request = require('supertest');
 const {
   createRequestTimingMiddleware,
   logSlowTiming,
+  setRequestTimingCacheContext,
   setRequestTimingCacheStatus,
   timeAsync,
 } = require('../lib/timingDiagnostics');
@@ -79,6 +80,79 @@ test('timeAsync logs safe operation metadata and preserves return value', async 
     cache: 'rebuild',
   });
   assert.ok(Number.isFinite(capture.entries[0].payload.durationMs));
+});
+
+test('timing diagnostics include safe public-news cache context', async () => {
+  const capture = captureLogger();
+  const req = { method: 'GET', originalUrl: '/api/public/news?category=national&lang=gu&page=1' };
+  const res = { statusCode: 200 };
+  setRequestTimingCacheStatus(req, 'rebuild');
+  setRequestTimingCacheContext(req, {
+    cacheFamily: 'category',
+    cacheKey: 'np:v1:category:national:gu:page:1',
+    language: 'gu',
+    category: 'national',
+    page: 1,
+  });
+
+  await timeAsync('mongo.publicNews.category.siblings', {
+    req,
+    res,
+    thresholdMs: 0,
+    logger: capture.logger,
+  }, async () => null);
+
+  assert.equal(capture.entries.length, 1);
+  assert.equal(capture.entries[0].tag, '[perf][mongo.publicNews.category.siblings]');
+  assert.deepEqual(capture.entries[0].payload, {
+    method: 'GET',
+    route: '/api/public/news',
+    durationMs: capture.entries[0].payload.durationMs,
+    statusCode: 200,
+    cache: 'rebuild',
+    cacheFamily: 'category',
+    cacheKey: 'np:v1:category:national:gu:page:1',
+    language: 'gu',
+    category: 'national',
+    page: 1,
+  });
+});
+
+test('timing diagnostics ignore unsupported cache context and private extras', async () => {
+  const capture = captureLogger();
+  const req = { method: 'GET', originalUrl: '/api/public/news?token=secret-token' };
+  const res = { statusCode: 200 };
+  setRequestTimingCacheStatus(req, 'rebuild');
+  setRequestTimingCacheContext(req, {
+    cacheFamily: 'latest',
+    cacheKey: 'np:v1:latest:en',
+    language: 'en',
+    category: 'person@example.com',
+    page: 'not-a-page',
+    authorization: 'Bearer secret-token',
+    cookie: 'session=secret-cookie',
+    requestBody: { password: 'secret-password' },
+  });
+
+  await timeAsync('mongo.publicNews.latest.findAndCount', {
+    req,
+    res,
+    thresholdMs: 0,
+    logger: capture.logger,
+  }, async () => null);
+
+  assert.deepEqual(capture.entries[0].payload, {
+    method: 'GET',
+    route: '/api/public/news',
+    durationMs: capture.entries[0].payload.durationMs,
+    statusCode: 200,
+    cache: 'rebuild',
+    cacheFamily: 'latest',
+    cacheKey: 'np:v1:latest:en',
+    language: 'en',
+  });
+  assert.equal(JSON.stringify(capture.entries[0].payload).includes('secret'), false);
+  assert.equal(JSON.stringify(capture.entries[0].payload).includes('@example.com'), false);
 });
 
 test('logSlowTiming suppresses operations below threshold', () => {

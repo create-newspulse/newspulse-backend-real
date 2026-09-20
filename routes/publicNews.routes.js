@@ -1,6 +1,14 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const { createJsonCacheMiddleware, buildLatestCacheKey, buildCategoryCacheKey, normalizeCacheLang } = require('../lib/cache');
+const {
+  createJsonCacheMiddleware,
+  buildLatestCacheKey,
+  buildCategoryCacheKey,
+  normalizeCacheLang,
+  normalizeCategorySlugForCache,
+  normalizePageForCache,
+} = require('../lib/cache');
+const { setRequestTimingCacheContext } = require('../lib/timingDiagnostics');
 const noCache = require('../middleware/noCache');
 
 const {
@@ -29,7 +37,7 @@ function getRequestedLang(req) {
 function buildPublicNewsCacheKey(req) {
   if (!isDbReady()) return null;
 
-  const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+  const page = normalizePageForCache(req.query.page || '1');
   const category = String(req.query.category || '').trim();
   const track = String(req.query.track || '').trim();
   const topic = String(req.query.topic || '').trim();
@@ -40,14 +48,28 @@ function buildPublicNewsCacheKey(req) {
   const lang = getRequestedLang(req);
 
   if (category) {
-    return buildCategoryCacheKey(category, lang, page);
+    const cacheKey = buildCategoryCacheKey(category, lang, page);
+    setRequestTimingCacheContext(req, {
+      cacheFamily: 'category',
+      cacheKey,
+      language: lang,
+      category: normalizeCategorySlugForCache(category),
+      page,
+    });
+    return cacheKey;
   }
 
   if (page !== 1 || track || topic || state || founderOnly || type || q) {
     return null;
   }
 
-  return buildLatestCacheKey(lang);
+  const cacheKey = buildLatestCacheKey(lang);
+  setRequestTimingCacheContext(req, {
+    cacheFamily: 'latest',
+    cacheKey,
+    language: lang,
+  });
+  return cacheKey;
 }
 
 // Public read-only news feed (NO AUTH)
