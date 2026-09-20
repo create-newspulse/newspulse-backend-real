@@ -39,6 +39,18 @@ const REQUIRED_PUBLIC_NEWS_INDEXES = Object.freeze([
 
 const EXPECTED_CATEGORY_COLLATION = Object.freeze({ locale: 'en', strength: 2 });
 const PUBLIC_NEWS_CATEGORY_COLLATION = Object.freeze({ locale: 'en', strength: 2 });
+const SIBLING_PREPARE_PROJECTION = Object.freeze({
+  _id: 0,
+  translationKey: 1,
+  translationGroupId: 1,
+  slug: 1,
+  'slugs.en': 1,
+});
+const SIBLING_PREPARE_FIELD_GROUPS = Object.freeze([
+  Object.freeze({ label: 'category.siblings.prepare.translationKeys', projection: Object.freeze({ _id: 0, translationKey: 1, translationGroupId: 1 }) }),
+  Object.freeze({ label: 'category.siblings.prepare.slug', projection: Object.freeze({ _id: 0, slug: 1 }) }),
+  Object.freeze({ label: 'category.siblings.prepare.slugsEn', projection: Object.freeze({ _id: 0, 'slugs.en': 1 }) }),
+]);
 
 function parseArgs(argv) {
   const args = {
@@ -88,6 +100,29 @@ function normalizeIndexOptions(options = {}) {
     normalized[key] = value;
   }
   return normalized;
+}
+
+function safeDiagnosticError(error) {
+  const rawMessage = String(error && error.message ? error.message : error || 'diagnostic failed');
+  const safeMessage = /invalid utf-?8 string in bson document/i.test(rawMessage)
+    ? 'Invalid UTF-8 string in BSON document'
+    : rawMessage.replace(/[\r\n\t]+/g, ' ').slice(0, 240);
+  return {
+    errorName: String(error && error.name ? error.name : 'Error').slice(0, 80),
+    errorMessage: safeMessage,
+  };
+}
+
+async function runDiagnosticSection(label, fn) {
+  try {
+    return await fn();
+  } catch (error) {
+    return {
+      label,
+      ok: false,
+      ...safeDiagnosticError(error),
+    };
+  }
 }
 
 function collationContainsExpected(actualCollation, expectedCollation) {
@@ -362,15 +397,7 @@ async function explainCountDocuments({ collection, label, filter, collation, pro
 }
 
 async function collectCategorySiblingClauses({ collection, categoryFilter, collation }) {
-  let cursor = collection.find(categoryFilter, {
-    projection: {
-      _id: 0,
-      translationKey: 1,
-      translationGroupId: 1,
-      slug: 1,
-      slugs: 1,
-    },
-  });
+  let cursor = collection.find(categoryFilter, { projection: SIBLING_PREPARE_PROJECTION });
   if (collation) cursor = cursor.collation(collation);
   const matchedDocs = await cursor.toArray();
   const lookups = (matchedDocs || []).map((doc) => getPublicContentLookup(doc));
@@ -387,6 +414,28 @@ async function collectCategorySiblingClauses({ collection, categoryFilter, colla
     canonicalSlugCount: canonicalSlugs.length,
     siblingClauses: buildPublicContentSiblingOrClauses({ groupKeys, canonicalSlugs }),
   };
+}
+
+async function runSiblingPrepareFieldGroupDiagnostics({ collection, categoryFilter, collation }) {
+  const diagnostics = [];
+
+  for (const group of SIBLING_PREPARE_FIELD_GROUPS) {
+    diagnostics.push(await runDiagnosticSection(group.label, async () => {
+      let cursor = collection.find(categoryFilter, { projection: group.projection });
+      if (collation) cursor = cursor.collation(collation);
+      const docs = await cursor.toArray();
+      return {
+        label: group.label,
+        ok: true,
+        operation: 'find',
+        fieldGroup: group.label.replace('category.siblings.prepare.', ''),
+        projectionFields: Object.keys(group.projection).filter((field) => field !== '_id'),
+        matchedLookupCount: Array.isArray(docs) ? docs.length : 0,
+      };
+    }));
+  }
+
+  return diagnostics;
 }
 
 function buildCategorySiblingFilter({ baseFilter, siblingClauses }) {
@@ -407,61 +456,104 @@ async function buildExplainDiagnostics({ collection, args }) {
   const latestFilter = buildLatestFilter({ lang: args.lang });
   const categoryFilter = buildCategoryFilter({ category: args.category });
   const skip = (Math.max(Number(args.page || 1), 1) - 1) * args.limit;
-  const explain = [
-    await explainFind({
-      collection,
-      label: `latest.find:${desiredLang}`,
-      filter: latestFilter,
-      sort,
-      skip,
-      limit: args.limit,
-    }),
-    await explainCountDocuments({
-      collection,
-      label: `latest.count:${desiredLang}`,
-      filter: latestFilter,
-    }),
-    await explainFind({
-      collection,
-      label: `category.matched.find:${categoryKey}`,
-      filter: categoryFilter,
-      sort,
-      collation: PUBLIC_NEWS_CATEGORY_COLLATION,
-    }),
-    await explainCountDocuments({
-      collection,
-      label: `category.matched.count:${categoryKey}`,
-      filter: categoryFilter,
-      collation: PUBLIC_NEWS_CATEGORY_COLLATION,
-      productionOperation: false,
-    }),
-  ];
+  const explain = [];
 
-  const siblingInputs = await collectCategorySiblingClauses({
+  explain.push(await runDiagnosticSection(`latest.find:${desiredLang}`, () => explainFind({
     collection,
-    categoryFilter,
+    label: `latest.find:${desiredLang}`,
+    filter: latestFilter,
+    sort,
+    skip,
+    limit: args.limit,
+  })));
+
+  explain.push(await runDiagnosticSection(`latest.count:${desiredLang}`, () => explainCountDocuments({
+    collection,
+    label: `latest.count:${desiredLang}`,
+    filter: latestFilter,
+  })));
+
+  explain.push(await runDiagnosticSection(`category.matched.find:${categoryKey}`, () => explainFind({
+    collection,
+    label: `category.matched.find:${categoryKey}`,
+    filter: categoryFilter,
+    sort,
     collation: PUBLIC_NEWS_CATEGORY_COLLATION,
+  })));
+
+  explain.push(await runDiagnosticSection(`category.matched.count:${categoryKey}`, () => explainCountDocuments({
+    collection,
+    label: `category.matched.count:${categoryKey}`,
+    filter: categoryFilter,
+    collation: PUBLIC_NEWS_CATEGORY_COLLATION,
+    productionOperation: false,
+  })));
+
+  const siblingPrepare = await runDiagnosticSection('category.siblings.prepare', async () => {
+    const inputs = await collectCategorySiblingClauses({
+      collection,
+      categoryFilter,
+      collation: PUBLIC_NEWS_CATEGORY_COLLATION,
+    });
+    return {
+      label: 'category.siblings.prepare',
+      ok: true,
+      operation: 'find',
+      category: categoryKey,
+      projectionFields: Object.keys(SIBLING_PREPARE_PROJECTION).filter((field) => field !== '_id'),
+      siblingLookupMetadata: {
+        matchedLookupCount: inputs.matchedLookupCount,
+        groupKeyCount: inputs.groupKeyCount,
+        canonicalSlugCount: inputs.canonicalSlugCount,
+        siblingClauseCount: inputs.siblingClauses.length,
+      },
+      siblingInputs: inputs,
+    };
   });
+  const siblingInputs = siblingPrepare.siblingInputs || null;
+  if (siblingPrepare.siblingInputs) delete siblingPrepare.siblingInputs;
+  explain.push(siblingPrepare);
+
+  if (!siblingPrepare.ok) {
+    explain.push(...await runSiblingPrepareFieldGroupDiagnostics({
+      collection,
+      categoryFilter,
+      collation: PUBLIC_NEWS_CATEGORY_COLLATION,
+    }));
+    explain.push({
+      label: `category.siblings.find:${categoryKey}`,
+      operation: 'find',
+      skipped: true,
+      reason: 'sibling preparation failed',
+    });
+    return explain;
+  }
+
   const siblingFilter = buildCategorySiblingFilter({
     baseFilter: buildPublicPublishedFilter({}),
     siblingClauses: siblingInputs.siblingClauses,
   });
 
   if (siblingFilter) {
-    explain.push({
-      ...(await explainFind({
-        collection,
-        label: `category.siblings.find:${categoryKey}`,
-        filter: siblingFilter,
-        sort,
-      })),
-      siblingLookupMetadata: {
-        matchedLookupCount: siblingInputs.matchedLookupCount,
-        groupKeyCount: siblingInputs.groupKeyCount,
-        canonicalSlugCount: siblingInputs.canonicalSlugCount,
-        siblingClauseCount: siblingInputs.siblingClauses.length,
-      },
-    });
+    const siblingExplain = await runDiagnosticSection(`category.siblings.find:${categoryKey}`, () => explainFind({
+      collection,
+      label: `category.siblings.find:${categoryKey}`,
+      filter: siblingFilter,
+      sort,
+    }));
+    if (siblingExplain.ok === false) {
+      explain.push(siblingExplain);
+    } else {
+      explain.push({
+        ...siblingExplain,
+        siblingLookupMetadata: {
+          matchedLookupCount: siblingInputs.matchedLookupCount,
+          groupKeyCount: siblingInputs.groupKeyCount,
+          canonicalSlugCount: siblingInputs.canonicalSlugCount,
+          siblingClauseCount: siblingInputs.siblingClauses.length,
+        },
+      });
+    }
   } else {
     explain.push({
       label: `category.siblings.find:${categoryKey}`,
@@ -546,11 +638,14 @@ if (require.main === module) {
 
 module.exports = {
   EXPECTED_CATEGORY_COLLATION,
+  SIBLING_PREPARE_PROJECTION,
   collationContainsExpected,
   buildCategorySiblingFilter,
   buildExplainDiagnostics,
   compareDeclaredToActual,
   indexKeyMatchesExpected,
   normalizeIndexOptions,
+  runDiagnosticSection,
+  safeDiagnosticError,
   summarizeExplain,
 };
