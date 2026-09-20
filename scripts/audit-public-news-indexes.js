@@ -1,4 +1,18 @@
-require('dotenv').config();
+const path = require('path');
+
+const nodeEnvEarly = String(process.env.NODE_ENV || 'development').toLowerCase();
+const isRenderEarly = !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
+const isProdEarly = nodeEnvEarly === 'production' || isRenderEarly;
+
+require('dotenv').config({
+  path: path.join(__dirname, '..', '.env'),
+  override: !isProdEarly && nodeEnvEarly !== 'test',
+});
+
+// Match server.js startup compatibility: prefer MONGODB_URI, but allow legacy MONGO_URI.
+if (!process.env.MONGODB_URI && process.env.MONGO_URI) {
+  process.env.MONGODB_URI = process.env.MONGO_URI;
+}
 
 const mongoose = require('mongoose');
 
@@ -255,7 +269,7 @@ async function main() {
   const uri = String(process.env.MONGODB_URI || '').trim();
   const dbName = String(process.env.MONGODB_DBNAME || '').trim() || undefined;
 
-  if (!uri) throw new Error('Missing MONGODB_URI');
+  if (!uri) throw new Error('Missing MONGODB_URI or legacy MONGO_URI');
 
   await mongoose.connect(uri, {
     ...(dbName ? { dbName } : {}),
