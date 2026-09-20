@@ -79,6 +79,12 @@ router.get(
   noCache,
   createJsonCacheMiddleware({
     ttlSeconds: 45,
+    staleWhileRevalidate: true,
+    backgroundRebuild: listPublicNews,
+    deterministicTtlSpreadSeconds: 15,
+    rebuildConcurrencyGroup: 'public-news',
+    rebuildConcurrencyLimit: 2,
+    lockTtlSeconds: 60,
     buildKey: buildPublicNewsCacheKey,
     shouldCache: ({ statusCode, body }) => statusCode === 200 && body && Array.isArray(body.items),
   }),

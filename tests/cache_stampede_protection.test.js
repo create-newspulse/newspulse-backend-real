@@ -94,6 +94,47 @@ function makeApp(cache, handler, options = {}) {
   return app;
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function waitFor(predicate, timeoutMs = 500) {
+  const started = Date.now();
+  return new Promise((resolve, reject) => {
+    const tick = async () => {
+      if (await predicate()) return resolve();
+      if (Date.now() - started > timeoutMs) return reject(new Error('Timed out waiting for condition'));
+      return setTimeout(tick, 5);
+    };
+    tick();
+  });
+}
+
+function makePublicNewsCacheApp(cache, handler, options = {}) {
+  const app = express();
+  const routeHandler = options.routeHandler || handler;
+  app.get('/cached/:key?', cache.createJsonCacheMiddleware({
+    ttlSeconds: options.ttlSeconds || 45,
+    staleWhileRevalidate: true,
+    backgroundRebuild: handler,
+    deterministicTtlSpreadSeconds: 15,
+    rebuildConcurrencyGroup: options.rebuildConcurrencyGroup || `public-news-test-${Date.now()}-${Math.random()}`,
+    rebuildConcurrencyLimit: options.rebuildConcurrencyLimit || 2,
+    lockTtlSeconds: 60,
+    coldCacheWaitMs: options.coldCacheWaitMs || 180,
+    coldCachePollMs: 15,
+    buildKey: (req) => `np:v1:test:public-news:${req.params.key || 'default'}`,
+    shouldCache: ({ statusCode, body }) => statusCode === 200 && body && Array.isArray(body.items),
+  }), routeHandler);
+  return app;
+}
+
 test('cache middleware protects rebuilds, serves stale data, and fails open', async (t) => {
   const redis = new FakeRedis();
   const state = { ready: true };
@@ -161,6 +202,134 @@ test('locks are owner-safe, expire, and cache TTLs use bounded jitter', async (t
   assert.equal(cache.getJitteredTtlSeconds(100, () => 0), 100);
   assert.equal(cache.getJitteredTtlSeconds(100, () => 1), 110);
   assert.equal(cache.getStaleTtlSeconds(110, 100), 210);
+});
+
+test('public-news cache serves stale immediately and refreshes in background', async (t) => {
+  const redis = new FakeRedis();
+  const loaded = loadCache(redis);
+  const { cache } = loaded;
+  t.after(loaded.restore);
+
+  const key = 'np:v1:test:public-news:default';
+  await cache.safeSetCache(cache.buildStaleCacheKey(key), { status: 200, body: { items: [{ source: 'stale' }] } }, 120);
+  const releaseRefresh = deferred();
+  let refreshRuns = 0;
+  const app = makePublicNewsCacheApp(cache, async (_req, res) => {
+    refreshRuns += 1;
+    await releaseRefresh.promise;
+    return res.status(200).json({ items: [{ source: 'fresh' }] });
+  });
+
+  const stale = await request(app).get('/cached').expect(200);
+  assert.deepEqual(stale.body, { items: [{ source: 'stale' }] });
+  await waitFor(() => refreshRuns === 1);
+  assert.equal(await redis.get(key), null);
+
+  releaseRefresh.resolve();
+  await waitFor(async () => Boolean(await redis.get(key)));
+  assert.deepEqual(JSON.parse(await redis.get(key)).body, { items: [{ source: 'fresh' }] });
+});
+
+test('public-news cache still rebuilds the same stale key only once', async (t) => {
+  const redis = new FakeRedis();
+  const loaded = loadCache(redis);
+  const { cache } = loaded;
+  t.after(loaded.restore);
+
+  const key = 'np:v1:test:public-news:default';
+  await cache.safeSetCache(cache.buildStaleCacheKey(key), { status: 200, body: { items: [{ source: 'stale' }] } }, 120);
+  const releaseRefresh = deferred();
+  let refreshRuns = 0;
+  const app = makePublicNewsCacheApp(cache, async (_req, res) => {
+    refreshRuns += 1;
+    await releaseRefresh.promise;
+    return res.status(200).json({ items: [{ source: 'fresh' }] });
+  });
+
+  const responses = await Promise.all([
+    request(app).get('/cached'),
+    request(app).get('/cached'),
+    request(app).get('/cached'),
+  ]);
+  assert.deepEqual(responses.map((res) => res.body.items[0].source), ['stale', 'stale', 'stale']);
+  await waitFor(() => refreshRuns === 1);
+  releaseRefresh.resolve();
+});
+
+test('public-news cache limits concurrent rebuilds across different keys', async (t) => {
+  const redis = new FakeRedis();
+  const loaded = loadCache(redis);
+  const { cache } = loaded;
+  t.after(loaded.restore);
+
+  for (const suffix of ['one', 'two', 'three']) {
+    const key = `np:v1:test:public-news:${suffix}`;
+    await cache.safeSetCache(cache.buildStaleCacheKey(key), { status: 200, body: { items: [{ source: `stale-${suffix}` }] } }, 120);
+  }
+
+  const releaseRefresh = deferred();
+  let active = 0;
+  let maxActive = 0;
+  const started = [];
+  const app = makePublicNewsCacheApp(cache, async (req, res) => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    started.push(req.params.key);
+    await releaseRefresh.promise;
+    active -= 1;
+    return res.status(200).json({ items: [{ source: `fresh-${req.params.key}` }] });
+  }, { rebuildConcurrencyGroup: 'public-news-concurrency-test', rebuildConcurrencyLimit: 2 });
+
+  const responses = await Promise.all([
+    request(app).get('/cached/one'),
+    request(app).get('/cached/two'),
+    request(app).get('/cached/three'),
+  ]);
+  assert.deepEqual(responses.map((res) => res.body.items[0].source).sort(), ['stale-one', 'stale-three', 'stale-two']);
+  await waitFor(() => started.length === 2);
+  assert.equal(maxActive, 2);
+  assert.equal(started.includes('three') && started.includes('one') && started.includes('two'), false);
+  releaseRefresh.resolve();
+  await waitFor(() => started.length === 3);
+  assert.equal(maxActive, 2);
+});
+
+test('public-news cache uses deterministic 45 to 60 second TTL spread', async (t) => {
+  const redis = new FakeRedis();
+  const loaded = loadCache(redis);
+  const { cache } = loaded;
+  t.after(loaded.restore);
+
+  const latestKey = cache.buildLatestCacheKey('gu');
+  const nationalKey = cache.buildCategoryCacheKey('national', 'gu', 1);
+  const latestTtl = cache.getDeterministicSpreadTtlSeconds(45, latestKey, 15);
+  const latestTtlAgain = cache.getDeterministicSpreadTtlSeconds(45, latestKey, 15);
+  const nationalTtl = cache.getDeterministicSpreadTtlSeconds(45, nationalKey, 15);
+
+  assert.equal(latestTtl, latestTtlAgain);
+  assert.ok(latestTtl >= 45 && latestTtl <= 60);
+  assert.ok(nationalTtl >= 45 && nationalTtl <= 60);
+
+  await cache.safeSetCacheWithStale(latestKey, { status: 200, body: { items: [] } }, 45, { deterministicTtlSpreadSeconds: 15 });
+  assert.equal(redis.entries.get(latestKey).expiresAt - redis.now, latestTtl * 1000);
+});
+
+test('public-news cold cache miss waits for rebuild and preserves API body', async (t) => {
+  const redis = new FakeRedis();
+  const loaded = loadCache(redis);
+  const { cache } = loaded;
+  t.after(loaded.restore);
+
+  let handlerRuns = 0;
+  const app = makePublicNewsCacheApp(cache, async (_req, res) => {
+    handlerRuns += 1;
+    return res.status(200).json({ items: [{ source: 'controller' }], page: 1, limit: 30, total: 1, totalPages: 1 });
+  });
+
+  const response = await request(app).get('/cached').expect(200);
+  assert.equal(handlerRuns, 1);
+  assert.deepEqual(response.body, { items: [{ source: 'controller' }], page: 1, limit: 30, total: 1, totalPages: 1 });
+  assert.deepEqual(JSON.parse(await redis.get('np:v1:test:public-news:default')).body, response.body);
 });
 
 test('stale companions invalidate with all public cache families and key dimensions remain isolated', async (t) => {
