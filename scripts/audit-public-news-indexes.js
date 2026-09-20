@@ -81,6 +81,27 @@ function normalizeIndexOptions(options = {}) {
   return normalized;
 }
 
+function collationContainsExpected(actualCollation, expectedCollation) {
+  if (!expectedCollation) return !actualCollation;
+  if (!actualCollation || typeof actualCollation !== 'object') return false;
+
+  return Object.entries(expectedCollation).every(([key, expectedValue]) => (
+    stableStringify(actualCollation[key]) === stableStringify(expectedValue)
+  ));
+}
+
+function indexKeyMatchesExpected(actualKey, expectedKey) {
+  if (!actualKey || !expectedKey || typeof actualKey !== 'object' || typeof expectedKey !== 'object') return false;
+  const actualEntries = Object.entries(actualKey);
+  const expectedEntries = Object.entries(expectedKey);
+  if (actualEntries.length !== expectedEntries.length) return false;
+
+  return expectedEntries.every(([expectedField, expectedValue], index) => {
+    const [actualField, actualValue] = actualEntries[index] || [];
+    return actualField === expectedField && stableStringify(actualValue) === stableStringify(expectedValue);
+  });
+}
+
 function declaredIndexName(fields, options = {}) {
   if (options && options.name) return options.name;
   return Object.entries(fields || {}).map(([key, value]) => `${key}_${value}`).join('_');
@@ -107,10 +128,11 @@ function compareDeclaredToActual(declaredIndexes, actualIndexes) {
 
   return declaredIndexes.map((declared) => {
     const actual = actualByName.get(declared.name) || null;
-    const keyMatches = actual ? stableStringify(actual.key) === stableStringify(declared.key) : false;
+    const keyMatches = actual ? indexKeyMatchesExpected(actual.key, declared.key) : false;
     const collationMatches = declared.options && declared.options.collation
-      ? stableStringify(actual && actual.options ? actual.options.collation : undefined) === stableStringify(declared.options.collation)
+      ? collationContainsExpected(actual && actual.options ? actual.options.collation : null, declared.options.collation)
       : undefined;
+    const matches = Boolean(actual && keyMatches && (collationMatches === undefined || collationMatches));
 
     return {
       name: declared.name,
@@ -118,6 +140,7 @@ function compareDeclaredToActual(declaredIndexes, actualIndexes) {
       actualKey: actual ? actual.key : null,
       exists: Boolean(actual),
       keyMatches,
+      matches,
       ...(collationMatches !== undefined ? {
         declaredCollation: declared.options.collation,
         actualCollation: actual && actual.options ? actual.options.collation || null : null,
@@ -334,11 +357,21 @@ async function main() {
   console.log(JSON.stringify(output, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error && error.stack ? error.stack : error);
-  process.exitCode = 1;
-}).finally(async () => {
-  try {
-    await mongoose.disconnect();
-  } catch (_) {}
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error && error.stack ? error.stack : error);
+    process.exitCode = 1;
+  }).finally(async () => {
+    try {
+      await mongoose.disconnect();
+    } catch (_) {}
+  });
+}
+
+module.exports = {
+  EXPECTED_CATEGORY_COLLATION,
+  collationContainsExpected,
+  compareDeclaredToActual,
+  indexKeyMatchesExpected,
+  normalizeIndexOptions,
+};

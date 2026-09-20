@@ -93,6 +93,35 @@ function significantIndexOptions(indexLike = {}) {
   return options;
 }
 
+function collationContainsExpected(actualCollation, expectedCollation) {
+  if (!expectedCollation) return !actualCollation;
+  if (!actualCollation || typeof actualCollation !== 'object') return false;
+
+  return Object.entries(expectedCollation).every(([key, expectedValue]) => (
+    stableStringify(actualCollation[key]) === stableStringify(expectedValue)
+  ));
+}
+
+function indexOptionsMatchExpected(actualOptions = {}, expectedOptions = {}) {
+  const { collation: actualCollation, ...actualWithoutCollation } = actualOptions || {};
+  const { collation: expectedCollation, ...expectedWithoutCollation } = expectedOptions || {};
+
+  return stableStringify(actualWithoutCollation) === stableStringify(expectedWithoutCollation)
+    && collationContainsExpected(actualCollation || null, expectedCollation || null);
+}
+
+function indexKeyMatchesExpected(actualKey, expectedKey) {
+  if (!actualKey || !expectedKey || typeof actualKey !== 'object' || typeof expectedKey !== 'object') return false;
+  const actualEntries = Object.entries(actualKey);
+  const expectedEntries = Object.entries(expectedKey);
+  if (actualEntries.length !== expectedEntries.length) return false;
+
+  return expectedEntries.every(([expectedField, expectedValue], index) => {
+    const [actualField, actualValue] = actualEntries[index] || [];
+    return actualField === expectedField && stableStringify(actualValue) === stableStringify(expectedValue);
+  });
+}
+
 function createIndexOptions(definition) {
   return {
     name: definition.name,
@@ -110,9 +139,9 @@ function getIndexStatus(definition, actualIndexes) {
   const actualOptions = actual ? significantIndexOptions(actual) : {};
   const expectedCollation = expectedOptions.collation || null;
   const actualCollation = actualOptions.collation || null;
-  const keyMatches = actual ? stableStringify(actual.key || {}) === stableStringify(definition.key) : false;
-  const optionsMatches = actual ? stableStringify(actualOptions) === stableStringify(expectedOptions) : false;
-  const collationMatches = actual ? stableStringify(actualCollation) === stableStringify(expectedCollation) : false;
+  const keyMatches = actual ? indexKeyMatchesExpected(actual.key || {}, definition.key) : false;
+  const optionsMatches = actual ? indexOptionsMatchExpected(actualOptions, expectedOptions) : false;
+  const collationMatches = actual ? collationContainsExpected(actualCollation, expectedCollation) : false;
 
   return {
     name: definition.name,
@@ -287,8 +316,11 @@ if (require.main === module) {
 
 module.exports = {
   REQUIRED_PUBLIC_NEWS_INDEXES,
+  collationContainsExpected,
   createIndexOptions,
   getIndexStatus,
+  indexKeyMatchesExpected,
+  indexOptionsMatchExpected,
   runPublicNewsIndexCreation,
   significantIndexOptions,
   summarizeRequiredIndexes,

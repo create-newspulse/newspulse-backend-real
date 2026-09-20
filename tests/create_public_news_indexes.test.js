@@ -6,8 +6,22 @@ process.env.NODE_ENV = 'test';
 const {
   REQUIRED_PUBLIC_NEWS_INDEXES,
   createIndexOptions,
+  getIndexStatus,
   runPublicNewsIndexCreation,
 } = require('../scripts/create-public-news-indexes');
+
+const MONGODB_EXPANDED_EN_STRENGTH_2_COLLATION = Object.freeze({
+  locale: 'en',
+  caseLevel: false,
+  caseFirst: 'off',
+  strength: 2,
+  numericOrdering: false,
+  alternate: 'non-ignorable',
+  maxVariable: 'punct',
+  normalization: false,
+  backwards: false,
+  version: '57.1',
+});
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -161,6 +175,34 @@ test('category public-news index collation is exact', async () => {
     name: 'public_news_category_status_published_created_ci',
     collation: { locale: 'en', strength: 2 },
   });
+});
+
+test('category public-news index matches MongoDB-expanded collation', () => {
+  const categoryDefinition = REQUIRED_PUBLIC_NEWS_INDEXES.find((definition) => definition.name === 'public_news_category_status_published_created_ci');
+  const status = getIndexStatus(categoryDefinition, [{
+    name: categoryDefinition.name,
+    key: clone(categoryDefinition.key),
+    collation: clone(MONGODB_EXPANDED_EN_STRENGTH_2_COLLATION),
+  }]);
+
+  assert.equal(status.exists, true);
+  assert.equal(status.keyMatches, true);
+  assert.equal(status.collationMatches, true);
+  assert.equal(status.matches, true);
+});
+
+test('category public-news index still rejects key-order mismatch with expanded collation', () => {
+  const categoryDefinition = REQUIRED_PUBLIC_NEWS_INDEXES.find((definition) => definition.name === 'public_news_category_status_published_created_ci');
+  const status = getIndexStatus(categoryDefinition, [{
+    name: categoryDefinition.name,
+    key: { status: 1, category: 1, publishedAt: -1, createdAt: -1 },
+    collation: clone(MONGODB_EXPANDED_EN_STRENGTH_2_COLLATION),
+  }]);
+
+  assert.equal(status.exists, true);
+  assert.equal(status.keyMatches, false);
+  assert.equal(status.collationMatches, true);
+  assert.equal(status.matches, false);
 });
 
 test('public-news index creator never calls drop or sync index APIs', async () => {

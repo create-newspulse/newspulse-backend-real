@@ -7,8 +7,22 @@ const {
   SOURCE_INDEXES,
   TARGET_INDEXES,
   createIndexOptions,
+  indexStatus,
   runPriorityIndexSwap,
 } = require('../scripts/swap-public-news-priority-indexes');
+
+const MONGODB_EXPANDED_EN_STRENGTH_2_COLLATION = Object.freeze({
+  locale: 'en',
+  caseLevel: false,
+  caseFirst: 'off',
+  strength: 2,
+  numericOrdering: false,
+  alternate: 'non-ignorable',
+  maxVariable: 'punct',
+  normalization: false,
+  backwards: false,
+  version: '57.1',
+});
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -176,6 +190,32 @@ test('priority index swap category collation is exact', () => {
     name: 'public_news_category_status_published_created_ci',
     collation: { locale: 'en', strength: 2 },
   });
+});
+
+test('priority index swap verifier matches MongoDB-expanded category collation', () => {
+  const status = indexStatus(TARGET_INDEXES[1], [{
+    name: TARGET_INDEXES[1].name,
+    key: clone(TARGET_INDEXES[1].key),
+    collation: clone(MONGODB_EXPANDED_EN_STRENGTH_2_COLLATION),
+  }]);
+
+  assert.equal(status.exists, true);
+  assert.equal(status.keyMatches, true);
+  assert.equal(status.collationMatches, true);
+  assert.equal(status.matches, true);
+});
+
+test('priority index swap verifier still rejects key-order mismatch with expanded collation', () => {
+  const status = indexStatus(TARGET_INDEXES[1], [{
+    name: TARGET_INDEXES[1].name,
+    key: { status: 1, category: 1, publishedAt: -1, createdAt: -1 },
+    collation: clone(MONGODB_EXPANDED_EN_STRENGTH_2_COLLATION),
+  }]);
+
+  assert.equal(status.exists, true);
+  assert.equal(status.keyMatches, false);
+  assert.equal(status.collationMatches, true);
+  assert.equal(status.matches, false);
 });
 
 test('priority index swap only uses approved dropIndex names', async () => {

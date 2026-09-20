@@ -78,6 +78,35 @@ function significantIndexOptions(indexLike = {}) {
   return options;
 }
 
+function collationContainsExpected(actualCollation, expectedCollation) {
+  if (!expectedCollation) return !actualCollation;
+  if (!actualCollation || typeof actualCollation !== 'object') return false;
+
+  return Object.entries(expectedCollation).every(([key, expectedValue]) => (
+    stableStringify(actualCollation[key]) === stableStringify(expectedValue)
+  ));
+}
+
+function indexOptionsMatchExpected(actualOptions = {}, expectedOptions = {}) {
+  const { collation: actualCollation, ...actualWithoutCollation } = actualOptions || {};
+  const { collation: expectedCollation, ...expectedWithoutCollation } = expectedOptions || {};
+
+  return stableStringify(actualWithoutCollation) === stableStringify(expectedWithoutCollation)
+    && collationContainsExpected(actualCollation || null, expectedCollation || null);
+}
+
+function indexKeyMatchesExpected(actualKey, expectedKey) {
+  if (!actualKey || !expectedKey || typeof actualKey !== 'object' || typeof expectedKey !== 'object') return false;
+  const actualEntries = Object.entries(actualKey);
+  const expectedEntries = Object.entries(expectedKey);
+  if (actualEntries.length !== expectedEntries.length) return false;
+
+  return expectedEntries.every(([expectedField, expectedValue], index) => {
+    const [actualField, actualValue] = actualEntries[index] || [];
+    return actualField === expectedField && stableStringify(actualValue) === stableStringify(expectedValue);
+  });
+}
+
 function findIndexByName(indexes, name) {
   return (Array.isArray(indexes) ? indexes : []).find((index) => index && index.name === name) || null;
 }
@@ -93,8 +122,8 @@ function indexMatchesDefinition(actual, definition) {
   if (!actual) return false;
   const expectedOptions = significantIndexOptions(definition.options || {});
   const actualOptions = significantIndexOptions(actual);
-  return stableStringify(actual.key || {}) === stableStringify(definition.key)
-    && stableStringify(actualOptions) === stableStringify(expectedOptions);
+  return indexKeyMatchesExpected(actual.key || {}, definition.key)
+    && indexOptionsMatchExpected(actualOptions, expectedOptions);
 }
 
 function indexStatus(definition, indexes) {
@@ -103,9 +132,9 @@ function indexStatus(definition, indexes) {
   const actualOptions = actual ? significantIndexOptions(actual) : {};
   const expectedCollation = expectedOptions.collation || null;
   const actualCollation = actualOptions.collation || null;
-  const keyMatches = actual ? stableStringify(actual.key || {}) === stableStringify(definition.key) : false;
-  const optionsMatches = actual ? stableStringify(actualOptions) === stableStringify(expectedOptions) : false;
-  const collationMatches = actual ? stableStringify(actualCollation) === stableStringify(expectedCollation) : false;
+  const keyMatches = actual ? indexKeyMatchesExpected(actual.key || {}, definition.key) : false;
+  const optionsMatches = actual ? indexOptionsMatchExpected(actualOptions, expectedOptions) : false;
+  const collationMatches = actual ? collationContainsExpected(actualCollation, expectedCollation) : false;
 
   return {
     name: definition.name,
@@ -121,7 +150,7 @@ function indexStatus(definition, indexes) {
 
 function sourceStatus(source, indexes) {
   const actual = findIndexByName(indexes, source.name);
-  const keyMatches = actual ? stableStringify(actual.key || {}) === stableStringify(source.key) : false;
+  const keyMatches = actual ? indexKeyMatchesExpected(actual.key || {}, source.key) : false;
   return {
     name: source.name,
     expectedKey: source.key,
@@ -339,8 +368,11 @@ module.exports = {
   SOURCE_INDEXES,
   TARGET_INDEXES,
   buildPrecheck,
+  collationContainsExpected,
   createIndexOptions,
   finalReport,
+  indexKeyMatchesExpected,
   indexStatus,
+  indexOptionsMatchExpected,
   runPriorityIndexSwap,
 };
