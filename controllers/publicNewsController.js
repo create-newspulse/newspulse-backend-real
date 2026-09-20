@@ -11,7 +11,7 @@ const {
   buildPubliclyVisiblePublicArticleFilter,
 } = require('../services/publicArticleVisibility.service');
 const { getLinkedSponsoredFeatureForArticle } = require('../services/sponsoredFeatures.service');
-const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
+const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey, getPublicCategoryMatchValues } = require('../lib/categories');
 const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode, detectSlugLocale } = require('../lib/slug');
 const { timeAsync } = require('../lib/timingDiagnostics');
@@ -249,6 +249,20 @@ function buildReadyTranslationMatch(lang) {
   };
 }
 
+const PUBLIC_NEWS_CATEGORY_COLLATION = Object.freeze({ locale: 'en', strength: 2 });
+
+function buildPublicNewsCategoryFilter(value) {
+  const matchValues = getPublicCategoryMatchValues(value);
+  return matchValues.length ? { $in: matchValues } : null;
+}
+
+function applyPublicNewsCategoryCollation(query) {
+  if (query && typeof query.collation === 'function') {
+    return query.collation(PUBLIC_NEWS_CATEGORY_COLLATION);
+  }
+  return query;
+}
+
 function isPlainTextBody(content) {
   const s = String(content || '');
   if (!s.trim()) return true;
@@ -474,10 +488,10 @@ function buildPublicPublishedFilter({ category, track, q, founderOnly, type }) {
   const filter = buildPubliclyVisibleNewsArticleFilter();
 
   if (normalizedCategory) {
-    // Case-safe for older mixed-case data.
-    filter.category = buildPublicCategoryFilter(normalizedCategory);
+    // Case-safe for older mixed-case data via query collation on public-news category reads.
+    filter.category = buildPublicNewsCategoryFilter(normalizedCategory);
   } else if (normalizedTrack) {
-    filter.category = buildPublicCategoryFilter('youth-pulse');
+    filter.category = buildPublicNewsCategoryFilter('youth-pulse');
   }
 
   const trackFilter = buildYouthPulseTrackFilter(normalizedTrack);
@@ -993,7 +1007,7 @@ async function _resolveGroupedCategoryNewsItems({
   timingContext,
 }) {
   const matchedDocs = await timeAsync('mongo.publicNews.category.matched', timingContext, () => (
-    News.find(categoryFilter).select(PUBLIC_FEED_SELECT).sort(sort).lean()
+    applyPublicNewsCategoryCollation(News.find(categoryFilter).select(PUBLIC_FEED_SELECT).sort(sort)).lean()
   ));
   const lookups = (matchedDocs || []).map((doc) => getPublicContentLookup(doc));
   const groupKeys = Array.from(new Set(lookups.map((entry) => entry.groupKey).filter(Boolean)));

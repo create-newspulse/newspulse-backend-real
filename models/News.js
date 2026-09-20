@@ -611,6 +611,30 @@ newsSchema.post('save', async function syncYouthPulseSubmission(doc) {
 newsSchema.index({ workflowStage: 1, workflowUpdatedAt: -1 });
 newsSchema.index({ status: 1, createdAt: -1 });
 newsSchema.index({ scheduledAt: 1 });
+newsSchema.index(
+  { status: 1, publishedAt: -1, createdAt: -1 },
+  { name: 'public_news_latest_status_published_created' }
+);
+newsSchema.index(
+  { category: 1, status: 1, publishedAt: -1, createdAt: -1 },
+  { name: 'public_news_category_status_published_created_ci', collation: { locale: 'en', strength: 2 } }
+);
+newsSchema.index(
+  { translationKey: 1, status: 1, publishedAt: -1, createdAt: -1 },
+  { name: 'public_news_sibling_translation_key_status_published_created' }
+);
+newsSchema.index(
+  { translationGroupId: 1, status: 1, publishedAt: -1, createdAt: -1 },
+  { name: 'public_news_sibling_translation_group_status_published_created' }
+);
+newsSchema.index(
+  { slug: 1, status: 1, publishedAt: -1, createdAt: -1 },
+  { name: 'public_news_sibling_slug_status_published_created' }
+);
+newsSchema.index(
+  { 'slugs.en': 1, status: 1, publishedAt: -1, createdAt: -1 },
+  { name: 'public_news_sibling_slugs_en_status_published_created' }
+);
 newsSchema.index({ category: 1, status: 1, stateTags: 1, publishedAt: -1 });
 newsSchema.index({ status: 1, category: 1, 'geo.state': 1, 'geo.district': 1, 'geo.city': 1, publishedAt: -1 });
 newsSchema.index({ translationKey: 1, lang: 1, status: 1, publishedAt: -1 });
