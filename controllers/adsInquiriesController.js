@@ -27,6 +27,7 @@ const sanitizeHtml = require('sanitize-html');
 const AdInquiry = require('../models/AdInquiry');
 const AuditLog = require('../models/AuditLog');
 const adsMailer = require('../utils/mailer');
+const { timeAsync } = require('../lib/timingDiagnostics');
 const { normalizeAdOpportunityKey } = require('../src/constants/adSlots');
 
 const STATUS_VALUES = ['new', 'read', 'deleted'];
@@ -576,7 +577,7 @@ async function submitPublicAdInquiry(req, res) {
 
     let emailSent = false;
     try {
-      await adsMailer.sendAdsInquiryMail({
+      await timeAsync('smtp.adsInquiry.send', { req, res }, () => adsMailer.sendAdsInquiryMail({
         name: advertiserName,
         advertiserName,
         companyName,
@@ -602,7 +603,7 @@ async function submitPublicAdInquiry(req, res) {
           referer: referrer,
           site: site || source || null,
         },
-      });
+      }));
       emailSent = true;
       console.log(`[ads] email sent id=${id}`);
     } catch (e) {

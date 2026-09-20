@@ -483,6 +483,7 @@ try { publicFeatureTogglesRouter = require('./routes/publicFeatureToggles'); } c
 const { getEffectiveCommunityAccessState } = require('./services/communityAccessToggleService');
 
 const { langMiddleware } = require('./middleware/lang');
+const { createRequestTimingMiddleware } = require('./lib/timingDiagnostics');
 
 const app = express();
 
@@ -495,6 +496,8 @@ app.use((req, res, next) => {
   res.setHeader('X-Newspulse-Db', _safeDbLabel());
   next();
 });
+
+app.use(createRequestTimingMiddleware());
 
 // Language negotiation (query ?lang=hi, header x-lang: hi). Controllers may still
 // choose their own defaults for backward compatibility.

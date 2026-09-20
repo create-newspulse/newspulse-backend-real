@@ -2,6 +2,7 @@ const sanitizeHtml = require('sanitize-html');
 const { randomBytes } = require('crypto');
 
 const grievanceMailer = require('../lib/grievanceMailer');
+const { timeAsync } = require('../lib/timingDiagnostics');
 
 const SUCCESS_RESPONSE = { success: true, message: 'Grievance submitted successfully.' };
 const FAILURE_RESPONSE = { success: false, message: 'Unable to submit grievance right now.' };
@@ -171,7 +172,7 @@ async function submitPublicGrievance(req, res) {
       return res.status(400).json(FAILURE_RESPONSE);
     }
 
-    await grievanceMailer.sendGrievanceMail(submission);
+    await timeAsync('smtp.grievance.send', { req, res }, () => grievanceMailer.sendGrievanceMail(submission));
     return res.status(200).json({ ...SUCCESS_RESPONSE, referenceId: submission.referenceId });
   } catch (error) {
     console.error('[grievance] submit failed', grievanceMailer.serializeMailError(error));

@@ -3,6 +3,7 @@ const sanitizeHtml = require('sanitize-html');
 
 const { getPrivacyTransporter, getPrivacyEmailConfig } = require('../lib/emailService');
 const { getPublicBaseUrl } = require('../lib/publicBaseUrl');
+const { timeAsync } = require('../lib/timingDiagnostics');
 const {
   REQUEST_TYPE_VALUES,
   STATUS_VALUES,
@@ -224,7 +225,10 @@ async function submitPrivacyRequest(req, res) {
     });
 
     const verificationUrl = buildVerificationUrl(req, token);
-    ensurePrivacyVerificationEmailSent(await sendPrivacyVerificationEmail({ to: parsed.value.email, verificationUrl }));
+    const emailResult = await timeAsync('smtp.privacyVerification.send', { req, res }, () => (
+      sendPrivacyVerificationEmail({ to: parsed.value.email, verificationUrl })
+    ));
+    ensurePrivacyVerificationEmailSent(emailResult);
 
     return res.status(201).json({
       ok: true,

@@ -14,6 +14,7 @@ const { getLinkedSponsoredFeatureForArticle } = require('../services/sponsoredFe
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
 const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode, detectSlugLocale } = require('../lib/slug');
+const { timeAsync } = require('../lib/timingDiagnostics');
 const {
   getPublicContentGroupKey,
   getPublicContentLookup,
@@ -385,13 +386,15 @@ async function translatePublicNews(req, res) {
     // Translate + cache full (title+summary+content). Never silently skip body.
     // NOTE: we translate from detected source (or stored lang) and use HTML mode for HTML bodies.
     const obj0 = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    const localized = await ensureOnDemandNewsTranslation({
-      doc: { ...obj0, title, description: summary, content },
-      requestedLang: target,
-      logger: console,
-      lockOwner: true,
-      now: new Date(),
-    });
+    const localized = await timeAsync('external.publicNews.translateEndpoint', { req, res }, () => (
+      ensureOnDemandNewsTranslation({
+        doc: { ...obj0, title, description: summary, content },
+        requestedLang: target,
+        logger: console,
+        lockOwner: true,
+        now: new Date(),
+      })
+    ));
 
     doc.translations = doc.translations || {};
     doc.translations[target] = doc.translations[target] || { title: '', summary: '', content: '', generatedAt: null };
@@ -987,8 +990,11 @@ async function _resolveGroupedCategoryNewsItems({
   sort,
   categorySlug,
   normalizedCategoryKey,
+  timingContext,
 }) {
-  const matchedDocs = await News.find(categoryFilter).select(PUBLIC_FEED_SELECT).sort(sort).lean();
+  const matchedDocs = await timeAsync('mongo.publicNews.category.matched', timingContext, () => (
+    News.find(categoryFilter).select(PUBLIC_FEED_SELECT).sort(sort).lean()
+  ));
   const lookups = (matchedDocs || []).map((doc) => getPublicContentLookup(doc));
   const groupKeys = Array.from(new Set(lookups.map((entry) => entry.groupKey).filter(Boolean)));
   const canonicalSlugs = Array.from(new Set(
@@ -1007,7 +1013,9 @@ async function _resolveGroupedCategoryNewsItems({
         { $or: siblingClauses },
       ],
     };
-    siblingDocs = await News.find(siblingFilter).select(PUBLIC_FEED_SELECT).sort(sort).lean();
+    siblingDocs = await timeAsync('mongo.publicNews.category.siblings', timingContext, () => (
+      News.find(siblingFilter).select(PUBLIC_FEED_SELECT).sort(sort).lean()
+    ));
   }
 
   const groupedDocs = new Map();
@@ -1283,7 +1291,7 @@ function _preparePublicNewsFeedItems(itemsRaw, requestedLang, { fallbackToBase =
   return localizedItems;
 }
 
-async function _collectPlainLatestPublicNewsItems({ filter, desired, fallbackEnabled, sort, limit, count }) {
+async function _collectPlainLatestPublicNewsItems({ filter, desired, fallbackEnabled, sort, limit, count, timingContext }) {
   const totalRaw = Math.max(Number(count || 0), 0);
   if (!totalRaw || limit <= 0) return [];
 
@@ -1292,12 +1300,14 @@ async function _collectPlainLatestPublicNewsItems({ filter, desired, fallbackEna
   let rawSkip = 0;
 
   while (accepted.length < limit && rawSkip < totalRaw) {
-    const batchRaw = await News.find(filter)
-      .select(PUBLIC_FEED_SELECT)
-      .sort(sort)
-      .skip(rawSkip)
-      .limit(batchSize)
-      .lean();
+    const batchRaw = await timeAsync('mongo.publicNews.latest.fallbackBatch', timingContext, () => (
+      News.find(filter)
+        .select(PUBLIC_FEED_SELECT)
+        .sort(sort)
+        .skip(rawSkip)
+        .limit(batchSize)
+        .lean()
+    ));
 
     if (!Array.isArray(batchRaw) || !batchRaw.length) break;
 
@@ -1438,16 +1448,17 @@ async function listPublicNews(req, res) {
         sort,
         categorySlug: req.query.category,
         normalizedCategoryKey: category,
+        timingContext: { req, res },
       });
       items = resolved.items;
       total = resolved.total;
       totalPages = resolved.totalPages;
     } else {
       const skip = (page - 1) * limit;
-      const [itemsRaw, count] = await Promise.all([
+      const [itemsRaw, count] = await timeAsync('mongo.publicNews.latest.findAndCount', { req, res }, () => Promise.all([
         News.find(filter).select(PUBLIC_FEED_SELECT).sort(sort).skip(skip).limit(limit).lean(),
         News.countDocuments(filter),
-      ]);
+      ]));
 
       items = _preparePublicNewsFeedItems(itemsRaw || [], desired, { fallbackToBase: fallbackEnabled });
       if (!items.length && isPlainLatestRequest && Number(count || 0) > limit) {
@@ -1458,6 +1469,7 @@ async function listPublicNews(req, res) {
           sort,
           limit,
           count,
+          timingContext: { req, res },
         });
       }
 
@@ -1744,13 +1756,15 @@ async function getPublicNewsBySlugOrId(req, res) {
     if (shouldAuto && fallbackEnabled && needsRequested && allowOnDemandTranslate && isGoogleTranslateConfigured()) {
       const now = new Date();
       const lockOwner = await tryAcquireNewsTranslationLock({ id: out?._id, lang: desired, now });
-      const localized = await ensureOnDemandNewsTranslation({
-        doc: rawForTranslation,
-        requestedLang: desired,
-        logger: console,
-        lockOwner,
-        now,
-      });
+      const localized = await timeAsync('external.publicNews.detail.translate', { req, res }, () => (
+        ensureOnDemandNewsTranslation({
+          doc: rawForTranslation,
+          requestedLang: desired,
+          logger: console,
+          lockOwner,
+          now,
+        })
+      ));
 
       if (localized && localized.dbSet && out && out._id) {
         try {
@@ -1896,13 +1910,15 @@ async function getPublicNewsBySlug(req, res) {
     if (shouldAuto && fallbackEnabled && needsRequested && isGoogleTranslateConfigured()) {
       const now = new Date();
       const lockOwner = await tryAcquireNewsTranslationLock({ id: out?._id, lang: desired, now });
-      const localized = await ensureOnDemandNewsTranslation({
-        doc: rawForTranslation,
-        requestedLang: desired,
-        logger: console,
-        lockOwner,
-        now,
-      });
+      const localized = await timeAsync('external.publicNews.articleFallback.translate', { req, res }, () => (
+        ensureOnDemandNewsTranslation({
+          doc: rawForTranslation,
+          requestedLang: desired,
+          logger: console,
+          lockOwner,
+          now,
+        })
+      ));
 
       if (localized && localized.dbSet && out && out._id) {
         try {
