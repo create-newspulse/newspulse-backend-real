@@ -37,7 +37,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^7.2.2",
     "multer": "^2.0.2",
-    "nodemailer": "^7.0.10",
+    "nodemailer": "^7.0.13",
     "openai": "^4.0.0",
     "pdfkit": "^0.15.0",
     "sanitize-html": "^2.17.1",
