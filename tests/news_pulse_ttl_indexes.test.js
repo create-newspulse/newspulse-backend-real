@@ -42,6 +42,7 @@ class FakeDb {
     this.collections = collections;
     this.commands = [];
     this.failCollMod = options.failCollMod || false;
+    this.unauthorizedCollMod = options.unauthorizedCollMod || false;
   }
 
   collection(name) {
@@ -55,6 +56,12 @@ class FakeDb {
     if (this.failCollMod) {
       const error = new Error('no such command: collMod');
       error.codeName = 'CommandNotFound';
+      throw error;
+    }
+    if (this.unauthorizedCollMod) {
+      const error = new Error(`user is not allowed to do action [collMod] on [test.${command.collMod}]`);
+      error.code = 13;
+      error.codeName = 'Unauthorized';
       throw error;
     }
 
@@ -74,11 +81,11 @@ function baseIndexes(ttlValue) {
   ];
 }
 
-function makeDb({ incidentTtl, alertTtl, incidentIndexes, alertIndexes, failCollMod } = {}) {
+function makeDb({ incidentTtl, alertTtl, incidentIndexes, alertIndexes, failCollMod, unauthorizedCollMod } = {}) {
   return new FakeDb({
     news_pulse_incidents: new FakeCollection('news_pulse_incidents', incidentIndexes || baseIndexes(incidentTtl)),
     news_pulse_alerts: new FakeCollection('news_pulse_alerts', alertIndexes || baseIndexes(alertTtl)),
-  }, { failCollMod });
+  }, { failCollMod, unauthorizedCollMod });
 }
 
 test('audit detects missing TTL option', async () => {
@@ -157,6 +164,20 @@ test('apply falls back to guarded drop and recreate when collMod is unsupported'
   assert.deepEqual(incident.calls.map((call) => call.op), ['dropIndex', 'createIndex']);
   assert.deepEqual(alert.calls, []);
   assert.equal((await incident.indexes()).find((entry) => entry.name === 'expiresAt_1').expireAfterSeconds, 0);
+});
+
+test('apply falls back to guarded drop and recreate when collMod is unauthorized', async () => {
+  const db = makeDb({ incidentTtl: undefined, alertTtl: undefined, unauthorizedCollMod: true });
+  const result = await repairNewsPulseTtlIndexes(db, { apply: true });
+  const incident = db.collection('news_pulse_incidents');
+  const alert = db.collection('news_pulse_alerts');
+
+  assert.deepEqual(result.results.map((entry) => entry.action), ['drop-create', 'drop-create']);
+  assert.deepEqual(incident.calls.map((call) => call.op), ['dropIndex', 'createIndex']);
+  assert.deepEqual(alert.calls.map((call) => call.op), ['dropIndex', 'createIndex']);
+  assert.equal((await incident.indexes()).find((entry) => entry.name === 'expiresAt_1').expireAfterSeconds, 0);
+  assert.equal((await alert.indexes()).find((entry) => entry.name === 'expiresAt_1').expireAfterSeconds, 0);
+  assert.ok(result.results.every((entry) => entry.after.matches === true));
 });
 
 test('repair stops on unexpected index-name conflict', async () => {
