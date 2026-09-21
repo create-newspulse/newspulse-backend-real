@@ -23,7 +23,7 @@ const NewsPulseAlertSchema = new mongoose.Schema(
     sentAt: { type: Date, default: null, index: true },
     deliveryErrorCode: { type: String, default: null, trim: true, maxlength: 120 },
     claimedAt: { type: Date, required: true, default: Date.now, index: true },
-    expiresAt: { type: Date, required: true, index: true },
+    expiresAt: { type: Date, required: true },
   },
   { timestamps: true, collection: 'news_pulse_alerts' },
 );
@@ -33,7 +33,7 @@ NewsPulseAlertSchema.index(
   { unique: true, name: 'uniq_news_pulse_alert_per_incident_type' },
 );
 NewsPulseAlertSchema.index({ createdAt: -1 });
-NewsPulseAlertSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0, name: 'news_pulse_alert_retention_ttl' });
+NewsPulseAlertSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 module.exports = mongoose.models.NewsPulseAlert || mongoose.model('NewsPulseAlert', NewsPulseAlertSchema);
 module.exports.ALERT_TYPES = ALERT_TYPES;

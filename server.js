@@ -1312,17 +1312,17 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
     }
 
     try {
-      const NewsPulseIncident = require('./models/NewsPulseIncident');
-      await NewsPulseIncident.syncIndexes();
+      const { auditNewsPulseTtlIndexes } = require('./lib/newsPulseTtlIndexes');
+      const audit = await auditNewsPulseTtlIndexes(mongoose.connection.db);
+      const mismatched = audit.collections.filter((entry) => !entry.matches);
+      if (mismatched.length) {
+        console.warn('[startup] News Pulse TTL index audit found mismatches; run scripts/audit-news-pulse-ttl-indexes.js and review repair dry-run.', {
+          db: audit.databaseName,
+          collections: mismatched.map((entry) => entry.collectionName),
+        });
+      }
     } catch (e) {
-      console.warn('[startup] NewsPulseIncident index sync failed', e?.message || e);
-    }
-
-    try {
-      const NewsPulseAlert = require('./models/NewsPulseAlert');
-      await NewsPulseAlert.syncIndexes();
-    } catch (e) {
-      console.warn('[startup] NewsPulseAlert index sync failed', e?.message || e);
+      console.warn('[startup] News Pulse TTL index audit failed', e?.message || e);
     }
 
 		// Cleanup old Broadcast Center items (older than 24h)

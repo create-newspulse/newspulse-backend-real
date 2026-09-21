@@ -19,7 +19,7 @@ const NewsPulseIncidentSchema = new mongoose.Schema(
     criticalAlertSentAt: { type: Date, default: null, index: true },
     recoveryAlertClaimedAt: { type: Date, default: null, index: true },
     recoveryAlertSentAt: { type: Date, default: null, index: true },
-    expiresAt: { type: Date, default: null, index: true },
+    expiresAt: { type: Date, default: null },
   },
   { timestamps: true, collection: 'news_pulse_incidents' },
 );
