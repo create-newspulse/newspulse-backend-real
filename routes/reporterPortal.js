@@ -4,6 +4,7 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const { createExpressSessionStore } = require('../lib/expressSessionStore');
 
 const CommunitySubmission = require('../models/CommunitySubmission');
 const OtpToken = require('../models/OtpToken');
@@ -48,6 +49,7 @@ const OTP_CHALLENGE_LOOKBACK_LIMIT = 10;
 const OTP_REQUEST_RATE_LIMIT = { windowMs: 15 * 60 * 1000, maxAttempts: 8 };
 const OTP_VERIFY_RATE_LIMIT = { windowMs: 10 * 60 * 1000, maxAttempts: 10 };
 const REPORTER_AUTH_REQUEST_BURST_WINDOW_MS = 5 * 1000;
+const REPORTER_SESSION_COOKIE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const otpRequestAttempts = new Map();
 const otpVerifyAttempts = new Map();
 const reporterAuthRequestBursts = new Map();
@@ -159,18 +161,34 @@ function getReporterSessionCookieConfig() {
     sameSite: 'lax',
     secure: false,
     path: '/',
-    maxAge: 24 * 60 * 60 * 1000,
+    maxAge: REPORTER_SESSION_COOKIE_MAX_AGE_MS,
   };
 }
 
-const reporterSessionMiddleware = session({
-  name: 'reporter_portal.sid',
-  secret: getReporterSessionSecret() || 'reporter-portal-dev-session-secret',
-  resave: false,
-  saveUninitialized: false,
-  proxy: true,
-  cookie: getReporterSessionCookieConfig(),
-});
+function createReporterSessionMiddleware(options = {}) {
+  const cookie = getReporterSessionCookieConfig();
+  const storeOptions = {
+    prefix: options.prefix,
+    productionLike: options.productionLike,
+    ttlMs: cookie.maxAge,
+  };
+  if (Object.prototype.hasOwnProperty.call(options, 'redisClient')) {
+    storeOptions.client = options.redisClient;
+  }
+  const store = createExpressSessionStore(storeOptions);
+
+  return session({
+    name: 'reporter_portal.sid',
+    secret: getReporterSessionSecret() || 'reporter-portal-dev-session-secret',
+    resave: false,
+    saveUninitialized: false,
+    proxy: true,
+    cookie,
+    ...(store ? { store } : {}),
+  });
+}
+
+const reporterSessionMiddleware = createReporterSessionMiddleware();
 
 function isHttpsRequest(req) {
   return !!(req && (req.secure || String(req.get('x-forwarded-proto') || '').toLowerCase() === 'https'));
