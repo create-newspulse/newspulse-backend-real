@@ -16,6 +16,9 @@ const CATEGORY_VALUES = [
   'editorial',
   'youth-pulse',
   'inspiration-hub',
+  'faith-culture',
+  'pulse-dialogue',
+  'tech-gadgets',
 ];
 
 const LANGUAGE_VALUES = ['en', 'hi', 'gu'];
