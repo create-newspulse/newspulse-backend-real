@@ -7,11 +7,42 @@ const {
   placementKeyToPlacement,
 } = require('../lib/sponsoredFeatures');
 const { buildPubliclyVisiblePublicArticleFilter } = require('../services/publicArticleVisibility.service');
+const { getSpotlightPriorityRank } = require('../services/spotlightPriority.service');
 const {
   getActiveSponsoredFeatureByPlacement,
   buildLinkedArticleDto,
   toPublicSponsoredFeatureDto,
 } = require('../services/sponsoredFeatures.service');
+
+const SPOTLIGHT_STORY_LIMIT = 8;
+const SPOTLIGHT_WINDOWS_HOURS = Object.freeze([24, 48, 72]);
+const SPOTLIGHT_CATEGORY_LIMIT = 2;
+const SPOTLIGHT_SELECT = [
+  '_id',
+  'title',
+  'summary',
+  'slug',
+  'slugs',
+  'sourceNewsId',
+  'category',
+  'language',
+  'originalLang',
+  'publishedAt',
+  'createdAt',
+  'updatedAt',
+  'coverImage',
+  'spotlightPriority',
+  'spotlightExpiresAt',
+  'isSponsored',
+  'isSponsoredArticle',
+  'sponsorName',
+  'sponsorLabel',
+  'sponsorDisclosure',
+  'sponsorCtaText',
+  'sponsorCtaUrl',
+  'sponsorFeatureEligible',
+  'sponsorFeatureLinkedId',
+].join(' ');
 
 function isDbReady() {
   const env = String(process.env.NODE_ENV || '').toLowerCase();
@@ -62,6 +93,93 @@ function safeDefaultCard() {
     article: null,
     sponsor: null,
   };
+}
+
+function buildFreshSpotlightFilter(now, hours) {
+  const nowDt = now instanceof Date ? now : new Date(now);
+  const since = new Date(nowDt.getTime() - (Number(hours) * 60 * 60 * 1000));
+  const filter = buildPubliclyVisiblePublicArticleFilter({ now: nowDt });
+  filter.$and = (filter.$and || []).concat([
+    { publishedAt: { $gte: since, $lte: nowDt } },
+    { $or: [{ spotlightExpiresAt: null }, { spotlightExpiresAt: { $exists: false } }, { spotlightExpiresAt: { $gte: nowDt } }] },
+  ]);
+  return filter;
+}
+
+function dateMs(value) {
+  const ms = new Date(value || 0).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function sortSpotlightCandidates(items) {
+  return [...(Array.isArray(items) ? items : [])].sort((left, right) => {
+    const priorityDiff = getSpotlightPriorityRank(right && right.spotlightPriority) - getSpotlightPriorityRank(left && left.spotlightPriority);
+    if (priorityDiff) return priorityDiff;
+
+    const publishedDiff = dateMs(right && right.publishedAt) - dateMs(left && left.publishedAt);
+    if (publishedDiff) return publishedDiff;
+
+    const updatedDiff = dateMs(right && right.updatedAt) - dateMs(left && left.updatedAt);
+    if (updatedDiff) return updatedDiff;
+
+    return dateMs(right && right.createdAt) - dateMs(left && left.createdAt);
+  });
+}
+
+function uniqueFreshCandidates(items) {
+  const seen = new Set();
+  const out = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    const key = String(item && item._id ? item._id : '').trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
+function selectCategoryBalancedSpotlight(items, limit = SPOTLIGHT_STORY_LIMIT) {
+  const sorted = sortSpotlightCandidates(uniqueFreshCandidates(items));
+  const selected = [];
+  const selectedIds = new Set();
+  const categoryCounts = new Map();
+
+  for (const item of sorted) {
+    if (selected.length >= limit) break;
+    const category = String(item && item.category ? item.category : 'uncategorized').trim().toLowerCase() || 'uncategorized';
+    const count = categoryCounts.get(category) || 0;
+    if (count >= SPOTLIGHT_CATEGORY_LIMIT) continue;
+
+    selected.push(item);
+    selectedIds.add(String(item._id));
+    categoryCounts.set(category, count + 1);
+  }
+
+  for (const item of sorted) {
+    if (selected.length >= limit) break;
+    const id = String(item && item._id ? item._id : '');
+    if (!id || selectedIds.has(id)) continue;
+    selected.push(item);
+    selectedIds.add(id);
+  }
+
+  return selected;
+}
+
+async function findFreshSpotlightStories(now) {
+  let candidates = [];
+
+  for (const hours of SPOTLIGHT_WINDOWS_HOURS) {
+    const filter = buildFreshSpotlightFilter(now, hours);
+    const docs = await Article.find(filter)
+      .select(SPOTLIGHT_SELECT)
+      .sort({ publishedAt: -1, createdAt: -1 })
+      .lean();
+    candidates = uniqueFreshCandidates(docs);
+    if (candidates.length >= SPOTLIGHT_STORY_LIMIT || hours === SPOTLIGHT_WINDOWS_HOURS[SPOTLIGHT_WINDOWS_HOURS.length - 1]) break;
+  }
+
+  return selectCategoryBalancedSpotlight(candidates, SPOTLIGHT_STORY_LIMIT);
 }
 
 async function findEditorsPick(now, excludedIds = []) {
@@ -153,39 +271,16 @@ async function getHomepageCenterSlot(req, res) {
     });
   }
 
-  const excludedIds = [];
-  const editorsPick = await findEditorsPick(now, excludedIds);
-  if (editorsPick) {
-    excludedIds.push(editorsPick._id);
+  const spotlightStories = await findFreshSpotlightStories(now);
+  if (spotlightStories.length) {
+    const items = spotlightStories.map((doc) => articleCardFromDoc(doc, { labelText: 'Spotlight', selectedSource: 'spotlight' }));
     return res.status(200).json({
       ok: true,
       slotKey: 'HOMEPAGE_CENTER',
-      selectedSource: 'editor-pick',
-      selectionOrder: ['editor-pick', 'top-explainer', 'regional-national-fallback', 'safe-default'],
-      item: articleCardFromDoc(editorsPick, { labelText: `Editor's Pick`, selectedSource: 'editor-pick' }),
-    });
-  }
-
-  const topExplainer = await findTopExplainer(now, excludedIds);
-  if (topExplainer) {
-    excludedIds.push(topExplainer._id);
-    return res.status(200).json({
-      ok: true,
-      slotKey: 'HOMEPAGE_CENTER',
-      selectedSource: 'top-explainer',
-      selectionOrder: ['editor-pick', 'top-explainer', 'regional-national-fallback', 'safe-default'],
-      item: articleCardFromDoc(topExplainer, { labelText: 'Top Explainer', selectedSource: 'top-explainer' }),
-    });
-  }
-
-  const fallbackArticle = await findRegionalNationalFallback(now, excludedIds);
-  if (fallbackArticle) {
-    return res.status(200).json({
-      ok: true,
-      slotKey: 'HOMEPAGE_CENTER',
-      selectedSource: 'regional-national-fallback',
-      selectionOrder: ['editor-pick', 'top-explainer', 'regional-national-fallback', 'safe-default'],
-      item: articleCardFromDoc(fallbackArticle, { labelText: 'Top Story', selectedSource: 'regional-national-fallback' }),
+      selectedSource: 'spotlight',
+      selectionOrder: ['spotlight', 'safe-default'],
+      item: items[0],
+      items,
     });
   }
 
@@ -193,12 +288,18 @@ async function getHomepageCenterSlot(req, res) {
     ok: true,
     slotKey: 'HOMEPAGE_CENTER',
     selectedSource: 'safe-default',
-    selectionOrder: ['editor-pick', 'top-explainer', 'regional-national-fallback', 'safe-default'],
+    selectionOrder: ['spotlight', 'safe-default'],
     item: safeDefaultCard(),
+    items: [],
   });
 }
 
 module.exports = {
   getActiveSponsoredFeature,
   getHomepageCenterSlot,
+  _private: {
+    buildFreshSpotlightFilter,
+    selectCategoryBalancedSpotlight,
+    sortSpotlightCandidates,
+  },
 };

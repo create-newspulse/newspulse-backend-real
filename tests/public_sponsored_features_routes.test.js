@@ -13,6 +13,7 @@ const app = require('../server');
 function makeFindResult(items) {
   let rows = Array.isArray(items) ? [...items] : [];
   return {
+    select() { return this; },
     sort(order) {
       if (order && typeof order === 'object') {
         rows.sort((left, right) => {
@@ -37,6 +38,82 @@ function makeFindOneResult(doc) {
     select() { return this; },
     sort() { return this; },
     lean: async () => doc,
+  };
+}
+
+function getPath(obj, path) {
+  return String(path || '').split('.').reduce((current, key) => (current == null ? undefined : current[key]), obj);
+}
+
+function comparable(value) {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) return new Date(value).getTime();
+  return value;
+}
+
+function matchesCondition(value, condition) {
+  if (condition && typeof condition === 'object' && !Array.isArray(condition) && !(condition instanceof Date) && !(condition instanceof RegExp)) {
+    if (Object.prototype.hasOwnProperty.call(condition, '$exists')) {
+      if ((value !== undefined) !== Boolean(condition.$exists)) return false;
+    }
+    if (Object.prototype.hasOwnProperty.call(condition, '$ne') && value === condition.$ne) return false;
+    if (Object.prototype.hasOwnProperty.call(condition, '$in') && !condition.$in.includes(value)) return false;
+    if (Object.prototype.hasOwnProperty.call(condition, '$gte') && comparable(value) < comparable(condition.$gte)) return false;
+    if (Object.prototype.hasOwnProperty.call(condition, '$lte') && comparable(value) > comparable(condition.$lte)) return false;
+    return true;
+  }
+  if (condition === null) return value === null || value === undefined;
+  if (condition instanceof RegExp) return condition.test(String(value || ''));
+  return value === condition;
+}
+
+function matchesFilter(doc, filter) {
+  if (!filter || typeof filter !== 'object') return true;
+  if (Array.isArray(filter.$and) && !filter.$and.every((clause) => matchesFilter(doc, clause))) return false;
+  if (Array.isArray(filter.$or) && !filter.$or.some((clause) => matchesFilter(doc, clause))) return false;
+
+  for (const [key, condition] of Object.entries(filter)) {
+    if (key === '$and' || key === '$or') continue;
+    if (!matchesCondition(getPath(doc, key), condition)) return false;
+  }
+  return true;
+}
+
+function makeSpotlightArticle(id, hoursAgo, overrides = {}) {
+  const publishedAt = new Date(Date.now() - (hoursAgo * 60 * 60 * 1000));
+  return {
+    _id: id,
+    title: `Story ${id}`,
+    summary: `Summary ${id}`,
+    slug: `story-${id}`,
+    category: 'national',
+    language: 'en',
+    status: 'published',
+    publishedAt,
+    createdAt: publishedAt,
+    updatedAt: publishedAt,
+    deletedAt: null,
+    publishAt: null,
+    scheduledAt: null,
+    visibility: 'public',
+    isPrivate: false,
+    spotlightPriority: 'normal',
+    spotlightExpiresAt: null,
+    coverImage: { url: `https://img.example/${id}.jpg`, alt: `Story ${id}`, publicId: null },
+    ...overrides,
+  };
+}
+
+function installSpotlightFindMock(docs) {
+  const prevArticleFind = Article.find;
+  const capturedFilters = [];
+  Article.find = (filter) => {
+    capturedFilters.push(filter);
+    return makeFindResult(docs.filter((doc) => matchesFilter(doc, filter)));
+  };
+  return {
+    capturedFilters,
+    restore() { Article.find = prevArticleFind; },
   };
 }
 
@@ -151,63 +228,131 @@ test('GET /api/public/sponsored-feature?placement=homepage returns a null-safe r
   }
 });
 
-test('GET /api/public/homepage/center-slot falls back to editor pick when no active sponsored feature exists', async () => {
-  const prevSponsoredFind = SponsoredFeature.find;
-  const prevArticleFindOne = Article.findOne;
+test('GET /api/public/homepage/center-slot returns fresh Spotlight stories ordered by priority and recency', async () => {
+  const docs = [
+    makeSpotlightArticle('normal-newest', 1, { spotlightPriority: 'normal' }),
+    makeSpotlightArticle('important-newer', 2, { spotlightPriority: 'important' }),
+    makeSpotlightArticle('top-older', 3, { spotlightPriority: 'top' }),
+    makeSpotlightArticle('important-older', 4, { spotlightPriority: 'important' }),
+    makeSpotlightArticle('normal-older', 5, { spotlightPriority: 'normal' }),
+    makeSpotlightArticle('normal-newer', 0.5, { spotlightPriority: 'normal' }),
+    makeSpotlightArticle('tech-one', 1.5, { category: 'tech' }),
+    makeSpotlightArticle('business-one', 2.5, { category: 'business' }),
+  ];
+  const state = installSpotlightFindMock(docs);
 
   try {
-    SponsoredFeature.find = () => makeFindResult([]);
-    Article.findOne = (filter) => {
-      const hasSpotlight = Array.isArray(filter && filter.$and) && filter.$and.some((clause) => clause && clause.spotlightEnabled === true);
-      if (hasSpotlight) {
-        return makeFindOneResult({
-          _id: '507f1f77bcf86cd799439141',
-          title: 'Editor pick title',
-          summary: 'Editor pick summary',
-          slug: 'editor-pick-title',
-          language: 'en',
-          coverImage: { url: 'https://img.example/editor.jpg', alt: 'Editor', publicId: null },
-          spotlightEnabled: true,
-          spotlightPinned: true,
-          spotlightPriority: 7,
-        });
-      }
-      return makeFindOneResult(null);
-    };
-
     const res = await request(app).get('/api/public/homepage/center-slot');
 
     assert.equal(res.status, 200);
     assert.equal(res.body.ok, true);
-    assert.equal(res.body.selectedSource, 'editor-pick');
-    assert.deepEqual(res.body.selectionOrder, ['editor-pick', 'top-explainer', 'regional-national-fallback', 'safe-default']);
-    assert.equal(res.body.item.labelText, `Editor's Pick`);
-    assert.equal(res.body.item.article.slug, 'editor-pick-title');
+    assert.equal(res.body.selectedSource, 'spotlight');
+    assert.equal(res.body.items.length, 8);
+    assert.equal(state.capturedFilters.length, 1, '8 stories in 24 hours should use the first window only');
+    assert.equal(res.body.item.article.slug, 'story-top-older');
+    assert.deepEqual(res.body.items.slice(0, 5).map((item) => item.article.slug), [
+      'story-top-older',
+      'story-important-newer',
+      'story-tech-one',
+      'story-business-one',
+      'story-important-older',
+    ]);
   } finally {
-    SponsoredFeature.find = prevSponsoredFind;
-    Article.findOne = prevArticleFindOne;
+    state.restore();
+  }
+});
+
+test('GET /api/public/homepage/center-slot excludes non-public and future scheduled articles', async () => {
+  const future = new Date(Date.now() + (2 * 60 * 60 * 1000));
+  const docs = [
+    makeSpotlightArticle('valid', 1),
+    makeSpotlightArticle('draft', 1, { status: 'draft', spotlightPriority: 'top' }),
+    makeSpotlightArticle('archived', 1, { status: 'archived', spotlightPriority: 'top' }),
+    makeSpotlightArticle('deleted-status', 1, { status: 'deleted', spotlightPriority: 'top' }),
+    makeSpotlightArticle('deleted-at', 1, { deletedAt: new Date(), spotlightPriority: 'top' }),
+    makeSpotlightArticle('future-published', 1, { publishedAt: future, spotlightPriority: 'top' }),
+    makeSpotlightArticle('future-publish-at', 1, { publishAt: future, spotlightPriority: 'top' }),
+    makeSpotlightArticle('future-scheduled', 1, { scheduledAt: future, spotlightPriority: 'top' }),
+  ];
+  const state = installSpotlightFindMock(docs);
+
+  try {
+    const res = await request(app).get('/api/public/homepage/center-slot');
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.items.length, 1);
+    assert.equal(res.body.items[0].article.slug, 'story-valid');
+  } finally {
+    state.restore();
+  }
+});
+
+test('GET /api/public/homepage/center-slot expands Spotlight freshness windows to 48 and 72 hours', async () => {
+  const docs = [
+    ...Array.from({ length: 6 }, (_, index) => makeSpotlightArticle(`fresh-${index}`, index + 1, { category: `cat-${index}` })),
+    makeSpotlightArticle('hour-30', 30, { category: 'regional' }),
+    makeSpotlightArticle('hour-60', 60, { category: 'business' }),
+    makeSpotlightArticle('hour-80-old', 80, { spotlightPriority: 'top', category: 'tech' }),
+  ];
+  const state = installSpotlightFindMock(docs);
+
+  try {
+    const res = await request(app).get('/api/public/homepage/center-slot');
+
+    assert.equal(res.status, 200);
+    assert.equal(state.capturedFilters.length, 3, 'should try 24h, 48h, then 72h');
+    assert.equal(res.body.items.length, 8);
+    assert.ok(res.body.items.some((item) => item.article.slug === 'story-hour-30'));
+    assert.ok(res.body.items.some((item) => item.article.slug === 'story-hour-60'));
+    assert.ok(!res.body.items.some((item) => item.article.slug === 'story-hour-80-old'));
+  } finally {
+    state.restore();
+  }
+});
+
+test('GET /api/public/homepage/center-slot balances categories without duplicating articles', async () => {
+  const docs = [
+    makeSpotlightArticle('national-1', 1, { category: 'national', spotlightPriority: 'top' }),
+    makeSpotlightArticle('national-2', 2, { category: 'national', spotlightPriority: 'top' }),
+    makeSpotlightArticle('national-3', 3, { category: 'national', spotlightPriority: 'top' }),
+    makeSpotlightArticle('national-3', 3, { category: 'national', spotlightPriority: 'top' }),
+    makeSpotlightArticle('tech-1', 1, { category: 'tech', spotlightPriority: 'important' }),
+    makeSpotlightArticle('tech-2', 2, { category: 'tech', spotlightPriority: 'important' }),
+    makeSpotlightArticle('business-1', 1, { category: 'business' }),
+    makeSpotlightArticle('business-2', 2, { category: 'business' }),
+    makeSpotlightArticle('sports-1', 1, { category: 'sports' }),
+    makeSpotlightArticle('sports-2', 2, { category: 'sports' }),
+  ];
+  const state = installSpotlightFindMock(docs);
+
+  try {
+    const res = await request(app).get('/api/public/homepage/center-slot');
+    const ids = res.body.items.map((item) => item.article.id);
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.items.length, 8);
+    assert.equal(new Set(ids).size, ids.length);
+    assert.deepEqual(res.body.items.slice(0, 4).map((item) => item.article.category), ['national', 'national', 'tech', 'tech']);
+  } finally {
+    state.restore();
   }
 });
 
 test('GET /api/public/homepage/center-slot returns a safe default card when no content is available', async () => {
-  const prevSponsoredFind = SponsoredFeature.find;
-  const prevArticleFindOne = Article.findOne;
+  const state = installSpotlightFindMock([]);
 
   try {
-    SponsoredFeature.find = () => makeFindResult([]);
-    Article.findOne = () => makeFindOneResult(null);
-
     const res = await request(app).get('/api/public/homepage/center-slot');
 
     assert.equal(res.status, 200);
     assert.equal(res.body.ok, true);
     assert.equal(res.body.selectedSource, 'safe-default');
-    assert.deepEqual(res.body.selectionOrder, ['editor-pick', 'top-explainer', 'regional-national-fallback', 'safe-default']);
+    assert.deepEqual(res.body.selectionOrder, ['spotlight', 'safe-default']);
     assert.equal(res.body.item.kind, 'default');
     assert.equal(res.body.item.headline, 'More stories coming soon');
+    assert.deepEqual(res.body.items, []);
   } finally {
-    SponsoredFeature.find = prevSponsoredFind;
-    Article.findOne = prevArticleFindOne;
+    state.restore();
   }
 });
 

@@ -70,7 +70,7 @@ test('PUT /api/articles/:id applies Spotlight override fields on admin updates',
       .send({
         spotlightEnabled: true,
         spotlightPinned: 'true',
-        spotlightPriority: '7',
+        spotlightPriority: 'top',
         spotlightExpiresAt: '2026-05-15T10:30:00.000Z',
       });
 
@@ -82,7 +82,7 @@ test('PUT /api/articles/:id applies Spotlight override fields on admin updates',
     assert.ok(firstOp && firstOp.$set && typeof firstOp.$set === 'object', 'expected first update op to use $set');
     assert.equal(firstOp.$set.spotlightEnabled, true);
     assert.equal(firstOp.$set.spotlightPinned, true);
-    assert.equal(firstOp.$set.spotlightPriority, 7);
+    assert.equal(firstOp.$set.spotlightPriority, 'top');
     assert.equal(new Date(firstOp.$set.spotlightExpiresAt).toISOString(), '2026-05-15T10:30:00.000Z');
   } finally {
     News.findById = prevFindById;

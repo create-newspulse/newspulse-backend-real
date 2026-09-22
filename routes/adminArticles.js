@@ -5,6 +5,7 @@ const { requireAdminAuth } = require('../middleware/adminAuth');
 const { enqueueTranslateAndSave } = require('../services/publishAsyncTranslation.service');
 const { buildTranslationGroupStatus, resolveBaseLang } = require('../services/translationGroupStatus');
 const { adminListReporterContacts } = require('../controllers/communityReporterController');
+const { normalizeSpotlightPriority } = require('../services/spotlightPriority.service');
 
 const router = express.Router();
 
@@ -338,7 +339,7 @@ router.post('/articles', requireAdminAuth, async (req, res) => {
       coverImageUrl: resolvedCoverImageUrl,
       ...(spotlightEnabled !== undefined ? { spotlightEnabled: Boolean(spotlightEnabled) } : {}),
       ...(spotlightPinned !== undefined ? { spotlightPinned: Boolean(spotlightPinned) } : {}),
-      ...(spotlightPriority !== undefined ? { spotlightPriority: Number.isFinite(Number(spotlightPriority)) ? Number(spotlightPriority) : 0 } : {}),
+      ...(spotlightPriority !== undefined ? { spotlightPriority: normalizeSpotlightPriority(spotlightPriority) } : {}),
       ...(spotlightExpiresAt !== undefined ? { spotlightExpiresAt: spotlightExpiresAt ? new Date(spotlightExpiresAt) : null } : {}),
     });
 
@@ -444,10 +445,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res) => {
     if (body.slug !== undefined) update.slug = body.slug;
     if (body.spotlightEnabled !== undefined) update.spotlightEnabled = Boolean(body.spotlightEnabled);
     if (body.spotlightPinned !== undefined) update.spotlightPinned = Boolean(body.spotlightPinned);
-    if (body.spotlightPriority !== undefined) {
-      const parsedPriority = Number(body.spotlightPriority);
-      update.spotlightPriority = Number.isFinite(parsedPriority) ? parsedPriority : 0;
-    }
+    if (body.spotlightPriority !== undefined) update.spotlightPriority = normalizeSpotlightPriority(body.spotlightPriority);
     if (body.spotlightExpiresAt !== undefined) {
       update.spotlightExpiresAt = body.spotlightExpiresAt ? new Date(body.spotlightExpiresAt) : null;
     }

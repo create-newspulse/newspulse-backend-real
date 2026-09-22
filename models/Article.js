@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 const { YOUTH_PULSE_TRACKS, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
+const { SPOTLIGHT_PRIORITY_VALUES, normalizeSpotlightPriority } = require('../services/spotlightPriority.service');
 
 const CATEGORY_VALUES = [
   'breaking',
@@ -214,7 +215,7 @@ const articleSchema = new mongoose.Schema(
 
     spotlightEnabled: { type: Boolean, default: false },
     spotlightPinned: { type: Boolean, default: false },
-    spotlightPriority: { type: Number, default: 0 },
+    spotlightPriority: { type: String, enum: SPOTLIGHT_PRIORITY_VALUES, default: 'normal', set: normalizeSpotlightPriority },
     spotlightExpiresAt: { type: Date, default: null },
     isSponsored: { type: Boolean, default: false, index: true },
     isSponsoredArticle: { type: Boolean, default: false, index: true },

@@ -2,6 +2,7 @@ const PublicArticle = require('../models/Article');
 const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 const { INDIA_STATES_UTS, isValidStateSlug } = require('../src/utils/locationTagger');
 const { ensureTrackTag, normalizeTrackValue } = require('./communitySubmissionWorkflow');
+const { normalizeSpotlightPriority } = require('./spotlightPriority.service');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 
@@ -280,7 +281,7 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     deletedAt: normalizedStatus === 'deleted' ? (newsDoc.deletedAt || new Date()) : null,
     spotlightEnabled: Boolean(newsDoc.spotlightEnabled),
     spotlightPinned: Boolean(newsDoc.spotlightPinned),
-    spotlightPriority: Number.isFinite(Number(newsDoc.spotlightPriority)) ? Number(newsDoc.spotlightPriority) : 0,
+    spotlightPriority: normalizeSpotlightPriority(newsDoc.spotlightPriority),
     spotlightExpiresAt: newsDoc.spotlightExpiresAt || null,
     isSponsored: Boolean(newsDoc.isSponsoredArticle || newsDoc.isSponsored),
     isSponsoredArticle: Boolean(newsDoc.isSponsoredArticle || newsDoc.isSponsored),

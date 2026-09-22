@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 const { YOUTH_PULSE_TRACKS, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
+const { SPOTLIGHT_PRIORITY_VALUES, normalizeSpotlightPriority } = require('../services/spotlightPriority.service');
 
 // Workflow stages
 // Admin panel (new) expects lowercase identifiers.
@@ -448,7 +449,7 @@ const newsSchema = new mongoose.Schema({
   deletedAt: { type: Date, default: null },
   spotlightEnabled: { type: Boolean, default: false },
   spotlightPinned: { type: Boolean, default: false },
-  spotlightPriority: { type: Number, default: 0 },
+  spotlightPriority: { type: String, enum: SPOTLIGHT_PRIORITY_VALUES, default: 'normal', set: normalizeSpotlightPriority },
   spotlightExpiresAt: { type: Date, default: null },
   isSponsored: { type: Boolean, default: false, index: true },
   isSponsoredArticle: { type: Boolean, default: false, index: true },

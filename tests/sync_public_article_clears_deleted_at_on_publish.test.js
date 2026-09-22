@@ -53,7 +53,7 @@ test('syncPublicArticleFromNews clears stale deletedAt when source news is publi
     assert.deepEqual(lastUpdate.$set.tags, ['desk:youth-pulse', 'track:student-voices']);
     assert.equal(lastUpdate.$set.spotlightEnabled, false);
     assert.equal(lastUpdate.$set.spotlightPinned, false);
-    assert.equal(lastUpdate.$set.spotlightPriority, 0);
+    assert.equal(lastUpdate.$set.spotlightPriority, 'normal');
     assert.equal(lastUpdate.$set.spotlightExpiresAt, null);
   } finally {
     PublicArticle.findOneAndUpdate = originalFindOneAndUpdate;
@@ -88,7 +88,7 @@ test('syncPublicArticleFromNews copies Spotlight fields to the public article', 
       originalLang: 'en',
       spotlightEnabled: true,
       spotlightPinned: true,
-      spotlightPriority: 9,
+      spotlightPriority: 'important',
       spotlightExpiresAt: expiresAt,
       publishedAt: new Date('2026-03-31T19:04:23.859Z'),
     });
@@ -96,7 +96,7 @@ test('syncPublicArticleFromNews copies Spotlight fields to the public article', 
     assert.ok(lastUpdate);
     assert.equal(lastUpdate.$set.spotlightEnabled, true);
     assert.equal(lastUpdate.$set.spotlightPinned, true);
-    assert.equal(lastUpdate.$set.spotlightPriority, 9);
+    assert.equal(lastUpdate.$set.spotlightPriority, 'important');
     assert.equal(lastUpdate.$set.spotlightExpiresAt, expiresAt);
   } finally {
     PublicArticle.findOneAndUpdate = originalFindOneAndUpdate;

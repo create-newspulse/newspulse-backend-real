@@ -40,6 +40,7 @@ const {
 
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
 const { ensureTrackTag, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
+const { normalizeSpotlightPriority } = require('../services/spotlightPriority.service');
 const {
   normalizeTranslationGroupKey,
   prepareSourceSyncMetadata,
@@ -903,7 +904,7 @@ function _buildSharedSyncFieldsFromBody(body) {
   const normalizedTrack = trackRaw === undefined ? undefined : normalizeTrackValue(trackRaw);
   const spotlightEnabled = _normalizeOptionalBoolean(body?.spotlightEnabled);
   const spotlightPinned = _normalizeOptionalBoolean(body?.spotlightPinned);
-  const spotlightPriority = _normalizeOptionalNumber(body?.spotlightPriority);
+  const spotlightPriority = body?.spotlightPriority === undefined ? undefined : normalizeSpotlightPriority(body.spotlightPriority);
   const spotlightExpiresAt = _normalizeOptionalDateInput(body?.spotlightExpiresAt);
 
   return {
@@ -915,7 +916,7 @@ function _buildSharedSyncFieldsFromBody(body) {
     ...(normalizedTrack !== undefined ? { track: normalizedTrack } : {}),
     ...(spotlightEnabled !== undefined ? { spotlightEnabled: Boolean(spotlightEnabled) } : {}),
     ...(spotlightPinned !== undefined ? { spotlightPinned: Boolean(spotlightPinned) } : {}),
-    ...(spotlightPriority !== undefined ? { spotlightPriority: spotlightPriority === null ? 0 : spotlightPriority } : {}),
+    ...(spotlightPriority !== undefined ? { spotlightPriority } : {}),
     ...(spotlightExpiresAt !== undefined ? { spotlightExpiresAt } : {}),
   };
 }
