@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
+const mongoose = require('mongoose');
 
 process.env.NODE_ENV = 'test';
 
@@ -8,15 +9,31 @@ const app = require('../server');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
 const PushHistory = require('../models/PushHistory');
-const { buildPublicCategoryFilter, isSupportedPublicCategory } = require('../lib/categories');
+const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey, isSupportedPublicCategory } = require('../lib/categories');
 const { publishCanonicalArticle } = require('../services/articlePublishing.service');
 
 const NEW_CATEGORY_VALUES = ['faith-culture', 'pulse-dialogue', 'tech-gadgets'];
-const EXISTING_CATEGORY_VALUES = ['national', 'business', 'lifestyle', 'editorial', 'sports'];
+const EXISTING_CATEGORY_VALUES = ['national', 'business', 'lifestyle', 'editorial', 'sports', 'tech'];
 
 function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
   const b64 = Buffer.from(`${email}:0`, 'utf8').toString('base64');
   return `np.${b64}`;
+}
+
+function matchesCategoryFilter(filterValue, category) {
+  if (!filterValue) return true;
+  const value = String(category || '');
+  if (filterValue instanceof RegExp) return filterValue.test(value);
+  return filterValue === value;
+}
+
+function makeArticleQuery(items) {
+  return {
+    sort() { return this; },
+    skip() { return this; },
+    limit() { return this; },
+    lean: async () => items,
+  };
 }
 
 function makeNewsDoc(overrides = {}) {
@@ -106,12 +123,56 @@ test('Article category enum keeps existing categories and accepts new categories
   await existing.validate();
 });
 
-test('public category filtering recognizes existing and new category slugs', () => {
-  for (const category of ['national', ...NEW_CATEGORY_VALUES]) {
+test('public category filtering recognizes existing and new category slugs without merging tech and tech-gadgets', () => {
+  for (const category of ['national', 'tech', ...NEW_CATEGORY_VALUES]) {
     assert.equal(isSupportedPublicCategory(category, PublicArticle.CATEGORY_VALUES), true);
     const filter = buildPublicCategoryFilter(category);
     assert.ok(filter instanceof RegExp);
     assert.equal(filter.test(category), true);
+  }
+
+  assert.equal(getCanonicalPublicCategoryKey('science-technology'), 'tech');
+  assert.equal(getCanonicalPublicCategoryKey('tech-gadgets'), 'tech-gadgets');
+
+  const scienceTechnologyFilter = buildPublicCategoryFilter('tech');
+  const techGadgetsFilter = buildPublicCategoryFilter('tech-gadgets');
+  assert.equal(scienceTechnologyFilter.test('tech'), true);
+  assert.equal(scienceTechnologyFilter.test('science-technology'), true);
+  assert.equal(scienceTechnologyFilter.test('tech-gadgets'), false);
+  assert.equal(techGadgetsFilter.test('tech-gadgets'), true);
+  assert.equal(techGadgetsFilter.test('tech'), false);
+  assert.equal(techGadgetsFilter.test('science-technology'), false);
+});
+
+test('GET /api/public/stories keeps Science Technology tech articles separate from tech-gadgets', async () => {
+  const prevReadyState = mongoose.connection.readyState;
+  const prevFind = PublicArticle.find;
+
+  try {
+    mongoose.connection.readyState = 1;
+
+    const docs = [
+      { _id: '507f1f77bcf86cd799439821', title: 'Science Technology Story', summary: 'Science summary', content: 'Science body', slug: 'science-technology-story', category: 'tech', status: 'published', language: 'en', originalLang: 'en', publishedAt: new Date('2026-01-01T00:00:00.000Z') },
+      { _id: '507f1f77bcf86cd799439822', title: 'Tech Gadgets Story', summary: 'Gadgets summary', content: 'Gadgets body', slug: 'tech-gadgets-story', category: 'tech-gadgets', status: 'published', language: 'en', originalLang: 'en', publishedAt: new Date('2026-01-02T00:00:00.000Z') },
+    ];
+
+    PublicArticle.find = (query) => {
+      if (!query || !query.category) return makeArticleQuery([]);
+      return makeArticleQuery(docs.filter((doc) => matchesCategoryFilter(query.category, doc.category)));
+    };
+
+    const scienceRes = await request(app).get('/api/public/stories?category=tech&lang=en&limit=10');
+    assert.equal(scienceRes.status, 200);
+    assert.deepEqual(scienceRes.body.data.map((item) => item.category), ['tech']);
+    assert.deepEqual(scienceRes.body.data.map((item) => item.slug), ['science-technology-story']);
+
+    const gadgetsRes = await request(app).get('/api/public/stories?category=tech-gadgets&lang=en&limit=10');
+    assert.equal(gadgetsRes.status, 200);
+    assert.deepEqual(gadgetsRes.body.data.map((item) => item.category), ['tech-gadgets']);
+    assert.deepEqual(gadgetsRes.body.data.map((item) => item.slug), ['tech-gadgets-story']);
+  } finally {
+    PublicArticle.find = prevFind;
+    mongoose.connection.readyState = prevReadyState;
   }
 });
 
