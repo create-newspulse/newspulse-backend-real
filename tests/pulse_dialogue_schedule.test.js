@@ -12,6 +12,7 @@ const Contributor = require('../models/Contributor');
 const PushHistory = require('../models/PushHistory');
 const { publishCanonicalArticle } = require('../services/articlePublishing.service');
 const { publishDueScheduledArticles } = require('../services/scheduledPublication.service');
+const { getPulseDialogueStandardText } = require('../services/pulseDialogue.service');
 
 function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
   const b64 = Buffer.from(`${email}:0`, 'utf8').toString('base64');
@@ -276,14 +277,22 @@ test('due Pulse scheduled article publishes through canonical pipeline and syncs
   assert.equal(stats.skipped, 2);
   assert.equal(stats.failed, 0);
   for (const doc of docs) {
+    const standard = getPulseDialogueStandardText(doc.language);
     assert.equal(doc.status, 'published');
     assert.equal(doc.scheduledAt, null);
     assert.equal(doc.publishAt, null);
     assert.equal(doc.workflowStage, 'PUBLISHED');
     assert.equal(doc.pulseDialogue.contributorId, '507f1f77bcf86cd79943a001');
     assert.equal(doc.pulseDialogue.bylineSnapshot.name, 'Public Pulse Writer');
+    assert.equal(doc.pulseDialogue.contributorDisclosure, standard.contributorDisclosure);
+    assert.equal(doc.pulseDialogue.contributorDisclaimer, standard.contributorDisclaimer);
   }
   assert.equal(publicUpdates.length, 3);
+  for (const update of publicUpdates) {
+    const standard = getPulseDialogueStandardText(update.$set.language);
+    assert.equal(update.$set.pulseDialogue.contributorDisclosure, standard.contributorDisclosure);
+    assert.equal(update.$set.pulseDialogue.contributorDisclaimer, standard.contributorDisclaimer);
+  }
   const publicPulse = publicUpdates[0].$set.pulseDialogue;
   assert.equal(publicPulse.contributorId, '507f1f77bcf86cd79943a001');
   assert.equal(publicPulse.contributor.name, 'Public Pulse Writer');
@@ -343,5 +352,10 @@ test('manual Pulse publish still prepares byline snapshot and public sync', asyn
   assert.deepEqual(result.publishedLanguages.sort(), ['en', 'gu', 'hi']);
   assert.equal(docs[0].pulseDialogue.bylineSnapshot.name, 'Public Pulse Writer');
   assert.equal(publicUpdates.length, 3);
+  for (const update of publicUpdates) {
+    const standard = getPulseDialogueStandardText(update.$set.language);
+    assert.equal(update.$set.pulseDialogue.contributorDisclosure, standard.contributorDisclosure);
+    assert.equal(update.$set.pulseDialogue.contributorDisclaimer, standard.contributorDisclaimer);
+  }
   assert.equal(publicUpdates[0].$set.pulseDialogue.contributor.internalEmail, undefined);
 });

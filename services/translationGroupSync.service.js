@@ -2,6 +2,7 @@ const crypto = require('crypto');
 
 const News = require('../models/News');
 const { syncPublicArticleFromNews } = require('./syncPublicArticleFromNews.service');
+const { applyPulseDialogueStandardText } = require('./pulseDialogue.service');
 const {
   buildArticleRevalidationTargets,
   notifyPublicContentInvalidation,
@@ -272,7 +273,7 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
     embeds: normalizeStringArray(master.embeds),
     gallery: normalizeStringArray(master.gallery),
     seo: buildSeoObject(master.seo),
-    pulseDialogue: cloneSimple(master.pulseDialogue || null),
+    pulseDialogue: master.pulseDialogue ? applyPulseDialogueStandardText(cloneSimple(master.pulseDialogue), childLang) : null,
     translationKey: getGroupKey(master),
     translationGroupId: getGroupKey(master),
     syncMode: 'auto',

@@ -11,7 +11,10 @@ const {
   normalizeTranslationGroupKey,
   prepareSourceSyncMetadata,
 } = require('./translationGroupSync.service');
-const { preparePulseDialogueForPublication } = require('./pulseDialogue.service');
+const {
+  applyPulseDialogueStandardText,
+  preparePulseDialogueForPublication,
+} = require('./pulseDialogue.service');
 
 const REQUIRED_LANGUAGES = ['en', 'hi', 'gu'];
 
@@ -234,6 +237,9 @@ function buildManualTranslationSibling(sourceDoc, targetLang, groupKey, actor) {
   const coverImage = sourceObject.coverImage && typeof sourceObject.coverImage === 'object' && !Array.isArray(sourceObject.coverImage)
     ? { ...sourceObject.coverImage }
     : undefined;
+  const pulseDialogue = sourceObject.pulseDialogue
+    ? applyPulseDialogueStandardText(sourceObject.pulseDialogue, targetLang)
+    : undefined;
 
   return {
     title: safeText(bucket.title),
@@ -255,7 +261,7 @@ function buildManualTranslationSibling(sourceDoc, targetLang, groupKey, actor) {
     embeds: Array.isArray(sourceObject.embeds) ? sourceObject.embeds : [],
     gallery: Array.isArray(sourceObject.gallery) ? sourceObject.gallery : [],
     seo: sourceObject.seo,
-    pulseDialogue: sourceObject.pulseDialogue || undefined,
+    pulseDialogue,
     slug: slugs[targetLang],
     slugs,
     lang: targetLang,

@@ -11,6 +11,7 @@ const googleTranslation = require('../services/googleTranslationService');
 const {
   generateArticleTranslations,
 } = require('../services/articleTranslationGeneration.service');
+const { getPulseDialogueStandardText } = require('../services/pulseDialogue.service');
 
 function restore(originals) {
   for (const [key, value] of Object.entries(originals)) News[key] = value;
@@ -970,6 +971,7 @@ test('English article generates Hindi and Gujarati sibling drafts only', async (
     assert.ok(created.every((item) => item.translationGroupId === 'grp-auto-1'));
     assert.ok(created.every((item) => item.status === 'draft'));
     assert.ok(created.every((item) => item.translationReviewStatus === 'review_required'));
+    assert.ok(created.every((item) => item.pulseDialogue === undefined));
   } finally {
     restore(originals);
     global.fetch = prevFetch;
@@ -1209,6 +1211,62 @@ test('Hindi and Gujarati source articles generate the other supported languages'
 
     const gu = await generateArticleTranslations(makeSource({ language: 'gu', lang: 'gu', originalLang: 'gu' }), { targetLanguages: ['en', 'hi', 'gu'] });
     assert.deepEqual(Object.keys(gu.created).sort(), ['en', 'hi']);
+  } finally {
+    restore(originals);
+    global.fetch = prevFetch;
+  }
+});
+
+test('Pulse Dialogue translation generation uses fixed standard texts for every target language', async () => {
+  const originals = { findOne: News.findOne, create: News.create, updateOne: News.updateOne };
+  const prevFetch = global.fetch;
+  const contributorId = '507f1f77bcf86cd799439a07';
+  const makePulseSource = (lang) => makeSource({
+    category: 'pulse-dialogue',
+    language: lang,
+    lang,
+    originalLang: lang,
+    pulseDialogue: {
+      contributorId,
+      dialogueFormat: 'essay',
+      series: 'Ideas',
+      bylineDesignationOverride: 'Guest Columnist',
+      bylineSnapshot: { name: 'Contributor Name', designation: 'Guest Columnist', affiliation: 'Forum' },
+      contributorDisclosure: `Machine translation bait disclosure ${lang}`,
+      editorNote: `Article-specific editor note ${lang}`,
+      contributorDisclaimer: `Machine translation bait disclaimer ${lang}`,
+      showAboutContributor: true,
+    },
+  });
+
+  try {
+    News.findOne = async () => null;
+    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+    global.fetch = async (_url, opts) => {
+      const body = JSON.parse(String(opts.body || '{}'));
+      return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
+    };
+
+    for (const sourceLang of ['en', 'hi', 'gu']) {
+      const created = [];
+      News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd799439${payload.language}7`, ...payload }; };
+
+      const result = await generateArticleTranslations(makePulseSource(sourceLang), { targetLanguages: ['en', 'hi', 'gu'] });
+      const expectedTargets = ['en', 'hi', 'gu'].filter((lang) => lang !== sourceLang);
+      assert.equal(result.ok, true);
+      assert.deepEqual(created.map((item) => item.language).sort(), expectedTargets.sort());
+
+      for (const payload of created) {
+        const standard = getPulseDialogueStandardText(payload.language);
+        assert.equal(payload.pulseDialogue.contributorDisclosure, standard.contributorDisclosure);
+        assert.equal(payload.pulseDialogue.contributorDisclaimer, standard.contributorDisclaimer);
+        assert.equal(payload.pulseDialogue.editorNote, `Article-specific editor note ${sourceLang}`);
+        assert.equal(String(payload.pulseDialogue.contributorId), contributorId);
+        assert.equal(payload.pulseDialogue.bylineSnapshot.name, 'Contributor Name');
+        assert.ok(!payload.pulseDialogue.contributorDisclosure.startsWith(`${payload.language}:`));
+        assert.ok(!payload.pulseDialogue.contributorDisclaimer.startsWith(`${payload.language}:`));
+      }
+    }
   } finally {
     restore(originals);
     global.fetch = prevFetch;

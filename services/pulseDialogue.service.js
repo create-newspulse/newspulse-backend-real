@@ -31,6 +31,50 @@ const DIALOGUE_FORMAT_VALUES = [
   'open_letter',
 ];
 
+const PULSE_DIALOGUE_STANDARD_TEXT_BY_LANGUAGE = Object.freeze({
+  en: Object.freeze({
+    contributorDisclosure: 'This article is a contributor submission published after editorial review by News Pulse.',
+    contributorDisclaimer: 'The views expressed in this contribution are those of the author and do not necessarily reflect the views of News Pulse.',
+  }),
+  hi: Object.freeze({
+    contributorDisclosure: "यह लेख 'न्यूज़ पल्स' द्वारा संपादकीय समीक्षा के बाद प्रकाशित एक प्रस्तुति है।",
+    contributorDisclaimer: "इसमें व्यक्त किए गए विचार लेखक के हैं और ज़रूरी नहीं कि वे 'न्यूज़ पल्स' के विचारों को दर्शाते हों।",
+  }),
+  gu: Object.freeze({
+    contributorDisclosure: 'આ લેખ ન્યૂઝ પલ્સની સંપાદકીય સમીક્ષા બાદ વાચકો સમક્ષ પ્રસ્તુત કરવામાં આવ્યો છે',
+    contributorDisclaimer: 'આ લેખમાં વ્યક્ત કરાયેલા વિચારો લેખકના વ્યક્તિગત અભિપ્રાયો છે અને ન્યૂઝ પલ્સ તેની સાથે સહમત હોય તે જરૂરી નથી.',
+  }),
+});
+
+function normalizePulseDialogueLanguage(value) {
+  if (value === null || value === undefined) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  if (/[\u0A80-\u0AFF]/.test(raw)) return 'gu';
+  if (/[\u0900-\u097F]/.test(raw)) return 'hi';
+  const lower = raw.toLowerCase();
+  const primary = lower.split(/[-_]/)[0];
+  if (['en', 'hi', 'gu'].includes(primary)) return primary;
+  const lettersOnly = lower.replace(/[^a-z]/g, '');
+  if (lettersOnly === 'english' || lettersOnly === 'eng') return 'en';
+  if (lettersOnly === 'hindi' || lettersOnly === 'hin') return 'hi';
+  if (lettersOnly === 'gujarati' || lettersOnly === 'gujrati' || lettersOnly === 'guj' || lettersOnly === 'gj') return 'gu';
+  return null;
+}
+
+function getPulseDialogueStandardText(language = 'en') {
+  const lang = normalizePulseDialogueLanguage(language) || 'en';
+  return { ...PULSE_DIALOGUE_STANDARD_TEXT_BY_LANGUAGE[lang] };
+}
+
+function applyPulseDialogueStandardText(pulseDialogue, language = 'en') {
+  if (!isPlainObject(pulseDialogue)) return pulseDialogue;
+  return {
+    ...pulseDialogue,
+    ...getPulseDialogueStandardText(language),
+  };
+}
+
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -298,9 +342,7 @@ async function assertContributorExists(contributorId) {
 }
 
 function getArticleLanguage(docLike) {
-  const raw = String(docLike?.language || docLike?.lang || docLike?.originalLang || 'en').trim().toLowerCase();
-  const primary = raw.split(/[-_]/)[0];
-  return ['en', 'hi', 'gu'].includes(primary) ? primary : 'en';
+  return normalizePulseDialogueLanguage(docLike?.language || docLike?.lang || docLike?.originalLang) || 'en';
 }
 
 async function preparePulseDialogueForPublication(docLike) {
@@ -330,11 +372,11 @@ async function preparePulseDialogueForPublication(docLike) {
 
   const language = getArticleLanguage(docLike);
   const snapshot = buildBylineSnapshot(contributor, language, pulse.bylineDesignationOverride);
-  const nextPulse = {
+  const nextPulse = applyPulseDialogueStandardText({
     ...pulse,
     contributorId: pulse.contributorId,
     bylineSnapshot: snapshot,
-  };
+  }, language);
 
   docLike.pulseDialogue = nextPulse;
   return { ok: true, changed: true, contributor, bylineSnapshot: snapshot };
@@ -351,12 +393,12 @@ async function buildPublicPulseDialogueFromArticle(docLike) {
   const publicBylineSnapshot = bylineSnapshot && !bylineSnapshot.photo && publicContributor?.photo
     ? { ...bylineSnapshot, photo: publicContributor.photo }
     : bylineSnapshot;
-  const out = normalizePublicPulseDialogue({
+  const out = normalizePublicPulseDialogue(applyPulseDialogueStandardText({
     ...pulse,
     contributorId: pulse.contributorId || null,
     ...(publicBylineSnapshot ? { bylineSnapshot: publicBylineSnapshot } : {}),
     contributor: publicContributor,
-  });
+  }, language));
   return out;
 }
 
@@ -366,9 +408,10 @@ async function attachPublicPulseDialogueContributor(docLike, language) {
   if (!pulse || !pulse.contributorId) return docLike;
   const contributor = await findContributorById(pulse.contributorId);
   if (!contributor) return docLike;
+  const resolvedLanguage = language || getArticleLanguage(docLike);
   docLike.pulseDialogue = {
-    ...pulse,
-    contributor: buildPublicContributor(contributor, language || getArticleLanguage(docLike)),
+    ...applyPulseDialogueStandardText(pulse, resolvedLanguage),
+    contributor: buildPublicContributor(contributor, resolvedLanguage),
   };
   return docLike;
 }
@@ -379,15 +422,18 @@ module.exports = {
   CONTRIBUTOR_TYPE_VALUES,
   DIALOGUE_FORMAT_VALUES,
   assertContributorExists,
+  applyPulseDialogueStandardText,
   attachPublicPulseDialogueContributor,
   buildBylineSnapshot,
   buildPublicPulseDialogueFromArticle,
   buildPublicContributor,
   findContributorById,
   getArticleLanguage,
+  getPulseDialogueStandardText,
   isPlainObject,
   isPulseDialogueArticle,
   normalizeContributorPayload,
+  normalizePulseDialogueLanguage,
   normalizeNullableString,
   normalizePhoto,
   normalizePublicPulseDialogue,

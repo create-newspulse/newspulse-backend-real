@@ -13,10 +13,26 @@ const {
 } = require('../services/translationGroupSync.service');
 const {
   buildPublicContributor,
+  getPulseDialogueStandardText,
   normalizePulseDialoguePayload,
   preparePulseDialogueForPublication,
 } = require('../services/pulseDialogue.service');
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
+
+const APPROVED_PULSE_DIALOGUE_TEXT = {
+  en: {
+    contributorDisclosure: 'This article is a contributor submission published after editorial review by News Pulse.',
+    contributorDisclaimer: 'The views expressed in this contribution are those of the author and do not necessarily reflect the views of News Pulse.',
+  },
+  hi: {
+    contributorDisclosure: "यह लेख 'न्यूज़ पल्स' द्वारा संपादकीय समीक्षा के बाद प्रकाशित एक प्रस्तुति है।",
+    contributorDisclaimer: "इसमें व्यक्त किए गए विचार लेखक के हैं और ज़रूरी नहीं कि वे 'न्यूज़ पल्स' के विचारों को दर्शाते हों।",
+  },
+  gu: {
+    contributorDisclosure: 'આ લેખ ન્યૂઝ પલ્સની સંપાદકીય સમીક્ષા બાદ વાચકો સમક્ષ પ્રસ્તુત કરવામાં આવ્યો છે',
+    contributorDisclaimer: 'આ લેખમાં વ્યક્ત કરાયેલા વિચારો લેખકના વ્યક્તિગત અભિપ્રાયો છે અને ન્યૂઝ પલ્સ તેની સાથે સહમત હોય તે જરૂરી નથી.',
+  },
+};
 
 function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
   const b64 = Buffer.from(`${email}:0`, 'utf8').toString('base64');
@@ -110,6 +126,14 @@ test('Pulse Dialogue payload accepts only approved dialogue formats for Pulse ar
   assert.match(invalid.message, /dialogueFormat/);
 });
 
+test('Pulse Dialogue standard text helper returns exact approved EN HI GU copy', () => {
+  for (const lang of ['en', 'hi', 'gu']) {
+    const standard = getPulseDialogueStandardText(lang);
+    assert.equal(standard.contributorDisclosure, APPROVED_PULSE_DIALOGUE_TEXT[lang].contributorDisclosure);
+    assert.equal(standard.contributorDisclaimer, APPROVED_PULSE_DIALOGUE_TEXT[lang].contributorDisclaimer);
+  }
+});
+
 test('publish preparation builds language-aware byline snapshots and requires active contributors', async () => {
   const originals = { findById: Contributor.findById };
   const contributorId = '507f1f77bcf86cd799439a03';
@@ -134,13 +158,20 @@ test('publish preparation builds language-aware byline snapshots and requires ac
         contributorId,
         dialogueFormat: 'essay',
         bylineDesignationOverride: 'Visiting Professor',
+        contributorDisclosure: 'Custom disclosure must not publish',
+        editorNote: 'Article-specific editor note',
+        contributorDisclaimer: 'Custom disclaimer must not publish',
       },
     };
 
     await preparePulseDialogueForPublication(doc);
+    const standard = getPulseDialogueStandardText('hi');
     assert.equal(doc.pulseDialogue.bylineSnapshot.name, 'डॉ. अनिल मेहता');
     assert.equal(doc.pulseDialogue.bylineSnapshot.designation, 'Visiting Professor');
     assert.equal(doc.pulseDialogue.bylineSnapshot.affiliation, 'Gujarat University');
+    assert.equal(doc.pulseDialogue.contributorDisclosure, standard.contributorDisclosure);
+    assert.equal(doc.pulseDialogue.contributorDisclaimer, standard.contributorDisclaimer);
+    assert.equal(doc.pulseDialogue.editorNote, 'Article-specific editor note');
 
     Contributor.findById = () => ({
       lean: async () => ({ _id: contributorId, canonicalName: 'Inactive Writer', status: 'inactive' }),
@@ -202,14 +233,21 @@ test('News to public Article sync copies only public-safe Pulse Dialogue data', 
         contributorId,
         dialogueFormat: 'essay',
         bylineSnapshot: { name: 'Public Writer', designation: 'Columnist', affiliation: 'News Pulse Forum' },
+        contributorDisclosure: 'Custom disclosure must not sync',
+        editorNote: 'Public article-specific editor note',
+        contributorDisclaimer: 'Custom disclaimer must not sync',
         showAboutContributor: true,
       },
     });
 
     assert.equal(saved._id, 'public-copy');
+    const standard = getPulseDialogueStandardText('en');
     const pulse = capturedUpdate.$set.pulseDialogue;
     assert.equal(pulse.contributorId, contributorId);
     assert.equal(pulse.dialogueFormat, 'essay');
+    assert.equal(pulse.contributorDisclosure, standard.contributorDisclosure);
+    assert.equal(pulse.contributorDisclaimer, standard.contributorDisclaimer);
+    assert.equal(pulse.editorNote, 'Public article-specific editor note');
     assert.equal(pulse.contributor.name, 'Public Writer');
     assert.equal(pulse.contributor.shortBio, 'Writes on public policy.');
     assert.deepEqual(pulse.contributor.photo, { url: 'https://cdn.example.test/public-writer.jpg', publicId: 'public-writer-photo', alt: 'Public Writer portrait' });
@@ -238,7 +276,15 @@ test('translation group child sync preserves Pulse Dialogue contributor identity
       lang: 'en',
       originalLang: 'en',
       translationGroupId: 'pulse-group-1',
-      pulseDialogue: { contributorId, dialogueFormat: 'essay', series: 'Ideas' },
+      pulseDialogue: {
+        contributorId,
+        dialogueFormat: 'essay',
+        series: 'Ideas',
+        contributorDisclosure: 'Source custom disclosure',
+        editorNote: 'Child-specific editor note source copy',
+        contributorDisclaimer: 'Source custom disclaimer',
+        bylineSnapshot: { name: 'Source Writer', designation: 'Essayist', affiliation: 'Forum' },
+      },
     },
     {
       _id: '507f1f77bcf86cd799439c02',
@@ -249,9 +295,14 @@ test('translation group child sync preserves Pulse Dialogue contributor identity
     }
   );
 
+  const standard = getPulseDialogueStandardText('hi');
   assert.equal(String(patch.pulseDialogue.contributorId), contributorId);
   assert.equal(patch.pulseDialogue.dialogueFormat, 'essay');
   assert.equal(patch.pulseDialogue.series, 'Ideas');
+  assert.equal(patch.pulseDialogue.contributorDisclosure, standard.contributorDisclosure);
+  assert.equal(patch.pulseDialogue.contributorDisclaimer, standard.contributorDisclaimer);
+  assert.equal(patch.pulseDialogue.editorNote, 'Child-specific editor note source copy');
+  assert.equal(patch.pulseDialogue.bylineSnapshot.name, 'Source Writer');
 });
 
 test('public contributor DTO excludes private Contributor fields', () => {

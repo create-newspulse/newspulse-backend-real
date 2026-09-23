@@ -5,6 +5,7 @@ const TranslationJob = require('../models/TranslationJob');
 const { slugifyUnicode } = require('../lib/slug');
 const { invalidateArticleCaches, invalidateArticleLanguageCaches } = require('../lib/cache');
 const googleTranslation = require('./googleTranslationService');
+const { applyPulseDialogueStandardText } = require('./pulseDialogue.service');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 const JOB_TYPE = 'article-translation-generate';
@@ -136,6 +137,10 @@ function buildTranslatedPayload(source, translated, { targetLang, sourceLang, gr
   if (translated.metaDescription) seo.metaDescription = translated.metaDescription;
   if (translated.socialDescription) seo.socialDescription = translated.socialDescription;
 
+  const pulseDialogue = source.pulseDialogue
+    ? applyPulseDialogueStandardText(source.pulseDialogue, targetLang)
+    : undefined;
+
   return {
     title: translated.title || source.title,
     description: translated.description || source.description || source.summary,
@@ -156,7 +161,7 @@ function buildTranslatedPayload(source, translated, { targetLang, sourceLang, gr
     embeds: Array.isArray(source.embeds) ? source.embeds : [],
     gallery: Array.isArray(source.gallery) ? source.gallery : [],
     seo,
-    pulseDialogue: source.pulseDialogue || undefined,
+    pulseDialogue,
     slug: targetSlug,
     slugs,
     lang: targetLang,
