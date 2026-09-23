@@ -1416,59 +1416,8 @@ async function _publishScheduledTick() {
   if (_publishTickInFlight) return;
   _publishTickInFlight = true;
   try {
-    if (mongoose.connection.readyState !== 1) return;
-    const News = require('./models/News');
-    const PushHistory = require('./models/PushHistory');
-    const now = new Date();
-
-    const candidates = await News.find({
-      status: 'scheduled',
-      scheduledAt: { $lte: now },
-      $and: [
-        { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
-        { $or: [{ locked: { $ne: true } }, { locked: { $exists: false } }] },
-        { $or: [{ embargoUntil: null }, { embargoUntil: { $exists: false } }, { embargoUntil: { $lte: now } }] },
-      ],
-    }).limit(50);
-
-    for (const doc of candidates) {
-      try {
-        const fromStage = String(doc.workflowStage || 'SCHEDULED');
-        doc.status = 'published';
-        doc.publishedAt = now;
-        doc.publishAt = null;
-        doc.workflowStage = 'PUBLISHED';
-        doc.workflowUpdatedAt = now;
-        doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
-        doc.workflowHistory.push({
-          at: now,
-          byUserId: null,
-          byRole: 'SYSTEM',
-          action: 'PUBLISH',
-          fromStage,
-          toStage: 'PUBLISHED',
-          note: 'Auto-published by scheduler',
-        });
-        await doc.save();
-
-        try {
-          await PushHistory.create({
-            articleId: doc._id,
-            slug: doc.slug,
-            title: doc.title,
-            channel: 'SITE',
-            at: now,
-            byUserId: null,
-            status: 'SUCCESS',
-            meta: { source: 'scheduler' },
-          });
-        } catch (e) {
-          console.warn('[scheduler][pushHistory] create failed', e?.message || e);
-        }
-      } catch (e) {
-        console.warn('[scheduler] publish candidate failed', e?.message || e);
-      }
-    }
+    const { publishDueScheduledArticles } = require('./services/scheduledPublication.service');
+    await publishDueScheduledArticles({ logger: console });
   } catch (e) {
     console.warn('[scheduler] tick failed', e?.message || e);
   } finally {

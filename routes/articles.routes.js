@@ -2851,6 +2851,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     const beforeStatusNorm = String(before && before.status ? before.status : '').toLowerCase();
     const nextStatusNorm = update.status ? String(update.status).toLowerCase() : '';
     const isPublishingNow = beforeStatusNorm !== 'published' && nextStatusNorm === 'published';
+    const isSchedulingNow = nextStatusNorm === 'scheduled';
     const shouldTreatAsSyncSource = _isSourceTranslationDoc(before, rawId);
     if (language !== undefined || shouldFixMislabel) {
       await assertTranslationGroupLanguageUnique(before?.translationGroupId || before?.translationKey, effectiveLang, rawId);
@@ -2978,6 +2979,35 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         translationUpdatedAt: before?.translationUpdatedAt,
       }, { now });
       Object.assign(update, syncMetadata);
+    }
+
+    if (isSchedulingNow) {
+      const existingPulse = (before?.pulseDialogue && typeof before.pulseDialogue === 'object' && !Array.isArray(before.pulseDialogue))
+        ? before.pulseDialogue
+        : {};
+      const nextPulse = pulseDialogueFields.unset
+        ? undefined
+        : (pulseDialogueFields.value && Object.keys(pulseDialogueFields.value).length
+          ? { ...existingPulse, ...pulseDialogueFields.value }
+          : before?.pulseDialogue);
+      const pulseValidationDoc = { ...(before || {}), ...update, _id: rawId, pulseDialogue: nextPulse };
+      try {
+        await preparePulseDialogueForPublication(pulseValidationDoc);
+      } catch (validationError) {
+        return res.status(validationError?.statusCode || validationError?.status || 400).json({
+          ok: false,
+          success: false,
+          status: validationError?.statusCode || validationError?.status || 400,
+          message: validationError?.message || 'Pulse Dialogue validation failed',
+          ...(validationError?.details || {}),
+        });
+      }
+      if (pulseValidationDoc.pulseDialogue) {
+        for (const key of Object.keys(update)) {
+          if (key.startsWith('pulseDialogue.')) delete update[key];
+        }
+        update.pulseDialogue = pulseValidationDoc.pulseDialogue;
+      }
     }
 
     const updateKeys = Object.keys(update);
