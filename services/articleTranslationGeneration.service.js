@@ -83,6 +83,7 @@ function buildExistingQuery(groupKey, lang, excludeId) {
     $and: [
       { $or: [{ translationGroupId: groupKey }, { translationKey: groupKey }] },
       { $or: [{ language: lang }, { lang }] },
+      { status: { $ne: 'deleted' } },
       { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
     ],
   };

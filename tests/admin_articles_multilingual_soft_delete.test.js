@@ -108,6 +108,7 @@ function installRouteStubs(t, seedDocs, options = {}) {
   const originals = {
     News: {
       findById: News.findById,
+      findOne: News.findOne,
       find: News.find,
       findByIdAndUpdate: News.findByIdAndUpdate,
     },
@@ -135,6 +136,7 @@ function installRouteStubs(t, seedDocs, options = {}) {
   });
 
   News.findById = (id) => queryResult(records.get(String(id)) || null);
+  News.findOne = (query) => queryResult(typeof options.duplicateForQuery === 'function' ? options.duplicateForQuery(query, records) : null);
   News.find = (filter = {}) => {
     newsFindCalls.push(filter);
     if (filter && filter._id && filter._id.$ne) {

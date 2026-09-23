@@ -70,6 +70,7 @@ const {
   markSiblingTranslationsOutdated,
   estimateBackfill,
 } = require('../services/articleTranslationGeneration.service');
+const { assertTranslationGroupLanguageUnique } = require('../services/articleLanguageUniqueness.service');
 const { resolveFacebookShareUrl } = require('../services/googleTranslationService');
 const { invalidateArticleCaches } = require('../lib/cache');
 const { logAudit } = require('../lib/audit');
@@ -450,6 +451,23 @@ function normalizeLanguage(v) {
   return null;
 }
 
+function getStoredArticleEffectiveLanguage(docLike) {
+  return normalizeLanguage(docLike?.language)
+    || normalizeLanguage(docLike?.lang)
+    || normalizeLanguage(docLike?.originalLang)
+    || null;
+}
+
+function shouldIgnoreDefaultEnglishLanguagePayload({ requestBody, before, requestedLang }) {
+  if (requestedLang !== 'en' || !before) return false;
+  if (!Object.prototype.hasOwnProperty.call(requestBody || {}, 'language')) return false;
+  if (Object.prototype.hasOwnProperty.call(requestBody || {}, 'lang')) return false;
+
+  const storedLanguage = normalizeLanguage(before?.language);
+  const storedFallback = normalizeLanguage(before?.lang) || normalizeLanguage(before?.originalLang);
+  return !storedLanguage && Boolean(storedFallback && storedFallback !== 'en');
+}
+
 function _stripHtmlForLangDetect(v) {
   return String(v ?? '').replace(/<[^>]*>/g, ' ');
 }
@@ -588,27 +606,6 @@ async function assertSlugUnique(slug, excludeId) {
   const existing = await News.findOne(q).select('_id slug').lean();
   if (existing) {
     const err = new Error('Slug already exists');
-    err.status = 409;
-    throw err;
-  }
-}
-
-async function assertTranslationGroupLanguageUnique(groupId, lang, excludeId) {
-  const groupKey = String(groupId || '').trim();
-  const langNorm = normalizeLanguage(lang);
-  if (!groupKey || !langNorm) return;
-
-  const q = {
-    $and: [
-      { $or: [{ translationGroupId: groupKey }, { translationKey: groupKey }] },
-      { $or: [{ language: langNorm }, { lang: langNorm }] },
-    ],
-  };
-  if (excludeId) q._id = { $ne: excludeId };
-
-  const existing = await News.findOne(q).select('_id translationGroupId translationKey language lang').lean();
-  if (existing) {
-    const err = new Error('An article for this translationGroupId and language already exists');
     err.status = 409;
     throw err;
   }
@@ -2726,20 +2723,20 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       // ignore
     }
 
-    const langFromPayload = normalizeLanguage(language);
+    const langFromPayload0 = normalizeLanguage(language);
+    const langFromPayload = shouldIgnoreDefaultEnglishLanguagePayload({ requestBody, before, requestedLang: langFromPayload0 })
+      ? null
+      : langFromPayload0;
     const inferredLang = inferLanguageFromDocText({
       title: title !== undefined ? title : before?.title,
       description: (summaryOrDescription0 !== undefined ? summaryOrDescription0 : before?.description),
       content: (content !== undefined ? content : (bodyText !== undefined ? bodyText : before?.content)),
     });
-    const effectiveLang0 = langFromPayload || normalizeLanguage(before?.lang || before?.language) || 'en';
-    const effectiveLang = (
-      (langFromPayload && langFromPayload !== 'en')
-        ? langFromPayload
-        : (inferredLang && inferredLang !== 'en')
-          ? inferredLang
-          : effectiveLang0
-    );
+    const currentEffectiveLang = getStoredArticleEffectiveLanguage(before) || 'en';
+    const requestedLanguageChangesIdentity = Boolean(langFromPayload && langFromPayload !== currentEffectiveLang);
+    const effectiveLang = requestedLanguageChangesIdentity
+      ? langFromPayload
+      : ((inferredLang && inferredLang !== 'en') ? inferredLang : currentEffectiveLang);
 
     // If description is missing in the update payload AND the existing doc is missing it too,
     // fall back to a stripped excerpt of content/body (<= 180 chars).
@@ -2790,8 +2787,8 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       : (sharedSyncFields.track !== undefined ? ensureTrackTag(before?.tags || [], sharedSyncFields.track) : null);
     const geo = tagsArr ? _geoFromTags(tagsArr) : null;
 
-    const beforeBaseLang = normalizeLanguage(before?.originalLang || before?.lang || before?.language) || 'en';
-    const shouldFixMislabel = Boolean((!langFromPayload || langFromPayload === 'en') && inferredLang && inferredLang !== 'en' && beforeBaseLang === 'en');
+    const beforeBaseLang = getStoredArticleEffectiveLanguage(before) || 'en';
+    const shouldFixMislabel = Boolean(!requestedLanguageChangesIdentity && inferredLang && inferredLang !== 'en' && beforeBaseLang === 'en');
     const editorialPatch = _buildEditorialTypePatch({
       category,
       existingCategory: before?.category,
@@ -2817,7 +2814,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       ...(category !== undefined ? { category } : {}),
       ...(editorialPatch.value !== undefined ? { editorialType: editorialPatch.value } : {}),
       ...(sharedSyncFields.track !== undefined ? { track: sharedSyncFields.track } : {}),
-      ...((language !== undefined || shouldFixMislabel) ? { language: effectiveLang, lang: effectiveLang, originalLang: effectiveLang } : {}),
+      ...((requestedLanguageChangesIdentity || shouldFixMislabel) ? { language: effectiveLang, lang: effectiveLang, originalLang: effectiveLang } : {}),
       ...(loc.state !== undefined ? { 'location.state': loc.state, 'location.stateSlug': loc.stateSlug ?? null } : {}),
       ...(loc.district !== undefined ? { 'location.district': loc.district, 'location.districtSlug': loc.districtSlug ?? null } : {}),
       ...(loc.city !== undefined ? { 'location.city': loc.city, 'location.citySlug': loc.citySlug ?? null } : {}),
@@ -2858,8 +2855,11 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     const nextStatusNorm = update.status ? String(update.status).toLowerCase() : '';
     const isPublishingNow = beforeStatusNorm !== 'published' && nextStatusNorm === 'published';
     const isSchedulingNow = nextStatusNorm === 'scheduled';
+    const isRestoringDeleted = beforeStatusNorm === 'deleted' && nextStatusNorm && nextStatusNorm !== 'deleted';
+    const nextEffectiveStatus = nextStatusNorm || beforeStatusNorm;
+    const willOccupyActiveLanguageSlot = nextEffectiveStatus !== 'deleted';
     const shouldTreatAsSyncSource = _isSourceTranslationDoc(before, rawId);
-    if (language !== undefined || shouldFixMislabel) {
+    if (willOccupyActiveLanguageSlot && (before?.translationGroupId || before?.translationKey) && effectiveLang) {
       await assertTranslationGroupLanguageUnique(before?.translationGroupId || before?.translationKey, effectiveLang, rawId);
     }
 

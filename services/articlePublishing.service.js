@@ -300,6 +300,7 @@ async function createSiblingsFromCachedTranslations(sourceDoc, missingLanguages,
       $and: [
         { $or: [{ translationGroupId: groupKey }, { translationKey: groupKey }] },
         { $or: [{ language: lang }, { lang }] },
+        { status: { $ne: 'deleted' } },
         { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
       ],
     }).select('_id').lean();

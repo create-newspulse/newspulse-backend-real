@@ -453,10 +453,13 @@ test('Updating Gujarati article does not modify English or Hindi siblings', asyn
     assert.equal(res.status, 200);
     assert.ok(updates.length >= 1);
     assert.ok(updates.every((update) => update.targetId === id));
-    const languageUpdate = updates.find((update) => update.op?.$set?.language === 'gu');
-    assert.ok(languageUpdate);
-    assert.equal(languageUpdate.op.$set.title, 'નવું ગુજરાતી');
-    assert.equal(languageUpdate.op.$set.lang, 'gu');
+    const contentUpdate = updates.find((update) => update.op?.$set?.title === 'નવું ગુજરાતી');
+    assert.ok(contentUpdate);
+    assert.equal(contentUpdate.op.$set.description, 'નવો સારાંશ');
+    assert.equal(contentUpdate.op.$set.content, 'નવું મુખ્ય લખાણ');
+    assert.equal(Object.prototype.hasOwnProperty.call(contentUpdate.op.$set, 'language'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(contentUpdate.op.$set, 'lang'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(contentUpdate.op.$set, 'originalLang'), false);
   } finally {
     News.findById = prevFindById;
     News.findByIdAndUpdate = prevFindByIdAndUpdate;

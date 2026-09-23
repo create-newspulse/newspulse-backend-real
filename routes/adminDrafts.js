@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const News = require('../models/News');
 const { logAudit } = require('../lib/audit');
+const { assertArticleTranslationGroupLanguageUnique } = require('../services/articleLanguageUniqueness.service');
 let { requireAdminAuth } = (() => { try { return require('../middleware/adminAuth'); } catch (_) { return { requireAdminAuth: (_req,_res,next)=>next() }; } })();
 
 const router = express.Router();
@@ -115,6 +116,7 @@ router.post('/drafts/:id/restore', requireAdminAuth, async (req, res) => {
     if (!doc) {
       return res.status(404).json({ ok: false, success: false, message: 'Draft not found' });
     }
+    await assertArticleTranslationGroupLanguageUnique(doc, id);
     doc.status = 'draft';
     if ('deletedAt' in doc) doc.deletedAt = null;
     await doc.save();
@@ -122,7 +124,8 @@ router.post('/drafts/:id/restore', requireAdminAuth, async (req, res) => {
     return res.json({ ok: true, success: true, data: doc });
   } catch (err) {
     console.error('[ADMIN_DRAFTS][restore-error]', err?.message || err);
-    return res.status(500).json({ ok: false, success: false, message: 'Failed to restore draft' });
+    const status = Number(err?.status) || 500;
+    return res.status(status).json({ ok: false, success: false, message: status === 500 ? 'Failed to restore draft' : err.message });
   }
 });
 
