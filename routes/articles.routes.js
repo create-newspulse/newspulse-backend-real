@@ -2707,8 +2707,14 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const allowedStatuses = new Set(['draft', 'scheduled', 'published', 'archived', 'deleted']);
-    if (status !== undefined && status !== null && String(status).trim() !== '' && !allowedStatuses.has(String(status).toLowerCase())) {
+    const requestedStatusNorm = (status !== undefined && status !== null && String(status).trim() !== '')
+      ? String(status).toLowerCase()
+      : '';
+    if (requestedStatusNorm && !allowedStatuses.has(requestedStatusNorm)) {
       return res.status(400).json({ ok: false, success: false, message: 'Invalid status' });
+    }
+    if (requestedStatusNorm === 'deleted') {
+      return softDeleteArticleGroup(req, res, rawId);
     }
 
     let before = null;
@@ -3753,10 +3759,8 @@ router.post('/articles/:id/archive', requireAdminAuth, async (req, res) => {
   }
 });
 
-// DELETE /api/articles/:id → soft delete (CMS/admin)
-router.delete('/articles/:id', requireAdminAuth, async (req, res) => {
+async function softDeleteArticleGroup(req, res, id) {
   try {
-    const { id } = req.params;
     const before = await News.findById(id).select('workflowStage slug slugs title coverImage coverImageUrl imageURL translationGroupId translationKey sourceArticleId status lang language originalLang').lean();
     if (!before) {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
@@ -3857,6 +3861,11 @@ router.delete('/articles/:id', requireAdminAuth, async (req, res) => {
       .status(500)
       .json({ ok: false, success: false, status: 500, message: 'Internal server error' });
   }
+}
+
+// DELETE /api/articles/:id → soft delete (CMS/admin)
+router.delete('/articles/:id', requireAdminAuth, async (req, res) => {
+  return softDeleteArticleGroup(req, res, req.params.id);
 });
 
 // DELETE /api/articles/:id/permanent → permanent delete (CMS/admin)
