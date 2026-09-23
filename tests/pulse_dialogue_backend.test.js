@@ -176,6 +176,7 @@ test('News to public Article sync copies only public-safe Pulse Dialogue data', 
         affiliation: 'News Pulse Forum',
         shortBio: 'Writes on public policy.',
         status: 'active',
+        photo: { url: 'https://cdn.example.test/public-writer.jpg', publicId: 'public-writer-photo', alt: 'Public Writer portrait' },
         internalEmail: 'private@example.test',
         internalNotes: 'Do not publish',
         rightsConsent: { notes: 'private consent' },
@@ -211,6 +212,8 @@ test('News to public Article sync copies only public-safe Pulse Dialogue data', 
     assert.equal(pulse.dialogueFormat, 'essay');
     assert.equal(pulse.contributor.name, 'Public Writer');
     assert.equal(pulse.contributor.shortBio, 'Writes on public policy.');
+    assert.deepEqual(pulse.contributor.photo, { url: 'https://cdn.example.test/public-writer.jpg', publicId: 'public-writer-photo', alt: 'Public Writer portrait' });
+    assert.deepEqual(pulse.bylineSnapshot.photo, { url: 'https://cdn.example.test/public-writer.jpg', publicId: 'public-writer-photo', alt: 'Public Writer portrait' });
     assert.equal(pulse.contributor.internalEmail, undefined);
     assert.equal(pulse.contributor.internalNotes, undefined);
     assert.equal(pulse.contributor.rightsConsent, undefined);

@@ -346,10 +346,16 @@ async function buildPublicPulseDialogueFromArticle(docLike) {
   if (!pulse) return undefined;
   const language = getArticleLanguage(docLike);
   const contributor = pulse.contributorId ? await findContributorById(pulse.contributorId) : null;
+  const publicContributor = contributor ? buildPublicContributor(contributor, language) : null;
+  const bylineSnapshot = normalizeBylineSnapshot(pulse.bylineSnapshot);
+  const publicBylineSnapshot = bylineSnapshot && !bylineSnapshot.photo && publicContributor?.photo
+    ? { ...bylineSnapshot, photo: publicContributor.photo }
+    : bylineSnapshot;
   const out = normalizePublicPulseDialogue({
     ...pulse,
     contributorId: pulse.contributorId || null,
-    contributor: contributor ? buildPublicContributor(contributor, language) : null,
+    ...(publicBylineSnapshot ? { bylineSnapshot: publicBylineSnapshot } : {}),
+    contributor: publicContributor,
   });
   return out;
 }

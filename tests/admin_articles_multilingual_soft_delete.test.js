@@ -16,6 +16,10 @@ function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
   return `np.${b64}`;
 }
 
+function makeFounderToken() {
+  return makeOpaqueAdminToken('founder@example.com');
+}
+
 function queryResult(value) {
   return {
     select() { return this; },
@@ -206,6 +210,38 @@ async function requestPutDeleted(id) {
     .send({ status: 'deleted' });
 }
 
+async function requestPutStatus(id, status) {
+  return request(app)
+    .put(`/api/articles/${id}`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
+    .send({ status });
+}
+
+async function requestPostUnpublish(id, body = {}) {
+  return request(app)
+    .post(`/api/articles/${id}/unpublish`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
+    .send(body);
+}
+
+async function requestPostArchive(id) {
+  return request(app)
+    .post(`/api/articles/${id}/archive`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
+    .send();
+}
+
+function assertAllRecordsHaveStatus(stubs, ids, status, workflowStage) {
+  for (const id of Object.values(ids)) {
+    const record = stubs.records.get(id);
+    assert.equal(record.status, status);
+    assert.equal(record.workflowStage, workflowStage);
+    assert.equal(record.publishedAt, null);
+    assert.equal(record.publishAt, null);
+    assert.equal(record.scheduledAt, null);
+  }
+}
+
 async function assertPutDeletesFullGroup(t, clickedLang) {
   const ids = {
     en: '507f1f77bcf86cd79943d001',
@@ -339,7 +375,149 @@ test('PUT Pulse Dialogue EN+HI+GU soft-delete deletes only article group and pre
   assert.equal(stubs.contributorFinds.length, 3);
 });
 
-test('PUT normal status/edit update still uses the single-article update path', async (t) => {
+async function assertPostUnpublishTakesDownFullGroup(t, clickedLang) {
+  const ids = {
+    en: '507f1f77bcf86cd79943d601',
+    hi: '507f1f77bcf86cd79943d602',
+    gu: '507f1f77bcf86cd79943d603',
+  };
+  const stubs = installRouteStubs(t, [
+    makeNewsDoc(ids.en, 'en', { translationGroupId: 'tg-unpublish-group', translationKey: 'tg-unpublish-group', sourceArticleId: null, publishedAt: new Date('2026-01-01T00:00:00.000Z') }),
+    makeNewsDoc(ids.hi, 'hi', { translationGroupId: 'tg-unpublish-group', translationKey: 'tg-unpublish-group', sourceArticleId: ids.en, publishedAt: new Date('2026-01-01T00:00:00.000Z') }),
+    makeNewsDoc(ids.gu, 'gu', { translationGroupId: 'tg-unpublish-group', translationKey: 'tg-unpublish-group', sourceArticleId: ids.en, publishedAt: new Date('2026-01-01T00:00:00.000Z') }),
+  ]);
+
+  const res = await requestPostUnpublish(ids[clickedLang]);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.message, 'Article unpublished');
+  assert.equal(res.body.changedCount, 3);
+  assert.deepEqual(new Set(res.body.changedIds), new Set(Object.values(ids)));
+  assert.deepEqual(new Set(stubs.updates.map((entry) => entry.id)), new Set(Object.values(ids)));
+  assertAllRecordsHaveStatus(stubs, ids, 'draft', 'DRAFT');
+  assert.equal(stubs.publicSyncs.length, 3);
+  assert.equal(stubs.publicSyncs.every((sync) => sync.update.$set.status === 'draft' && sync.update.$set.publishedAt === null), true);
+  assert.equal(stubs.publicDraftSweeps.length, 1);
+  assert.ok(stubs.publicDraftSweeps[0].query.$or.some((clause) => clause.translationGroupId === 'tg-unpublish-group'));
+}
+
+test('POST unpublish via EN id takes down all EN HI GU language docs', async (t) => {
+  await assertPostUnpublishTakesDownFullGroup(t, 'en');
+});
+
+test('POST unpublish via HI id takes down all EN HI GU language docs', async (t) => {
+  await assertPostUnpublishTakesDownFullGroup(t, 'hi');
+});
+
+test('POST unpublish via GU id takes down all EN HI GU language docs', async (t) => {
+  await assertPostUnpublishTakesDownFullGroup(t, 'gu');
+});
+
+test('PUT status=draft takedown via translated id takes down all public Article copies', async (t) => {
+  const ids = {
+    en: '507f1f77bcf86cd79943d611',
+    hi: '507f1f77bcf86cd79943d612',
+    gu: '507f1f77bcf86cd79943d613',
+  };
+  const stubs = installRouteStubs(t, [
+    makeNewsDoc(ids.en, 'en', { translationGroupId: 'tg-put-unpublish', translationKey: 'tg-put-unpublish', sourceArticleId: null, publishedAt: new Date('2026-01-01T00:00:00.000Z') }),
+    makeNewsDoc(ids.hi, 'hi', { translationGroupId: 'tg-put-unpublish', translationKey: 'tg-put-unpublish', sourceArticleId: ids.en, publishedAt: new Date('2026-01-01T00:00:00.000Z') }),
+    makeNewsDoc(ids.gu, 'gu', { translationGroupId: 'tg-put-unpublish', translationKey: 'tg-put-unpublish', sourceArticleId: ids.en, publishedAt: new Date('2026-01-01T00:00:00.000Z') }),
+  ]);
+
+  const res = await requestPutStatus(ids.gu, 'draft');
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.message, 'Article unpublished');
+  assert.equal(res.body.changedCount, 3);
+  assertAllRecordsHaveStatus(stubs, ids, 'draft', 'DRAFT');
+  assert.equal(stubs.publicSyncs.length, 3);
+  assert.equal(stubs.publicSyncs.every((sync) => sync.update.$set.status === 'draft' && sync.update.$set.publishedAt === null), true);
+  assert.equal(stubs.publicDraftSweeps.length, 1);
+});
+
+test('POST archive via translated id archives all EN HI GU language docs as non-public', async (t) => {
+  const ids = {
+    en: '507f1f77bcf86cd79943d621',
+    hi: '507f1f77bcf86cd79943d622',
+    gu: '507f1f77bcf86cd79943d623',
+  };
+  const stubs = installRouteStubs(t, [
+    makeNewsDoc(ids.en, 'en', { translationGroupId: 'tg-archive-group', translationKey: 'tg-archive-group', sourceArticleId: null, publishedAt: new Date('2026-01-01T00:00:00.000Z') }),
+    makeNewsDoc(ids.hi, 'hi', { translationGroupId: 'tg-archive-group', translationKey: 'tg-archive-group', sourceArticleId: ids.en, publishedAt: new Date('2026-01-01T00:00:00.000Z') }),
+    makeNewsDoc(ids.gu, 'gu', { translationGroupId: 'tg-archive-group', translationKey: 'tg-archive-group', sourceArticleId: ids.en, publishedAt: new Date('2026-01-01T00:00:00.000Z') }),
+  ]);
+
+  const res = await requestPostArchive(ids.hi);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.message, 'Article archived');
+  assert.equal(res.body.changedCount, 3);
+  assertAllRecordsHaveStatus(stubs, ids, 'archived', 'ARCHIVED');
+  assert.equal(stubs.publicSyncs.length, 3);
+  assert.equal(stubs.publicSyncs.every((sync) => sync.update.$set.status === 'archived' && sync.update.$set.publishedAt === null), true);
+  assert.equal(stubs.publicDraftSweeps.length, 1);
+});
+
+test('POST unpublish on legacy single-language article only changes that record', async (t) => {
+  const id = '507f1f77bcf86cd79943d631';
+  const stubs = installRouteStubs(t, [
+    makeNewsDoc(id, 'en', { translationGroupId: null, translationKey: null, sourceArticleId: null, publishedAt: new Date('2026-01-01T00:00:00.000Z') }),
+  ]);
+
+  const res = await requestPostUnpublish(id);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.changedCount, 1);
+  assert.deepEqual(res.body.changedIds, [id]);
+  assert.equal(stubs.updates.length, 1);
+  assert.equal(stubs.updates[0].id, id);
+  assert.equal(stubs.records.get(id).status, 'draft');
+  assert.equal(stubs.publicSyncs.length, 1);
+});
+
+test('POST Pulse Dialogue unpublish preserves Contributor record and photo asset', async (t) => {
+  const contributorId = '507f1f77bcf86cd79943da11';
+  const contributor = {
+    _id: contributorId,
+    canonicalName: 'Pulse Columnist',
+    publicDesignation: 'Columnist',
+    status: 'active',
+    photo: { url: 'https://cdn.example.test/pulse-columnist.jpg', publicId: 'pulse-columnist-photo', alt: 'Pulse Columnist' },
+    shortBio: 'Writes essays.',
+  };
+  const otherStoryId = '507f1f77bcf86cd79943d644';
+  const ids = {
+    en: '507f1f77bcf86cd79943d641',
+    hi: '507f1f77bcf86cd79943d642',
+    gu: '507f1f77bcf86cd79943d643',
+  };
+  const pulseDialogue = {
+    contributorId,
+    dialogueFormat: 'essay',
+    showAboutContributor: true,
+    bylineSnapshot: { name: 'Pulse Columnist', designation: 'Columnist', photo: contributor.photo },
+  };
+  const stubs = installRouteStubs(t, [
+    makeNewsDoc(ids.en, 'en', { category: 'pulse-dialogue', translationGroupId: 'tg-pulse-unpublish', translationKey: 'tg-pulse-unpublish', sourceArticleId: null, pulseDialogue }),
+    makeNewsDoc(ids.hi, 'hi', { category: 'pulse-dialogue', translationGroupId: 'tg-pulse-unpublish', translationKey: 'tg-pulse-unpublish', sourceArticleId: ids.en, pulseDialogue }),
+    makeNewsDoc(ids.gu, 'gu', { category: 'pulse-dialogue', translationGroupId: 'tg-pulse-unpublish', translationKey: 'tg-pulse-unpublish', sourceArticleId: ids.en, pulseDialogue }),
+    makeNewsDoc(otherStoryId, 'en', { category: 'pulse-dialogue', translationGroupId: 'tg-pulse-other-unpublish', translationKey: 'tg-pulse-other-unpublish', sourceArticleId: null, pulseDialogue }),
+  ], { contributor });
+  const beforeContributor = cloneRecord(contributor);
+
+  const res = await requestPostUnpublish(ids.gu);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.changedCount, 3);
+  assert.equal(stubs.records.get(otherStoryId).status, 'published');
+  assert.equal(stubs.contributorMutations.length, 0);
+  assert.deepEqual(contributor, beforeContributor);
+  assert.deepEqual(contributor.photo, beforeContributor.photo);
+  assert.equal(stubs.contributorFinds.length, 3);
+});
+
+test('PUT status=draft update now uses group-aware takedown path', async (t) => {
   const id = '507f1f77bcf86cd79943d401';
   const siblingId = '507f1f77bcf86cd79943d402';
   const stubs = installRouteStubs(t, [
@@ -353,12 +531,11 @@ test('PUT normal status/edit update still uses the single-article update path', 
     .send({ status: 'draft' });
 
   assert.equal(res.statusCode, 200);
-  assert.equal(res.body.message, 'Article updated');
-  assert.equal(stubs.updates.length, 1);
-  assert.equal(stubs.updates[0].id, id);
-  assert.equal(stubs.updates[0].update.$set.status, 'draft');
-  assert.equal(Object.prototype.hasOwnProperty.call(stubs.updates[0].update.$set, 'deletedAt'), false);
-  assert.equal(stubs.records.get(siblingId).status, 'published');
+  assert.equal(res.body.message, 'Article unpublished');
+  assert.equal(stubs.updates.length, 2);
+  assert.deepEqual(new Set(stubs.updates.map((entry) => entry.id)), new Set([id, siblingId]));
+  assert.equal(stubs.records.get(id).status, 'draft');
+  assert.equal(stubs.records.get(siblingId).status, 'draft');
 });
 
 test('DELETE /api/articles/:id still uses the same group-aware soft-delete behavior', async (t) => {

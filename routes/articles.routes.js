@@ -184,6 +184,116 @@ async function findArticleDeleteTargets(seedDoc) {
   return Array.from(byId.values());
 }
 
+const findArticleLifecycleTargets = findArticleDeleteTargets;
+
+async function applyArticleGroupLifecycleStatus(req, {
+  id,
+  toStatus,
+  historyAction,
+  historyNote = null,
+  auditAction,
+  pushAction,
+  pushSource,
+  responseMessage,
+}) {
+  const before = await News.findById(id).select('workflowStage slug slugs title coverImage coverImageUrl imageURL translationGroupId translationKey sourceArticleId status lang language originalLang').lean();
+  if (!before) {
+    const error = new Error('Article not found');
+    error.status = 404;
+    throw error;
+  }
+
+  const now = new Date();
+  const actor = getActor(req);
+  const workflowStage = mapStatusToWorkflowStage(toStatus);
+  const targets = await findArticleLifecycleTargets(before);
+  const changedDocs = [];
+  const changedIds = [];
+
+  for (const target of targets) {
+    const targetId = getArticleIdString(target);
+    if (!targetId) continue;
+    const fromStage = String(target.workflowStage || 'DRAFT');
+    const doc = await News.findByIdAndUpdate(
+      targetId,
+      {
+        $set: {
+          status: toStatus,
+          publishedAt: null,
+          publishAt: null,
+          scheduledAt: null,
+          workflowStage,
+          workflowUpdatedAt: now,
+        },
+        $push: {
+          workflowHistory: {
+            at: now,
+            byUserId: actor.byUserId,
+            byRole: actor.byRole,
+            action: historyAction,
+            fromStage,
+            toStage: workflowStage,
+            note: historyNote,
+          },
+        },
+      },
+      { new: true, runValidators: false }
+    );
+
+    if (!doc) continue;
+    changedDocs.push(doc);
+    changedIds.push(String(doc._id || targetId));
+
+    if (_isSourceTranslationDoc(doc, targetId)) {
+      Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
+      if (typeof doc.save === 'function') await doc.save({ validateModifiedOnly: true });
+    }
+
+    await syncArticleFromNews(doc);
+    await logEditorialArticleAudit(req, auditAction, doc, {
+      oldValue: target.status || null,
+      newValue: toStatus,
+      reason: req.body?.reason,
+    });
+
+    try {
+      await PushHistory.create({
+        articleId: doc._id,
+        type: 'publish',
+        action: pushAction,
+        slug: doc.slug,
+        title: doc.title,
+        channel: 'SITE',
+        at: now,
+        byUserId: actor.byUserId,
+        status: 'SUCCESS',
+        meta: { source: pushSource, oldStatus: target.status || null, newStatus: toStatus, oldStage: fromStage, newStage: doc.workflowStage },
+      });
+    } catch (e) {
+      console.warn('[pushHistory] create failed', e?.message || e);
+    }
+  }
+
+  if (!changedDocs.length) {
+    const error = new Error('Article not found');
+    error.status = 404;
+    throw error;
+  }
+
+  const sourceDoc = changedDocs.find((doc) => _isSourceTranslationDoc(doc, doc?._id));
+  await markPublicCopiesDraftFromNewsDoc(sourceDoc || changedDocs[0]);
+  invalidateArticleCaches().catch(() => {});
+
+  const clickedDoc = changedDocs.find((item) => String(item?._id || '') === String(id)) || changedDocs[0];
+  return {
+    doc: clickedDoc,
+    docs: changedDocs,
+    changedIds,
+    changedCount: changedDocs.length,
+    message: responseMessage,
+  };
+}
+
 function isAutoTranslateOnReadEnabled() {
   const s = String(process.env.ENABLE_AUTO_TRANSLATE_ON_READ ?? '').trim().toLowerCase();
   return s === 'true' || s === '1' || s === 'yes' || s === 'y';
@@ -2723,6 +2833,32 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       // ignore
     }
 
+    const beforeStatusForLifecycle = String(before?.status || '').toLowerCase();
+    const isLifecycleTakedownStatus = requestedStatusNorm === 'draft' || requestedStatusNorm === 'archived';
+    const isStatusOnlyRequest = Object.keys(requestBody).every((key) => ['status', 'reason'].includes(key));
+    if (before && beforeStatusForLifecycle !== 'deleted' && isLifecycleTakedownStatus && isStatusOnlyRequest && beforeStatusForLifecycle !== requestedStatusNorm) {
+      const lifecycleResult = await applyArticleGroupLifecycleStatus(req, {
+        id: rawId,
+        toStatus: requestedStatusNorm,
+        historyAction: requestedStatusNorm === 'archived' ? 'MOVE_STAGE' : 'UNPUBLISH',
+        auditAction: requestedStatusNorm === 'archived' ? 'EDITORIAL_ARTICLE_ARCHIVED' : 'EDITORIAL_ARTICLE_UNPUBLISHED',
+        pushAction: requestedStatusNorm === 'archived' ? 'archive' : 'unpublish',
+        pushSource: requestedStatusNorm === 'archived' ? 'archive' : 'unpublish',
+        responseMessage: requestedStatusNorm === 'archived' ? 'Article archived' : 'Article unpublished',
+      });
+      const obj0 = lifecycleResult.doc.toObject ? lifecycleResult.doc.toObject({ virtuals: true }) : lifecycleResult.doc;
+      return res.json({
+        ok: true,
+        success: true,
+        status: 200,
+        message: lifecycleResult.message || 'Article updated',
+        changedCount: lifecycleResult.changedCount,
+        changedIds: lifecycleResult.changedIds,
+        data: { article: withCoverImageUrl(obj0) },
+        article: withCoverImageUrl(obj0),
+      });
+    }
+
     const langFromPayload0 = normalizeLanguage(language);
     const langFromPayload = shouldIgnoreDefaultEnglishLanguagePayload({ requestBody, before, requestedLang: langFromPayload0 })
       ? null
@@ -3487,100 +3623,22 @@ router.post('/articles/:id/unpublish', requireAdminAuth, async (req, res) => {
     const doc = await News.findById(id);
     if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
 
-    const now = new Date();
-    const actor = getActor(req);
-    const fromStage = String(doc.workflowStage || 'DRAFT');
-    doc.status = toStatus;
-    doc.publishedAt = null;
-    doc.publishAt = null;
-    doc.scheduledAt = null;
-    doc.workflowStage = toStatus === 'archived' ? 'ARCHIVED' : 'DRAFT';
-    doc.workflowUpdatedAt = now;
-    if (_isSourceTranslationDoc(doc)) {
-      Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
-    }
-
-    doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
-    doc.workflowHistory.push({
-      at: now,
-      byUserId: actor.byUserId,
-      byRole: actor.byRole,
-      action: 'UNPUBLISH',
-      fromStage,
-      toStage: doc.workflowStage,
-      note: null,
+    const lifecycleResult = await applyArticleGroupLifecycleStatus(req, {
+      id,
+      toStatus,
+      historyAction: 'UNPUBLISH',
+      auditAction: 'EDITORIAL_ARTICLE_UNPUBLISHED',
+      pushAction: 'unpublish',
+      pushSource: 'unpublish',
+      responseMessage: 'Article unpublished',
     });
 
-    await doc.save();
-    await syncArticleFromNews(doc);
-    await syncMasterArticleGroup(doc, { reason: 'article_unpublish', invalidate: true });
-    await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_UNPUBLISHED', doc, {
-      oldValue: 'published',
-      newValue: toStatus,
-      reason: req.body?.reason,
-    });
-
-    // Legacy cleanup:
-    // Older public Article copies may not be linked via sourceNewsId/translationGroupId.
-    // Ensure any public copies reachable by slug/slugs.* are also marked as draft.
-    try {
-      const slugs = new Set();
-      if (doc.slug) slugs.add(String(doc.slug).trim());
-      const slugsObj = doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
-      for (const k of ['en', 'hi', 'gu']) {
-        const v = slugsObj && slugsObj[k] ? String(slugsObj[k]).trim() : '';
-        if (v) slugs.add(v);
-      }
-
-      const slugList = Array.from(slugs).filter(Boolean);
-      const or = [];
-      if (slugList.length) {
-        or.push({ slug: { $in: slugList } });
-        or.push({ 'slugs.en': { $in: slugList } });
-        or.push({ 'slugs.hi': { $in: slugList } });
-        or.push({ 'slugs.gu': { $in: slugList } });
-      }
-      const groupKey = normalizeTranslationGroupKey(doc.translationKey)
-        || normalizeTranslationGroupKey(doc.translationGroupId);
-      if (groupKey) {
-        or.push({ translationKey: groupKey });
-        or.push({ translationGroupId: groupKey });
-      }
-
-      if (or.length) {
-        await PublicArticle.updateMany(
-          { $or: or },
-          { $set: { status: 'draft', publishedAt: null } },
-          { runValidators: false }
-        );
-      }
-    } catch (e) {
-      console.warn('[articles.unpublish] public cleanup failed', e?.message || e);
-    }
-
-    try {
-      await PushHistory.create({
-        articleId: doc._id,
-        type: 'publish',
-        action: 'unpublish',
-        slug: doc.slug,
-        title: doc.title,
-        channel: 'SITE',
-        at: now,
-        byUserId: actor.byUserId,
-        status: 'SUCCESS',
-        meta: { source: 'unpublish', oldStatus: 'published', newStatus: toStatus, oldStage: fromStage, newStage: doc.workflowStage },
-      });
-    } catch (e) {
-      console.warn('[pushHistory] create failed', e?.message || e);
-    }
-
-    const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    invalidateArticleCaches().catch(() => {});
-    return res.json({ ok: true, success: true, status: 200, message: 'Article unpublished', data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj) });
+    const obj = lifecycleResult.doc.toObject ? lifecycleResult.doc.toObject({ virtuals: true }) : lifecycleResult.doc;
+    return res.json({ ok: true, success: true, status: 200, message: 'Article unpublished', changedCount: lifecycleResult.changedCount, changedIds: lifecycleResult.changedIds, data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj) });
   } catch (e) {
     console.error('[articles.unpublish] error:', e?.message || e);
-    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to unpublish article' });
+    const status = Number(e?.status) || 500;
+    return res.status(status).json({ ok: false, success: false, status, message: status === 404 ? 'Article not found' : 'Failed to unpublish article' });
   }
 });
 
@@ -3688,74 +3746,22 @@ router.post('/articles/:id/archive', requireAdminAuth, async (req, res) => {
     }
 
     const { id } = req.params;
-    const before = await News.findById(id).select('workflowStage slug title coverImage coverImageUrl imageURL').lean();
-    if (!before) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
-
-    const now = new Date();
-    const fromStage = String(before.workflowStage || 'DRAFT');
-    const actor = getActor(req);
-
-    const doc = await News.findByIdAndUpdate(
+    const lifecycleResult = await applyArticleGroupLifecycleStatus(req, {
       id,
-      {
-        $set: {
-          status: 'archived',
-          workflowStage: 'ARCHIVED',
-          workflowUpdatedAt: now,
-        },
-        $push: {
-          workflowHistory: {
-            at: now,
-            byUserId: actor.byUserId,
-            byRole: actor.byRole,
-            action: 'MOVE_STAGE',
-            fromStage,
-            toStage: 'ARCHIVED',
-            note: null,
-          },
-        },
-      },
-      { new: true, runValidators: false }
-    );
-    if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
-
-    if (_isSourceTranslationDoc(doc)) {
-      Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
-      if (typeof doc.save === 'function') await doc.save({ validateModifiedOnly: true });
-    }
-
-    await syncArticleFromNews(doc);
-    await syncMasterArticleGroup(doc, { reason: 'article_archive', invalidate: true });
-    await markPublicCopiesDraftFromNewsDoc(doc);
-    await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_ARCHIVED', doc, {
-      oldValue: 'draft',
-      newValue: 'archived',
-      reason: req.body?.reason,
+      toStatus: 'archived',
+      historyAction: 'MOVE_STAGE',
+      auditAction: 'EDITORIAL_ARTICLE_ARCHIVED',
+      pushAction: 'archive',
+      pushSource: 'archive',
+      responseMessage: 'Article archived',
     });
 
-    try {
-      await PushHistory.create({
-        articleId: doc._id,
-        type: 'publish',
-        action: 'archive',
-        slug: doc.slug,
-        title: doc.title,
-        channel: 'SITE',
-        at: now,
-        byUserId: actor.byUserId,
-        status: 'SUCCESS',
-        meta: { source: 'archive', oldStatus: 'draft', newStatus: 'archived', oldStage: fromStage, newStage: doc.workflowStage },
-      });
-    } catch (e) {
-      console.warn('[pushHistory] create failed', e?.message || e);
-    }
-
-    const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    invalidateArticleCaches().catch(() => {});
-    return res.json({ ok: true, success: true, status: 200, message: 'Article archived', data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj) });
+    const obj = lifecycleResult.doc.toObject ? lifecycleResult.doc.toObject({ virtuals: true }) : lifecycleResult.doc;
+    return res.json({ ok: true, success: true, status: 200, message: 'Article archived', changedCount: lifecycleResult.changedCount, changedIds: lifecycleResult.changedIds, data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj) });
   } catch (e) {
     console.error('[articles.archive] error:', e?.message || e);
-    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to archive article' });
+    const status = Number(e?.status) || 500;
+    return res.status(status).json({ ok: false, success: false, status, message: status === 404 ? 'Article not found' : 'Failed to archive article' });
   }
 });
 
