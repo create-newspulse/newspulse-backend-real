@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 const { YOUTH_PULSE_TRACKS, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { SPOTLIGHT_PRIORITY_VALUES, normalizeSpotlightPriority } = require('../services/spotlightPriority.service');
+const { DIALOGUE_FORMAT_VALUES } = require('../services/pulseDialogue.service');
 
 // Workflow stages
 // Admin panel (new) expects lowercase identifiers.
@@ -44,6 +45,31 @@ const WORKFLOW_CHAIN_STAGES = [
 const TRANSLATION_PROVIDER_VALUES = ['google', 'openai', 'manual'];
 const EDITORIAL_TYPE_VALUES = ['editorial', 'special_story'];
 const TRANSLATION_REVIEW_STATUS_VALUES = ['none', 'review_required', 'reviewed', 'approved', 'translation_outdated'];
+
+const PulseDialoguePhotoSchema = new mongoose.Schema({
+  url: { type: String, default: null },
+  publicId: { type: String, default: null },
+  alt: { type: String, default: null },
+}, { _id: false });
+
+const PulseDialogueBylineSnapshotSchema = new mongoose.Schema({
+  name: { type: String, default: null },
+  designation: { type: String, default: null },
+  affiliation: { type: String, default: null },
+  photo: { type: PulseDialoguePhotoSchema, default: null },
+}, { _id: false });
+
+const PulseDialogueSchema = new mongoose.Schema({
+  contributorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contributor', default: null, index: true },
+  dialogueFormat: { type: String, enum: DIALOGUE_FORMAT_VALUES, default: null, index: true },
+  series: { type: String, default: null, trim: true },
+  bylineDesignationOverride: { type: String, default: null, trim: true },
+  bylineSnapshot: { type: PulseDialogueBylineSnapshotSchema, default: null },
+  contributorDisclosure: { type: String, default: null, trim: true },
+  editorNote: { type: String, default: null, trim: true },
+  contributorDisclaimer: { type: String, default: null, trim: true },
+  showAboutContributor: { type: Boolean, default: false },
+}, { _id: false });
 
 function normalizeEditorialType(v) {
   if (v === null || v === undefined) return undefined;
@@ -460,6 +486,7 @@ const newsSchema = new mongoose.Schema({
   sponsorCtaUrl: { type: String, default: null },
   sponsorFeatureEligible: { type: Boolean, default: false },
   sponsorFeatureLinkedId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
+  pulseDialogue: { type: PulseDialogueSchema, default: undefined },
   // Provenance (optional)
   source: { type: String, index: true }, // e.g. 'community', 'editor'
   sourceType: { type: String, default: null, index: true },

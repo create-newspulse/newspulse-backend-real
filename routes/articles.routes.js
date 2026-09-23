@@ -47,6 +47,13 @@ const {
   syncTranslationGroupFromMaster,
 } = require('../services/translationGroupSync.service');
 const {
+  PULSE_DIALOGUE_CATEGORY,
+  assertContributorExists,
+  attachPublicPulseDialogueContributor,
+  normalizePulseDialoguePayload,
+  preparePulseDialogueForPublication,
+} = require('../services/pulseDialogue.service');
+const {
   getPublicContentGroupKey,
   getPublicContentLookup,
   buildPublicContentSiblingOrClauses,
@@ -975,6 +982,41 @@ function _buildSponsoredArticleFieldsFromBody(body) {
   };
 }
 
+async function _buildPulseDialoguePatchFromBody(body, { category, existingCategory, partial = false } = {}) {
+  const b = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+  const hasPayload = Object.prototype.hasOwnProperty.call(b, 'pulseDialogue');
+  const effectiveCategory = String(category !== undefined ? category : existingCategory || '').trim().toLowerCase();
+  const categoryExplicitlyNonPulse = category !== undefined && effectiveCategory !== PULSE_DIALOGUE_CATEGORY;
+
+  if (categoryExplicitlyNonPulse) {
+    return { ok: true, value: undefined, unset: true };
+  }
+  if (effectiveCategory !== PULSE_DIALOGUE_CATEGORY || !hasPayload) {
+    return { ok: true, value: undefined, unset: false };
+  }
+
+  const parsed = normalizePulseDialoguePayload(b, { category: effectiveCategory, partial });
+  if (!parsed.ok) return parsed;
+  const value = parsed.value;
+  if (value && value.contributorId) {
+    try {
+      await assertContributorExists(value.contributorId);
+    } catch (error) {
+      return { ok: false, status: error?.statusCode || error?.status || 400, message: error?.message || 'Pulse Dialogue contributor not found' };
+    }
+  }
+  return { ok: true, value, unset: false };
+}
+
+function _buildPulseDialogueDotSet(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out = {};
+  for (const [key, fieldValue] of Object.entries(value)) {
+    out[`pulseDialogue.${key}`] = fieldValue;
+  }
+  return out;
+}
+
 async function syncMasterArticleGroup(doc, options = {}) {
   if (!doc || !_isSourceTranslationDoc(doc)) return null;
   try {
@@ -1224,6 +1266,10 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     }
 
     const categoryNorm = _normalizeCategoryValue(category);
+    const pulseDialogueFields = await _buildPulseDialoguePatchFromBody(body0, { category: categoryNorm || category, partial: false });
+    if (!pulseDialogueFields.ok) {
+      return res.status(pulseDialogueFields.status || 400).json({ ok: false, success: false, message: pulseDialogueFields.message });
+    }
     const editorialPatch = _buildEditorialTypePatch({
       category: categoryNorm,
       editorialType,
@@ -1369,6 +1415,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       translationGroupId: finalTranslationGroupId,
       ...sharedSyncFields,
       ...sponsoredArticleFields.value,
+      ...(pulseDialogueFields.value !== undefined ? { pulseDialogue: pulseDialogueFields.value } : {}),
       tags: tagsArr,
       geo,
       status: createStatus,
@@ -1400,6 +1447,19 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
 
     _stripUndefinedKeysInPlace(createDoc);
     await assertTranslationGroupLanguageUnique(finalTranslationGroupId, langNorm);
+    if (String(createDoc.status || '').toLowerCase() === 'scheduled') {
+      try {
+        await preparePulseDialogueForPublication(createDoc);
+      } catch (scheduleValidationError) {
+        return res.status(scheduleValidationError?.statusCode || scheduleValidationError?.status || 400).json({
+          ok: false,
+          success: false,
+          status: scheduleValidationError?.statusCode || scheduleValidationError?.status || 400,
+          message: scheduleValidationError?.message || 'Pulse Dialogue validation failed',
+          ...(scheduleValidationError?.details || {}),
+        });
+      }
+    }
 
     const doc = await News.create(createDoc);
     if (initialStatus !== 'published') {
@@ -1696,7 +1756,7 @@ router.get('/public/articles', async (req, res, next) => {
         categorySlug: categoryRaw,
         normalizedCategoryKey: categoryNorm || categoryRaw,
       });
-      items = resolved.items;
+      items = await Promise.all((resolved.items || []).map((item) => attachPublicPulseDialogueContributor(item, groupedRequestedLang)));
       total = resolved.total;
     } else {
       const skip = (page - 1) * limit;
@@ -1730,6 +1790,7 @@ router.get('/public/articles', async (req, res, next) => {
           })
           .filter(Boolean);
       }
+      items = await Promise.all((items || []).map((item) => attachPublicPulseDialogueContributor(item, desired || item.lang || item.language)));
     }
 
     return res.status(200).json({ ok: true, success: true, status: 200, data: { items, page, limit, total } });
@@ -2653,7 +2714,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     let before = null;
     try {
       before = await News.findById(rawId)
-        .select('title description content translations translationStatus translationError translationNextRetryAt translationUpdatedAt category editorialType status workflowStage translationGroupId translationKey sourceArticleId originalLang lang language slugs coverImage coverImageUrl imageURL syncVersion machineGenerated humanEdited translationReviewStatus sourceHash translationMeta')
+        .select('title description content translations translationStatus translationError translationNextRetryAt translationUpdatedAt category editorialType pulseDialogue status workflowStage translationGroupId translationKey sourceArticleId originalLang lang language slugs coverImage coverImageUrl imageURL syncVersion machineGenerated humanEdited translationReviewStatus sourceHash translationMeta')
         .lean();
     } catch (_) {
       // ignore
@@ -2734,6 +2795,14 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     if (!editorialPatch.ok) {
       return res.status(400).json({ ok: false, success: false, message: editorialPatch.message });
     }
+    const pulseDialogueFields = await _buildPulseDialoguePatchFromBody(requestBody, {
+      category,
+      existingCategory: before?.category,
+      partial: true,
+    });
+    if (!pulseDialogueFields.ok) {
+      return res.status(pulseDialogueFields.status || 400).json({ ok: false, success: false, message: pulseDialogueFields.message });
+    }
 
     const update = {
       ...(title !== undefined ? { title } : {}),
@@ -2764,6 +2833,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
       ...sharedSyncFields,
       ...sponsoredArticleFields.value,
+      ..._buildPulseDialogueDotSet(pulseDialogueFields.value),
     };
 
     // Defensive: remove any accidental undefined keys before updates.
@@ -2802,8 +2872,12 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       delete prePublishUpdate.workflowStage;
       delete prePublishUpdate.workflowUpdatedAt;
 
-      const doc = Object.keys(prePublishUpdate).length
-        ? await News.findByIdAndUpdate(rawId, { $set: prePublishUpdate }, { new: true, runValidators: true })
+      const prePublishUpdateOp = {};
+      if (Object.keys(prePublishUpdate).length) prePublishUpdateOp.$set = prePublishUpdate;
+      if (pulseDialogueFields.unset) prePublishUpdateOp.$unset = { pulseDialogue: '' };
+
+      const doc = Object.keys(prePublishUpdateOp).length
+        ? await News.findByIdAndUpdate(rawId, prePublishUpdateOp, { new: true, runValidators: true })
         : await News.findById(rawId);
       if (!doc) {
         return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
@@ -2921,6 +2995,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         const beforeStage = String(before?.workflowStage || 'DRAFT');
         const updateOp = { $set: { ...update } };
         if (editorialPatch.shouldUnset) updateOp.$unset = { editorialType: '' };
+        if (pulseDialogueFields.unset) updateOp.$unset = { ...(updateOp.$unset || {}), pulseDialogue: '' };
 
         if (stage && beforeStage !== stage) {
           updateOp.$set.workflowStage = stage;
@@ -2944,6 +3019,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         // Full edit update: apply only $set fields (never replace the document).
         const updateOp = { $set: { ...update } };
         if (editorialPatch.shouldUnset) updateOp.$unset = { editorialType: '' };
+        if (pulseDialogueFields.unset) updateOp.$unset = { ...(updateOp.$unset || {}), pulseDialogue: '' };
         doc = await News.findByIdAndUpdate(rawId, updateOp, { new: true, runValidators: true });
         if (doc) {
           // Keep slugs aligned with current titles/translations.
@@ -3495,6 +3571,17 @@ router.post('/articles/:id/schedule', requireAdminAuth, async (req, res) => {
       return res.status(400).json({ ok: false, success: false, status: 400, message: `Missing required fields: ${missing.join(', ')}` });
     }
     await assertSlugUnique(normalizeSlug(doc.slug), id);
+    try {
+      await preparePulseDialogueForPublication(doc);
+    } catch (validationError) {
+      return res.status(validationError?.statusCode || validationError?.status || 400).json({
+        ok: false,
+        success: false,
+        status: validationError?.statusCode || validationError?.status || 400,
+        message: validationError?.message || 'Pulse Dialogue validation failed',
+        ...(validationError?.details || {}),
+      });
+    }
 
     const now = new Date();
     const fromStage = String(doc.workflowStage || 'DRAFT');

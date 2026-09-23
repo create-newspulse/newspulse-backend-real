@@ -3,6 +3,7 @@ const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 const { INDIA_STATES_UTS, isValidStateSlug } = require('../src/utils/locationTagger');
 const { ensureTrackTag, normalizeTrackValue } = require('./communitySubmissionWorkflow');
 const { normalizeSpotlightPriority } = require('./spotlightPriority.service');
+const { buildPublicPulseDialogueFromArticle } = require('./pulseDialogue.service');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 
@@ -219,6 +220,7 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
         alt: newsDoc.coverImage && typeof newsDoc.coverImage === 'object' ? (newsDoc.coverImage.alt || null) : null,
       }
     : { url: null, publicId: null, alt: null };
+  const pulseDialogue = await buildPublicPulseDialogueFromArticle(newsDoc);
 
   const update = {
     title: newsDoc.title,
@@ -292,6 +294,7 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     sponsorCtaUrl: _safeStr(newsDoc.sponsorCtaUrl) || null,
     sponsorFeatureEligible: Boolean(newsDoc.sponsorFeatureEligible),
     sponsorFeatureLinkedId: newsDoc.sponsorFeatureLinkedId || null,
+    ...(pulseDialogue ? { pulseDialogue } : {}),
     isBreaking: String(newsDoc.category || '').toLowerCase() === 'breaking',
     coverImage,
     externalUrls: Array.isArray(newsDoc.externalUrls) ? newsDoc.externalUrls.filter((v) => _isNonEmptyString(v)) : [],
@@ -376,9 +379,12 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     const or = [{ slug }];
     if (newsDoc._id) or.unshift({ sourceNewsId: newsDoc._id });
 
+    const updateOp = { $set: update };
+    if (!pulseDialogue) updateOp.$unset = { pulseDialogue: '' };
+
     const saved = await PublicArticle.findOneAndUpdate(
       { $or: or },
-      { $set: update },
+      updateOp,
       { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
     ).lean();
 

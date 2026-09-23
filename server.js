@@ -387,6 +387,7 @@ const adminBroadcastRouter = require('./routes/adminBroadcast.routes');
 const adminTickerRouter = require('./routes/adminTicker.routes');
 const adminTickerAdsRouter = require('./routes/adminTickerAds.routes');
 const adminGlossaryRouter = require('./routes/adminGlossary.routes');
+const adminPulseDialogueContributorsRouter = require('./routes/adminPulseDialogueContributors.routes');
 
 const authRoutes = require('./routes/auth.routes');
 const adminAccountRoutes = require('./routes/adminAccount.routes');
@@ -1759,6 +1760,11 @@ app.use('/admin/ticker', adminTickerRouter);
 app.use('/api/admin/glossary', adminGlossaryRouter);
 app.use('/admin-api/admin/glossary', adminGlossaryRouter);
 app.use('/admin-api/api/admin/glossary', adminGlossaryRouter);
+
+// Admin Pulse Dialogue contributor API (Phase 1 backend foundation)
+app.use('/api/admin/pulse-dialogue/contributors', adminPulseDialogueContributorsRouter);
+app.use('/admin-api/admin/pulse-dialogue/contributors', adminPulseDialogueContributorsRouter);
+app.use('/admin-api/api/admin/pulse-dialogue/contributors', adminPulseDialogueContributorsRouter);
 
 // Admin panel compatibility: some builds call this translation glossary endpoint.
 // Keep it as a lightweight 200 stub so the Add News page doesn't break.

@@ -155,6 +155,7 @@ function buildTranslatedPayload(source, translated, { targetLang, sourceLang, gr
     embeds: Array.isArray(source.embeds) ? source.embeds : [],
     gallery: Array.isArray(source.gallery) ? source.gallery : [],
     seo,
+    pulseDialogue: source.pulseDialogue || undefined,
     slug: targetSlug,
     slugs,
     lang: targetLang,

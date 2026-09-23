@@ -20,6 +20,7 @@ const {
   getPublicContentLookup,
   buildPublicContentSiblingOrClauses,
 } = require('../services/publicCategoryListing.service');
+const { attachPublicPulseDialogueContributor } = require('../services/pulseDialogue.service');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -580,6 +581,7 @@ const PUBLIC_SELECT = [
   'images',
   'imageAlt',
   'imageCaption',
+  'pulseDialogue',
   'publishedAt',
   'date',
   'createdAt',
@@ -1741,6 +1743,7 @@ async function getPublicNewsBySlugOrId(req, res) {
       try { delete out.translations; } catch (_) {}
       try { delete out.translationStatus; } catch (_) {}
       await _attachLinkedSponsoredFeature(out);
+      await attachPublicPulseDialogueContributor(out, out.resolvedLang || base);
       attachLocalizationFields(out, out.resolvedLang);
       _attachPublicRouteData(out, out.resolvedLang, { fallbackEnabled, realTranslations });
       return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
@@ -1828,6 +1831,7 @@ async function getPublicNewsBySlugOrId(req, res) {
     try { delete out.translationError; } catch (_) {}
     try { delete out.translationNextRetryAt; } catch (_) {}
     await _attachLinkedSponsoredFeature(out);
+    await attachPublicPulseDialogueContributor(out, desired);
     attachLocalizationFields(out, desired);
     _attachPublicRouteData(out, desired, { fallbackEnabled, realTranslations });
     return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));

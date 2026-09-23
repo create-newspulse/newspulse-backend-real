@@ -122,6 +122,7 @@ function computeContentFingerprint(docLike) {
     deletedAt: doc.deletedAt ? new Date(doc.deletedAt).toISOString() : null,
     translations: cloneSimple(doc.translations || null),
     translationStatus: cloneSimple(doc.translationStatus || null),
+    pulseDialogue: cloneSimple(doc.pulseDialogue || null),
   };
 
   return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
@@ -271,6 +272,7 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
     embeds: normalizeStringArray(master.embeds),
     gallery: normalizeStringArray(master.gallery),
     seo: buildSeoObject(master.seo),
+    pulseDialogue: cloneSimple(master.pulseDialogue || null),
     translationKey: getGroupKey(master),
     translationGroupId: getGroupKey(master),
     syncMode: 'auto',

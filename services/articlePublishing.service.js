@@ -11,6 +11,7 @@ const {
   normalizeTranslationGroupKey,
   prepareSourceSyncMetadata,
 } = require('./translationGroupSync.service');
+const { preparePulseDialogueForPublication } = require('./pulseDialogue.service');
 
 const REQUIRED_LANGUAGES = ['en', 'hi', 'gu'];
 
@@ -254,6 +255,7 @@ function buildManualTranslationSibling(sourceDoc, targetLang, groupKey, actor) {
     embeds: Array.isArray(sourceObject.embeds) ? sourceObject.embeds : [],
     gallery: Array.isArray(sourceObject.gallery) ? sourceObject.gallery : [],
     seo: sourceObject.seo,
+    pulseDialogue: sourceObject.pulseDialogue || undefined,
     slug: slugs[targetLang],
     slugs,
     lang: targetLang,
@@ -501,6 +503,7 @@ async function publishCanonicalArticle(articleIdOrDoc, options = {}) {
         });
       }
       ensureNewsSlugs(doc);
+      await preparePulseDialogueForPublication(doc);
       if (isSourceTranslationDoc(doc)) Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
       await saveDoc(doc);
     }

@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 const { YOUTH_PULSE_TRACKS, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { SPOTLIGHT_PRIORITY_VALUES, normalizeSpotlightPriority } = require('../services/spotlightPriority.service');
+const { DIALOGUE_FORMAT_VALUES } = require('../services/pulseDialogue.service');
 
 const CATEGORY_VALUES = [
   'breaking',
@@ -27,6 +28,45 @@ const STATUS_VALUES = ['draft', 'scheduled', 'published', 'archived', 'deleted']
 const EDITORIAL_TYPE_VALUES = ['editorial', 'special_story'];
 
 const TRANSLATION_PROVIDER_VALUES = ['google', 'openai', 'manual'];
+
+const PulseDialoguePhotoSchema = new mongoose.Schema({
+  url: { type: String, default: null },
+  publicId: { type: String, default: null },
+  alt: { type: String, default: null },
+}, { _id: false });
+
+const PulseDialogueBylineSnapshotSchema = new mongoose.Schema({
+  name: { type: String, default: null },
+  designation: { type: String, default: null },
+  affiliation: { type: String, default: null },
+  photo: { type: PulseDialoguePhotoSchema, default: null },
+}, { _id: false });
+
+const PublicPulseDialogueContributorSchema = new mongoose.Schema({
+  id: { type: String, default: null },
+  name: { type: String, default: null },
+  canonicalName: { type: String, default: null },
+  photo: { type: PulseDialoguePhotoSchema, default: null },
+  publicDesignation: { type: String, default: null },
+  affiliation: { type: String, default: null },
+  shortBio: { type: String, default: null },
+  slug: { type: String, default: null },
+  website: { type: String, default: null },
+  socialLinks: { type: Map, of: String, default: () => ({}) },
+}, { _id: false });
+
+const PulseDialogueSchema = new mongoose.Schema({
+  contributorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contributor', default: null, index: true },
+  dialogueFormat: { type: String, enum: DIALOGUE_FORMAT_VALUES, default: null, index: true },
+  series: { type: String, default: null },
+  bylineDesignationOverride: { type: String, default: null },
+  bylineSnapshot: { type: PulseDialogueBylineSnapshotSchema, default: null },
+  contributorDisclosure: { type: String, default: null },
+  editorNote: { type: String, default: null },
+  contributorDisclaimer: { type: String, default: null },
+  showAboutContributor: { type: Boolean, default: false },
+  contributor: { type: PublicPulseDialogueContributorSchema, default: null },
+}, { _id: false });
 
 function normalizeEditorialType(v) {
   if (v === null || v === undefined) return undefined;
@@ -226,6 +266,7 @@ const articleSchema = new mongoose.Schema(
     sponsorCtaUrl: { type: String, default: null },
     sponsorFeatureEligible: { type: Boolean, default: false },
     sponsorFeatureLinkedId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
+    pulseDialogue: { type: PulseDialogueSchema, default: undefined },
 
     isBreaking: { type: Boolean, default: false, index: true },
 
