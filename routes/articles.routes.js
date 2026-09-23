@@ -2885,10 +2885,9 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       if (excerpt) summaryOrDescription = excerpt;
     }
 
-    // On update: if slug is provided, use it. Otherwise if title is updated, regenerate slug for that language.
-    const resolvedSlug = slug !== undefined
-      ? normalizeSlug(slug)
-      : (title !== undefined ? slugifyFromTitle(title) : undefined);
+    // On update: preserve the existing slug unless the request explicitly changes it.
+    const slugWasProvided = Object.prototype.hasOwnProperty.call(requestBody, 'slug');
+    const resolvedSlug = slugWasProvided ? normalizeSlug(slug) : undefined;
 
     if (resolvedSlug !== undefined) {
       if (!resolvedSlug) {
