@@ -317,6 +317,31 @@ function normalizePublicPulseDialogue(value) {
   return Object.keys(out).length ? out : undefined;
 }
 
+function buildPublicBylineSnapshot(pulse, contributor, language) {
+  const existing = normalizeBylineSnapshot(pulse?.bylineSnapshot);
+  const generated = contributor ? buildBylineSnapshot(contributor, language, pulse?.bylineDesignationOverride) : null;
+  if (!existing) return generated;
+  if (!generated) return existing;
+  return {
+    name: existing.name || generated.name || null,
+    designation: existing.designation || generated.designation || null,
+    affiliation: existing.affiliation || generated.affiliation || null,
+    photo: existing.photo || generated.photo || null,
+  };
+}
+
+function buildPublicPulseDialoguePayload(pulse, contributor, language) {
+  if (!isPlainObject(pulse)) return undefined;
+  const publicContributor = contributor ? buildPublicContributor(contributor, language) : null;
+  const bylineSnapshot = buildPublicBylineSnapshot(pulse, contributor, language);
+  return normalizePublicPulseDialogue(applyPulseDialogueStandardText({
+    ...pulse,
+    contributorId: pulse.contributorId || null,
+    ...(bylineSnapshot ? { bylineSnapshot } : {}),
+    contributor: publicContributor,
+  }, language));
+}
+
 function isPulseDialogueArticle(docLike) {
   return String(docLike?.category || '').trim().toLowerCase() === PULSE_DIALOGUE_CATEGORY;
 }
@@ -388,18 +413,7 @@ async function buildPublicPulseDialogueFromArticle(docLike) {
   if (!pulse) return undefined;
   const language = getArticleLanguage(docLike);
   const contributor = pulse.contributorId ? await findContributorById(pulse.contributorId) : null;
-  const publicContributor = contributor ? buildPublicContributor(contributor, language) : null;
-  const bylineSnapshot = normalizeBylineSnapshot(pulse.bylineSnapshot);
-  const publicBylineSnapshot = bylineSnapshot && !bylineSnapshot.photo && publicContributor?.photo
-    ? { ...bylineSnapshot, photo: publicContributor.photo }
-    : bylineSnapshot;
-  const out = normalizePublicPulseDialogue(applyPulseDialogueStandardText({
-    ...pulse,
-    contributorId: pulse.contributorId || null,
-    ...(publicBylineSnapshot ? { bylineSnapshot: publicBylineSnapshot } : {}),
-    contributor: publicContributor,
-  }, language));
-  return out;
+  return buildPublicPulseDialoguePayload(pulse, contributor, language);
 }
 
 async function attachPublicPulseDialogueContributor(docLike, language) {
@@ -409,10 +423,7 @@ async function attachPublicPulseDialogueContributor(docLike, language) {
   const contributor = await findContributorById(pulse.contributorId);
   if (!contributor) return docLike;
   const resolvedLanguage = language || getArticleLanguage(docLike);
-  docLike.pulseDialogue = {
-    ...applyPulseDialogueStandardText(pulse, resolvedLanguage),
-    contributor: buildPublicContributor(contributor, resolvedLanguage),
-  };
+  docLike.pulseDialogue = buildPublicPulseDialoguePayload(pulse, contributor, resolvedLanguage) || pulse;
   return docLike;
 }
 
@@ -425,7 +436,9 @@ module.exports = {
   applyPulseDialogueStandardText,
   attachPublicPulseDialogueContributor,
   buildBylineSnapshot,
+  buildPublicBylineSnapshot,
   buildPublicPulseDialogueFromArticle,
+  buildPublicPulseDialoguePayload,
   buildPublicContributor,
   findContributorById,
   getArticleLanguage,

@@ -163,6 +163,7 @@ function installPublishMocks(t, docs) {
       shortBio: 'Writes public essays.',
       slug: 'public-pulse-writer',
       status: 'active',
+      photo: { url: 'https://cdn.example.test/public-pulse-writer.jpg', publicId: 'public-pulse-writer-photo', alt: 'Public Pulse Writer portrait' },
       internalEmail: 'private@example.test',
       internalNotes: 'private note',
       rightsConsent: { notes: 'private consent' },
@@ -284,6 +285,7 @@ test('due Pulse scheduled article publishes through canonical pipeline and syncs
     assert.equal(doc.workflowStage, 'PUBLISHED');
     assert.equal(doc.pulseDialogue.contributorId, '507f1f77bcf86cd79943a001');
     assert.equal(doc.pulseDialogue.bylineSnapshot.name, 'Public Pulse Writer');
+    assert.deepEqual(doc.pulseDialogue.bylineSnapshot.photo, { url: 'https://cdn.example.test/public-pulse-writer.jpg', publicId: 'public-pulse-writer-photo', alt: 'Public Pulse Writer portrait' });
     assert.equal(doc.pulseDialogue.contributorDisclosure, standard.contributorDisclosure);
     assert.equal(doc.pulseDialogue.contributorDisclaimer, standard.contributorDisclaimer);
   }
@@ -292,6 +294,8 @@ test('due Pulse scheduled article publishes through canonical pipeline and syncs
     const standard = getPulseDialogueStandardText(update.$set.language);
     assert.equal(update.$set.pulseDialogue.contributorDisclosure, standard.contributorDisclosure);
     assert.equal(update.$set.pulseDialogue.contributorDisclaimer, standard.contributorDisclaimer);
+    assert.deepEqual(update.$set.pulseDialogue.bylineSnapshot.photo, { url: 'https://cdn.example.test/public-pulse-writer.jpg', publicId: 'public-pulse-writer-photo', alt: 'Public Pulse Writer portrait' });
+    assert.deepEqual(update.$set.pulseDialogue.contributor.photo, { url: 'https://cdn.example.test/public-pulse-writer.jpg', publicId: 'public-pulse-writer-photo', alt: 'Public Pulse Writer portrait' });
   }
   const publicPulse = publicUpdates[0].$set.pulseDialogue;
   assert.equal(publicPulse.contributorId, '507f1f77bcf86cd79943a001');
@@ -358,4 +362,32 @@ test('manual Pulse publish still prepares byline snapshot and public sync', asyn
     assert.equal(update.$set.pulseDialogue.contributorDisclaimer, standard.contributorDisclaimer);
   }
   assert.equal(publicUpdates[0].$set.pulseDialogue.contributor.internalEmail, undefined);
+});
+
+test('manual Pulse republish repairs existing published null byline snapshot', async (t) => {
+  const docs = [
+    makePublishDoc('en', { status: 'published', publishedAt: new Date('2026-09-20T10:00:00.000Z'), pulseDialogue: { contributorId: '507f1f77bcf86cd79943a001', dialogueFormat: 'essay', bylineSnapshot: null } }),
+    makePublishDoc('hi', { status: 'published', publishedAt: new Date('2026-09-20T10:00:00.000Z'), pulseDialogue: { contributorId: '507f1f77bcf86cd79943a001', dialogueFormat: 'essay', bylineSnapshot: null } }),
+    makePublishDoc('gu', { status: 'published', publishedAt: new Date('2026-09-20T10:00:00.000Z'), pulseDialogue: { contributorId: '507f1f77bcf86cd79943a001', dialogueFormat: 'essay', bylineSnapshot: null } }),
+  ];
+  const { publicUpdates } = installPublishMocks(t, docs);
+
+  const result = await publishCanonicalArticle(docs[0], {
+    actor: { byUserId: null, byRole: 'Founder' },
+    reason: 'manual pulse republish repair test',
+    source: 'manual_pulse_republish_test',
+    now: new Date('2026-09-23T10:00:00.000Z'),
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.publishedLanguages.sort(), ['en', 'gu', 'hi']);
+  for (const doc of docs) {
+    assert.equal(doc.pulseDialogue.bylineSnapshot.name, 'Public Pulse Writer');
+    assert.deepEqual(doc.pulseDialogue.bylineSnapshot.photo, { url: 'https://cdn.example.test/public-pulse-writer.jpg', publicId: 'public-pulse-writer-photo', alt: 'Public Pulse Writer portrait' });
+  }
+  assert.equal(publicUpdates.length, 3);
+  for (const update of publicUpdates) {
+    assert.deepEqual(update.$set.pulseDialogue.bylineSnapshot.photo, { url: 'https://cdn.example.test/public-pulse-writer.jpg', publicId: 'public-pulse-writer-photo', alt: 'Public Pulse Writer portrait' });
+    assert.deepEqual(update.$set.pulseDialogue.contributor.photo, { url: 'https://cdn.example.test/public-pulse-writer.jpg', publicId: 'public-pulse-writer-photo', alt: 'Public Pulse Writer portrait' });
+  }
 });

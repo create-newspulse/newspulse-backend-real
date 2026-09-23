@@ -12,6 +12,7 @@ const {
   buildChildNewsSyncPatch,
 } = require('../services/translationGroupSync.service');
 const {
+  attachPublicPulseDialogueContributor,
   buildPublicContributor,
   getPulseDialogueStandardText,
   normalizePulseDialoguePayload,
@@ -257,6 +258,248 @@ test('News to public Article sync copies only public-safe Pulse Dialogue data', 
     assert.equal(pulse.contributor.rightsConsent, undefined);
   } finally {
     Contributor.findById = originals.contributorFindById;
+    PublicArticle.findOneAndUpdate = originals.publicFindOneAndUpdate;
+  }
+});
+
+test('News to public Article sync repairs null Pulse byline snapshot from contributor photo', async () => {
+  const contributorId = '507f1f77bcf86cd799439a07';
+  const contributorPhoto = { url: 'https://cdn.example.test/shailesh.jpg', publicId: 'shailesh-photo', alt: 'Shailesh Rathod portrait' };
+  const coverPhoto = { url: 'https://cdn.example.test/article-cover.jpg', publicId: 'article-cover', alt: 'Article cover' };
+  const originals = {
+    contributorFindById: Contributor.findById,
+    publicFindOneAndUpdate: PublicArticle.findOneAndUpdate,
+  };
+  let capturedUpdate = null;
+
+  try {
+    Contributor.findById = () => ({
+      lean: async () => ({
+        _id: contributorId,
+        canonicalName: 'Shailesh Rathod',
+        displayNameHi: 'शैलेश राठौड़',
+        displayNameGu: 'શૈલેશ રાઠોડ',
+        publicDesignation: 'Guest Contributor',
+        affiliation: 'News Pulse Dialogue',
+        shortBio: 'Writes public essays.',
+        status: 'active',
+        photo: contributorPhoto,
+        internalEmail: 'private@example.test',
+        internalNotes: 'private note',
+        rightsConsent: { notes: 'private rights note' },
+      }),
+    });
+    PublicArticle.findOneAndUpdate = (_query, update) => {
+      capturedUpdate = update;
+      return { lean: async () => ({ _id: 'public-repaired' }) };
+    };
+
+    const saved = await syncPublicArticleFromNews({
+      _id: '507f1f77bcf86cd799439b07',
+      title: 'Pulse essay with null snapshot',
+      description: 'Summary',
+      content: '<p>Body</p>',
+      slug: 'pulse-null-snapshot',
+      category: 'pulse-dialogue',
+      status: 'published',
+      language: 'gu',
+      lang: 'gu',
+      originalLang: 'gu',
+      coverImage: coverPhoto,
+      pulseDialogue: {
+        contributorId,
+        dialogueFormat: 'essay',
+        bylineSnapshot: null,
+        showAboutContributor: true,
+      },
+    });
+
+    assert.equal(saved._id, 'public-repaired');
+    const pulse = capturedUpdate.$set.pulseDialogue;
+    assert.equal(pulse.contributorId, contributorId);
+    assert.ok(pulse.bylineSnapshot.name);
+    assert.equal(pulse.bylineSnapshot.designation, 'Guest Contributor');
+    assert.equal(pulse.bylineSnapshot.affiliation, 'News Pulse Dialogue');
+    assert.deepEqual(pulse.bylineSnapshot.photo, contributorPhoto);
+    assert.ok(pulse.contributor.name);
+    assert.equal(pulse.contributor.canonicalName, 'Shailesh Rathod');
+    assert.deepEqual(pulse.contributor.photo, contributorPhoto);
+    assert.notDeepEqual(pulse.bylineSnapshot.photo, coverPhoto);
+    assert.equal(pulse.contributor.internalEmail, undefined);
+    assert.equal(pulse.contributor.internalNotes, undefined);
+    assert.equal(pulse.contributor.rightsConsent, undefined);
+  } finally {
+    Contributor.findById = originals.contributorFindById;
+    PublicArticle.findOneAndUpdate = originals.publicFindOneAndUpdate;
+  }
+});
+
+test('EN HI GU public Pulse Articles share contributorId and contributor photo', async () => {
+  const contributorId = '507f1f77bcf86cd799439a08';
+  const contributorPhoto = { url: 'https://cdn.example.test/shared-writer.jpg', publicId: 'shared-writer-photo', alt: 'Shared Writer portrait' };
+  const originals = {
+    contributorFindById: Contributor.findById,
+    publicFindOneAndUpdate: PublicArticle.findOneAndUpdate,
+  };
+  const publicUpdates = [];
+
+  try {
+    Contributor.findById = () => ({
+      lean: async () => ({
+        _id: contributorId,
+        canonicalName: 'Shared Writer',
+        displayNameHi: 'साझा लेखक',
+        displayNameGu: 'સાંઝા લેખક',
+        publicDesignation: 'Columnist',
+        affiliation: 'News Pulse Forum',
+        shortBio: 'Writes across languages.',
+        status: 'active',
+        photo: contributorPhoto,
+      }),
+    });
+    PublicArticle.findOneAndUpdate = (_query, update) => {
+      publicUpdates.push(update.$set);
+      return { lean: async () => ({ _id: `public-${publicUpdates.length}` }) };
+    };
+
+    for (const lang of ['en', 'hi', 'gu']) {
+      await syncPublicArticleFromNews({
+        _id: `507f1f77bcf86cd799439c0${lang === 'en' ? '1' : lang === 'hi' ? '2' : '3'}`,
+        title: `Pulse ${lang}`,
+        description: 'Summary',
+        content: '<p>Body</p>',
+        slug: `pulse-${lang}`,
+        category: 'pulse-dialogue',
+        status: 'published',
+        language: lang,
+        lang,
+        originalLang: lang,
+        pulseDialogue: { contributorId, dialogueFormat: 'essay', bylineSnapshot: null },
+      });
+    }
+
+    assert.equal(publicUpdates.length, 3);
+    for (const update of publicUpdates) {
+      assert.equal(update.pulseDialogue.contributorId, contributorId);
+      assert.deepEqual(update.pulseDialogue.bylineSnapshot.photo, contributorPhoto);
+      assert.deepEqual(update.pulseDialogue.contributor.photo, contributorPhoto);
+    }
+    assert.equal(publicUpdates.find((item) => item.language === 'en').pulseDialogue.bylineSnapshot.name, 'Shared Writer');
+    assert.equal(publicUpdates.find((item) => item.language === 'hi').pulseDialogue.bylineSnapshot.name, 'साझा लेखक');
+    assert.equal(publicUpdates.find((item) => item.language === 'gu').pulseDialogue.bylineSnapshot.name, 'સાંઝા લેખક');
+  } finally {
+    Contributor.findById = originals.contributorFindById;
+    PublicArticle.findOneAndUpdate = originals.publicFindOneAndUpdate;
+  }
+});
+
+test('public read attachment repairs null Pulse byline snapshot without private fields', async () => {
+  const contributorId = '507f1f77bcf86cd799439a09';
+  const contributorPhoto = { url: 'https://cdn.example.test/read-path.jpg', publicId: 'read-path-photo', alt: 'Read Path Writer portrait' };
+  const originals = { findById: Contributor.findById };
+
+  try {
+    Contributor.findById = () => ({
+      lean: async () => ({
+        _id: contributorId,
+        canonicalName: 'Read Path Writer',
+        publicDesignation: 'Essayist',
+        affiliation: 'Public Forum',
+        shortBio: 'Public safe bio.',
+        status: 'active',
+        photo: contributorPhoto,
+        internalEmail: 'private@example.test',
+        internalNotes: 'private',
+        rightsConsent: { notes: 'private' },
+      }),
+    });
+
+    const doc = {
+      category: 'pulse-dialogue',
+      language: 'en',
+      pulseDialogue: { contributorId, dialogueFormat: 'essay', bylineSnapshot: null },
+    };
+
+    await attachPublicPulseDialogueContributor(doc, 'en');
+
+    assert.equal(doc.pulseDialogue.bylineSnapshot.name, 'Read Path Writer');
+    assert.deepEqual(doc.pulseDialogue.bylineSnapshot.photo, contributorPhoto);
+    assert.equal(doc.pulseDialogue.contributor.shortBio, 'Public safe bio.');
+    assert.equal(doc.pulseDialogue.contributor.internalEmail, undefined);
+    assert.equal(doc.pulseDialogue.contributor.internalNotes, undefined);
+    assert.equal(doc.pulseDialogue.contributor.rightsConsent, undefined);
+  } finally {
+    Contributor.findById = originals.findById;
+  }
+});
+
+test('Pulse contributor without photo still builds public-safe payload', async () => {
+  const contributorId = '507f1f77bcf86cd799439a0a';
+  const originals = {
+    contributorFindById: Contributor.findById,
+    publicFindOneAndUpdate: PublicArticle.findOneAndUpdate,
+  };
+  let capturedUpdate = null;
+
+  try {
+    Contributor.findById = () => ({
+      lean: async () => ({
+        _id: contributorId,
+        canonicalName: 'No Photo Writer',
+        publicDesignation: 'Contributor',
+        status: 'active',
+        photo: null,
+      }),
+    });
+    PublicArticle.findOneAndUpdate = (_query, update) => {
+      capturedUpdate = update;
+      return { lean: async () => ({ _id: 'public-no-photo' }) };
+    };
+
+    await syncPublicArticleFromNews({
+      _id: '507f1f77bcf86cd799439b0a',
+      title: 'No photo pulse',
+      description: 'Summary',
+      content: '<p>Body</p>',
+      slug: 'no-photo-pulse',
+      category: 'pulse-dialogue',
+      status: 'published',
+      language: 'en',
+      pulseDialogue: { contributorId, dialogueFormat: 'essay', bylineSnapshot: null },
+    });
+
+    assert.equal(capturedUpdate.$set.pulseDialogue.bylineSnapshot.name, 'No Photo Writer');
+    assert.equal(capturedUpdate.$set.pulseDialogue.bylineSnapshot.photo, null);
+    assert.equal(capturedUpdate.$set.pulseDialogue.contributor.photo, null);
+  } finally {
+    Contributor.findById = originals.contributorFindById;
+    PublicArticle.findOneAndUpdate = originals.publicFindOneAndUpdate;
+  }
+});
+
+test('non-Pulse public Article sync does not add Pulse Dialogue payload', async () => {
+  const originals = { publicFindOneAndUpdate: PublicArticle.findOneAndUpdate };
+  let capturedUpdate = null;
+
+  try {
+    PublicArticle.findOneAndUpdate = (_query, update) => {
+      capturedUpdate = update;
+      return { lean: async () => ({ _id: 'public-non-pulse' }) };
+    };
+
+    await syncPublicArticleFromNews({
+      _id: '507f1f77bcf86cd799439b0b',
+      title: 'Normal article',
+      description: 'Summary',
+      content: '<p>Body</p>',
+      slug: 'normal-article',
+      category: 'national',
+      status: 'published',
+      language: 'en',
+    });
+
+    assert.equal(Object.prototype.hasOwnProperty.call(capturedUpdate.$set, 'pulseDialogue'), false);
+  } finally {
     PublicArticle.findOneAndUpdate = originals.publicFindOneAndUpdate;
   }
 });
