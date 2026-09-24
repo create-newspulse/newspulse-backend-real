@@ -354,6 +354,16 @@ async function findContributorById(contributorId) {
   if (query && typeof query.lean === 'function') return query.lean();
   return query;
 }
+async function findContributorsByIds(contributorIds) {
+  const ids = Array.from(new Set((Array.isArray(contributorIds) ? contributorIds : [])
+    .map((id) => normalizeObjectId(id))
+    .filter(Boolean)));
+  if (!ids.length) return [];
+  const Contributor = require('../models/Contributor');
+  const query = Contributor.find({ _id: { $in: ids } });
+  if (query && typeof query.lean === 'function') return query.lean();
+  return query;
+}
 
 async function assertContributorExists(contributorId) {
   const contributor = await findContributorById(contributorId);
@@ -426,6 +436,30 @@ async function attachPublicPulseDialogueContributor(docLike, language) {
   docLike.pulseDialogue = buildPublicPulseDialoguePayload(pulse, contributor, resolvedLanguage) || pulse;
   return docLike;
 }
+async function attachPublicPulseDialogueContributorsBatch(docLikes, language) {
+  const docs = Array.isArray(docLikes) ? docLikes : [];
+  const pulseDocs = docs.filter((doc) => {
+    const pulse = isPlainObject(doc?.pulseDialogue) ? doc.pulseDialogue : null;
+    return isPulseDialogueArticle(doc) && pulse && pulse.contributorId;
+  });
+  if (!pulseDocs.length) return docs;
+
+  const contributors = await findContributorsByIds(pulseDocs.map((doc) => doc.pulseDialogue.contributorId));
+  const contributorById = new Map((Array.isArray(contributors) ? contributors : [])
+    .filter(Boolean)
+    .map((contributor) => [String(contributor._id || contributor.id || ''), contributor])
+    .filter(([id]) => Boolean(id)));
+
+  for (const doc of pulseDocs) {
+    const pulse = isPlainObject(doc.pulseDialogue) ? doc.pulseDialogue : null;
+    const contributor = contributorById.get(String(pulse?.contributorId || ''));
+    if (!contributor) continue;
+    const resolvedLanguage = language || doc.resolvedLang || doc.resolvedLanguage || doc.lang || doc.language || getArticleLanguage(doc);
+    doc.pulseDialogue = buildPublicPulseDialoguePayload(pulse, contributor, resolvedLanguage) || pulse;
+  }
+
+  return docs;
+}
 
 module.exports = {
   PULSE_DIALOGUE_CATEGORY,
@@ -433,6 +467,7 @@ module.exports = {
   CONTRIBUTOR_TYPE_VALUES,
   DIALOGUE_FORMAT_VALUES,
   assertContributorExists,
+  attachPublicPulseDialogueContributorsBatch,
   applyPulseDialogueStandardText,
   attachPublicPulseDialogueContributor,
   buildBylineSnapshot,
@@ -441,6 +476,7 @@ module.exports = {
   buildPublicPulseDialoguePayload,
   buildPublicContributor,
   findContributorById,
+  findContributorsByIds,
   getArticleLanguage,
   getPulseDialogueStandardText,
   isPlainObject,

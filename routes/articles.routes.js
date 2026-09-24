@@ -50,6 +50,7 @@ const {
   PULSE_DIALOGUE_CATEGORY,
   assertContributorExists,
   attachPublicPulseDialogueContributor,
+  attachPublicPulseDialogueContributorsBatch,
   normalizePulseDialoguePayload,
   preparePulseDialogueForPublication,
 } = require('../services/pulseDialogue.service');
@@ -1863,7 +1864,7 @@ router.get('/public/articles', async (req, res, next) => {
         categorySlug: categoryRaw,
         normalizedCategoryKey: categoryNorm || categoryRaw,
       });
-      items = await Promise.all((resolved.items || []).map((item) => attachPublicPulseDialogueContributor(item, groupedRequestedLang)));
+      items = await attachPublicPulseDialogueContributorsBatch(resolved.items || [], groupedRequestedLang);
       total = resolved.total;
     } else {
       const skip = (page - 1) * limit;
@@ -1897,7 +1898,7 @@ router.get('/public/articles', async (req, res, next) => {
           })
           .filter(Boolean);
       }
-      items = await Promise.all((items || []).map((item) => attachPublicPulseDialogueContributor(item, desired || item.lang || item.language)));
+      items = await attachPublicPulseDialogueContributorsBatch(items || [], desired);
     }
 
     return res.status(200).json({ ok: true, success: true, status: 200, data: { items, page, limit, total } });

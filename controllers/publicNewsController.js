@@ -20,7 +20,10 @@ const {
   getPublicContentLookup,
   buildPublicContentSiblingOrClauses,
 } = require('../services/publicCategoryListing.service');
-const { attachPublicPulseDialogueContributor } = require('../services/pulseDialogue.service');
+const {
+  attachPublicPulseDialogueContributor,
+  attachPublicPulseDialogueContributorsBatch,
+} = require('../services/pulseDialogue.service');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -1102,6 +1105,8 @@ async function _resolveGroupedCategoryNewsItems({
     try { delete item.__sortCreatedAt; } catch (_) {}
     return item;
   });
+
+  await attachPublicPulseDialogueContributorsBatch(items);
 
   return { items, total, totalPages: Math.max(Math.ceil(total / limit), 1) };
 }
