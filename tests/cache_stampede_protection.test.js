@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { EventEmitter } = require('node:events');
 const express = require('express');
 const request = require('supertest');
 
@@ -116,10 +117,8 @@ function waitFor(predicate, timeoutMs = 500) {
   });
 }
 
-function makePublicNewsCacheApp(cache, handler, options = {}) {
-  const app = express();
-  const routeHandler = options.routeHandler || handler;
-  app.get('/cached/:key?', cache.createJsonCacheMiddleware({
+function publicNewsCacheOptions(handler, options = {}) {
+  return {
     ttlSeconds: options.ttlSeconds || 45,
     staleWhileRevalidate: true,
     backgroundRebuild: handler,
@@ -129,11 +128,354 @@ function makePublicNewsCacheApp(cache, handler, options = {}) {
     lockTtlSeconds: 60,
     coldCacheWaitMs: options.coldCacheWaitMs || 180,
     coldCachePollMs: 15,
+    rebuildAdmissionTimeoutMs: options.rebuildAdmissionTimeoutMs || 180,
+    rebuildCommandTimeoutMs: options.rebuildCommandTimeoutMs || 180,
+    onRebuildUnavailable: (_req, res) => res.set('Retry-After', '1').status(503).json({ items: [], page: 1, limit: 30, total: 0, totalPages: 1 }),
     buildKey: (req) => `np:v1:test:public-news:${req.params.key || 'default'}`,
     shouldCache: ({ statusCode, body }) => statusCode === 200 && body && Array.isArray(body.items),
-  }), routeHandler);
+  };
+}
+
+function makePublicNewsCacheApp(cache, handler, options = {}) {
+  const app = express();
+  const routeHandler = options.routeHandler || handler;
+  app.get('/cached/:key?', cache.createJsonCacheMiddleware(publicNewsCacheOptions(handler, options)), routeHandler);
   return app;
 }
+
+async function flushPromises() {
+  for (let turn = 0; turn < 100; turn += 1) await Promise.resolve();
+}
+
+function makeLifecycleHarness(t, handler, options = {}) {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const redis = new FakeRedis();
+  const loaded = loadCache(redis);
+  t.after(loaded.restore);
+  const middleware = loaded.cache.createJsonCacheMiddleware(publicNewsCacheOptions(handler, {
+    rebuildAdmissionTimeoutMs: 100,
+    rebuildCommandTimeoutMs: 20,
+    coldCacheWaitMs: 40,
+    ...options,
+  }));
+  return {
+    redis,
+    cache: loaded.cache,
+    async advance(milliseconds) {
+      redis.advance(milliseconds);
+      t.mock.timers.tick(milliseconds);
+      await flushPromises();
+    },
+    request(key) {
+      const req = new EventEmitter();
+      Object.assign(req, { method: 'GET', params: { key }, query: {}, headers: {} });
+      const res = new EventEmitter();
+      Object.assign(res, { statusCode: 200, headers: {}, destroyed: false, writableFinished: false });
+      res.set = (name, value) => { res.headers[name.toLowerCase()] = value; return res; };
+      res.status = (code) => { res.statusCode = code; return res; };
+      res.json = (body) => {
+        assert.equal(res.destroyed, false, 'must not respond to a disconnected client');
+        res.body = body;
+        res.writableFinished = true;
+        res.writableEnded = true;
+        res.emit('finish');
+        return res;
+      };
+      const task = { req, res, settled: false };
+      task.promise = middleware(req, res, (error) => {
+        assert.ok(error, 'bounded requests must not bypass admission into the next controller');
+        res.status(500).json({ items: [], message: error.message });
+      }).then(() => { task.settled = true; });
+      return task;
+    },
+  };
+}
+
+test('cross-key backlog has a finite admission deadline and holds no queued locks', async (t) => {
+  const release = deferred();
+  const started = [];
+  const harness = makeLifecycleHarness(t, async (req, res) => {
+    started.push(req.params.key);
+    await release.promise;
+    res.json({ items: [] });
+  });
+  const first = harness.request('one');
+  const second = harness.request('two');
+  await flushPromises();
+  const queued = ['national', 'regional', 'glamour', 'sports'].map((key) => harness.request(key));
+  await flushPromises();
+  assert.equal(started.length, 2);
+  assert.equal(harness.redis.entries.has('np:v1:test:public-news:national:lock'), false);
+  await harness.advance(99);
+  assert.ok(queued.every((task) => !task.settled));
+  await harness.advance(2);
+  assert.ok(queued.every((task) => task.settled && task.res.statusCode === 503));
+  assert.equal(started.length, 2);
+  release.resolve();
+  await Promise.all([first.promise, second.promise]);
+  const next = harness.request('next');
+  await next.promise;
+  assert.equal(next.res.statusCode, 200);
+});
+
+for (const event of ['close', 'aborted']) {
+  test(`queued client ${event} removes work before admission`, async (t) => {
+    const release = deferred();
+    const started = [];
+    const harness = makeLifecycleHarness(t, async (req, res) => {
+      started.push(req.params.key);
+      await release.promise;
+      res.json({ items: [] });
+    });
+    const first = harness.request('one');
+    const second = harness.request('two');
+    await flushPromises();
+    const dead = harness.request('dead');
+    await flushPromises();
+    assert.equal(dead.res.listenerCount('close'), 1);
+    if (event === 'close') { dead.res.destroyed = true; dead.res.emit('close'); }
+    else { dead.req.aborted = true; dead.req.emit('aborted'); }
+    await dead.promise;
+    assert.equal(dead.req.listenerCount('aborted'), 0);
+    assert.equal(dead.res.listenerCount('close'), 0);
+    release.resolve();
+    await Promise.all([first.promise, second.promise]);
+    const next = harness.request('next');
+    await next.promise;
+    assert.equal(started.includes('dead'), false);
+    assert.equal(harness.redis.entries.has('np:v1:test:public-news:dead'), false);
+    assert.equal(next.res.statusCode, 200);
+  });
+}
+
+test('expired admission is rejected even before its delayed timer callback executes', async (t) => {
+  const release = deferred();
+  const started = [];
+  const harness = makeLifecycleHarness(t, async (req, res) => {
+    started.push(req.params.key);
+    await release.promise;
+    res.json({ items: [] });
+  });
+  const first = harness.request('one');
+  const second = harness.request('two');
+  await flushPromises();
+  const expired = harness.request('expired');
+  await flushPromises();
+  t.mock.timers.setTime(Date.now() + 101);
+  release.resolve();
+  await Promise.all([first.promise, second.promise, expired.promise]);
+  assert.equal(expired.res.statusCode, 503);
+  assert.equal(started.includes('expired'), false);
+});
+
+test('cache created while queued is returned after admission even after an earlier lock expires', async (t) => {
+  const release = deferred();
+  const started = [];
+  const harness = makeLifecycleHarness(t, async (req, res) => {
+    started.push(req.params.key);
+    await release.promise;
+    res.json({ items: [] });
+  }, { rebuildAdmissionTimeoutMs: 2000 });
+  const first = harness.request('one');
+  const second = harness.request('two');
+  await flushPromises();
+  const key = 'np:v1:test:public-news:queued';
+  await harness.cache.safeAcquireRebuildLock(key, 1);
+  const queued = harness.request('queued');
+  await flushPromises();
+  await harness.advance(1001);
+  assert.equal(await harness.redis.get(`${key}:lock`), null);
+  await harness.cache.safeSetCache(key, { status: 200, body: { items: [{ source: 'other-owner' }] } }, 45);
+  release.resolve();
+  await Promise.all([first.promise, second.promise, queued.promise]);
+  assert.equal(started.includes('queued'), false);
+  assert.equal(queued.res.body.items[0].source, 'other-owner');
+  assert.equal(await harness.redis.get(`${key}:lock`), null);
+});
+
+test('replacement lock acquired during queue wait prevents the queued job rebuilding', async (t) => {
+  const release = deferred();
+  const started = [];
+  const harness = makeLifecycleHarness(t, async (req, res) => {
+    started.push(req.params.key);
+    await release.promise;
+    res.json({ items: [] });
+  }, { rebuildAdmissionTimeoutMs: 2000 });
+  const first = harness.request('one');
+  const second = harness.request('two');
+  await flushPromises();
+  const key = 'np:v1:test:public-news:queued';
+  await harness.cache.safeAcquireRebuildLock(key, 1);
+  const queued = harness.request('queued');
+  await flushPromises();
+  await harness.advance(1001);
+  const replacement = await harness.cache.safeAcquireRebuildLock(key, 60);
+  release.resolve();
+  await Promise.all([first.promise, second.promise]);
+  await flushPromises();
+  for (let tick = 0; tick < 3; tick += 1) await harness.advance(15);
+  await queued.promise;
+  assert.equal(queued.res.statusCode, 503);
+  assert.equal(started.includes('queued'), false);
+  assert.equal(await harness.redis.get(`${key}:lock`), replacement.token);
+});
+
+test('cold follower uses completed cache without a duplicate controller call', async (t) => {
+  const release = deferred();
+  let calls = 0;
+  const harness = makeLifecycleHarness(t, async (_req, res) => {
+    calls += 1;
+    await release.promise;
+    res.json({ items: [{ source: 'owner' }] });
+  });
+  const owner = harness.request('same');
+  await flushPromises();
+  const follower = harness.request('same');
+  await flushPromises();
+  release.resolve();
+  await owner.promise;
+  await harness.advance(15);
+  await follower.promise;
+  assert.equal(calls, 1);
+  assert.equal(follower.res.body.items[0].source, 'owner');
+});
+
+test('stale response does not wait for saturated foreground slots', async (t) => {
+  const release = deferred();
+  let calls = 0;
+  const harness = makeLifecycleHarness(t, async (_req, res) => {
+    calls += 1;
+    await release.promise;
+    res.json({ items: [] });
+  });
+  const first = harness.request('one');
+  const second = harness.request('two');
+  await flushPromises();
+  await harness.cache.safeSetCache('np:v1:test:public-news:stale:stale', { status: 200, body: { items: ['stale'] } }, 45);
+  const stale = harness.request('stale');
+  await stale.promise;
+  assert.deepEqual(stale.res.body.items, ['stale']);
+  assert.equal(calls, 2);
+  await harness.advance(101);
+  release.resolve();
+  await Promise.all([first.promise, second.promise]);
+  assert.equal(calls, 2);
+});
+
+for (const fault of ['write-failure', 'write-stall', 'release-failure', 'release-stall', 'acquire-stall', 'read-stall']) {
+  test(`limiter slots release after Redis ${fault}`, async (t) => {
+    const harness = makeLifecycleHarness(t, async (_req, res) => res.json({ items: [] }), { rebuildAdmissionTimeoutMs: 500 });
+    const originalSet = harness.redis.set.bind(harness.redis);
+    const originalGet = harness.redis.get.bind(harness.redis);
+    const originalEval = harness.redis.eval.bind(harness.redis);
+    const failing = (key) => /:(one|two)(:lock|:stale)?$/.test(key);
+    const fail = () => {
+      if (fault.endsWith('stall')) return new Promise(() => {});
+      throw new Error('simulated Redis failure');
+    };
+    harness.redis.set = async (key, value, ...args) => {
+      if (failing(key) && ((fault.startsWith('write') && !args.includes('NX')) || (fault.startsWith('acquire') && args.includes('NX')))) return fail();
+      return originalSet(key, value, ...args);
+    };
+    harness.redis.get = async (key) => fault === 'read-stall' && failing(key) ? fail() : originalGet(key);
+    harness.redis.eval = async (...args) => fault.startsWith('release') && failing(args[2]) ? fail() : originalEval(...args);
+    const first = harness.request('one');
+    const second = harness.request('two');
+    await flushPromises();
+    const third = harness.request('three');
+    for (let tick = 0; tick < 12; tick += 1) await harness.advance(21);
+    assert.equal(first.settled, true);
+    assert.equal(second.settled, true);
+    assert.equal(third.settled, true);
+    assert.equal(third.res.statusCode, 200);
+    if (fault.startsWith('write')) {
+      assert.equal(harness.redis.entries.has('np:v1:test:public-news:one:stale'), false);
+    }
+  });
+}
+
+test('controller exceptions release slots and reach the error response', async (t) => {
+  const harness = makeLifecycleHarness(t, async (req, res) => {
+    if (req.params.key !== 'success') throw new Error('simulated controller failure');
+    res.json({ items: [] });
+  });
+  const tasks = ['one', 'two', 'success'].map((key) => harness.request(key));
+  await Promise.all(tasks.map((task) => task.promise));
+  assert.deepEqual(tasks.map((task) => task.res.statusCode), [500, 500, 200]);
+  assert.equal(await harness.redis.get('np:v1:test:public-news:one:lock'), null);
+});
+
+test('active disconnect releases the slot and late controller completion never writes cache', async (t) => {
+  const release = deferred();
+  const harness = makeLifecycleHarness(t, async (req, res) => {
+    if (req.params.key === 'dead') await release.promise;
+    res.json({ items: [] });
+  });
+  const dead = harness.request('dead');
+  await flushPromises();
+  dead.res.destroyed = true;
+  dead.res.emit('close');
+  await dead.promise;
+  const next = harness.request('next');
+  await next.promise;
+  release.resolve();
+  await flushPromises();
+  assert.equal(harness.redis.entries.has('np:v1:test:public-news:dead'), false);
+  assert.equal(await harness.redis.get('np:v1:test:public-news:dead:lock'), null);
+  assert.equal(next.res.statusCode, 200);
+});
+
+test('rebuild exceeding the lock lifetime releases slots and ignores late results', async (t) => {
+  const release = deferred();
+  const harness = makeLifecycleHarness(t, async (req, res) => {
+    if (req.params.key !== 'next') await release.promise;
+    res.json({ items: [] });
+  });
+  const first = harness.request('one');
+  const second = harness.request('two');
+  await flushPromises();
+  await harness.advance(60001);
+  await Promise.all([first.promise, second.promise]);
+  assert.equal(first.res.statusCode, 503);
+  assert.equal(second.res.statusCode, 503);
+  const next = harness.request('next');
+  await next.promise;
+  release.resolve();
+  await flushPromises();
+  assert.equal(harness.redis.entries.has('np:v1:test:public-news:one'), false);
+  assert.equal(next.res.statusCode, 200);
+});
+
+test('public-news foreground admission expires without running another category rebuild', async (t) => {
+  const redis = new FakeRedis();
+  const loaded = loadCache(redis);
+  t.after(loaded.restore);
+  const release = deferred();
+  const started = [];
+  const app = makePublicNewsCacheApp(loaded.cache, async (req, res) => {
+    started.push(req.params.key);
+    await release.promise;
+    res.json({ items: [] });
+  }, { rebuildAdmissionTimeoutMs: 30 });
+  const first = request(app).get('/cached/one').then((response) => response);
+  const second = request(app).get('/cached/two').then((response) => response);
+  await waitFor(() => started.length === 2);
+  let deadline;
+  const third = request(app).get('/cached/three').then((response) => response);
+  try {
+    const result = await Promise.race([
+      third,
+      new Promise((resolve) => { deadline = setTimeout(() => resolve(null), 300); }),
+    ]);
+    assert.equal(result?.status, 503);
+    assert.equal(result.headers['retry-after'], '1');
+    assert.deepEqual(started.slice().sort(), ['one', 'two']);
+  } finally {
+    clearTimeout(deadline);
+    release.resolve();
+    await Promise.all([first, second, third]);
+  }
+});
 
 test('cache middleware protects rebuilds, serves stale data, and fails open', async (t) => {
   const redis = new FakeRedis();
