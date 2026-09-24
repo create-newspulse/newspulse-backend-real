@@ -5,6 +5,8 @@ const request = require('supertest');
 
 const {
   createRequestTimingMiddleware,
+  getRequestTimingState,
+  copyRequestTimingIdentity,
   logSlowTiming,
   setRequestTimingCacheContext,
   setRequestTimingCacheStatus,
@@ -46,6 +48,7 @@ test('request timing middleware logs only safe slow-request metadata', async () 
     'durationMs',
     'method',
     'route',
+    'requestId',
     'statusCode',
   ].sort());
   assert.equal(capture.entries[0].payload.method, 'GET');
@@ -77,6 +80,7 @@ test('timeAsync logs safe operation metadata and preserves return value', async 
     method: 'GET',
     route: '/api/public/news',
     durationMs: capture.entries[0].payload.durationMs,
+    requestId: getRequestTimingState(req).requestId,
     statusCode: 200,
     cache: 'rebuild',
     resultCount: 2,
@@ -129,6 +133,7 @@ test('timing diagnostics include safe public-news cache context', async () => {
     method: 'GET',
     route: '/api/public/news',
     durationMs: capture.entries[0].payload.durationMs,
+    requestId: getRequestTimingState(req).requestId,
     statusCode: 200,
     cache: 'rebuild',
     cacheFamily: 'category',
@@ -168,6 +173,7 @@ test('timing diagnostics ignore unsupported cache context and private extras', a
     method: 'GET',
     route: '/api/public/news',
     durationMs: capture.entries[0].payload.durationMs,
+    requestId: getRequestTimingState(req).requestId,
     statusCode: 200,
     cache: 'rebuild',
     cacheFamily: 'latest',
@@ -177,6 +183,63 @@ test('timing diagnostics ignore unsupported cache context and private extras', a
   });
   assert.equal(JSON.stringify(capture.entries[0].payload).includes('secret'), false);
   assert.equal(JSON.stringify(capture.entries[0].payload).includes('@example.com'), false);
+});
+
+test('request identities are server-generated and survive copies without sharing mutable timing state', () => {
+  const first = { headers: { 'x-request-id': 'secret-person@example.test' } };
+  const second = {};
+  const cloned = {};
+  const firstState = getRequestTimingState(first);
+  assert.match(firstState.requestId, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+  assert.notEqual(firstState.requestId, getRequestTimingState(second).requestId);
+  assert.equal(Object.keys(first).includes('__npTimingDiagnostics'), false);
+  setRequestTimingCacheStatus(first, 'stale-hit');
+  copyRequestTimingIdentity(first, cloned);
+  setRequestTimingCacheStatus(cloned, 'rebuild');
+  assert.equal(getRequestTimingState(cloned).requestId, firstState.requestId);
+  assert.equal(firstState.cache, 'stale-hit');
+});
+
+test('HTTP and Mongo operation timings correlate to the same request without trusting headers', async () => {
+  const capture = captureLogger();
+  const app = express();
+  app.use(createRequestTimingMiddleware({ thresholdMs: 0, logger: capture.logger }));
+  app.get('/correlated', async (req, res) => {
+    await timeAsync('mongo.publicNews.category.matched.find', { req, res, thresholdMs: 0, logger: capture.logger }, async () => []);
+    res.json({ items: [] });
+  });
+  const response = await request(app).get('/correlated').set('X-Request-ID', 'secret-client-id').expect(200);
+  assert.deepEqual(response.body, { items: [] });
+  assert.equal(response.headers['x-request-id'], undefined);
+  assert.equal(capture.entries.length, 2);
+  assert.equal(capture.entries[0].payload.requestId, capture.entries[1].payload.requestId);
+  assert.equal(JSON.stringify(capture.entries).includes('secret-client-id'), false);
+});
+
+test('contributor batch query includes request correlation and count without contributor identity', async () => {
+  const capture = captureLogger();
+  const Contributor = require('../models/Contributor');
+  const { attachPublicPulseDialogueContributorsBatch } = require('../services/pulseDialogue.service');
+  const originalFind = Contributor.find;
+  const contributorId = '507f1f77bcf86cd799439901';
+  const req = { method: 'GET', originalUrl: '/api/public/news' };
+  let queries = 0;
+  Contributor.find = () => {
+    queries += 1;
+    return { lean: async () => [{ _id: contributorId, canonicalName: 'Private Test Name' }] };
+  };
+  try {
+    const docs = [{ category: 'pulse-dialogue', language: 'en', pulseDialogue: { contributorId } }];
+    await attachPublicPulseDialogueContributorsBatch(docs, undefined, { req, res: { statusCode: 200 }, thresholdMs: 0, logger: capture.logger });
+    assert.equal(queries, 1);
+    assert.equal(capture.entries[0].tag, '[perf][mongo.publicNews.contributors.find]');
+    assert.equal(capture.entries[0].payload.resultCount, 1);
+    assert.equal(capture.entries[0].payload.requestId, getRequestTimingState(req).requestId);
+    assert.equal(JSON.stringify(capture.entries).includes(contributorId), false);
+    assert.equal(JSON.stringify(capture.entries).includes('Private Test Name'), false);
+  } finally {
+    Contributor.find = originalFind;
+  }
 });
 
 test('logSlowTiming suppresses operations below threshold', () => {

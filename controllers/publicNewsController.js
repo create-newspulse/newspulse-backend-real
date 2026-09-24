@@ -1106,7 +1106,7 @@ async function _resolveGroupedCategoryNewsItems({
     return item;
   });
 
-  await attachPublicPulseDialogueContributorsBatch(items);
+  await attachPublicPulseDialogueContributorsBatch(items, undefined, timingContext);
 
   return { items, total, totalPages: Math.max(Math.ceil(total / limit), 1) };
 }
@@ -1395,29 +1395,27 @@ async function tryAcquireNewsTranslationLock({ id, lang, now = new Date() }) {
   }
 }
 
+function resolvePublicNewsListRequest(req) {
+  return {
+    page: Math.max(parseInt(req.query.page || '1', 10), 1),
+    limit: Math.min(Math.max(parseInt(req.query.limit || '30', 10), 1), 100),
+    category: normalizeCategorySlug(req.query.category),
+    track: normalizeTrackValue(req.query.track),
+    topic: normalizeTopicSlug(req.query.topic),
+    state: normalizeLocationPart(req.query.state || req.query.locationState),
+    founderOnly: parseTruthy(req.query.founderOnly),
+    type: String(req.query.type || '').trim().toLowerCase(),
+    desired: normalizeLang(getRequestedLang(req) || 'gu') || 'gu',
+    fallbackEnabled: isFallbackModeEnabled(req),
+    q: String(req.query.q || '').trim().slice(0, 80),
+  };
+}
+
 // GET /api/public/news?category=&type=video&founderOnly=true&limit=30&page=1
 async function listPublicNews(req, res) {
   try {
     res.set('Cache-Control', 'no-store');
-
-    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit || '30', 10), 1), 100);
-
-    const category = normalizeCategorySlug(req.query.category);
-    const track = normalizeTrackValue(req.query.track);
-    const topic = normalizeTopicSlug(req.query.topic);
-    const state = normalizeLocationPart(req.query.state || req.query.locationState);
-    const founderOnly = parseTruthy(req.query.founderOnly);
-    const type = String(req.query.type || '').trim().toLowerCase();
-
-    // Default language for public story feed is Gujarati (backward compatible).
-    const requestedLang = getRequestedLang(req) || 'gu';
-    const desired = normalizeLang(requestedLang) || 'gu';
-    const fallbackEnabled = isFallbackModeEnabled(req);
-
-    let q = String(req.query.q || '').trim();
-    // Keep keyword search safe and bounded
-    if (q.length > 80) q = q.slice(0, 80);
+    const { page, limit, category, track, topic, state, founderOnly, type, desired, fallbackEnabled, q } = resolvePublicNewsListRequest(req);
 
     if (!isDbReady()) {
       return res.status(200).json({ items: [], page, limit, total: 0, totalPages: 1 });
@@ -1999,6 +1997,7 @@ async function getPublicNewsBySlug(req, res) {
 }
 
 module.exports = {
+  resolvePublicNewsListRequest,
   listPublicBreakingNews,
   listPublicNews,
   listPublicNewsTranslations,

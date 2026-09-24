@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { slugifyUnicode } = require('../lib/slug');
+const { timeAsync } = require('../lib/timingDiagnostics');
 
 const PULSE_DIALOGUE_CATEGORY = 'pulse-dialogue';
 
@@ -354,15 +355,22 @@ async function findContributorById(contributorId) {
   if (query && typeof query.lean === 'function') return query.lean();
   return query;
 }
-async function findContributorsByIds(contributorIds) {
+async function findContributorsByIds(contributorIds, timingContext) {
   const ids = Array.from(new Set((Array.isArray(contributorIds) ? contributorIds : [])
     .map((id) => normalizeObjectId(id))
     .filter(Boolean)));
   if (!ids.length) return [];
   const Contributor = require('../models/Contributor');
-  const query = Contributor.find({ _id: { $in: ids } });
-  if (query && typeof query.lean === 'function') return query.lean();
-  return query;
+  const find = () => {
+    const query = Contributor.find({ _id: { $in: ids } });
+    if (query && typeof query.lean === 'function') return query.lean();
+    return query;
+  };
+  if (!timingContext) return find();
+  return timeAsync('mongo.publicNews.contributors.find', {
+    ...timingContext,
+    getResultMetadata: (result) => ({ resultCount: Array.isArray(result) ? result.length : 0 }),
+  }, find);
 }
 
 async function assertContributorExists(contributorId) {
@@ -436,7 +444,7 @@ async function attachPublicPulseDialogueContributor(docLike, language) {
   docLike.pulseDialogue = buildPublicPulseDialoguePayload(pulse, contributor, resolvedLanguage) || pulse;
   return docLike;
 }
-async function attachPublicPulseDialogueContributorsBatch(docLikes, language) {
+async function attachPublicPulseDialogueContributorsBatch(docLikes, language, timingContext) {
   const docs = Array.isArray(docLikes) ? docLikes : [];
   const pulseDocs = docs.filter((doc) => {
     const pulse = isPlainObject(doc?.pulseDialogue) ? doc.pulseDialogue : null;
@@ -444,7 +452,7 @@ async function attachPublicPulseDialogueContributorsBatch(docLikes, language) {
   });
   if (!pulseDocs.length) return docs;
 
-  const contributors = await findContributorsByIds(pulseDocs.map((doc) => doc.pulseDialogue.contributorId));
+  const contributors = await findContributorsByIds(pulseDocs.map((doc) => doc.pulseDialogue.contributorId), timingContext);
   const contributorById = new Map((Array.isArray(contributors) ? contributors : [])
     .filter(Boolean)
     .map((contributor) => [String(contributor._id || contributor.id || ''), contributor])

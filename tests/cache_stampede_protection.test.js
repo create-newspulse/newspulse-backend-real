@@ -95,6 +95,111 @@ function makeApp(cache, handler, options = {}) {
   return app;
 }
 
+function capturePublicNewsCacheKey(t) {
+  const loaded = loadCache(new FakeRedis());
+  const routePath = require.resolve('../routes/publicNews.routes');
+  const originalRoute = require.cache[routePath];
+  const originalFactory = loaded.cache.createJsonCacheMiddleware;
+  let buildKey;
+  loaded.cache.createJsonCacheMiddleware = (options) => {
+    buildKey = options.buildKey;
+    return originalFactory(options);
+  };
+  try {
+    delete require.cache[routePath];
+    require(routePath);
+  } finally {
+    loaded.cache.createJsonCacheMiddleware = originalFactory;
+    if (originalRoute) require.cache[routePath] = originalRoute;
+    else delete require.cache[routePath];
+  }
+  const mongoose = require('mongoose');
+  const previousState = mongoose.connection.readyState;
+  mongoose.connection.readyState = 1;
+  t.after(() => {
+    mongoose.connection.readyState = previousState;
+    loaded.restore();
+  });
+  return (query, headers = {}) => buildKey({ query, headers });
+}
+
+test('public-news cache keys isolate category and latest limits', (t) => {
+  const key = capturePublicNewsCacheKey(t);
+  assert.notEqual(key({ category: 'national', lang: 'en', limit: '30' }), key({ category: 'national', lang: 'en', limit: '90' }));
+  assert.notEqual(key({ lang: 'gu', limit: '8' }), key({ lang: 'gu', limit: '40' }));
+});
+
+test('public-news keys isolate every active category filter and locale', (t) => {
+  const key = capturePublicNewsCacheKey(t);
+  const base = { category: 'national', lang: 'en', page: '1', limit: '30' };
+  const variants = [
+    {}, { category: 'sports' }, { lang: 'hi' }, { lang: 'gu' }, { page: '2' }, { limit: '40' },
+    { track: 'campus-buzz' }, { topic: 'politics' }, { state: 'Gujarat' }, { q: 'news' },
+    { founderOnly: 'true' }, { type: 'video' },
+  ].map((variant) => key({ ...base, ...variant }));
+  assert.equal(new Set(variants).size, variants.length);
+  assert.notEqual(key(base), key({ lang: 'en', limit: '30' }));
+});
+
+test('equivalent effective list requests produce identical keys', (t) => {
+  const key = capturePublicNewsCacheKey(t);
+  assert.equal(
+    key({ category: 'SCIENCE_AND_TECHNOLOGY', lang: 'Hindi', page: '01', limit: '999', track: 'Campus Buzz', topic: ' Politics ', state: ' GUJARAT ', q: ' NEWS ', founderOnly: 'YES', type: ' VIDEO ' }),
+    key({ category: 'tech', language: 'hi-IN', page: '1', limit: '100', track: 'campusbuzz', topic: 'politics', locationState: 'gujarat', q: 'news', founderOnly: '1', type: 'video' })
+  );
+  assert.equal(key({ category: 'national' }), key({ category: 'national', lang: 'Gujarati', limit: '30', page: '1' }));
+  assert.equal(key({ lang: 'invalid', language: 'Hindi' }), key({ lang: 'hi' }));
+  assert.equal(key({}, { 'x-language': 'Gujarati' }), key({ lang: 'gu' }));
+  assert.equal(key({ lang: 'en' }, { 'x-lang': 'hi' }), key({ lang: 'en' }));
+  assert.equal(key({ lang: 'en', limit: '0' }), key({ lang: 'en', limit: '1' }));
+  assert.equal(key({ category: 'national', q: 'a'.repeat(90) }), key({ category: 'national', q: 'a'.repeat(80) }));
+});
+
+test('keys exclude ignored options but separate active latest fallback aliases', (t) => {
+  const key = capturePublicNewsCacheKey(t);
+  const category = { category: 'pulse-dialogue', lang: 'en' };
+  assert.equal(key(category), key({ ...category, strictLocale: '1', search: 'ignored', spotlight: '1', fallback: 'true', type: 'article' }));
+  assert.equal(key({ lang: 'en' }), key({ lang: 'en', fallback: 'false', founderOnly: 'no' }));
+  assert.notEqual(key({ lang: 'en' }), key({ lang: 'en', fallback: 'true' }));
+  assert.equal(key({ lang: 'en', fallback: 'yes' }), key({ language: 'English', allowFallback: '1' }));
+  assert.equal(key({ lang: 'en', fallback: '0', fallbackToBase: 'y' }), key({ lang: 'en', fallback: '1' }));
+});
+
+test('invalid inputs cannot reuse successful cached responses and filtered latest stays uncached', (t) => {
+  const key = capturePublicNewsCacheKey(t);
+  for (const query of [
+    { category: 'national', page: 'bad' }, { category: 'national', limit: 'bad' },
+    { category: 'national', page: '1000000000000000000000' },
+    { category: 'youth-pulse', track: 'invalid' }, { category: 'youth-pulse', track: '' },
+    { page: '2' }, { q: 'news' }, { topic: 'politics' }, { state: 'Gujarat' },
+    { track: 'campus-buzz' }, { founderOnly: 'true' }, { type: 'video' },
+  ]) assert.equal(key(query), null, JSON.stringify(query));
+});
+
+test('variant keys hide free text and avoid unsafe Unicode case-fold collisions', (t) => {
+  const key = capturePublicNewsCacheKey(t);
+  const value = key({ category: 'national', q: 'person@example.test secret-token', state: 'private-location' }, { authorization: 'Bearer secret-token' });
+  assert.match(value, /^np:v1:category:national:gu:page:1:v2:[a-f0-9]{64}$/);
+  assert.equal(/person|secret|private|Bearer/.test(value), false);
+  assert.notEqual(key({ category: 'national', q: '\u0130' }), key({ category: 'national', q: 'i\u0307' }));
+  assert.notEqual(key({ category: 'national', state: '\u0130' }), key({ category: 'national', state: 'i\u0307' }));
+});
+
+test('new variants avoid old entries and retain takedown invalidation coverage', async (t) => {
+  const key = capturePublicNewsCacheKey(t);
+  const cache = require('../lib/cache');
+  const oldKey = cache.buildCategoryCacheKey('national', 'en', 1);
+  const variants = [key({ category: 'national', lang: 'en', limit: '30' }), key({ category: 'national', lang: 'en', limit: '90' }), key({ lang: 'gu', fallback: 'true' })];
+  await cache.safeSetCacheWithStale(oldKey, { status: 200, body: { items: ['old'] } }, 45);
+  assert.equal(await cache.safeGetCache(variants[0]), null);
+  for (const variant of variants) await cache.safeSetCacheWithStale(variant, { status: 200, body: { items: ['new'] } }, 45);
+  await cache.invalidateArticleCaches();
+  for (const variant of [oldKey, ...variants]) {
+    assert.equal(await cache.safeGetCache(variant), null);
+    assert.equal(await cache.safeGetCache(cache.buildStaleCacheKey(variant)), null);
+  }
+});
+
 function deferred() {
   let resolve;
   let reject;
@@ -190,6 +295,33 @@ function makeLifecycleHarness(t, handler, options = {}) {
     },
   };
 }
+
+test('foreground and background rebuild clones retain the initiating request identity', async (t) => {
+  const { getRequestTimingState } = require('../lib/timingDiagnostics');
+  const captured = [];
+  const harness = makeLifecycleHarness(t, async (req, res) => {
+    captured.push(getRequestTimingState(req).requestId);
+    res.json({ items: [] });
+  });
+  const foreground = harness.request('foreground');
+  await foreground.promise;
+  assert.equal(captured[0], getRequestTimingState(foreground.req).requestId);
+  await harness.cache.safeSetCache('np:v1:test:public-news:background:stale', { status: 200, body: { items: [] } }, 45);
+  const background = harness.request('background');
+  await background.promise;
+  await flushPromises();
+  assert.equal(captured[1], getRequestTimingState(background.req).requestId);
+  assert.notEqual(captured[0], captured[1]);
+  assert.deepEqual(foreground.res.body, { items: [] });
+  assert.deepEqual(background.res.body, { items: [] });
+  const cached = await harness.cache.safeGetCache('np:v1:test:public-news:foreground');
+  assert.equal(JSON.stringify(cached).includes(captured[0]), false);
+  const cacheHit = harness.request('foreground');
+  await cacheHit.promise;
+  assert.deepEqual(cacheHit.res.body, { items: [] });
+  assert.notEqual(getRequestTimingState(cacheHit.req).requestId, captured[0]);
+  assert.equal(captured.length, 2);
+});
 
 test('cross-key backlog has a finite admission deadline and holds no queued locks', async (t) => {
   const release = deferred();

@@ -1,17 +1,17 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const { createHash } = require('node:crypto');
 const {
   createJsonCacheMiddleware,
   buildLatestCacheKey,
   buildCategoryCacheKey,
-  normalizeCacheLang,
   normalizeCategorySlugForCache,
-  normalizePageForCache,
 } = require('../lib/cache');
 const { setRequestTimingCacheContext } = require('../lib/timingDiagnostics');
 const noCache = require('../middleware/noCache');
 
 const {
+  resolvePublicNewsListRequest,
   listPublicBreakingNews,
   listPublicNews,
   listPublicNewsTranslations,
@@ -27,28 +27,23 @@ function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
 
-function getRequestedLang(req) {
-  return normalizeCacheLang(
-    req.query.lang || req.query.language || req.headers['x-lang'] || req.headers['x-language'] || req.lang || 'gu',
-    'gu'
-  );
-}
-
 function buildPublicNewsCacheKey(req) {
   if (!isDbReady()) return null;
-
-  const page = normalizePageForCache(req.query.page || '1');
-  const category = String(req.query.category || '').trim();
-  const track = String(req.query.track || '').trim();
-  const topic = String(req.query.topic || '').trim();
-  const state = String(req.query.state || req.query.locationState || '').trim();
-  const founderOnly = String(req.query.founderOnly || '').trim();
-  const type = String(req.query.type || '').trim();
-  const q = String(req.query.q || '').trim();
-  const lang = getRequestedLang(req);
+  const { page, limit, category, track, topic, state, founderOnly, type, desired: lang, fallbackEnabled, q } = resolvePublicNewsListRequest(req);
+  if (!Number.isSafeInteger(page) || !Number.isFinite(limit) || (req.query.track !== undefined && !track)) return null;
+  const variant = createHash('sha256').update(JSON.stringify({
+    limit,
+    track,
+    topic,
+    state: state ? state.replace(/[A-Z]/g, (letter) => letter.toLowerCase()) : null,
+    q: q.replace(/[A-Z]/g, (letter) => letter.toLowerCase()),
+    founderOnly,
+    type: type === 'video' ? 'video' : '',
+    fallback: category ? false : fallbackEnabled,
+  })).digest('hex');
 
   if (category) {
-    const cacheKey = buildCategoryCacheKey(category, lang, page);
+    const cacheKey = `${buildCategoryCacheKey(category, lang, page)}:v2:${variant}`;
     setRequestTimingCacheContext(req, {
       cacheFamily: 'category',
       cacheKey,
@@ -63,7 +58,7 @@ function buildPublicNewsCacheKey(req) {
     return null;
   }
 
-  const cacheKey = buildLatestCacheKey(lang);
+  const cacheKey = `${buildLatestCacheKey(lang)}:v2:${variant}`;
   setRequestTimingCacheContext(req, {
     cacheFamily: 'latest',
     cacheKey,
