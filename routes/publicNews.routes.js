@@ -73,6 +73,7 @@ router.get(
   '/',
   noCache,
   createJsonCacheMiddleware({
+    publicNewsDiagnostics: true,
     ttlSeconds: 45,
     staleWhileRevalidate: true,
     backgroundRebuild: listPublicNews,

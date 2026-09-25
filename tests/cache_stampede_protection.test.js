@@ -3,6 +3,7 @@ const test = require('node:test');
 const { EventEmitter } = require('node:events');
 const express = require('express');
 const request = require('supertest');
+const { getRequestTimingState, setRequestTimingCacheContext } = require('../lib/timingDiagnostics');
 
 class FakeRedis {
   constructor() {
@@ -102,6 +103,7 @@ function capturePublicNewsCacheKey(t) {
   const originalFactory = loaded.cache.createJsonCacheMiddleware;
   let buildKey;
   loaded.cache.createJsonCacheMiddleware = (options) => {
+    assert.equal(options.publicNewsDiagnostics, true);
     buildKey = options.buildKey;
     return originalFactory(options);
   };
@@ -224,6 +226,7 @@ function waitFor(predicate, timeoutMs = 500) {
 
 function publicNewsCacheOptions(handler, options = {}) {
   return {
+    publicNewsDiagnostics: options.publicNewsDiagnostics === true,
     ttlSeconds: options.ttlSeconds || 45,
     staleWhileRevalidate: true,
     backgroundRebuild: handler,
@@ -236,7 +239,11 @@ function publicNewsCacheOptions(handler, options = {}) {
     rebuildAdmissionTimeoutMs: options.rebuildAdmissionTimeoutMs || 180,
     rebuildCommandTimeoutMs: options.rebuildCommandTimeoutMs || 180,
     onRebuildUnavailable: (_req, res) => res.set('Retry-After', '1').status(503).json({ items: [], page: 1, limit: 30, total: 0, totalPages: 1 }),
-    buildKey: (req) => `np:v1:test:public-news:${req.params.key || 'default'}`,
+    buildKey: (req) => {
+      const key = `np:v1:test:public-news:${req.params.key || 'default'}`;
+      if (options.publicNewsDiagnostics) setRequestTimingCacheContext(req, { cacheFamily: 'latest', cacheKey: key });
+      return key;
+    },
     shouldCache: ({ statusCode, body }) => statusCode === 200 && body && Array.isArray(body.items),
   };
 }
@@ -255,7 +262,7 @@ async function flushPromises() {
 function makeLifecycleHarness(t, handler, options = {}) {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const redis = new FakeRedis();
-  const loaded = loadCache(redis);
+  const loaded = loadCache(redis, options.redisState);
   t.after(loaded.restore);
   const middleware = loaded.cache.createJsonCacheMiddleware(publicNewsCacheOptions(handler, {
     rebuildAdmissionTimeoutMs: 100,
@@ -295,6 +302,218 @@ function makeLifecycleHarness(t, handler, options = {}) {
     },
   };
 }
+
+function captureCacheDiagnostics(t) {
+  const entries = [];
+  t.mock.method(console, 'log', (tag, payload) => {
+    if (tag === '[cache][public-news]') entries.push(payload);
+  });
+  return entries;
+}
+
+test('public-news diagnostics correlate lookup and fresh/stale writes without changing JSON or cache hits', async (t) => {
+  const entries = captureCacheDiagnostics(t);
+  const body = { items: [{ title: 'private-article' }], page: 1, limit: 40, total: 1, totalPages: 1 };
+  let calls = 0;
+  const harness = makeLifecycleHarness(t, async (_req, res) => {
+    calls += 1;
+    res.json(body);
+  }, { publicNewsDiagnostics: true });
+  const owner = harness.request('hi');
+  owner.req.headers.authorization = 'Bearer secret-token';
+  await owner.promise;
+  const requestId = getRequestTimingState(owner.req).requestId;
+  const key = 'np:v1:test:public-news:hi';
+  const freshTtl = harness.cache.getDeterministicSpreadTtlSeconds(45, key, 15);
+  assert.ok(entries.some((entry) => entry.event === 'lookup' && entry.result === 'miss'));
+  assert.ok(entries.some((entry) => entry.event === 'admission' && entry.result === 'admitted'));
+  assert.ok(entries.some((entry) => entry.event === 'lock_acquire' && entry.result === 'acquired'));
+  assert.ok(entries.some((entry) => entry.event === 'lock_owner' && entry.result === 'matched'));
+  assert.ok(entries.some((entry) => entry.event === 'lock_release' && entry.result === 'released'));
+  for (const [event, ttl] of [['write_fresh', freshTtl], ['write_stale', freshTtl + 45]]) {
+    const writes = entries.filter((entry) => entry.event === event);
+    assert.deepEqual(writes.map((entry) => entry.result), ['attempted', 'succeeded']);
+    assert.ok(writes.every((entry) => entry.ttlSeconds === ttl));
+  }
+  assert.ok(entries.every((entry) => entry.requestId === requestId && entry.cacheKey === key));
+  assert.equal(harness.redis.entries.get(key).expiresAt, freshTtl * 1000);
+  assert.equal(harness.redis.entries.get(key + ':stale').expiresAt, (freshTtl + 45) * 1000);
+  const hit = harness.request('hi');
+  await hit.promise;
+  assert.equal(calls, 1);
+  assert.deepEqual(owner.res.body, body);
+  assert.deepEqual(hit.res.body, body);
+  const hitEntries = entries.filter((entry) => entry.requestId === getRequestTimingState(hit.req).requestId);
+  assert.deepEqual(hitEntries.map((entry) => [entry.event, entry.result]), [['lookup', 'hit']]);
+  assert.equal(/private-article|secret-token|authorization/.test(JSON.stringify(entries)), false);
+  assert.equal(JSON.stringify(harness.redis.entries.get(key).value).includes(requestId), false);
+});
+
+for (const stage of ['fresh', 'stale']) {
+  for (const fault of ['failure', 'timeout']) {
+    test(`public-news diagnostics report ${stage} write ${fault} and preserve the 200 response`, async (t) => {
+      const entries = captureCacheDiagnostics(t);
+      const body = { items: [], page: 1, limit: 40, total: 0, totalPages: 1 };
+      const harness = makeLifecycleHarness(t, async (_req, res) => res.json(body), { publicNewsDiagnostics: true });
+      const key = 'np:v1:test:public-news:gu';
+      const failedKey = stage === 'fresh' ? key : key + ':stale';
+      const originalSet = harness.redis.set.bind(harness.redis);
+      harness.redis.set = (target, ...args) => {
+        if (target === failedKey) {
+          if (fault === 'timeout') return new Promise(() => {});
+          throw new Error('redis://user:secret-password@host private-article');
+        }
+        return originalSet(target, ...args);
+      };
+      const task = harness.request('gu');
+      await flushPromises();
+      if (fault === 'timeout') await harness.advance(21);
+      await task.promise;
+      const requestId = getRequestTimingState(task.req).requestId;
+      const writes = entries.filter((entry) => entry.event === `write_${stage}`);
+      assert.deepEqual(writes.map((entry) => entry.result), ['attempted', fault === 'timeout' ? 'timed_out' : 'failed']);
+      assert.ok(writes.every((entry) => entry.requestId === requestId && entry.ttlSeconds >= 45));
+      assert.equal(writes[1].reason, fault === 'timeout' ? 'command_timeout' : 'redis_command_failed');
+      if (stage === 'fresh') {
+        assert.ok(entries.some((entry) => entry.event === 'write_stale' && entry.result === 'skipped' && entry.reason === 'fresh_write_not_stored'));
+        assert.ok(entries.some((entry) => entry.event === 'no_store' && entry.statusCode === 200));
+      } else {
+        assert.ok(entries.some((entry) => entry.event === 'storage' && entry.result === 'partial'));
+        assert.ok(harness.redis.entries.has(key));
+        assert.equal(entries.some((entry) => entry.event === 'no_store'), false);
+      }
+      assert.equal(task.res.statusCode, 200);
+      assert.deepEqual(task.res.body, body);
+      assert.equal(/secret|private-article|redis:\/\//.test(JSON.stringify(entries)), false);
+    });
+  }
+}
+
+for (const fault of ['failure', 'timeout', 'mismatch']) {
+  test(`public-news diagnostics explain skipped writes after owner-check ${fault}`, async (t) => {
+    const entries = captureCacheDiagnostics(t);
+    const harness = makeLifecycleHarness(t, async (_req, res) => res.json({ items: [] }), { publicNewsDiagnostics: true });
+    const originalGet = harness.redis.get.bind(harness.redis);
+    let checked = false;
+    harness.redis.get = (key) => {
+      if (key.endsWith(':lock') && !checked) {
+        checked = true;
+        if (fault === 'timeout') return new Promise(() => {});
+        if (fault === 'failure') return Promise.reject(new Error('redis://user:secret-password@host'));
+        return Promise.resolve('secret-replacement-lock-token');
+      }
+      return originalGet(key);
+    };
+    const task = harness.request('hi');
+    await flushPromises();
+    if (fault === 'timeout') await harness.advance(21);
+    await task.promise;
+    assert.ok(entries.some((entry) => entry.event === 'lock_owner' && entry.result === ({ failure: 'failed', timeout: 'timed_out', mismatch: 'mismatch' })[fault]));
+    for (const event of ['write_fresh', 'write_stale', 'no_store']) {
+      const entry = entries.find((entry) => entry.event === event);
+      assert.equal(entry.result, 'skipped');
+      assert.ok(entry.reason);
+      assert.equal(entry.requestId, getRequestTimingState(task.req).requestId);
+    }
+    assert.equal(harness.redis.entries.has('np:v1:test:public-news:hi'), false);
+    assert.deepEqual(task.res.body, { items: [] });
+    assert.equal(task.res.statusCode, 200);
+    assert.equal(JSON.stringify(entries).includes('secret'), false);
+  });
+}
+
+test('public-news diagnostics explain Redis-not-ready 200 rebuilds that cannot warm cache', async (t) => {
+  const entries = captureCacheDiagnostics(t);
+  let calls = 0;
+  const harness = makeLifecycleHarness(t, async (_req, res) => {
+    calls += 1;
+    res.json({ items: [] });
+  }, { publicNewsDiagnostics: true, redisState: { ready: false } });
+  for (let iteration = 0; iteration < 2; iteration += 1) {
+    const task = harness.request('hi');
+    await task.promise;
+    const correlated = entries.filter((entry) => entry.requestId === getRequestTimingState(task.req).requestId);
+    assert.ok(correlated.some((entry) => entry.event === 'lookup' && entry.result === 'bypass'));
+    assert.ok(correlated.some((entry) => entry.event === 'no_store' && entry.reason === 'redis_not_ready' && entry.redisReady === false && entry.statusCode === 200));
+    assert.equal(task.res.statusCode, 200);
+    assert.deepEqual(task.res.body, { items: [] });
+  }
+  assert.equal(calls, 2);
+  assert.equal(harness.redis.entries.size, 0);
+});
+
+test('public-news stale-hit diagnostics retain request identity through background writes', async (t) => {
+  const entries = captureCacheDiagnostics(t);
+  const harness = makeLifecycleHarness(t, async (_req, res) => res.json({ items: ['refreshed'] }), { publicNewsDiagnostics: true });
+  await harness.cache.safeSetCache('np:v1:test:public-news:hi:stale', { status: 200, body: { items: ['stale'] } }, 45);
+  const task = harness.request('hi');
+  await task.promise;
+  await flushPromises();
+  assert.deepEqual(task.res.body, { items: ['stale'] });
+  assert.ok(entries.some((entry) => entry.event === 'lookup' && entry.result === 'stale'));
+  assert.ok(entries.some((entry) => entry.event === 'admission' && entry.result === 'admitted' && entry.mode === 'background'));
+  assert.ok(entries.some((entry) => entry.event === 'write_stale' && entry.result === 'succeeded'));
+  assert.ok(entries.every((entry) => entry.requestId === getRequestTimingState(task.req).requestId));
+});
+
+test('public-news diagnostics report bounded admission timeout without changing the 503 body', async (t) => {
+  const entries = captureCacheDiagnostics(t);
+  const release = deferred();
+  const harness = makeLifecycleHarness(t, async (_req, res) => { await release.promise; res.json({ items: [] }); }, { publicNewsDiagnostics: true });
+  const first = harness.request('one');
+  const second = harness.request('two');
+  await flushPromises();
+  const queued = harness.request('three');
+  await flushPromises();
+  await harness.advance(101);
+  await queued.promise;
+  assert.ok(entries.some((entry) => entry.requestId === getRequestTimingState(queued.req).requestId && entry.event === 'admission' && entry.result === 'timed_out'));
+  assert.equal(queued.res.statusCode, 503);
+  assert.deepEqual(queued.res.body, { items: [], page: 1, limit: 30, total: 0, totalPages: 1 });
+  release.resolve();
+  await Promise.all([first.promise, second.promise]);
+});
+
+test('cache lifecycle diagnostics remain opt-in', async (t) => {
+  const entries = captureCacheDiagnostics(t);
+  const harness = makeLifecycleHarness(t, async (_req, res) => res.json({ items: [] }));
+  await harness.request('disabled').promise;
+  assert.equal(entries.length, 0);
+});
+
+test('public-news diagnostic logging failures cannot change writes or response JSON', async (t) => {
+  t.mock.method(console, 'log', (tag) => {
+    if (tag === '[cache][public-news]') throw new Error('logger unavailable');
+  });
+  let calls = 0;
+  const harness = makeLifecycleHarness(t, async (_req, res) => {
+    calls += 1;
+    res.json({ items: [] });
+  }, { publicNewsDiagnostics: true });
+  const first = harness.request('hi');
+  await first.promise;
+  const second = harness.request('hi');
+  await second.promise;
+  assert.equal(calls, 1);
+  assert.equal(first.res.statusCode, 200);
+  assert.equal(second.res.statusCode, 200);
+  assert.deepEqual(first.res.body, { items: [] });
+  assert.deepEqual(second.res.body, { items: [] });
+});
+
+test('public-news diagnostics explain an uncacheable 200 without changing its JSON', async (t) => {
+  const entries = captureCacheDiagnostics(t);
+  const body = { message: 'private-response' };
+  const harness = makeLifecycleHarness(t, async (_req, res) => res.json(body), { publicNewsDiagnostics: true });
+  const task = harness.request('hi');
+  await task.promise;
+  assert.equal(task.res.statusCode, 200);
+  assert.deepEqual(task.res.body, body);
+  assert.ok(entries.some((entry) => entry.event === 'no_store' && entry.reason === 'response_not_cacheable' && entry.statusCode === 200));
+  assert.equal(entries.some((entry) => entry.result === 'attempted'), false);
+  assert.equal(harness.redis.entries.size, 0);
+  assert.equal(JSON.stringify(entries).includes('private-response'), false);
+});
 
 test('foreground and background rebuild clones retain the initiating request identity', async (t) => {
   const { getRequestTimingState } = require('../lib/timingDiagnostics');

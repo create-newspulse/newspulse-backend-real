@@ -8,6 +8,7 @@ const {
   getRequestTimingState,
   copyRequestTimingIdentity,
   logSlowTiming,
+  logPublicNewsCacheDiagnostic,
   setRequestTimingCacheContext,
   setRequestTimingCacheStatus,
   timeAsync,
@@ -24,6 +25,34 @@ function captureLogger() {
     },
   };
 }
+
+test('public-news cache diagnostics correlate fast operations and exclude private data', () => {
+  const capture = captureLogger();
+  const req = { headers: { authorization: 'Bearer secret-token', 'x-request-id': 'secret-id' }, query: { token: 'secret-token' } };
+  for (const event of ['lookup', 'write_fresh', 'write_stale']) {
+    assert.equal(logPublicNewsCacheDiagnostic(req, event, {
+      cacheKey: 'np:v1:latest:hi', result: 'succeeded', ttlSeconds: 47, statusCode: 200, redisReady: true,
+      body: { items: ['private-article'] }, token: 'secret-token', url: 'redis://user:secret@host',
+    }, capture.logger), true);
+  }
+  assert.equal(capture.entries.length, 3);
+  for (const entry of capture.entries) {
+    assert.equal(entry.tag, '[cache][public-news]');
+    assert.deepEqual(entry.payload, {
+      requestId: getRequestTimingState(req).requestId, cacheKey: 'np:v1:latest:hi', event: entry.payload.event,
+      result: 'succeeded', ttlSeconds: 47, statusCode: 200, redisReady: true,
+    });
+  }
+  assert.equal(/secret|private|redis:\/\//.test(JSON.stringify(capture.entries)), false);
+});
+
+test('public-news cache diagnostics reject unsafe fields and tolerate logger failure', () => {
+  const capture = captureLogger();
+  logPublicNewsCacheDiagnostic({}, 'lookup', { cacheKey: 'redis://user:secret@host', reason: 'failed at redis://user:secret@host' }, capture.logger);
+  assert.equal(capture.entries[0].payload.cacheKey, null);
+  assert.equal(capture.entries[0].payload.reason, undefined);
+  assert.equal(logPublicNewsCacheDiagnostic({}, 'lookup', {}, { log() { throw new Error('logger unavailable'); } }), false);
+});
 
 test('request timing middleware logs only safe slow-request metadata', async () => {
   const capture = captureLogger();
