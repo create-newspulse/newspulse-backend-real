@@ -69,10 +69,7 @@ function buildPublicNewsCacheKey(req) {
 
 // Public read-only news feed (NO AUTH)
 // GET /api/public/news
-router.get(
-  '/',
-  noCache,
-  createJsonCacheMiddleware({
+const latestCache = createJsonCacheMiddleware({
     publicNewsDiagnostics: true,
     ttlSeconds: 45,
     staleWhileRevalidate: true,
@@ -90,10 +87,15 @@ router.get(
       message: 'News feed is busy. Please retry shortly.',
     }),
     buildKey: buildPublicNewsCacheKey,
+    buildLastKnownGoodKey: (req, key) => {
+      const { limit, fallbackEnabled } = resolvePublicNewsListRequest(req);
+      return key && key.startsWith('np:v1:latest:') && limit === 40 && !fallbackEnabled
+        ? key.replace('np:v1:latest:', 'np:v1:latest-lkg:') : null;
+    },
     shouldCache: ({ statusCode, body }) => statusCode === 200 && body && Array.isArray(body.items),
-  }),
-  listPublicNews,
-);
+  });
+router.get('/', noCache, latestCache, listPublicNews);
+router.refreshCanonicalLatest = (req) => latestCache.refresh(req);
 
 // GET /api/public/news/breaking
 router.get('/breaking', noCache, listPublicBreakingNews);

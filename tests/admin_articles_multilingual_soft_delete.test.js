@@ -107,6 +107,11 @@ function installRouteStubs(t, seedDocs, options = {}) {
   const contributorMutations = [];
   const contributorFinds = [];
   const newsFindCalls = [];
+  const invalidations = [];
+  t.after(require('../lib/cache').onArticleCachesInvalidated((event) => {
+    invalidations.push(event);
+    return new Promise(() => {});
+  }));
   const contributorRecord = options.contributor || null;
 
   const originals = {
@@ -200,6 +205,7 @@ function installRouteStubs(t, seedDocs, options = {}) {
     contributorFinds,
     contributorMutations,
     newsFindCalls,
+    invalidations,
   };
 }
 
@@ -258,6 +264,7 @@ async function assertPutDeletesFullGroup(t, clickedLang) {
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.message, 'Article deleted');
+  assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
   assert.equal(res.body.deletedCount, 3);
   assert.deepEqual(new Set(res.body.deletedIds), new Set(Object.values(ids)));
   assert.deepEqual(new Set(stubs.updates.map((entry) => entry.id)), new Set(Object.values(ids)));
@@ -391,6 +398,7 @@ async function assertPostUnpublishTakesDownFullGroup(t, clickedLang) {
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.message, 'Article unpublished');
+  assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
   assert.equal(res.body.changedCount, 3);
   assert.deepEqual(new Set(res.body.changedIds), new Set(Object.values(ids)));
   assert.deepEqual(new Set(stubs.updates.map((entry) => entry.id)), new Set(Object.values(ids)));
@@ -452,11 +460,94 @@ test('POST archive via translated id archives all EN HI GU language docs as non-
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.message, 'Article archived');
+  assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
   assert.equal(res.body.changedCount, 3);
   assertAllRecordsHaveStatus(stubs, ids, 'archived', 'ARCHIVED');
   assert.equal(stubs.publicSyncs.length, 3);
   assert.equal(stubs.publicSyncs.every((sync) => sync.update.$set.status === 'archived' && sync.update.$set.publishedAt === null), true);
   assert.equal(stubs.publicDraftSweeps.length, 1);
+});
+
+for (const status of ['draft', 'archived', 'scheduled']) {
+  test(`PUT published article with content and status=${status} invalidates withdrawn LKG`, async (t) => {
+    const id = '507f1f77bcf86cd79943d701';
+    const stubs = installRouteStubs(t, [makeNewsDoc(id, 'en', { translationGroupId: null, translationKey: null, sourceArticleId: null })]);
+    const response = await request(app).put(`/api/articles/${id}`)
+      .set('Authorization', `Bearer ${makeFounderToken()}`)
+      .send({ status, title: 'Updated title' });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
+    assert.ok(stubs.publicSyncs.some((entry) => entry.update.$set.status === status));
+  });
+}
+
+test('ordinary published article edit keeps LKG resilience', async (t) => {
+  const id = '507f1f77bcf86cd79943d702';
+  const stubs = installRouteStubs(t, [makeNewsDoc(id, 'en', { translationGroupId: null, translationKey: null, sourceArticleId: null })]);
+  const response = await request(app).put(`/api/articles/${id}`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
+    .send({ title: 'Updated public headline' });
+  assert.equal(response.statusCode, 200);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: false }]);
+});
+
+test('rescheduling a published article invalidates withdrawn LKG', async (t) => {
+  const id = '507f1f77bcf86cd79943d706';
+  const doc = toDocument(makeNewsDoc(id, 'en', { translationGroupId: null, translationKey: null, sourceArticleId: null }));
+  const stubs = installRouteStubs(t, [doc]);
+  t.mock.method(News, 'findById', () => queryResult(doc));
+  const response = await request(app).post(`/api/articles/${id}/schedule`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
+    .send({ scheduledAt: '2099-01-01T00:00:00.000Z' });
+  assert.equal(response.statusCode, 200);
+  assert.equal(doc.status, 'scheduled');
+  assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
+});
+
+test('permanent deletion of a published article invalidates withdrawn LKG before success', async (t) => {
+  const id = '507f1f77bcf86cd79943d703';
+  const doc = makeNewsDoc(id, 'en');
+  const stubs = installRouteStubs(t, [doc]);
+  t.mock.method(News, 'findByIdAndDelete', async () => doc);
+  const response = await request(app).delete(`/api/articles/${id}/permanent`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
+});
+
+for (const path of ['drafts/:id/delete', 'drafts/:id/restore', 'workflow/:id/lock', 'workflow/:id/embargo']) {
+  test(`legacy ${path} invalidates LKG when removing public visibility`, async (t) => {
+    const id = '507f1f77bcf86cd79943d704';
+    const doc = toDocument(makeNewsDoc(id, 'en', { translationGroupId: null, translationKey: null, sourceArticleId: null }));
+    const stubs = installRouteStubs(t, [doc]);
+    t.mock.method(News, 'findById', () => queryResult(doc));
+    const response = await request(app).post('/api/admin/' + path.replace(':id', id))
+      .set('Authorization', `Bearer ${makeFounderToken()}`)
+      .send({ embargoUntil: '2099-01-01T00:00:00.000Z' });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
+  });
+}
+
+test('workflow stage moving published News to draft invalidates LKG', async (t) => {
+  const mongoose = require('mongoose');
+  const previousState = mongoose.connection.readyState;
+  const id = '507f1f77bcf86cd79943d705';
+  const doc = toDocument(makeNewsDoc(id, 'en'));
+  const stubs = installRouteStubs(t, [doc]);
+  t.mock.method(News, 'findById', async () => doc);
+  t.mock.method(require('../models/WorkflowEvent'), 'create', async () => ({}));
+  t.mock.method(require('../models/AuditLog'), 'create', async () => ({}));
+  mongoose.connection.readyState = 1;
+  t.after(() => { mongoose.connection.readyState = previousState; });
+  const res = { status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
+  await require('../src/controllers/admin/workflow.controller').patchWorkflowStage({
+    params: { id }, body: { action: 'set', toStage: 'draft' }, admin: { role: 'founder' }, headers: {},
+  }, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(doc.status, 'draft');
+  assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
 });
 
 test('POST unpublish on legacy single-language article only changes that record', async (t) => {

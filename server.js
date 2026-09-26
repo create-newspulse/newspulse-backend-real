@@ -442,6 +442,11 @@ const PublicSiteSettings = require('./models/PublicSiteSettings');
 const { ensureCategoryStripEnabled, buildPublishedSettingsResponse } = require('./controllers/publicSiteSettingsController');
 const User = require('./models/User');
 const publicNewsRouter = require('./routes/publicNews.routes');
+require('./lib/publicNewsPrewarm').startCanonicalLatestPrewarm({
+  refresh: publicNewsRouter.refreshCanonicalLatest,
+  mongo: mongoose.connection,
+  redis: require('./lib/redis').getRedisClient(),
+});
 const breakingRouter = require('./routes/breaking.routes');
 const adminNewsTranslationsRouter = require('./routes/adminNewsTranslations.routes');
 const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');

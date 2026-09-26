@@ -283,7 +283,7 @@ async function applyArticleGroupLifecycleStatus(req, {
 
   const sourceDoc = changedDocs.find((doc) => _isSourceTranslationDoc(doc, doc?._id));
   await markPublicCopiesDraftFromNewsDoc(sourceDoc || changedDocs[0]);
-  invalidateArticleCaches().catch(() => {});
+  await invalidateArticleCaches({ publicVisibilityRemoved: true });
 
   const clickedDoc = changedDocs.find((item) => String(item?._id || '') === String(id)) || changedDocs[0];
   return {
@@ -1626,8 +1626,6 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-
-    invalidateArticleCaches().catch(() => {});
 
     return res.status(201).json({
       ok: true,
@@ -3208,7 +3206,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
     // Keep the public Article copy in sync when editing already-published CMS News.
     // (Draft/scheduled edits should not affect the public site.)
-    if (doc && String(doc.status || '').toLowerCase() === 'published') {
+    if (doc && [before?.status, doc.status].some((value) => String(value || '').toLowerCase() === 'published')) {
       await syncArticleFromNews(doc);
     }
     if (doc && hasArticleContentEdit(update)) {
@@ -3309,7 +3307,8 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       }
 
       const obj2 = articleDoc.toObject ? articleDoc.toObject({ virtuals: true }) : articleDoc;
-      invalidateArticleCaches().catch(() => {});
+      if (articleUpdate.status === 'draft') await invalidateArticleCaches({ publicVisibilityRemoved: true });
+      else invalidateArticleCaches().catch(() => {});
       return res.json({
         ok: true,
         success: true,
@@ -3348,7 +3347,10 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         });
       }
       const obj0 = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-      invalidateArticleCaches().catch(() => {});
+      if ([before?.status, doc.status].some((value) => String(value || '').toLowerCase() === 'published')) {
+        if (String(doc.status || '').toLowerCase() !== 'published') await invalidateArticleCaches({ publicVisibilityRemoved: true });
+        else invalidateArticleCaches().catch(() => {});
+      }
       return res.json({
         ok: true,
         success: true,
@@ -3415,7 +3417,10 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
 
-    invalidateArticleCaches().catch(() => {});
+    if ([before?.status, doc.status].some((value) => String(value || '').toLowerCase() === 'published')) {
+      if (String(doc.status || '').toLowerCase() !== 'published') await invalidateArticleCaches({ publicVisibilityRemoved: true });
+      else invalidateArticleCaches().catch(() => {});
+    }
 
     return res.json({
       ok: true,
@@ -3679,6 +3684,7 @@ router.post('/articles/:id/schedule', requireAdminAuth, async (req, res) => {
 
     const now = new Date();
     const fromStage = String(doc.workflowStage || 'DRAFT');
+    const wasPublished = String(doc.status || '').toLowerCase() === 'published';
     doc.status = 'scheduled';
     doc.scheduledAt = scheduledAt;
     doc.publishAt = scheduledAt;
@@ -3728,7 +3734,8 @@ router.post('/articles/:id/schedule', requireAdminAuth, async (req, res) => {
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    invalidateArticleCaches().catch(() => {});
+    if (wasPublished) await invalidateArticleCaches({ publicVisibilityRemoved: true });
+    else invalidateArticleCaches().catch(() => {});
     return res.json({ ok: true, success: true, status: 200, message: 'Article scheduled', data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj) });
   } catch (e) {
     if (e?.status === 409) return res.status(409).json({ ok: false, success: false, status: 409, message: e.message || 'Slug already exists' });
@@ -3850,7 +3857,7 @@ async function softDeleteArticleGroup(req, res, id) {
 
     const doc = deletedDocs.find((item) => String(item?._id || '') === String(id)) || deletedDocs[0];
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    invalidateArticleCaches().catch(() => {});
+    await invalidateArticleCaches({ publicVisibilityRemoved: true });
     return res.status(200).json({
       ok: true,
       success: true,
@@ -3888,6 +3895,7 @@ router.delete('/articles/:id/permanent', requireAdminAuth, async (req, res) => {
     if (!doc) {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
     }
+    await invalidateArticleCaches({ publicVisibilityRemoved: true });
     return res.status(200).json({ ok: true, success: true, status: 200, message: 'Article permanently deleted.' });
   } catch (err) {
     console.error('[articles.permanent-delete] error:', err?.message || err);

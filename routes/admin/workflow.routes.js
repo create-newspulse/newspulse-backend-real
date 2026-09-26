@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const News = require('../../models/News');
 const PushHistory = require('../../models/PushHistory');
+const { invalidateArticleCaches } = require('../../lib/cache');
 const { requireAdminAuth, requireFounderAuth } = require('../../middleware/adminAuth');
 
 const router = express.Router();
@@ -311,6 +312,7 @@ router.post('/:articleId([0-9a-fA-F]{24})/lock', requireFounderAuth, async (req,
     });
 
     await doc.save();
+    if (String(doc.status || '').toLowerCase() === 'published') await invalidateArticleCaches({ publicVisibilityRemoved: true });
     const out = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
     return ok(res, 'Locked', { article: withCover(out) });
   } catch (e) {
@@ -344,6 +346,7 @@ router.post('/:articleId([0-9a-fA-F]{24})/unlock', requireFounderAuth, async (re
     });
 
     await doc.save();
+    if (String(doc.status || '').toLowerCase() === 'published') invalidateArticleCaches().catch(() => {});
     const out = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
     return ok(res, 'Unlocked', { article: withCover(out) });
   } catch (e) {
@@ -388,6 +391,10 @@ router.post('/:articleId([0-9a-fA-F]{24})/embargo', requireAdminAuth, async (req
     });
 
     await doc.save();
+    if (String(doc.status || '').toLowerCase() === 'published') {
+      if (embargoUntil > now) await invalidateArticleCaches({ publicVisibilityRemoved: true });
+      else invalidateArticleCaches().catch(() => {});
+    }
     const out = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
     return ok(res, 'Embargo updated', { article: withCover(out) });
   } catch (e) {

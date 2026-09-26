@@ -4,6 +4,7 @@ const Article = require('../../../models/News');
 const WorkflowEvent = require('../../../models/WorkflowEvent');
 const PushHistory = require('../../../models/PushHistory');
 const AuditLog = require('../../../models/AuditLog');
+const { invalidateArticleCaches } = require('../../../lib/cache');
 
 const STAGE_ORDER = [
   'DRAFT',
@@ -434,6 +435,7 @@ async function patchWorkflowStage(req, res) {
 
     const fromLower = getCurrentStageLower(doc);
     const fromUpper = fromLower.toUpperCase();
+    const wasPublished = String(doc.status || '').toLowerCase() === 'published';
 
     let toLower = '';
     if (action === 'set') {
@@ -511,6 +513,8 @@ async function patchWorkflowStage(req, res) {
 
     // save article + audit event
     await doc.save();
+    if (wasPublished && doc.status !== 'published') await invalidateArticleCaches({ publicVisibilityRemoved: true });
+    else if (doc.status === 'published') invalidateArticleCaches().catch(() => {});
 
     try {
       await WorkflowEvent.create({

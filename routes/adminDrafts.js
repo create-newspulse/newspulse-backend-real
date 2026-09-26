@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const News = require('../models/News');
 const { logAudit } = require('../lib/audit');
+const { invalidateArticleCaches } = require('../lib/cache');
 const { assertArticleTranslationGroupLanguageUnique } = require('../services/articleLanguageUniqueness.service');
 let { requireAdminAuth } = (() => { try { return require('../middleware/adminAuth'); } catch (_) { return { requireAdminAuth: (_req,_res,next)=>next() }; } })();
 
@@ -94,9 +95,11 @@ router.post('/drafts/:id/delete', requireAdminAuth, async (req, res) => {
     if (!doc) {
       return res.status(404).json({ ok: false, success: false, message: 'Draft not found' });
     }
+    const wasPublished = String(doc.status || '').toLowerCase() === 'published';
     doc.status = 'deleted';
     if ('deletedAt' in doc) doc.deletedAt = new Date();
     await doc.save();
+    if (wasPublished) await invalidateArticleCaches({ publicVisibilityRemoved: true });
     await logEditorialDraftAudit(req, 'EDITORIAL_ARTICLE_DELETED', doc, { oldValue: 'draft', newValue: 'deleted', reason: req.body?.reason });
     return res.json({ ok: true, success: true, data: doc });
   } catch (err) {
@@ -117,9 +120,11 @@ router.post('/drafts/:id/restore', requireAdminAuth, async (req, res) => {
       return res.status(404).json({ ok: false, success: false, message: 'Draft not found' });
     }
     await assertArticleTranslationGroupLanguageUnique(doc, id);
+    const wasPublished = String(doc.status || '').toLowerCase() === 'published';
     doc.status = 'draft';
     if ('deletedAt' in doc) doc.deletedAt = null;
     await doc.save();
+    if (wasPublished) await invalidateArticleCaches({ publicVisibilityRemoved: true });
     await logEditorialDraftAudit(req, 'EDITORIAL_ARTICLE_RESTORED', doc, { oldValue: 'deleted', newValue: 'draft', reason: req.body?.reason });
     return res.json({ ok: true, success: true, data: doc });
   } catch (err) {

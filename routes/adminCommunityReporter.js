@@ -205,12 +205,14 @@ async function upsertDraftFromSubmission(submission) {
       article.content = body;
       if (category !== undefined) article.category = category;
       article.track = track;
+      const wasPublished = String(article.status || '').toLowerCase() === 'published';
       article.status = 'draft';
       article.language = article.language || 'en';
       article.source = source;
       article.communityReportId = submission._id;
       if (tags && tags.length) article.tags = tags;
       await article.save();
+      if (wasPublished) await require('../lib/cache').invalidateArticleCaches({ publicVisibilityRemoved: true });
     } else {
       article = new News({
         title,

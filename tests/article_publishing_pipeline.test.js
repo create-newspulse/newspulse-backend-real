@@ -193,10 +193,18 @@ async function publishForTest(t, docs, options = {}) {
 }
 
 test('canonical publish publishes a draft with all EN HI GU translations', async (t) => {
+  let refreshScheduled = false;
+  t.after(require('../lib/cache').onArticleCachesInvalidated((event) => {
+    assert.equal(event.publicVisibilityRemoved, false);
+    refreshScheduled = true;
+    return new Promise(() => {});
+  }));
   const docs = [makeLanguageDoc('en'), makeLanguageDoc('hi'), makeLanguageDoc('gu')];
   const { result, created } = await publishForTest(t, docs, { groupPublish: true });
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(result.ok, true);
+  assert.equal(refreshScheduled, true);
   assert.deepEqual(result.publishedLanguages.sort(), ['en', 'gu', 'hi']);
   assert.equal(created.length, 0);
   for (const doc of docs) {

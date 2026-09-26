@@ -51,7 +51,13 @@ class FakeRedis {
     return ['0', keys];
   }
 
-  async eval(_script, _keyCount, key, token) {
+  async eval(_script, keyCount, key, ...args) {
+    if (keyCount === 2) {
+      const [targetKey, token, value, ttl] = args;
+      if ((await this.get(key)) !== token) return 0;
+      return this.set(targetKey, value, 'EX', ttl);
+    }
+    const [token] = args;
     return (await this.get(key)) === token ? this.del([key]) : 0;
   }
 
@@ -102,14 +108,17 @@ function capturePublicNewsCacheKey(t) {
   const originalRoute = require.cache[routePath];
   const originalFactory = loaded.cache.createJsonCacheMiddleware;
   let buildKey;
+  let buildLastKnownGoodKey;
+  let router;
   loaded.cache.createJsonCacheMiddleware = (options) => {
     assert.equal(options.publicNewsDiagnostics, true);
     buildKey = options.buildKey;
+    buildLastKnownGoodKey = options.buildLastKnownGoodKey;
     return originalFactory(options);
   };
   try {
     delete require.cache[routePath];
-    require(routePath);
+    router = require(routePath);
   } finally {
     loaded.cache.createJsonCacheMiddleware = originalFactory;
     if (originalRoute) require.cache[routePath] = originalRoute;
@@ -122,8 +131,206 @@ function capturePublicNewsCacheKey(t) {
     mongoose.connection.readyState = previousState;
     loaded.restore();
   });
-  return (query, headers = {}) => buildKey({ query, headers });
+  const key = (query, headers = {}, requestState = {}) => buildKey({ ...requestState, query, headers });
+  key.lastKnownGood = (query) => buildLastKnownGoodKey({ query, headers: {} }, key(query));
+  key.router = router;
+  return key;
 }
+
+test('canonical latest keys are stable, language-isolated and alone eligible for LKG', (t) => {
+  const key = capturePublicNewsCacheKey(t);
+  const variant = 'ee2450384fc7c547774c0e16dd90fbb20b1648e155856157ebd274df26231b08';
+  for (const lang of ['en', 'hi', 'gu']) {
+    const query = { lang, language: lang, limit: '40' };
+    const expected = `np:v1:latest:${lang}:v2:${variant}`;
+    for (let iteration = 0; iteration < 100; iteration += 1) {
+      assert.equal(key(query, { 'x-request-id': String(iteration), 'x-lang': 'en', authorization: 'ignored' }), expected);
+      assert.equal(key({ limit: '40', language: lang, lang, page: '1', timestamp: String(iteration) }), expected);
+      assert.equal(key(query, {}, { aborted: iteration % 2 === 0, requestId: String(iteration), timestamp: Date.now() }), expected);
+    }
+    assert.equal(key.lastKnownGood(query), `np:v1:latest-lkg:${lang}:v2:${variant}`);
+    for (const extra of [{ limit: '30' }, { fallback: 'true' }, { page: '2' }, { category: 'national' }, { q: 'test' }, { track: 'campus-buzz' }]) {
+      assert.equal(key.lastKnownGood({ ...query, ...extra }), null);
+    }
+  }
+});
+
+test('canonical GETs and unrelated invalidation preserve latest tiers; article invalidation preserves all LKGs', async (t) => {
+  const key = capturePublicNewsCacheKey(t);
+  const cache = require('../lib/cache');
+  const app = express();
+  app.use('/api/public/news', key.router);
+  let invalidations = 0;
+  t.after(cache.onArticleCachesInvalidated(() => { invalidations += 1; }));
+  const feeds = ['en', 'hi', 'gu'].map((language) => {
+    const query = { lang: language, language, limit: '40' };
+    return { query, freshKey: key(query), lastKey: key.lastKnownGood(query), body: {
+      items: [{ language }], page: 1, limit: 40, total: 1, totalPages: 1,
+    } };
+  });
+  for (const feed of feeds) {
+    const payload = { status: 200, body: feed.body };
+    await cache.safeSetCacheWithStale(feed.freshKey, payload, 45);
+    await cache.safeSetCache(feed.lastKey, payload, 86400);
+    for (let count = 0; count < 3; count += 1) {
+      const response = await request(app).get('/api/public/news').query(feed.query).expect(200);
+      assert.deepEqual(response.body, feed.body);
+    }
+  }
+  await cache.invalidateBroadcastCaches();
+  await cache.invalidatePublicSettingsCaches();
+  await cache.invalidateAdsCaches();
+  await cache.invalidateArticleLanguageCaches('detail-only');
+  assert.equal(invalidations, 0);
+  for (const feed of feeds) {
+    assert.deepEqual((await cache.safeGetCache(feed.freshKey)).body, feed.body);
+    assert.deepEqual((await cache.safeGetCache(cache.buildStaleCacheKey(feed.freshKey))).body, feed.body);
+    assert.deepEqual((await cache.safeGetCache(feed.lastKey)).body, feed.body);
+  }
+  await cache.invalidateArticleCaches();
+  assert.equal(invalidations, 1);
+  for (const feed of feeds) {
+    assert.equal(await cache.safeGetCache(feed.freshKey), null);
+    assert.equal(await cache.safeGetCache(cache.buildStaleCacheKey(feed.freshKey)), null);
+    assert.deepEqual((await cache.safeGetCache(feed.lastKey)).body, feed.body);
+  }
+});
+
+test('withdrawal invalidation removes canonical LKG in every language and schedules warming without awaiting it', async (t) => {
+  const key = capturePublicNewsCacheKey(t);
+  const cache = require('../lib/cache');
+  const keys = ['en', 'hi', 'gu'].map((language) => {
+    const query = { lang: language, language, limit: '40' };
+    return { fresh: key(query), last: key.lastKnownGood(query), language };
+  });
+  for (const entry of keys) {
+    const payload = { status: 200, body: { items: [{ id: 'withdrawn', language: entry.language }] } };
+    await cache.safeSetCacheWithStale(entry.fresh, payload, 45);
+    await cache.safeSetCache(entry.last, payload, 86400);
+  }
+  let scheduled = false;
+  t.after(cache.onArticleCachesInvalidated(() => {
+    scheduled = true;
+    return new Promise(() => {});
+  }));
+  await cache.invalidateArticleCaches({ publicVisibilityRemoved: true });
+  assert.equal(scheduled, true);
+  for (const entry of keys) {
+    assert.equal(await cache.safeGetCache(entry.fresh), null);
+    assert.equal(await cache.safeGetCache(cache.buildStaleCacheKey(entry.fresh)), null);
+    assert.equal(await cache.safeGetCache(entry.last), null);
+  }
+});
+
+test('startup and mutation prewarm wait for readiness, stagger languages, and never block invalidation', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const redis = new FakeRedis();
+  const loaded = loadCache(redis);
+  t.after(loaded.restore);
+  const modulePath = require.resolve('../lib/publicNewsPrewarm');
+  delete require.cache[modulePath];
+  const { startCanonicalLatestPrewarm } = require(modulePath);
+  t.after(() => { delete require.cache[modulePath]; });
+  const mongo = Object.assign(new EventEmitter(), { readyState: 0 });
+  const redisEvents = new EventEmitter();
+  let redisReady = false;
+  const started = [];
+  let release = deferred();
+  const stop = startCanonicalLatestPrewarm({
+    mongo, redis: redisEvents, redisReady: () => redisReady,
+    refresh: async (req) => {
+      started.push(req.query.lang);
+      assert.deepEqual(req.query, { lang: req.query.lang, language: req.query.lang, limit: '40' });
+      assert.equal(req.signal, undefined);
+      if (req.query.lang === 'hi') throw new Error('simulated failure');
+      await release.promise;
+      return true;
+    },
+  });
+  t.after(stop);
+  assert.deepEqual(started, []);
+  mongo.readyState = 1;
+  mongo.emit('connected');
+  t.mock.timers.tick(1000);
+  await flushPromises();
+  assert.deepEqual(started, []);
+  redisReady = true;
+  redisEvents.emit('ready');
+  t.mock.timers.tick(999);
+  await flushPromises();
+  assert.deepEqual(started, []);
+  t.mock.timers.tick(1);
+  await flushPromises();
+  assert.deepEqual(started, ['en']);
+  t.mock.timers.tick(10000);
+  await flushPromises();
+  assert.deepEqual(started, ['en']);
+  release.resolve();
+  await flushPromises();
+  t.mock.timers.tick(1000);
+  await flushPromises();
+  assert.deepEqual(started, ['en', 'hi']);
+  t.mock.timers.tick(1000);
+  await flushPromises();
+  assert.deepEqual(started, ['en', 'hi', 'gu']);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    t.mock.timers.tick(1000);
+    await flushPromises();
+  }
+  assert.equal(started.filter((lang) => lang === 'hi').length, 3);
+  const count = started.length;
+  release = deferred();
+  await loaded.cache.safeSetCache('np:v1:latest:hi:test', { status: 200, body: { items: [] } }, 45);
+  await loaded.cache.safeSetCache('np:v1:latest-lkg:hi:test', { status: 200, body: { items: [] } }, 86400);
+  await loaded.cache.invalidateArticleCaches();
+  await loaded.cache.invalidateArticleCaches();
+  assert.equal(started.length, count);
+  assert.equal(await loaded.cache.safeGetCache('np:v1:latest:hi:test'), null);
+  assert.ok(await loaded.cache.safeGetCache('np:v1:latest-lkg:hi:test'));
+  t.mock.timers.tick(1000);
+  await flushPromises();
+  assert.equal(started.length, count + 1);
+  stop();
+  release.resolve();
+  await flushPromises();
+});
+
+test('withdrawal prewarm starts asynchronously without the startup delay and failures stay serial', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const loaded = loadCache(new FakeRedis());
+  t.after(loaded.restore);
+  const modulePath = require.resolve('../lib/publicNewsPrewarm');
+  delete require.cache[modulePath];
+  t.after(() => { delete require.cache[modulePath]; });
+  const started = [];
+  const release = deferred();
+  const stop = require(modulePath).startCanonicalLatestPrewarm({
+    mongo: Object.assign(new EventEmitter(), { readyState: 1 }),
+    redis: new EventEmitter(),
+    refresh: async (req) => {
+      started.push(req.query.lang);
+      await release.promise;
+      throw new Error('warm failed');
+    },
+  });
+  t.after(stop);
+  await loaded.cache.invalidateArticleCaches({ publicVisibilityRemoved: true });
+  assert.deepEqual(started, []);
+  t.mock.timers.tick(0);
+  await flushPromises();
+  assert.deepEqual(started, ['en']);
+  t.mock.timers.tick(1000);
+  await flushPromises();
+  assert.deepEqual(started, ['en']);
+  release.resolve();
+  await flushPromises();
+  t.mock.timers.tick(999);
+  await flushPromises();
+  assert.deepEqual(started, ['en']);
+  t.mock.timers.tick(1);
+  await flushPromises();
+  assert.deepEqual(started, ['en', 'hi']);
+});
 
 test('public-news cache keys isolate category and latest limits', (t) => {
   const key = capturePublicNewsCacheKey(t);
@@ -227,6 +434,7 @@ function waitFor(predicate, timeoutMs = 500) {
 function publicNewsCacheOptions(handler, options = {}) {
   return {
     publicNewsDiagnostics: options.publicNewsDiagnostics === true,
+    buildLastKnownGoodKey: options.buildLastKnownGoodKey,
     ttlSeconds: options.ttlSeconds || 45,
     staleWhileRevalidate: true,
     backgroundRebuild: handler,
@@ -239,11 +447,11 @@ function publicNewsCacheOptions(handler, options = {}) {
     rebuildAdmissionTimeoutMs: options.rebuildAdmissionTimeoutMs || 180,
     rebuildCommandTimeoutMs: options.rebuildCommandTimeoutMs || 180,
     onRebuildUnavailable: (_req, res) => res.set('Retry-After', '1').status(503).json({ items: [], page: 1, limit: 30, total: 0, totalPages: 1 }),
-    buildKey: (req) => {
+    buildKey: options.buildKey || ((req) => {
       const key = `np:v1:test:public-news:${req.params.key || 'default'}`;
       if (options.publicNewsDiagnostics) setRequestTimingCacheContext(req, { cacheFamily: 'latest', cacheKey: key });
       return key;
-    },
+    }),
     shouldCache: ({ statusCode, body }) => statusCode === 200 && body && Array.isArray(body.items),
   };
 }
@@ -273,6 +481,7 @@ function makeLifecycleHarness(t, handler, options = {}) {
   return {
     redis,
     cache: loaded.cache,
+    refresh: (key) => middleware.refresh({ method: 'GET', params: { key }, query: {}, headers: {} }),
     async advance(milliseconds) {
       redis.advance(milliseconds);
       t.mock.timers.tick(milliseconds);
@@ -310,6 +519,230 @@ function captureCacheDiagnostics(t) {
   });
   return entries;
 }
+
+for (const language of ['en', 'hi', 'gu']) {
+  test(`canonical ${language} rebuild stores fresh/stale/LKG and expiry serves LKG before refresh`, async (t) => {
+    const release = deferred();
+    let calls = 0;
+    const body = { items: [{ language }], page: 1, limit: 40, total: 1, totalPages: 1 };
+    const harness = makeLifecycleHarness(t, async (_req, res) => {
+      calls += 1;
+      if (calls > 1) await release.promise;
+      res.json(body);
+    }, { buildLastKnownGoodKey: (_req, key) => key.replace(':test:public-news:', ':latest-lkg:') });
+    const first = harness.request(language);
+    await first.promise;
+    const key = `np:v1:test:public-news:${language}`;
+    const lastKey = `np:v1:latest-lkg:${language}`;
+    assert.ok(harness.redis.entries.has(key));
+    assert.ok(harness.redis.entries.has(key + ':stale'));
+    assert.equal(harness.redis.entries.get(lastKey).expiresAt, 86400000);
+    const fresh = harness.request(language);
+    await fresh.promise;
+    assert.equal(calls, 1);
+    assert.deepEqual(fresh.res.body, body);
+    await harness.advance(106000);
+    const cached = harness.request(language);
+    await cached.promise;
+    assert.equal(cached.res.statusCode, 200);
+    assert.deepEqual(cached.res.body, body);
+    cached.res.emit('close');
+    cached.req.emit('aborted');
+    await flushPromises();
+    assert.equal(calls, 2);
+    release.resolve();
+    await flushPromises();
+    assert.ok(harness.redis.entries.has(key));
+    assert.equal(harness.redis.entries.get(lastKey).expiresAt, 86506000);
+  });
+}
+
+for (const tier of ['stale', 'lkg']) {
+  test(`20 identical ${tier} requests respond immediately with only one detached rebuild`, async (t) => {
+    const release = deferred();
+    let calls = 0;
+    const harness = makeLifecycleHarness(t, async (req, res) => {
+      calls += 1;
+      assert.equal(req.signal, undefined);
+      assert.equal(req.aborted, undefined);
+      await release.promise;
+      res.json({ items: [{ language: 'hi', refreshed: true }] });
+    }, { buildLastKnownGoodKey: (_req, key) => key.replace(':test:public-news:', ':latest-lkg:') });
+    const key = 'np:v1:test:public-news:hi';
+    const lastKey = 'np:v1:latest-lkg:hi';
+    const body = { items: [{ language: 'hi' }], page: 1, limit: 40, total: 1, totalPages: 1 };
+    await harness.cache.safeSetCache(tier === 'stale' ? key + ':stale' : lastKey, { status: 200, body }, 86400);
+    const tasks = Array.from({ length: 20 }, () => harness.request('hi'));
+    const browser = new AbortController();
+    for (const task of tasks) task.req.signal = browser.signal;
+    await Promise.all(tasks.map((task) => task.promise));
+    await flushPromises();
+    assert.equal(calls, 1);
+    for (const task of tasks) {
+      assert.equal(task.res.statusCode, 200);
+      assert.deepEqual(task.res.body, body);
+      task.res.destroyed = true;
+      task.res.emit('close');
+      task.req.aborted = true;
+      task.req.emit('aborted');
+    }
+    browser.abort();
+    release.resolve();
+    await flushPromises();
+    assert.deepEqual((await harness.cache.safeGetCache(lastKey)).body, { items: [{ language: 'hi', refreshed: true }] });
+    assert.equal(await harness.cache.safeGetCache('np:v1:latest-lkg:en'), null);
+    assert.equal(await harness.cache.safeGetCache('np:v1:latest-lkg:gu'), null);
+  });
+}
+
+for (const failure of ['exception', '503', 'invalid-items']) {
+  test(`failed canonical background refresh (${failure}) preserves LKG and the served response`, async (t) => {
+    const harness = makeLifecycleHarness(t, async (_req, res) => {
+      if (failure === 'exception') throw new Error('simulated failure');
+      if (failure === '503') return res.status(503).json({ items: [] });
+      return res.json({ items: null });
+    }, { publicNewsDiagnostics: true, buildLastKnownGoodKey: (_req, key) => key.replace(':test:public-news:', ':latest-lkg:') });
+    const key = 'np:v1:latest-lkg:gu';
+    const payload = { status: 200, body: { items: [{ language: 'gu' }] } };
+    await harness.cache.safeSetCache(key, payload, 86400);
+    const before = { ...harness.redis.entries.get(key) };
+    const task = harness.request('gu');
+    await task.promise;
+    await flushPromises();
+    assert.equal(task.res.statusCode, 200);
+    assert.deepEqual(task.res.body, payload.body);
+    assert.deepEqual(harness.redis.entries.get(key), before);
+    assert.equal(await harness.cache.safeGetCache('np:v1:test:public-news:gu'), null);
+  });
+}
+
+test('LKG is language-isolated, invalid entries are ignored, and only zero-cache overload gets 503', async (t) => {
+  const release = deferred();
+  const harness = makeLifecycleHarness(t, async (_req, res) => { await release.promise; res.json({ items: [] }); }, {
+    buildLastKnownGoodKey: (_req, key) => key.replace(':test:public-news:', ':latest-lkg:'),
+  });
+  const en = harness.request('en');
+  const gu = harness.request('gu');
+  await flushPromises();
+  const hi = harness.request('hi');
+  await flushPromises();
+  await harness.advance(101);
+  await hi.promise;
+  assert.equal(hi.res.statusCode, 503);
+  assert.equal(hi.res.headers['retry-after'], '1');
+  assert.deepEqual(hi.res.body, { items: [], page: 1, limit: 30, total: 0, totalPages: 1 });
+  for (const lang of ['en', 'hi', 'gu']) {
+    await harness.cache.safeSetCache(`np:v1:latest-lkg:${lang}`, { status: 200, body: { items: [{ language: lang }] } }, 86400);
+    const cached = harness.request(lang);
+    await cached.promise;
+    assert.equal(cached.res.statusCode, 200);
+    assert.deepEqual(cached.res.body, { items: [{ language: lang }] });
+  }
+  for (const bad of [{ status: 503, body: { items: [] } }, { status: 200, body: { items: null } }]) {
+    await harness.cache.safeSetCache('np:v1:latest-lkg:hi', bad, 86400);
+    const invalid = harness.request('hi');
+    await flushPromises();
+    await harness.advance(101);
+    await invalid.promise;
+    assert.equal(invalid.res.statusCode, 503);
+  }
+  release.resolve();
+  await Promise.all([en.promise, gu.promise]);
+  await flushPromises();
+});
+
+for (const tier of ['fresh', 'stale']) {
+  test(`canonical invalid ${tier} payload falls through to valid same-language LKG`, async (t) => {
+    const release = deferred();
+    const harness = makeLifecycleHarness(t, async (_req, res) => {
+      await release.promise;
+      res.json({ items: [{ language: 'hi' }] });
+    }, { buildLastKnownGoodKey: (_req, key) => key.replace(':test:public-news:', ':latest-lkg:') });
+    t.after(() => release.resolve());
+    const body = { items: [{ language: 'hi' }], page: 1, limit: 40, total: 1, totalPages: 1 };
+    await harness.cache.safeSetCache('np:v1:latest-lkg:hi', { status: 200, body }, 86400);
+    for (const payload of [{ status: 503, body: { items: [] } }, { status: 200, body: { items: null } }]) {
+      await harness.cache.safeSetCache('np:v1:test:public-news:hi' + (tier === 'stale' ? ':stale' : ''), payload, 45);
+      const cached = harness.request('hi');
+      await cached.promise;
+      assert.equal(cached.res.statusCode, 200);
+      assert.deepEqual(cached.res.body, body);
+    }
+    release.resolve();
+    await flushPromises();
+  });
+}
+
+test('low-priority prewarm yields to active requests and shares per-key refresh deduplication', async (t) => {
+  const release = deferred();
+  const started = [];
+  const harness = makeLifecycleHarness(t, async (req, res) => {
+    started.push(req.params.key);
+    await release.promise;
+    res.json({ items: [] });
+  }, { buildLastKnownGoodKey: (_req, key) => key.replace(':test:public-news:', ':latest-lkg:') });
+  const foreground = harness.request('hi');
+  await flushPromises();
+  assert.equal(await harness.refresh('en'), false);
+  assert.deepEqual(started, ['hi']);
+  release.resolve();
+  await foreground.promise;
+  const warming = harness.refresh('en');
+  const duplicate = harness.refresh('en');
+  await Promise.all([warming, duplicate]);
+  assert.deepEqual(started, ['hi', 'en']);
+});
+
+test('withdrawal between ownership check and cache write cannot resurrect LKG, even when subsequent prewarm fails', async (t) => {
+  let attempts = 0;
+  const harness = makeLifecycleHarness(t, async (_req, res) => {
+    attempts += 1;
+    if (attempts > 1) return res.status(503).json({ items: [] });
+    return res.json({ items: [{ id: 'withdrawn', language: 'hi' }] });
+  }, {
+    buildKey: (req) => `np:v1:latest:${req.params.key}:v2:test`,
+    buildLastKnownGoodKey: (_req, key) => key.replace(':latest:', ':latest-lkg:'),
+  });
+  const key = 'np:v1:latest:hi:v2:test';
+  const lastKey = 'np:v1:latest-lkg:hi:v2:test';
+  await harness.cache.safeSetCache(lastKey, { status: 200, body: { items: [{ id: 'withdrawn', language: 'hi' }] } }, 86400);
+  const originalGet = harness.redis.get.bind(harness.redis);
+  let invalidated = false;
+  harness.redis.get = async (requestedKey) => {
+    const value = await originalGet(requestedKey);
+    if (requestedKey === key + ':lock' && value && !invalidated) {
+      invalidated = true;
+      await harness.cache.invalidateArticleCaches({ publicVisibilityRemoved: true });
+    }
+    return value;
+  };
+  assert.equal(await harness.refresh('hi'), false);
+  assert.equal(invalidated, true);
+  assert.equal(await harness.refresh('hi'), false);
+  const visitor = harness.request('hi');
+  await visitor.promise;
+  assert.equal(visitor.res.statusCode, 503);
+  assert.deepEqual(visitor.res.body, { items: [] });
+  for (const cacheKey of [key, key + ':stale', lastKey]) {
+    assert.equal(await harness.cache.safeGetCache(cacheKey), null);
+  }
+});
+
+test('canonical rebuild can store LKG after fresh write failure and reports partial storage', async (t) => {
+  const entries = captureCacheDiagnostics(t);
+  const harness = makeLifecycleHarness(t, async (_req, res) => res.json({ items: [{ language: 'hi' }] }), {
+    publicNewsDiagnostics: true, buildLastKnownGoodKey: (_req, key) => key.replace(':test:public-news:', ':latest-lkg:'),
+  });
+  const originalSet = harness.redis.set.bind(harness.redis);
+  harness.redis.set = (key, ...args) => {
+    if (key === 'np:v1:test:public-news:hi') throw new Error('write failed');
+    return originalSet(key, ...args);
+  };
+  assert.equal(await harness.refresh('hi'), true);
+  assert.ok(await harness.cache.safeGetCache('np:v1:latest-lkg:hi'));
+  assert.ok(entries.some((entry) => entry.event === 'storage' && entry.reason === 'lkg_only'));
+  assert.equal(entries.some((entry) => entry.event === 'no_store'), false);
+});
 
 test('public-news diagnostics correlate lookup and fresh/stale writes without changing JSON or cache hits', async (t) => {
   const entries = captureCacheDiagnostics(t);

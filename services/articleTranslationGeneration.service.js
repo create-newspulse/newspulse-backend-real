@@ -288,6 +288,7 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
   const updated = {};
   const skipped = {};
   const failed = {};
+  let changedPublicContent = false;
 
   for (const targetLang of targetLanguages) {
     const existing = await News.findOne(buildExistingQuery(groupKey, targetLang, source._id));
@@ -318,6 +319,7 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
     if (existing) {
       const doc = await News.findByIdAndUpdate(existing._id, { $set: payload }, { new: true, runValidators: true });
       updated[targetLang] = String(doc?._id || existing._id);
+      if (doc && String(existing.status || '').toLowerCase() === 'published') changedPublicContent = true;
     } else {
       const doc = await News.create(payload);
       created[targetLang] = String(doc?._id || '');
@@ -331,7 +333,7 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
   const status = failedCount && completedCount ? 'partially_completed' : (failedCount ? 'failed' : 'review_required');
   const result = { sourceLanguage, targetLanguages, translationGroupId: groupKey, created, updated, skipped, failed };
   await finishJob(job, status, result, failedCount ? 'One or more translations failed' : null);
-  await invalidateArticleCaches().catch(() => null);
+  if (changedPublicContent) await invalidateArticleCaches({ publicVisibilityRemoved: true });
 
   return { ok: failedCount === 0, status, provider: 'google_translate', sourceLanguage, targetLanguages, sourceHash, translationGroupId: groupKey, created, updated, skipped, failed, jobId: job?._id ? String(job._id) : null };
 }

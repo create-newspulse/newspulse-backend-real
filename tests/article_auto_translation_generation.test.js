@@ -950,7 +950,9 @@ test('googleTranslationService still translates normal article HTML around uncon
   assert.match(res.text, /Translated outro/);
 });
 
-test('English article generates Hindi and Gujarati sibling drafts only', async () => {
+test('English article generates Hindi and Gujarati sibling drafts only', async (t) => {
+  let invalidations = 0;
+  t.after(require('../lib/cache').onArticleCachesInvalidated(() => { invalidations += 1; }));
   const originals = { findOne: News.findOne, create: News.create, updateOne: News.updateOne };
   const prevFetch = global.fetch;
   const created = [];
@@ -972,10 +974,29 @@ test('English article generates Hindi and Gujarati sibling drafts only', async (
     assert.ok(created.every((item) => item.status === 'draft'));
     assert.ok(created.every((item) => item.translationReviewStatus === 'review_required'));
     assert.ok(created.every((item) => item.pulseDialogue === undefined));
+    assert.equal(invalidations, 0);
   } finally {
     restore(originals);
     global.fetch = prevFetch;
   }
+});
+
+test('translation generation invalidates latest only when overwriting published content', async (t) => {
+  const invalidations = [];
+  t.after(require('../lib/cache').onArticleCachesInvalidated((event) => { invalidations.push(event); }));
+  let status = 'draft';
+  t.mock.method(News, 'findOne', async () => ({ _id: '507f1f77bcf86cd799439601', language: 'hi', status }));
+  t.mock.method(News, 'updateOne', async () => ({ acknowledged: true, modifiedCount: 1 }));
+  t.mock.method(News, 'findByIdAndUpdate', async (_id, update) => ({ _id, ...update.$set }));
+  t.mock.method(global, 'fetch', async (_url, opts) => {
+    const body = JSON.parse(String(opts.body || '{}'));
+    return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((text) => ({ translatedText: `T:${body.target}:${text}` })) } }) };
+  });
+  await generateArticleTranslations(makeSource(), { targetLanguages: ['hi'], overwrite: true });
+  assert.deepEqual(invalidations, []);
+  status = 'published';
+  await generateArticleTranslations(makeSource(), { targetLanguages: ['hi'], overwrite: true });
+  assert.deepEqual(invalidations, [{ publicVisibilityRemoved: true }]);
 });
 
 test('generated Hindi and Gujarati article translations preserve inline image media identity', async () => {
