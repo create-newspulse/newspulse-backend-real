@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const News = require('../models/News');
+const { withPublicAuthorByline } = require('../services/authorByline.service');
 const { safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 const { buildPubliclyVisibleNewsArticleFilter } = require('../services/publicArticleVisibility.service');
@@ -58,6 +59,9 @@ function ensureNewsSlugs(docLike) {
 exports.createNews = async (req, res) => {
   try {
     const body = { ...(req.body || {}) };
+    if (Object.keys(body).some((key) => key === 'authorByline' || key.startsWith('authorByline.'))) {
+      return res.status(400).json({ error: 'Author bylines must be saved through the authenticated articles API' });
+    }
     if (body.coverImageUrl === undefined && body.imageURL !== undefined) {
       body.coverImageUrl = body.imageURL;
     }
@@ -121,7 +125,7 @@ exports.getNews = async (req, res) => {
       obj.coverImageUrl = obj.coverImageUrl || obj.imageURL || null;
       obj.lang = obj.lang || obj.language || 'gu';
       obj.language = obj.language || obj.lang || 'gu';
-      return obj;
+      return withPublicAuthorByline(obj);
     });
     res.json(items);
   } catch (error) {
@@ -135,6 +139,9 @@ exports.updateNews = async (req, res) => {
     if (!id) return res.status(400).json({ error: 'Missing id' });
 
     const body = { ...(req.body || {}) };
+    if (Object.keys(body).some((key) => key === 'authorByline' || key.startsWith('authorByline.'))) {
+      return res.status(400).json({ error: 'Author bylines must be saved through the authenticated articles API' });
+    }
     if (body.coverImageUrl === undefined && body.imageURL !== undefined) {
       body.coverImageUrl = body.imageURL;
     }
@@ -211,7 +218,7 @@ exports.getPublishedNewsBySlug = async (req, res) => {
       (await News.findOne(lookup(raw)).lean());
 
     if (!article) return res.status(404).json({ success: false });
-    return res.json({ success: true, data: article });
+    return res.json({ success: true, data: withPublicAuthorByline(article) });
   } catch (error) {
     return res.status(500).json({ success: false, message: error?.message || String(error) });
   }

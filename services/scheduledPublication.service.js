@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { prepareAuthorBylineForPublication } = require('./authorByline.service');
 
 const { publishCanonicalArticle } = require('./articlePublishing.service');
 const { isPulseDialogueArticle } = require('./pulseDialogue.service');
@@ -29,6 +30,7 @@ async function publishDueScheduledArticles(options = {}) {
   const candidates = typeof candidatesQuery.then === 'function' ? await candidatesQuery : candidatesQuery;
   const stats = { processed: 0, published: 0, failed: 0, skipped: 0 };
   const publishedPulseGroups = new Set();
+  const authorSnapshots = new Map();
 
   for (const doc of candidates || []) {
     stats.processed += 1;
@@ -51,6 +53,20 @@ async function publishDueScheduledArticles(options = {}) {
         continue;
       }
 
+      const bylineGroup = String(doc.translationGroupId || doc.translationKey || doc._id);
+      let bylineSource = doc;
+      if (authorSnapshots.has(bylineGroup)) {
+        doc.authorByline = authorSnapshots.get(bylineGroup);
+      } else {
+        if (doc.authorByline?.enabled && doc.sourceArticleId && String(doc.sourceArticleId) !== String(doc._id)) {
+          bylineSource = await News.findById(doc.sourceArticleId);
+          if (!bylineSource) throw new Error('Author byline source article not found');
+        }
+        await prepareAuthorBylineForPublication(bylineSource, now);
+        if (bylineSource !== doc) {
+          doc.authorByline = bylineSource.authorByline || { enabled: false };
+        }
+      }
       const fromStage = String(doc.workflowStage || 'SCHEDULED');
       doc.status = 'published';
       doc.publishedAt = now;
@@ -68,6 +84,10 @@ async function publishDueScheduledArticles(options = {}) {
         note: 'Auto-published by scheduler',
       });
       await doc.save();
+      if (bylineSource !== doc) {
+        await News.updateOne({ _id: bylineSource._id }, { $set: { authorByline: doc.authorByline } });
+      }
+      if (doc.authorByline !== undefined) authorSnapshots.set(bylineGroup, doc.authorByline);
 
       try {
         await PushHistory.create({

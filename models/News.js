@@ -487,6 +487,7 @@ const newsSchema = new mongoose.Schema({
   sponsorFeatureEligible: { type: Boolean, default: false },
   sponsorFeatureLinkedId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
   pulseDialogue: { type: PulseDialogueSchema, default: undefined },
+  authorByline: { type: require('../schemas/authorByline'), default: undefined },
   // Provenance (optional)
   source: { type: String, index: true }, // e.g. 'community', 'editor'
   sourceType: { type: String, default: null, index: true },

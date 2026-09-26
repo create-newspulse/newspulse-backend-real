@@ -162,6 +162,7 @@ function buildTranslatedPayload(source, translated, { targetLang, sourceLang, gr
     gallery: Array.isArray(source.gallery) ? source.gallery : [],
     seo,
     pulseDialogue,
+    ...(source.authorByline !== undefined ? { authorByline: source.authorByline } : {}),
     slug: targetSlug,
     slugs,
     lang: targetLang,

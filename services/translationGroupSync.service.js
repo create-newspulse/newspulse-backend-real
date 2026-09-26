@@ -124,6 +124,7 @@ function computeContentFingerprint(docLike) {
     translations: cloneSimple(doc.translations || null),
     translationStatus: cloneSimple(doc.translationStatus || null),
     pulseDialogue: cloneSimple(doc.pulseDialogue || null),
+    ...(doc.authorByline !== undefined ? { authorByline: cloneSimple(doc.authorByline) } : {}),
   };
 
   return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
@@ -274,6 +275,7 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
     gallery: normalizeStringArray(master.gallery),
     seo: buildSeoObject(master.seo),
     pulseDialogue: master.pulseDialogue ? applyPulseDialogueStandardText(cloneSimple(master.pulseDialogue), childLang) : null,
+    ...(master.authorByline !== undefined ? { authorByline: cloneSimple(master.authorByline) } : {}),
     translationKey: getGroupKey(master),
     translationGroupId: getGroupKey(master),
     syncMode: 'auto',

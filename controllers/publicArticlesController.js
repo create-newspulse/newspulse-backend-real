@@ -1,4 +1,5 @@
 const Article = require('../models/Article');
+const { withPublicAuthorByline } = require('../services/authorByline.service');
 const { CATEGORY_VALUES, LANGUAGE_VALUES } = require('../models/Article');
 const mongoose = require('mongoose');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey, isSupportedPublicCategory } = require('../lib/categories');
@@ -69,6 +70,7 @@ function shouldDeferToAdminArticlesRouter(req) {
 
 function withEditorialTypeFallback(doc) {
   if (!doc || typeof doc !== 'object') return doc;
+  doc = withPublicAuthorByline(doc);
   if (String(doc.category || '').trim().toLowerCase() === 'editorial' && !doc.editorialType) {
     return { ...doc, editorialType: 'editorial' };
   }

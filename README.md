@@ -201,6 +201,36 @@ Unknown routes return:
 
 ## Public Articles API (Frontend Feeds)
 
+### Optional Author Byline
+
+Normal newsroom articles may carry `authorByline` in both CMS `News` and public `Article` records. It is absent on legacy records; `enabled` defaults to false when supplied. No migration is required. Authors do not need a User account, staff role, or ID. This is independent of Pulse Dialogue contributors and community Reporter Portal profiles.
+
+Use authenticated `POST /api/admin/articles` or `PUT /api/admin/articles/:id` (including existing article aliases):
+
+```json
+{
+  "authorByline": {
+    "enabled": true,
+    "snapshot": {
+      "name": "Shailesh Rathod",
+      "publicDesignation": "Independent Writer",
+      "photoUrl": "/uploads/author.jpg",
+      "shortBio": "Public author biography."
+    }
+  }
+}
+```
+
+When enabled, `snapshot.name` is required and nonblank (maximum 160 characters). `publicDesignation` (160), `photoUrl` (2048), and `shortBio` (600) are optional. All values must be strings, are trimmed, and blank/null optional fields are omitted. Unknown fields are not stored or exposed. Invalid input returns 400.
+
+Use the existing admin image-upload flow and send its resulting URL/path as `photoUrl`; no manual URL entry or new upload endpoint is required. Photos accept absolute HTTPS URLs without embedded credentials, or local `/uploads/` paths without traversal, backslashes, percent escapes, query strings, or fragments. Protocol-relative, HTTP, data, and javascript URLs are rejected. The backend does not fetch the image.
+
+Saving a draft stores the submitted author snapshot for preview. First publication adds an internal, server-controlled `snapshotCapturedAt`, without any User lookup. Unrelated edits and republishing preserve the snapshot. Omit `authorByline` to preserve it; send `{ "authorByline": { "enabled": false } }` to clear it. To explicitly edit an enabled byline, send `authorByline.snapshot` with the complete desired public fields, including name; this replaces rather than merges snapshot fields. `enabled` may be omitted when already enabled. Sending only `enabled: true` preserves an existing valid snapshot. Client timestamps are ignored; an explicit changed snapshot on a published article gets a new server timestamp.
+
+Change attribution on the source article; conflicting changes to a translated child return 409. EN/HI/GU variants share the same identity and snapshot without translation. Public-copy IDs with a `sourceNewsId` resolve to that CMS source for byline edits; standalone public records without a source return 409. Legacy `/api/news` write routes reject byline input instead of bypassing validation.
+
+Public news/article responses include only `authorByline: { enabled: true, snapshot: { name, publicDesignation?, photoUrl?, shortBio? } }` when enabled and valid, and omit it when disabled. Public responses never include capture timestamps or other internal fields. Authenticated article detail includes the saved snapshot for editing. All four author fields are shared across EN/HI/GU, without automatic translation or transliteration. Pulse Dialogue contributor identity, snapshots, disclosures, disclaimers, Editor's Note, and author SEO behavior remain separate and unchanged. Existing authentication, Founder publication authorization, visibility and schedule transitions remain in force.
+
 ### Required env vars
 
 ### Endpoints

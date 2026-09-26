@@ -267,6 +267,7 @@ const articleSchema = new mongoose.Schema(
     sponsorFeatureEligible: { type: Boolean, default: false },
     sponsorFeatureLinkedId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
     pulseDialogue: { type: PulseDialogueSchema, default: undefined },
+    authorByline: { type: require('../schemas/authorByline'), default: undefined },
 
     isBreaking: { type: Boolean, default: false, index: true },
 

@@ -295,6 +295,7 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     sponsorFeatureEligible: Boolean(newsDoc.sponsorFeatureEligible),
     sponsorFeatureLinkedId: newsDoc.sponsorFeatureLinkedId || null,
     ...(pulseDialogue ? { pulseDialogue } : {}),
+    ...(newsDoc.authorByline !== undefined ? { authorByline: newsDoc.authorByline } : {}),
     isBreaking: String(newsDoc.category || '').toLowerCase() === 'breaking',
     coverImage,
     externalUrls: Array.isArray(newsDoc.externalUrls) ? newsDoc.externalUrls.filter((v) => _isNonEmptyString(v)) : [],

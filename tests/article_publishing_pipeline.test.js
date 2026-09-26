@@ -115,6 +115,7 @@ function installPublishMocks(t, docs, options = {}) {
   const prevFetch = global.fetch;
   const created = [];
   const pushHistory = [];
+  const publicCopies = [];
   let fetchCalls = 0;
 
   News.findById = async (id) => docs.find((doc) => String(doc._id) === String(id)) || docs[0] || null;
@@ -153,7 +154,10 @@ function installPublishMocks(t, docs, options = {}) {
     return doc;
   };
 
-  PublicArticle.findOneAndUpdate = () => ({ lean: async () => ({ _id: 'public-sync' }) });
+  PublicArticle.findOneAndUpdate = (_filter, update) => {
+    publicCopies.push(update.$set);
+    return { lean: async () => ({ _id: 'public-sync' }) };
+  };
   PublicArticle.updateMany = async () => ({ acknowledged: true, modifiedCount: 0 });
   PushHistory.create = async (payload) => {
     pushHistory.push(payload);
@@ -178,7 +182,7 @@ function installPublishMocks(t, docs, options = {}) {
     global.fetch = prevFetch;
   });
 
-  return { created, pushHistory, getFetchCalls: () => fetchCalls };
+  return { created, pushHistory, publicCopies, getFetchCalls: () => fetchCalls };
 }
 
 async function publishForTest(t, docs, options = {}) {
@@ -191,6 +195,166 @@ async function publishForTest(t, docs, options = {}) {
   });
   return { result, ...state };
 }
+
+for (const translationMode of ['existing', 'generated', 'cached']) {
+  test(`author publication snapshot is shared and frozen across ${translationMode} EN HI GU translations`, async (context) => {
+    const source = makeLanguageDoc('en', {
+      authorByline: { enabled: true, snapshot: { name: 'Independent Author', publicDesignation: 'Writer', photoUrl: '/uploads/author.jpg', shortBio: 'Public bio' } },
+    });
+    const docs = translationMode === 'existing' ? [source, makeLanguageDoc('hi'), makeLanguageDoc('gu')] : [source];
+    if (translationMode === 'cached') {
+      source.translations = Object.fromEntries(['hi', 'gu'].map((lang) => [lang, {
+        title: `${lang} title`, summary: `${lang} summary`, content: `<p>${lang} content</p>`, provider: 'manual',
+      }]));
+    }
+    context.mock.method(require('../models/User'), 'findOne', () => { throw new Error('Publication must not query Users'); });
+    const state = await publishForTest(context, docs);
+    const snapshot = structuredClone(source.authorByline);
+    assert.equal(snapshot.snapshot.name, 'Independent Author');
+    assert.ok(snapshot.snapshotCapturedAt);
+    assert.deepEqual(state.result.publishedLanguages.sort(), ['en', 'gu', 'hi']);
+    for (const doc of docs) assert.deepEqual(doc.authorByline, snapshot);
+    assert.equal(state.publicCopies.length, 3);
+    for (const copy of state.publicCopies) assert.deepEqual(copy.authorByline, snapshot);
+    await publishCanonicalArticle(source, { logger: { warn() {} } });
+    for (const doc of docs) assert.deepEqual(doc.authorByline, snapshot);
+  });
+}
+
+test('author byline survives draft creation, edit, preview, scheduling and scheduled publication', async (context) => {
+  const docs = [];
+  installPublishMocks(context, docs);
+  context.mock.method(require('../models/User'), 'findOne', () => { throw new Error('Author workflow must not query Users'); });
+  context.mock.method(News, 'findOne', () => queryDoc(null));
+  context.mock.method(PublicArticle, 'findOne', () => queryDoc(null));
+  context.mock.method(News, 'findById', (id) => queryDoc(docs.find((doc) => String(doc._id) === String(id))));
+  context.mock.method(News, 'findByIdAndUpdate', async (id, update) => {
+    const doc = docs.find((item) => String(item._id) === String(id));
+    if (doc) Object.assign(doc, update.$set || {});
+    return doc;
+  });
+  const token = makeOpaqueFounderToken();
+  const created = await request(app).post('/api/admin/articles').set('Authorization', `Bearer ${token}`).send({
+    title: 'Author draft', summary: 'Author summary', content: '<p>Author body</p>', category: 'national', language: 'en', status: 'draft',
+    authorByline: { enabled: true, snapshot: { name: 'Independent Author', photoUrl: '/uploads/author.jpg' } },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const doc = docs[0];
+  const byline = structuredClone(doc.authorByline);
+  const edited = await request(app).put(`/api/admin/articles/${doc._id}`).set('Authorization', `Bearer ${token}`).send({ summary: 'Edited summary' });
+  assert.equal(edited.status, 200, JSON.stringify(edited.body));
+  assert.deepEqual(doc.authorByline, byline);
+  const preview = await request(app).get(`/api/articles/${doc._id}`).set('Authorization', `Bearer ${token}`);
+  assert.equal(preview.status, 200);
+  assert.deepEqual(preview.body.article.authorByline, byline);
+  const publicPreview = await request(app).get(`/api/articles/${doc._id}`);
+  assert.equal(publicPreview.status, 404);
+  const scheduled = await request(app).post(`/api/articles/${doc._id}/schedule`).set('Authorization', `Bearer ${token}`).send({ scheduledAt: '2030-01-01T00:00:00.000Z' });
+  assert.equal(scheduled.status, 200, JSON.stringify(scheduled.body));
+  assert.equal(doc.status, 'scheduled');
+  assert.deepEqual(doc.authorByline, byline);
+  const { publishDueScheduledArticles } = require('../services/scheduledPublication.service');
+  const result = await publishDueScheduledArticles({
+    allowDisconnected: true,
+    News: { find: () => ({ limit: () => docs }) },
+    PushHistory: { create: async () => ({}) },
+    now: new Date('2030-01-01T00:00:00.000Z'),
+  });
+  assert.equal(result.published, 1);
+  assert.equal(doc.status, 'published');
+  assert.ok(doc.authorByline.snapshotCapturedAt);
+  assert.deepEqual(doc.authorByline.snapshot, byline.snapshot);
+  const frozen = structuredClone(doc.authorByline);
+  const managed = await request(app).put(`/api/admin/articles/${doc._id}`).set('Authorization', `Bearer ${token}`).send({ summary: 'Managed summary' });
+  assert.equal(managed.status, 200, JSON.stringify(managed.body));
+  assert.deepEqual(doc.authorByline, frozen);
+  const child = makeLanguageDoc('hi', {
+    sourceArticleId: doc._id,
+    translationKey: doc.translationKey,
+    translationGroupId: doc.translationGroupId,
+    authorByline: structuredClone(frozen),
+  });
+  docs.push(child);
+  const invalidEdit = await request(app).put(`/api/admin/articles/${doc._id}`).set('Authorization', `Bearer ${token}`).send({ authorByline: { snapshot: { name: ' ' } } });
+  assert.equal(invalidEdit.status, 400);
+  assert.deepEqual(doc.authorByline, frozen);
+  const conflictingName = await request(app).put(`/api/admin/articles/${child._id}`).set('Authorization', `Bearer ${token}`).send({ authorByline: { snapshot: { name: 'Different child author' } } });
+  assert.equal(conflictingName.status, 409);
+  const conflicting = await request(app).put(`/api/admin/articles/${child._id}`).set('Authorization', `Bearer ${token}`).send({ authorByline: { enabled: false } });
+  assert.equal(conflicting.status, 409);
+  assert.deepEqual(child.authorByline, frozen);
+  const publicId = '507f1f77bcf86cd799439960';
+  context.mock.method(PublicArticle, 'findById', () => queryDoc({ sourceNewsId: doc._id }));
+  const replacement = { name: 'Shailesh Rathod', publicDesignation: 'Independent Writer', shortBio: 'Updated biography' };
+  const explicitEdit = await request(app).put(`/api/admin/articles/${publicId}`).set('Authorization', `Bearer ${token}`).send({ authorByline: { snapshot: replacement, snapshotCapturedAt: '2000-01-01' } });
+  assert.equal(explicitEdit.status, 200, JSON.stringify(explicitEdit.body));
+  assert.deepEqual(doc.authorByline.snapshot, replacement);
+  assert.equal(child.authorByline.enabled, true);
+  assert.deepEqual(child.authorByline.snapshot, replacement);
+  assert.equal(new Date(child.authorByline.snapshotCapturedAt).getTime(), new Date(doc.authorByline.snapshotCapturedAt).getTime());
+  assert.notEqual(new Date(doc.authorByline.snapshotCapturedAt).getUTCFullYear(), 2000);
+  const fromPublicId = await request(app).put(`/api/admin/articles/${publicId}`).set('Authorization', `Bearer ${token}`).send({ authorByline: { enabled: false } });
+  assert.equal(fromPublicId.status, 200, JSON.stringify(fromPublicId.body));
+  assert.deepEqual(doc.authorByline, { enabled: false });
+  assert.deepEqual(child.authorByline, { enabled: false });
+});
+
+test('invalid author snapshot leaves publication drafts and snapshots unchanged', async (context) => {
+  const byline = { enabled: true, snapshot: { name: ' ' } };
+  const docs = [makeLanguageDoc('en', { authorByline: structuredClone(byline) }), makeLanguageDoc('hi'), makeLanguageDoc('gu')];
+  installPublishMocks(context, docs);
+  await assert.rejects(publishCanonicalArticle(docs[0]), /name is required/);
+  for (const doc of docs) assert.equal(doc.status, 'draft');
+  assert.deepEqual(docs[0].authorByline, byline);
+});
+
+test('scheduled translations reuse the source snapshot across separate scheduler batches', async (context) => {
+  const { publishDueScheduledArticles } = require('../services/scheduledPublication.service');
+  const byline = { enabled: true, snapshot: { name: 'Preview name', shortBio: 'Public bio' } };
+  const source = makeLanguageDoc('en', { status: 'scheduled', authorByline: structuredClone(byline) });
+  context.mock.method(require('../models/User'), 'findOne', () => { throw new Error('Scheduled publication must not query Users'); });
+  const snapshots = [];
+  for (const language of ['hi', 'gu']) {
+    const child = makeLanguageDoc(language, { status: 'scheduled', authorByline: structuredClone(byline) });
+    const result = await publishDueScheduledArticles({
+      allowDisconnected: true,
+      News: {
+        find: () => ({ limit: () => [child] }),
+        findById: async () => source,
+        updateOne: async (_filter, update) => { Object.assign(source, update.$set); },
+      },
+      PushHistory: { create: async () => ({}) },
+    });
+    assert.equal(result.published, 1);
+    snapshots.push(structuredClone(child.authorByline));
+  }
+  assert.equal(snapshots[0].snapshot.name, 'Preview name');
+  assert.equal(source.status, 'scheduled');
+  assert.deepEqual(snapshots[0], snapshots[1]);
+  assert.deepEqual(snapshots[0], source.authorByline);
+});
+
+test('a failed scheduled article save does not persist a source publication snapshot', async (context) => {
+  const { publishDueScheduledArticles } = require('../services/scheduledPublication.service');
+  const byline = { enabled: true, snapshot: { name: 'Preview name' } };
+  const source = makeLanguageDoc('en', { status: 'scheduled', authorByline: structuredClone(byline) });
+  const child = makeLanguageDoc('hi', { status: 'scheduled', authorByline: structuredClone(byline) });
+  child.save = async () => { throw new Error('Simulated persistence failure'); };
+  let sourceWrites = 0;
+  const result = await publishDueScheduledArticles({
+    allowDisconnected: true,
+    logger: { warn() {} },
+    News: {
+      find: () => ({ limit: () => [child] }),
+      findById: async () => source,
+      updateOne: async () => { sourceWrites += 1; },
+    },
+    PushHistory: { create: async () => ({}) },
+  });
+  assert.equal(result.failed, 1);
+  assert.equal(result.published, 0);
+  assert.equal(sourceWrites, 0);
+});
 
 test('canonical publish publishes a draft with all EN HI GU translations', async (t) => {
   let refreshScheduled = false;

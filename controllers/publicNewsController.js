@@ -1,3 +1,4 @@
+const { withPublicAuthorByline } = require('../services/authorByline.service');
 const mongoose = require('mongoose');
 
 const News = require('../models/News');
@@ -585,6 +586,8 @@ const PUBLIC_SELECT = [
   'imageAlt',
   'imageCaption',
   'pulseDialogue',
+  'authorByline.enabled',
+  'authorByline.snapshot',
   'publishedAt',
   'date',
   'createdAt',
@@ -598,6 +601,8 @@ const PUBLIC_DETAIL_SELECT = `${PUBLIC_SELECT} originalLang translations transla
 const PUBLIC_FEED_SELECT = `${PUBLIC_SELECT} originalLang translations translationStatus`;
 
 const PUBLIC_ARTICLE_DETAIL_SELECT = [
+  'authorByline.enabled',
+  'authorByline.snapshot',
   'title',
   'summary',
   'content',
@@ -685,7 +690,7 @@ function _extractFirstImgSrcFromHtml(html) {
 }
 
 function withCoverImageUrl(obj) {
-  const out = { ...(obj || {}) };
+  const out = withPublicAuthorByline({ ...(obj || {}) });
 
   // Normalize imageUrl with the requested priority, plus legacy fields.
   // Priority: imageUrl || coverImage || image || thumbnail || images[0] || null

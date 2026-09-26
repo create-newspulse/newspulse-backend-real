@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { prepareAuthorBylineForPublication } = require('./authorByline.service');
 
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
@@ -165,6 +166,7 @@ function snapshotPublishState(doc) {
     workflowStage: doc.workflowStage,
     workflowUpdatedAt: doc.workflowUpdatedAt,
     workflowHistory: Array.isArray(doc.workflowHistory) ? [...doc.workflowHistory] : doc.workflowHistory,
+    authorByline: doc.authorByline,
   };
 }
 
@@ -178,6 +180,7 @@ function restorePublishState(doc, state) {
   doc.workflowStage = state.workflowStage;
   doc.workflowUpdatedAt = state.workflowUpdatedAt;
   doc.workflowHistory = state.workflowHistory;
+  doc.authorByline = state.authorByline;
 }
 
 function buildTranslationGroupPublishReadiness(groupDocs) {
@@ -262,6 +265,7 @@ function buildManualTranslationSibling(sourceDoc, targetLang, groupKey, actor) {
     gallery: Array.isArray(sourceObject.gallery) ? sourceObject.gallery : [],
     seo: sourceObject.seo,
     pulseDialogue,
+    ...(sourceObject.authorByline !== undefined ? { authorByline: sourceObject.authorByline } : {}),
     slug: slugs[targetLang],
     slugs,
     lang: targetLang,
@@ -481,7 +485,10 @@ async function publishCanonicalArticle(articleIdOrDoc, options = {}) {
   const changedDocs = [];
 
   try {
+    const bylineSource = readiness.readyDocs.find((doc) => isSourceTranslationDoc(doc)) || sourceDoc;
+    await prepareAuthorBylineForPublication(bylineSource, now);
     for (const doc of readiness.readyDocs) {
+      if (bylineSource.authorByline !== undefined) doc.authorByline = bylineSource.authorByline;
       const lang = getStoredLanguageForArticle(doc);
       const wasPublished = String(doc.status || '').toLowerCase() === 'published' && doc.publishedAt;
       if (lang) {

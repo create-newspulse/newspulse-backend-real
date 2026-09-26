@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
+const { buildAuthorBylinePatch, withPublicAuthorByline, publicAuthorByline } = require('../services/authorByline.service');
 // CMS/admin "articles" are stored in the News collection in this codebase.
 // Keep an alias named Article for routes that treat these as "Articles".
 const Article = News;
@@ -1374,6 +1375,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     }
 
     const categoryNorm = _normalizeCategoryValue(category);
+    const authorByline = await buildAuthorBylinePatch(body0, { category: categoryNorm || category });
     const pulseDialogueFields = await _buildPulseDialoguePatchFromBody(body0, { category: categoryNorm || category, partial: false });
     if (!pulseDialogueFields.ok) {
       return res.status(pulseDialogueFields.status || 400).json({ ok: false, success: false, message: pulseDialogueFields.message });
@@ -1524,6 +1526,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       ...sharedSyncFields,
       ...sponsoredArticleFields.value,
       ...(pulseDialogueFields.value !== undefined ? { pulseDialogue: pulseDialogueFields.value } : {}),
+      ...(authorByline !== undefined ? { authorByline } : {}),
       tags: tagsArr,
       geo,
       status: createStatus,
@@ -1899,6 +1902,7 @@ router.get('/public/articles', async (req, res, next) => {
       items = await attachPublicPulseDialogueContributorsBatch(items || [], desired);
     }
 
+    items = items.map(withPublicAuthorByline);
     return res.status(200).json({ ok: true, success: true, status: 200, data: { items, page, limit, total } });
   } catch (err) {
     return next(err);
@@ -2237,7 +2241,7 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
 
     const [itemsRaw, total] = await Promise.all([
       PublicArticle.find(filter)
-        .select('title summary content slug slugs language originalLang translations translationStatus coverImage publishedAt createdAt updatedAt geo tags category translationKey translationGroupId spotlightEnabled spotlightPinned spotlightPriority spotlightExpiresAt')
+        .select('title summary content slug slugs language originalLang translations translationStatus coverImage publishedAt createdAt updatedAt geo tags category translationKey translationGroupId spotlightEnabled spotlightPinned spotlightPriority spotlightExpiresAt authorByline.enabled authorByline.snapshot')
         .sort({ publishedAt: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -2274,6 +2278,7 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
         generatedAt: mapped.generatedAt || null,
         provider: mapped.provider || 'google',
         __isTranslated: Boolean(mapped.isTranslated),
+        ...(withPublicAuthorByline(doc).authorByline ? { authorByline: withPublicAuthorByline(doc).authorByline } : {}),
       };
 
       const slugs = doc && doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
@@ -2431,7 +2436,7 @@ router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
       News.countDocuments(query),
     ]);
 
-    let items = (itemsRaw || []).map(withCoverImageUrl);
+    let items = (itemsRaw || []).map(withCoverImageUrl).map(withPublicAuthorByline);
     if (desired) {
       const bestByKey = new Map();
       for (const doc of items) {
@@ -2515,7 +2520,7 @@ router.get('/articles/slug/:slug', optionalAdminAuth, async (req, res, next) => 
     const query = _buildNewsSlugLookup(slugNorm, isAdminRequest);
     const doc = await News.findOne(query).lean().catch(() => null);
     const fallback = doc ? null : await PublicArticle.findOne(_buildPublicArticleSlugLookup(slugNorm, isAdminRequest)).lean().catch(() => null);
-    const out = doc || fallback;
+    const out = isAdminRequest ? (doc || fallback) : withPublicAuthorByline(doc || fallback);
     if (!out) return res.status(200).json({ exists: false });
 
     const langRaw = (req.query.lang || req.query.language || req.lang || '').toString().trim();
@@ -2586,7 +2591,7 @@ router.get('/articles/by-slug/:slug', optionalAdminAuth, async (req, res, next) 
     const query = _buildNewsSlugLookup(slugNorm, isAdminRequest);
     const doc = await News.findOne(query).lean().catch(() => null);
     const fallback = doc ? null : await PublicArticle.findOne(_buildPublicArticleSlugLookup(slugNorm, isAdminRequest)).lean().catch(() => null);
-    const out = doc || fallback;
+    const out = isAdminRequest ? (doc || fallback) : withPublicAuthorByline(doc || fallback);
     if (!out) return res.status(200).json({ exists: false });
 
     const langRaw = (req.query.lang || req.query.language || req.lang || '').toString().trim();
@@ -2670,7 +2675,7 @@ router.get('/articles/:id', optionalAdminAuth, async (req, res, next) => {
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    const out0 = withCoverImageUrl(obj);
+    const out0 = withCoverImageUrl(isAdminRequest ? obj : withPublicAuthorByline(obj));
 
     const localized = await (async () => {
       if (!langNorm) {
@@ -2740,7 +2745,7 @@ router.get('/articles/:id', optionalAdminAuth, async (req, res, next) => {
 // PUT /api/articles/:id → update existing article by id (CMS/admin)
 router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
   try {
-    const rawId = String(req.params.id || '').trim();
+    let rawId = String(req.params.id || '').trim();
     if (!mongoose.Types.ObjectId.isValid(rawId)) {
       return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
     }
@@ -2826,10 +2831,20 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     let before = null;
     try {
       before = await News.findById(rawId)
-        .select('title description content translations translationStatus translationError translationNextRetryAt translationUpdatedAt category editorialType pulseDialogue status workflowStage translationGroupId translationKey sourceArticleId originalLang lang language slugs coverImage coverImageUrl imageURL syncVersion machineGenerated humanEdited translationReviewStatus sourceHash translationMeta')
+        .select('title description content translations translationStatus translationError translationNextRetryAt translationUpdatedAt category editorialType pulseDialogue authorByline status workflowStage translationGroupId translationKey sourceArticleId originalLang lang language slugs coverImage coverImageUrl imageURL syncVersion machineGenerated humanEdited translationReviewStatus sourceHash translationMeta')
         .lean();
     } catch (_) {
       // ignore
+    }
+
+    if (!before && Object.prototype.hasOwnProperty.call(requestBody, 'authorByline')) {
+      const publicCopy = await PublicArticle.findById(rawId).select('sourceNewsId').lean();
+      if (!publicCopy?.sourceNewsId) {
+        return res.status(409).json({ ok: false, message: 'Author byline changes require a source newsroom article' });
+      }
+      rawId = String(publicCopy.sourceNewsId);
+      before = await News.findById(rawId).lean();
+      if (!before) return res.status(404).json({ ok: false, message: 'Source newsroom article not found' });
     }
 
     const beforeStatusForLifecycle = String(before?.status || '').toLowerCase();
@@ -2940,8 +2955,14 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     if (!pulseDialogueFields.ok) {
       return res.status(pulseDialogueFields.status || 400).json({ ok: false, success: false, message: pulseDialogueFields.message });
     }
+    const authorByline = await buildAuthorBylinePatch(requestBody, { ...before, category: category ?? before?.category });
+    if (authorByline !== undefined && before && !_isSourceTranslationDoc(before, rawId)
+      && JSON.stringify(publicAuthorByline(authorByline)) !== JSON.stringify(publicAuthorByline(before.authorByline))) {
+      return res.status(409).json({ ok: false, message: 'Change the author byline on the source article to keep translations aligned' });
+    }
 
     const update = {
+      ...(authorByline !== undefined ? { authorByline } : {}),
       ...(title !== undefined ? { title } : {}),
       ...(summaryOrDescription !== undefined ? { description: String(summaryOrDescription).trim() } : {}),
       ...(content !== undefined || bodyText !== undefined ? { content: content ?? bodyText ?? '' } : {}),
