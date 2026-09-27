@@ -1,10 +1,11 @@
 const mongoose = require('mongoose');
 const { slugifyUnicode } = require('../lib/slug');
+const { normalizeContributorSlug, normalizeContributorSlugHistory } = require('../lib/contributorSlugHistory');
 const { timeAsync } = require('../lib/timingDiagnostics');
 
 const PULSE_DIALOGUE_CATEGORY = 'pulse-dialogue';
 
-const CONTRIBUTOR_STATUS_VALUES = ['draft', 'active', 'inactive'];
+const CONTRIBUTOR_STATUS_VALUES = ['draft', 'active', 'inactive', 'hidden'];
 const CONTRIBUTOR_TYPE_VALUES = [
   'columnist',
   'guest_columnist',
@@ -158,6 +159,9 @@ function normalizeRightsConsent(value) {
 
 function normalizeContributorPayload(body, { partial = false } = {}) {
   const input = isPlainObject(body) ? body : {};
+  if (partial && Object.prototype.hasOwnProperty.call(input, 'slug')) {
+    return { ok: false, status: 400, message: 'Use the dedicated contributor slug-change action' };
+  }
   const out = {};
   const fields = [
     ['canonicalName', 200],
@@ -180,6 +184,10 @@ function normalizeContributorPayload(body, { partial = false } = {}) {
   }
 
   if (Object.prototype.hasOwnProperty.call(input, 'photo')) out.photo = normalizePhoto(input.photo);
+  if (Object.prototype.hasOwnProperty.call(input, 'profileVisible')) {
+    if (typeof input.profileVisible !== 'boolean') return { ok: false, status: 400, message: 'profileVisible must be a boolean' };
+    out.profileVisible = input.profileVisible;
+  }
   if (Object.prototype.hasOwnProperty.call(input, 'socialLinks')) out.socialLinks = normalizeSocialLinks(input.socialLinks);
   if (Object.prototype.hasOwnProperty.call(input, 'rightsConsent')) out.rightsConsent = normalizeRightsConsent(input.rightsConsent);
 
@@ -201,11 +209,53 @@ function normalizeContributorPayload(body, { partial = false } = {}) {
     return { ok: false, status: 400, message: 'canonicalName is required' };
   }
 
-  if (!partial && !out.slug && out.canonicalName) {
-    out.slug = slugifyUnicode(out.canonicalName, { maxLength: 120 });
+  if (Object.prototype.hasOwnProperty.call(input, 'slug')) {
+    out.slug = normalizeContributorSlug(input.slug, { maxLength: 120 });
+    if (!out.slug) return { ok: false, status: 400, message: 'slug must contain letters or numbers' };
+  } else if (!partial && out.canonicalName) {
+    out.slug = slugifyUnicode(out.canonicalName, { maxLength: 120 }) || 'contributor';
   }
 
   return { ok: true, value: out };
+}
+
+async function createWithUniqueDialogueSlug(Model, payload, { explicitSlug = false, reservedSlugField = null } = {}) {
+  const base = payload.slug;
+  for (let attempt = 1; attempt <= 100; attempt += 1) {
+    const slug = attempt === 1 ? base : `${base}-${attempt}`;
+    try {
+      if (reservedSlugField && await Model.exists({ $or: [{ slug }, { [reservedSlugField]: slug }] })) {
+        throw Object.assign(new Error('Contributor slug already exists'), { code: 11000, keyPattern: { [reservedSlugField]: 1 } });
+      }
+      return await Model.create({ ...payload, slug, ...(reservedSlugField ? { [reservedSlugField]: normalizeContributorSlugHistory([], slug) } : {}) });
+    } catch (error) {
+      const slugConflict = error?.code === 11000 && (!error.keyPattern || error.keyPattern.slug
+        || (reservedSlugField && error.keyPattern[reservedSlugField]));
+      if (explicitSlug || !slugConflict || attempt === 100) throw error;
+    }
+  }
+}
+
+function isContributorProfilePublic(contributor) {
+  const slug = contributor?.slug;
+  return Boolean(typeof slug === 'string' && slug.length > 0 && slug.length <= 140
+    && slug === slugifyUnicode(slug, { maxLength: 140 }) && contributor.profileVisible === true
+    && ['active', 'inactive'].includes(contributor.status));
+}
+
+function buildContributorProfileSummary(contributor) {
+  let photoUrl = null;
+  try {
+    const url = new URL(contributor.photo?.url);
+    if (['https:', 'http:'].includes(url.protocol)) photoUrl = url.href;
+  } catch (_) {}
+  return {
+    slug: contributor.slug,
+    name: contributor.canonicalName || null,
+    publicDesignation: contributor.publicDesignation || null,
+    photoUrl,
+    shortBio: contributor.shortBio || null,
+  };
 }
 
 function pickContributorDisplayName(contributor, language) {
@@ -267,6 +317,13 @@ function normalizePulseDialoguePayload(body, { category, partial = false } = {})
 
   const input = isPlainObject(body.pulseDialogue) ? body.pulseDialogue : {};
   const out = {};
+  if (Object.prototype.hasOwnProperty.call(input, 'seriesSlug')) {
+    const slug = input.seriesSlug;
+    if (slug !== null && (typeof slug !== 'string' || !slug || slug !== slugifyUnicode(slug, { maxLength: 140 }))) {
+      return { ok: false, status: 400, message: 'Invalid pulseDialogue.seriesSlug' };
+    }
+    out.seriesSlug = slug;
+  }
   const contributorId = normalizeObjectId(input.contributorId);
   if (contributorId === undefined) return { ok: false, status: 400, message: 'pulseDialogue.contributorId must be a valid id' };
   if (contributorId !== null) out.contributorId = contributorId;
@@ -305,9 +362,13 @@ function normalizePulseDialoguePayload(body, { category, partial = false } = {})
 function normalizePublicPulseDialogue(value) {
   if (!isPlainObject(value)) return undefined;
   const out = {};
+  if (Object.prototype.hasOwnProperty.call(value, 'profileAvailable')) {
+    out.profileAvailable = value.profileAvailable === true;
+    out.contributorSlug = out.profileAvailable ? (value.contributorSlug || null) : null;
+  }
   if (value.contributorId) out.contributorId = String(value.contributorId);
   if (value.dialogueFormat && DIALOGUE_FORMAT_VALUES.includes(String(value.dialogueFormat))) out.dialogueFormat = String(value.dialogueFormat);
-  for (const field of ['series', 'bylineDesignationOverride', 'contributorDisclosure', 'editorNote', 'contributorDisclaimer']) {
+  for (const field of ['series', 'seriesSlug', 'bylineDesignationOverride', 'contributorDisclosure', 'editorNote', 'contributorDisclaimer']) {
     const normalized = normalizeNullableString(value[field], { maxLength: 1000 });
     if (normalized !== undefined) out[field] = normalized;
   }
@@ -338,6 +399,8 @@ function buildPublicPulseDialoguePayload(pulse, contributor, language) {
   return normalizePublicPulseDialogue(applyPulseDialogueStandardText({
     ...pulse,
     contributorId: pulse.contributorId || null,
+    contributorSlug: isContributorProfilePublic(contributor) ? contributor.slug : null,
+    profileAvailable: isContributorProfilePublic(contributor),
     ...(bylineSnapshot ? { bylineSnapshot } : {}),
     contributor: publicContributor,
   }, language));
@@ -439,7 +502,10 @@ async function attachPublicPulseDialogueContributor(docLike, language) {
   const pulse = isPlainObject(docLike.pulseDialogue) ? docLike.pulseDialogue : null;
   if (!pulse || !pulse.contributorId) return docLike;
   const contributor = await findContributorById(pulse.contributorId);
-  if (!contributor) return docLike;
+  if (!contributor) {
+    docLike.pulseDialogue = { ...pulse, contributorSlug: null, profileAvailable: false };
+    return docLike;
+  }
   const resolvedLanguage = language || getArticleLanguage(docLike);
   docLike.pulseDialogue = buildPublicPulseDialoguePayload(pulse, contributor, resolvedLanguage) || pulse;
   return docLike;
@@ -461,7 +527,10 @@ async function attachPublicPulseDialogueContributorsBatch(docLikes, language, ti
   for (const doc of pulseDocs) {
     const pulse = isPlainObject(doc.pulseDialogue) ? doc.pulseDialogue : null;
     const contributor = contributorById.get(String(pulse?.contributorId || ''));
-    if (!contributor) continue;
+    if (!contributor) {
+      doc.pulseDialogue = { ...pulse, contributorSlug: null, profileAvailable: false };
+      continue;
+    }
     const resolvedLanguage = language || doc.resolvedLang || doc.resolvedLanguage || doc.lang || doc.language || getArticleLanguage(doc);
     doc.pulseDialogue = buildPublicPulseDialoguePayload(pulse, contributor, resolvedLanguage) || pulse;
   }
@@ -483,6 +552,9 @@ module.exports = {
   buildPublicPulseDialogueFromArticle,
   buildPublicPulseDialoguePayload,
   buildPublicContributor,
+  buildContributorProfileSummary,
+  createWithUniqueDialogueSlug,
+  isContributorProfilePublic,
   findContributorById,
   findContributorsByIds,
   getArticleLanguage,

@@ -2,9 +2,13 @@ const express = require('express');
 const mongoose = require('mongoose');
 
 const Contributor = require('../models/Contributor');
+const publicCache = require('../lib/cache');
+const { normalizeContributorSlug, normalizeContributorSlugHistory } = require('../lib/contributorSlugHistory');
+const { contributorSlugCapabilities, initializeLegacyContributorHistory } = require('../lib/contributorSlugReadiness');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const {
   buildPublicContributor,
+  createWithUniqueDialogueSlug,
   normalizeContributorPayload,
 } = require('../services/pulseDialogue.service');
 
@@ -42,9 +46,11 @@ function toAdminContributorDto(doc) {
     shortBio: source.shortBio || null,
     location: source.location || null,
     slug: source.slug || null,
+    slugHistory: source.slugHistory || [],
     website: source.website || null,
     socialLinks: source.socialLinks instanceof Map ? Object.fromEntries(source.socialLinks.entries()) : (source.socialLinks || {}),
     status: source.status || 'draft',
+    profileVisible: source.profileVisible === true,
     internalEmail: source.internalEmail || null,
     internalNotes: source.internalNotes || null,
     rightsConsent: source.rightsConsent || {},
@@ -60,6 +66,12 @@ function duplicateSlugMessage(error) {
 }
 
 router.use(requireAdminAuth);
+
+router.get('/capabilities', async (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const capabilities = await contributorSlugCapabilities(Contributor);
+  return res.json({ ok: true, success: true, capabilities, data: { capabilities } });
+});
 
 router.get('/', async (req, res, next) => {
   try {
@@ -111,7 +123,10 @@ router.post('/', async (req, res, next) => {
   try {
     const parsed = normalizeContributorPayload(req.body, { partial: false });
     if (!parsed.ok) return res.status(parsed.status || 400).json({ ok: false, success: false, message: parsed.message });
-    const contributor = await Contributor.create(parsed.value);
+    const contributor = await createWithUniqueDialogueSlug(Contributor, parsed.value, {
+      explicitSlug: Object.prototype.hasOwnProperty.call(req.body, 'slug'),
+      reservedSlugField: 'slugHistory',
+    });
     const dto = toAdminContributorDto(contributor);
     return res.status(201).json({ ok: true, success: true, status: 201, contributor: dto, data: { contributor: dto } });
   } catch (error) {
@@ -130,8 +145,12 @@ async function updateContributor(req, res, next) {
     }
     const parsed = normalizeContributorPayload(req.body, { partial: true });
     if (!parsed.ok) return res.status(parsed.status || 400).json({ ok: false, success: false, message: parsed.message });
-    const contributor = await Contributor.findByIdAndUpdate(id, { $set: parsed.value }, { new: true, runValidators: true });
+    let contributor = await Contributor.findByIdAndUpdate(id, { $set: parsed.value }, { new: true, runValidators: true });
     if (!contributor) return res.status(404).json({ ok: false, success: false, message: 'Contributor not found' });
+    contributor = await initializeLegacyContributorHistory(Contributor, contributor);
+    if (['status', 'profileVisible'].some((field) => Object.prototype.hasOwnProperty.call(parsed.value, field))) {
+      await publicCache.safeDeleteByPrefix('np:v1:category:pulse-dialogue:');
+    }
     const dto = toAdminContributorDto(contributor);
     return res.json({ ok: true, success: true, contributor: dto, data: { contributor: dto } });
   } catch (error) {
@@ -144,5 +163,43 @@ async function updateContributor(req, res, next) {
 
 router.put('/:id', updateContributor);
 router.patch('/:id', updateContributor);
+
+router.patch('/:id/slug', async (req, res, next) => {
+  try {
+    const capabilities = await contributorSlugCapabilities(Contributor);
+    if (!capabilities.slugRename) return res.status(503).json({
+      ok: false, success: false, code: 'CONTRIBUTOR_SLUG_RENAME_UNAVAILABLE', capabilities,
+      message: 'Contributor slug changes are temporarily unavailable pending release readiness.',
+    });
+    const id = String(req.params.id || '').trim();
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ ok: false, success: false, message: 'Invalid contributor id' });
+    }
+    if (typeof req.body?.slug !== 'string' || Object.keys(req.body).some((field) => field !== 'slug')) {
+      return res.status(400).json({ ok: false, success: false, message: 'Provide only a slug string' });
+    }
+    const slug = normalizeContributorSlug(req.body.slug, { maxLength: 120 });
+    if (!slug) return res.status(400).json({ ok: false, success: false, message: 'slug must contain letters or numbers' });
+    const existing = await Contributor.findById(id).select('slug slugHistory').lean();
+    if (!existing) return res.status(404).json({ ok: false, success: false, message: 'Contributor not found' });
+    const slugHistory = normalizeContributorSlugHistory([...(Array.isArray(existing.slugHistory) ? existing.slugHistory : []), existing.slug], slug);
+    const reserved = await Contributor.exists({ _id: { $ne: id }, $or: [{ slug: { $in: slugHistory } }, { slugHistory: { $in: slugHistory } }] });
+    if (reserved) return res.status(409).json({ ok: false, success: false, message: 'Contributor slug already exists' });
+    const contributor = await Contributor.findOneAndUpdate(
+      { _id: id, slug: existing.slug, $expr: { $eq: [{ $ifNull: ['$slugHistory', null] }, { $literal: existing.slugHistory ?? null }] } },
+      { $set: { slug, slugHistory } },
+      { new: true, runValidators: true }
+    );
+    if (!contributor) return res.status(409).json({ ok: false, success: false, message: 'Contributor slug changed; reload and retry' });
+    await publicCache.safeDeleteByPrefix('np:v1:category:pulse-dialogue:');
+    const dto = toAdminContributorDto(contributor);
+    return res.json({ ok: true, success: true, contributor: dto, data: { contributor: dto } });
+  } catch (error) {
+    const duplicateMessage = duplicateSlugMessage(error);
+    if (duplicateMessage) return res.status(409).json({ ok: false, success: false, message: duplicateMessage });
+    if (error?.name === 'ValidationError') return res.status(400).json({ ok: false, success: false, message: error.message });
+    return next(error);
+  }
+});
 
 module.exports = router;

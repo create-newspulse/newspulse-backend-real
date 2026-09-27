@@ -1107,6 +1107,11 @@ async function _buildPulseDialoguePatchFromBody(body, { category, existingCatego
   const parsed = normalizePulseDialoguePayload(b, { category: effectiveCategory, partial });
   if (!parsed.ok) return parsed;
   const value = parsed.value;
+  if (value?.seriesSlug) {
+    const Series = require('../models/PulseDialogueSeries');
+    const series = await Series.findOne({ slug: value.seriesSlug }).select('_id').lean();
+    if (!series) return { ok: false, status: 400, message: 'Pulse Dialogue series not found' };
+  }
   if (value && value.contributorId) {
     try {
       await assertContributorExists(value.contributorId);

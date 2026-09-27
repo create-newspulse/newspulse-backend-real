@@ -2002,6 +2002,7 @@ async function getPublicNewsBySlug(req, res) {
 }
 
 module.exports = {
+  resolveGroupedPublicNewsItems: _resolveGroupedCategoryNewsItems,
   resolvePublicNewsListRequest,
   listPublicBreakingNews,
   listPublicNews,

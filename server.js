@@ -388,6 +388,7 @@ const adminTickerRouter = require('./routes/adminTicker.routes');
 const adminTickerAdsRouter = require('./routes/adminTickerAds.routes');
 const adminGlossaryRouter = require('./routes/adminGlossary.routes');
 const adminPulseDialogueContributorsRouter = require('./routes/adminPulseDialogueContributors.routes');
+const adminPulseDialogueSeriesRouter = require('./routes/adminPulseDialogueSeries.routes');
 
 const authRoutes = require('./routes/auth.routes');
 const adminAccountRoutes = require('./routes/adminAccount.routes');
@@ -442,6 +443,7 @@ const PublicSiteSettings = require('./models/PublicSiteSettings');
 const { ensureCategoryStripEnabled, buildPublishedSettingsResponse } = require('./controllers/publicSiteSettingsController');
 const User = require('./models/User');
 const publicNewsRouter = require('./routes/publicNews.routes');
+const publicPulseDialogueRouter = require('./routes/publicPulseDialogue.routes');
 require('./lib/publicNewsPrewarm').startCanonicalLatestPrewarm({
   refresh: publicNewsRouter.refreshCanonicalLatest,
   mongo: mongoose.connection,
@@ -1719,6 +1721,9 @@ app.use('/admin-api/api/admin/glossary', adminGlossaryRouter);
 app.use('/api/admin/pulse-dialogue/contributors', adminPulseDialogueContributorsRouter);
 app.use('/admin-api/admin/pulse-dialogue/contributors', adminPulseDialogueContributorsRouter);
 app.use('/admin-api/api/admin/pulse-dialogue/contributors', adminPulseDialogueContributorsRouter);
+app.use('/api/admin/pulse-dialogue/series', adminPulseDialogueSeriesRouter);
+app.use('/admin-api/admin/pulse-dialogue/series', adminPulseDialogueSeriesRouter);
+app.use('/admin-api/api/admin/pulse-dialogue/series', adminPulseDialogueSeriesRouter);
 
 // Admin panel compatibility: some builds call this translation glossary endpoint.
 // Keep it as a lightweight 200 stub so the Add News page doesn't break.
@@ -1748,12 +1753,15 @@ app.use('/api/site-settings', siteSettingsRoutes);
 // Mount early to avoid being shadowed by other /api routers.
 app.use('/api/public/trending-topics', publicTrendingTopicsRouter);
 app.use('/api/public/news', publicNewsRouter);
+app.use('/api/public/pulse-dialogue', publicPulseDialogueRouter);
 app.use('/api/breaking', breakingRouter);
 app.use('/api/public/weather', publicWeatherRouter);
 app.use('/api/public/push', publicPushRouter);
 // Admin panel proxy basePath support for public news
 app.use('/admin-api/public/news', publicNewsRouter);
 app.use('/admin-api/api/public/news', publicNewsRouter);
+app.use('/admin-api/public/pulse-dialogue', publicPulseDialogueRouter);
+app.use('/admin-api/api/public/pulse-dialogue', publicPulseDialogueRouter);
 app.use('/admin-api/public/push', publicPushRouter);
 app.use('/admin-api/api/public/push', publicPushRouter);
 

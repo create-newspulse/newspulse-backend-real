@@ -69,10 +69,11 @@ test('Contributor model applies safe defaults and validates approved enums', asy
 });
 
 test('admin Contributor API requires admin auth and creates contributors', async () => {
-  const originals = { create: Contributor.create };
+  const originals = { create: Contributor.create, exists: Contributor.exists };
   const id = '507f1f77bcf86cd799439a01';
 
   try {
+    Contributor.exists = async () => null;
     Contributor.create = async (payload) => ({
       _id: id,
       ...payload,

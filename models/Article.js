@@ -59,6 +59,7 @@ const PulseDialogueSchema = new mongoose.Schema({
   contributorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contributor', default: null, index: true },
   dialogueFormat: { type: String, enum: DIALOGUE_FORMAT_VALUES, default: null, index: true },
   series: { type: String, default: null },
+  seriesSlug: { type: String, default: null, index: true },
   bylineDesignationOverride: { type: String, default: null },
   bylineSnapshot: { type: PulseDialogueBylineSnapshotSchema, default: null },
   contributorDisclosure: { type: String, default: null },
