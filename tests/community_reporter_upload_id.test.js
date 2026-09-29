@@ -27,6 +27,8 @@ app.use(express.json());
 const { blockPrivateReporterDocuments } = require('../lib/privateReporterDocuments');
 app.use('/uploads', blockPrivateReporterDocuments, express.static(path.join(temporaryRoot, 'uploads')));
 app.use(['/api/community-reporter', '/api/public/community-reporter'], require('../routes/communityReporter'));
+const intakeFixture = express();
+intakeFixture.post('/upload-id', require('../lib/privateReporterDocuments').uploadReporterDocument);
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const storedFiles = new Map();
 test.beforeEach((context) => {
@@ -65,8 +67,36 @@ function token(role = 'founder', overrides = {}) {
   return jwt.sign({ role, email: 'test@example.invalid', type: 'access', ...overrides }, process.env.JWT_SECRET, { expiresIn: '5m' });
 }
 
-test('public ID intake returns a private URL; only authorized internal readers can download', async () => {
-  const response = await request(app).post('/api/community-reporter/upload-id').attach('file', png, { filename: 'id.png', contentType: 'image/png' });
+test('public upload is unavailable before multipart parsing or document storage', async (context) => {
+  const storage = require('../services/reporterDocumentStorage');
+  const upload = context.mock.method(storage, 'uploadReporterDocument', () => { throw new Error('Storage must not run'); });
+  const parser = context.mock.method(require('multer'), 'memoryStorage', () => { throw new Error('Multipart parsing must not run'); });
+  const filesystem = ['mkdir', 'writeFile', 'readFile', 'open', 'lstat'].map(method =>
+    context.mock.method(fs.promises, method, () => { throw new Error('Document filesystem access must not run'); }));
+  const expected = { ok: false, code: 'JOURNALIST_VERIFICATION_NOT_AVAILABLE', message: 'Journalist verification is not currently available.' };
+  for (const prefix of ['/api/community-reporter', '/api/public/community-reporter']) {
+    const endpoint = prefix + '/upload-id';
+    for (const response of [
+      await request(app).post(endpoint),
+      await request(app).post(endpoint).attach('file', png, { filename: 'id.png', contentType: 'image/png' }),
+      await request(app).post(endpoint).set('Content-Type', 'multipart/form-data').send('malformed multipart'),
+      await request(app).post(endpoint).auth(token(), { type: 'bearer' }).attach('file', png, { filename: 'id.png', contentType: 'image/png' }),
+    ]) {
+      assert.equal(response.status, 404);
+      assert.deepEqual(response.body, expected);
+    }
+  }
+  assert.equal(parser.mock.calls.length, 0);
+  assert.equal(upload.mock.calls.length, 0);
+  for (const operation of filesystem) assert.equal(operation.mock.calls.length, 0);
+  assert.equal(require('cloudinary').v2.uploader.upload_stream.mock.calls.length, 0);
+  assert.equal(require('cloudinary').v2.utils.private_download_url.mock.calls.length, 0);
+  const registration = require('../routes/communityReporter').stack.find(layer => layer.route?.path === '/upload-id').route;
+  assert.equal(registration.stack.length, 1);
+});
+
+test('retained upload handler returns a private URL; only authorized internal readers can download', async () => {
+  const response = await request(intakeFixture).post('/upload-id').attach('file', png, { filename: 'id.png', contentType: 'image/png' });
   assert.equal(response.status, 201);
   assert.equal(response.body.path, undefined);
   assert.match(response.body.url, /^\/api\/community-reporter\/id-documents\//);
@@ -112,14 +142,14 @@ test('ID intake validates signatures, MIME allowlist and size before writing', a
     ['image/png', Buffer.alloc(1024 * 1024 + 1), 413],
   ]) {
     const before = storedFiles.size;
-    const response = await request(app).post('/api/community-reporter/upload-id').attach('file', buffer, { filename: 'document', contentType: mime });
+    const response = await request(intakeFixture).post('/upload-id').attach('file', buffer, { filename: 'document', contentType: mime });
     assert.equal(response.status, expected);
     assert.equal(storedFiles.size, before);
     assert.equal(fs.existsSync(process.env.COMMUNITY_REPORTER_UPLOAD_DIR), false);
   }
-  const response = await request(app).post('/api/community-reporter/upload-id').attach('file', Buffer.from('%PDF-1.7\nsynthetic fixture\n%%EOF'), { filename: 'id.pdf', contentType: 'application/pdf' });
+  const response = await request(intakeFixture).post('/upload-id').attach('file', Buffer.from('%PDF-1.7\nsynthetic fixture\n%%EOF'), { filename: 'id.pdf', contentType: 'application/pdf' });
   assert.equal(response.status, 201);
-  const jpeg = await request(app).post('/api/community-reporter/upload-id').attach('file', Buffer.from([0xff, 0xd8, 0xff, 0xe0]), { filename: 'id.jpg', contentType: 'image/jpeg' });
+  const jpeg = await request(intakeFixture).post('/upload-id').attach('file', Buffer.from([0xff, 0xd8, 0xff, 0xe0]), { filename: 'id.jpg', contentType: 'image/jpeg' });
   assert.equal(jpeg.status, 201);
   assert.equal(jpeg.body.mime, 'image/jpeg');
   assert.equal(fs.existsSync(process.env.COMMUNITY_REPORTER_UPLOAD_DIR), false);
@@ -219,7 +249,7 @@ test('storage failures do not leak provider details or fall back to disk', async
   context.mock.method(require('../lib/cloudinary'), 'ensureCloudinaryConfigured', () => {
     throw Object.assign(new Error('Synthetic private provider detail'), { status: 503 });
   });
-  const upload = await request(app).post('/api/community-reporter/upload-id').attach('file', png, { filename: 'id.png', contentType: 'image/png' });
+  const upload = await request(intakeFixture).post('/upload-id').attach('file', png, { filename: 'id.png', contentType: 'image/png' });
   assert.equal(upload.status, 503);
   assert.deepEqual(upload.body, { ok: false, message: 'UPLOAD_FAILED' });
   assert.equal(fs.existsSync(process.env.COMMUNITY_REPORTER_UPLOAD_DIR), false);
@@ -263,7 +293,7 @@ test('raw downloads preserve the full public ID and supply the validated PNG, JP
   assert.equal(downloadUrl.mock.calls.length, calls);
 });
 
-test('submission routes persist only an opaque reporter document ID outside public attachments', async (context) => {
+test('submission routes accept stories without documents and persist only opaque document IDs', async (context) => {
   const CommunitySubmission = require('../models/CommunitySubmission');
   const captured = [];
   context.mock.method(CommunitySubmission, 'create', async payload => {
@@ -275,11 +305,12 @@ test('submission routes persist only an opaque reporter document ID outside publ
   context.mock.method(contacts, 'upsertReporterContactFromSubmission', async () => null);
   context.mock.method(require('../services/reporterIdentityResolution.service'), 'resolveAndAttachForSubmission', async () => ({ ok: true }));
   context.mock.method(console, 'log', () => {});
-  const upload = await request(app).post('/api/community-reporter/upload-id').attach('file', png, { filename: 'id.png', contentType: 'image/png' });
+  const upload = await request(intakeFixture).post('/upload-id').attach('file', png, { filename: 'id.png', contentType: 'image/png' });
   assert.equal(upload.status, 201);
   for (const route of ['/api/community-reporter/submissions', '/api/community-reporter/submit', '/api/public/community-reporter/submissions', '/api/public/community-reporter/submit']) {
     const body = { name: 'Synthetic Reporter', email: 'reporter@example.invalid', location: 'Sample City', category: 'General Tip', headline: 'Test headline', story: 'Test story', ageGroup: '18_24' };
     for (const input of [
+      {},
       { reporterDocumentId: upload.body.fileId },
       { journalistIdFileId: upload.body.fileId },
       { reporterDocumentId: upload.body.fileId, journalistIdFileId: upload.body.fileId },
@@ -287,7 +318,7 @@ test('submission routes persist only an opaque reporter document ID outside publ
       const response = await request(app).post(route).send({ ...body, ...input });
       assert.equal(response.status, 201, route);
       const stored = captured.at(-1);
-      assert.equal(stored.reporterDocumentId, upload.body.fileId);
+      assert.equal(stored.reporterDocumentId, input.reporterDocumentId || input.journalistIdFileId || null);
       assert.equal(Object.hasOwn(stored, 'journalistIdFileId'), false);
       assert.deepEqual(stored.attachments, []);
       assert.equal(stored.mediaUrl, undefined);
@@ -344,7 +375,7 @@ test('authorized internal detail views select the opaque document ID without cha
 });
 
 test('queue-granted staff can download only after News Pulse authorization, with no signing on denial', async (context) => {
-  const upload = await request(app).post('/api/community-reporter/upload-id').attach('file', png, { filename: 'id.png', contentType: 'image/png' });
+  const upload = await request(intakeFixture).post('/upload-id').attach('file', png, { filename: 'id.png', contentType: 'image/png' });
   assert.equal(upload.status, 201);
   const mongoose = require('mongoose');
   const previousState = mongoose.connection.readyState;
@@ -402,7 +433,7 @@ test('provider upload errors fail closed without returning or logging provider d
     callback(new Error(details));
     done();
   } }));
-  const response = await request(app).post('/api/community-reporter/upload-id').attach('file', png, { filename: 'id.png', contentType: 'image/png' });
+  const response = await request(intakeFixture).post('/upload-id').attach('file', png, { filename: 'id.png', contentType: 'image/png' });
   assert.equal(response.status, 500);
   assert.deepEqual(response.body, { ok: false, message: 'UPLOAD_FAILED' });
   assert.equal(fs.existsSync(process.env.COMMUNITY_REPORTER_UPLOAD_DIR), false);

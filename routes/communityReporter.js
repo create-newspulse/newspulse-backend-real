@@ -1,5 +1,5 @@
 const express = require('express');
-const { uploadReporterDocument, downloadReporterDocument, validateReporterDocumentReference } = require('../lib/privateReporterDocuments');
+const { downloadReporterDocument, validateReporterDocumentReference } = require('../lib/privateReporterDocuments');
 const mongoose = require('mongoose');
 const CommunitySubmission = require('../models/CommunitySubmission');
 // Re-use legacy models from nested app for reporter + story linkage
@@ -105,8 +105,13 @@ function getAuthenticatedReporterOwner(req, fallbackReporterId) {
 }
 
 // POST /api/community-reporter/upload-id
-// multipart/form-data: file (required), email (optional), reporterId (optional), note (optional)
-router.post('/upload-id', requireCommunityReporterOpen, uploadReporterDocument);
+// Temporarily disabled. Future uploads must belong to a Journalist Desk application/verification record;
+// do not reopen this standalone public endpoint.
+router.post('/upload-id', (_req, res) => res.status(404).json({
+  ok: false,
+  code: 'JOURNALIST_VERIFICATION_NOT_AVAILABLE',
+  message: 'Journalist verification is not currently available.',
+}));
 router.get('/id-documents/:filename', requireAdminModule('communityReporterQueue'), downloadReporterDocument);
 
 // POST /api/public/community-reporter/:id/withdraw
