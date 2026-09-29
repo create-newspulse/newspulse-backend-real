@@ -98,6 +98,15 @@ async function deleteReporterDocument(fileId) {
     resource_type: 'raw', type: 'authenticated', invalidate: true,
   });
   if (!['ok', 'not found'].includes(response?.result)) throw new Error('Document deletion failed');
+  const { privateRoot, legacyRoots } = documentDirectories();
+  for (const directory of new Set([privateRoot, ...legacyRoots])) {
+    const filePath = path.join(directory, fileId);
+    try {
+      const stat = await fs.promises.lstat(filePath);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Invalid document path');
+      await fs.promises.unlink(filePath);
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
   return { deleted: response.result === 'ok' };
 }
 

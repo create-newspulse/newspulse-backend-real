@@ -5,8 +5,9 @@ const mongoose = require('mongoose');
 const axios = require('axios');
 
 process.env.NODE_ENV = 'test';
+test.mock.method(require('dotenv'), 'config', () => ({ parsed: {} }));
 process.env.NEWSPULSE_ENABLE_TOGGLE_QUERY_IN_TESTS = '1';
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
+process.env.JWT_SECRET = require('node:crypto').randomBytes(32).toString('hex');
 process.env.EMAIL_MODE = 'stub';
 process.env.REPORTER_OTP_RESEND_COOLDOWN_MS = '0';
 

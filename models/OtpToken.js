@@ -13,6 +13,7 @@ const otpTokenSchema = new mongoose.Schema({
     index: true,
   },
   used: { type: Boolean, default: false },
+  verificationAttempts: { type: Number, default: 0 },
   consumedAt: { type: Date, default: null },
   expiredAt: { type: Date, default: null },
   replacedAt: { type: Date, default: null },

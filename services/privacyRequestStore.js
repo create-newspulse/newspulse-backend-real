@@ -19,6 +19,7 @@ function isDbReady() {
 }
 
 function ensureJsonFile(filePath) {
+  if (require('../lib/environmentSafety').isProductionLike()) throw new Error('Privacy database unavailable');
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, '[]\n', 'utf8');
@@ -123,7 +124,7 @@ async function createPrivacyRequest(payload) {
     try {
       return normalizeStoredRequest(await PrivacyRequest.create(doc));
     } catch (error) {
-      console.warn('[dpdp][privacy-request][store] mongo create failed; falling back to file', error?.message || error);
+      console.warn('[dpdp][privacy-request][store] mongo create failed');
     }
   }
 
@@ -140,7 +141,7 @@ async function listPrivacyRequests({ status } = {}) {
       const docs = await PrivacyRequest.find(buildAdminListFilter(status)).sort({ createdAt: -1 }).limit(500).lean();
       return docs.map(normalizeStoredRequest);
     } catch (error) {
-      console.warn('[dpdp][privacy-request][store] mongo list failed; falling back to file', error?.message || error);
+      console.warn('[dpdp][privacy-request][store] mongo list failed');
     }
   }
 
@@ -152,7 +153,7 @@ async function getPrivacyRequestById(id, options = {}) {
     try {
       return normalizeStoredRequest(await PrivacyRequest.findOne(buildMongoIdFilter(id)).lean(), options);
     } catch (error) {
-      console.warn('[dpdp][privacy-request][store] mongo get failed; falling back to file', error?.message || error);
+      console.warn('[dpdp][privacy-request][store] mongo get failed');
     }
   }
 
@@ -181,7 +182,7 @@ async function verifyPrivacyRequestByTokenHash(tokenHash, now = new Date()) {
       await doc.save();
       return { request: normalizeStoredRequest(doc), oldStatus, newStatus: VERIFIED_STATUS };
     } catch (error) {
-      console.warn('[dpdp][privacy-request][store] mongo verify failed; falling back to file', error?.message || error);
+      console.warn('[dpdp][privacy-request][store] mongo verify failed');
     }
   }
 
@@ -222,7 +223,7 @@ async function updatePrivacyRequest(id, updates) {
       await doc.save();
       return { request: normalizeStoredRequest(doc), oldStatus, newStatus: doc.status || null };
     } catch (error) {
-      console.warn('[dpdp][privacy-request][store] mongo update failed; falling back to file', error?.message || error);
+      console.warn('[dpdp][privacy-request][store] mongo update failed');
     }
   }
 
@@ -253,7 +254,7 @@ async function createDpdpAuditLog(payload) {
     try {
       return normalizeStoredAuditLog(await DpdpAuditLog.create(doc));
     } catch (error) {
-      console.warn('[dpdp][audit][store] mongo create failed; falling back to file', error?.message || error);
+      console.warn('[dpdp][audit][store] mongo create failed');
     }
   }
 

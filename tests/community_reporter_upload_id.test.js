@@ -31,7 +31,12 @@ const intakeFixture = express();
 intakeFixture.post('/upload-id', require('../lib/privateReporterDocuments').uploadReporterDocument);
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const storedFiles = new Map();
+require('../services/reporterIdentityResolution.service');
+require('../routes/adminCommunity');
+require('../routes/adminCommunityReporter');
+const accountFixture = require('./helpers/accountAuthFixture').accountAuthFixture();
 test.beforeEach((context) => {
+  accountFixture.install(context);
   storedFiles.clear();
   const cloudinary = require('cloudinary').v2;
   context.mock.method(require('../lib/cloudinary'), 'ensureCloudinaryConfigured', () => {});
@@ -64,7 +69,7 @@ test.beforeEach((context) => {
   context.mock.method(cloudinary.uploader, 'destroy', async () => { throw new Error('Unexpected document deletion'); });
 });
 function token(role = 'founder', overrides = {}) {
-  return jwt.sign({ role, email: 'test@example.invalid', type: 'access', ...overrides }, process.env.JWT_SECRET, { expiresIn: '5m' });
+  return accountFixture.token(role, overrides);
 }
 
 test('public upload is unavailable before multipart parsing or document storage', async (context) => {
@@ -294,6 +299,7 @@ test('raw downloads preserve the full public ID and supply the validated PNG, JP
 });
 
 test('submission routes accept stories without documents and persist only opaque document IDs', async (context) => {
+  require('mongoose').connection.readyState = 0;
   const CommunitySubmission = require('../models/CommunitySubmission');
   const captured = [];
   context.mock.method(CommunitySubmission, 'create', async payload => {

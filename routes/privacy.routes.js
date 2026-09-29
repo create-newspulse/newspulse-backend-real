@@ -1,6 +1,6 @@
 const express = require('express');
 
-const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireAdminModule } = require('../middleware/adminAuth');
 const {
   submitPrivacyRequest,
   verifyPrivacyRequest,
@@ -18,7 +18,8 @@ publicRouter.post('/request', submitPrivacyRequest);
 publicRouter.get('/verify/:token', verifyPrivacyRequest);
 
 const adminRouter = express.Router();
-adminRouter.use(requireAdminAuth);
+adminRouter.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+adminRouter.use(requireAdminModule('dpdpCompliance'));
 adminRouter.get('/privacy-requests', listAdminPrivacyRequests);
 adminRouter.get('/privacy-requests/:id', getAdminPrivacyRequest);
 adminRouter.post('/privacy-requests/:id/resend-verification', resendAdminPrivacyRequestVerification);

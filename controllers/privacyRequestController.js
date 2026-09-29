@@ -54,8 +54,7 @@ function isValidEmail(value) {
 }
 
 function getReqIp(req) {
-  const forwarded = String(req?.headers?.['x-forwarded-for'] || '');
-  return forwarded.split(',')[0].trim() || req?.ip || req?.socket?.remoteAddress || 'unknown';
+  return req?.ip || req?.socket?.remoteAddress || 'unknown';
 }
 
 function isLocalDevelopment() {
@@ -64,7 +63,7 @@ function isLocalDevelopment() {
 }
 
 function isProductionEnvironment() {
-  return String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+  return require('../lib/environmentSafety').isProductionLike();
 }
 
 function rateLimitKey(kind, value) {
@@ -134,9 +133,6 @@ async function sendPrivacyVerificationEmail({ to, verificationUrl }) {
   }
 
   if (!transport) {
-    if (isLocalDevelopment()) {
-      console.log('[dpdp][privacy-request][verification-link]', verificationUrl);
-    }
     return { sent: false, configured: false };
   }
 
@@ -149,10 +145,7 @@ async function sendPrivacyVerificationEmail({ to, verificationUrl }) {
     });
     return { sent: true, configured: true };
   } catch (error) {
-    console.warn('[dpdp][privacy-request][mail] send failed', error?.message || error);
-    if (isLocalDevelopment()) {
-      console.log('[dpdp][privacy-request][verification-link]', verificationUrl);
-    }
+    console.warn('[dpdp][privacy-request][mail] send failed');
     return { sent: false, configured: true };
   }
 }
@@ -237,7 +230,7 @@ async function submitPrivacyRequest(req, res) {
       requestId: created.requestId,
     });
   } catch (error) {
-    console.error('[dpdp][privacy-request][submit] failed', error?.message || error);
+    console.error('[dpdp][privacy-request][submit] failed');
     return res.status(500).json({ ok: false, success: false, message: 'Unable to submit privacy request' });
   }
 }
@@ -265,7 +258,7 @@ async function verifyPrivacyRequest(req, res) {
     if (acceptsJson) return res.status(200).json({ ok: true, success: true, message });
     return res.status(200).send(message);
   } catch (error) {
-    console.error('[dpdp][privacy-request][verify] failed', error?.message || error);
+    console.error('[dpdp][privacy-request][verify] failed');
     return res.status(500).send('Unable to verify privacy request.');
   }
 }
@@ -279,7 +272,7 @@ async function listAdminPrivacyRequests(req, res) {
     const requests = await listPrivacyRequests({ status });
     return res.status(200).json({ ok: true, success: true, requests });
   } catch (error) {
-    console.error('[dpdp][privacy-request][admin-list] failed', error?.message || error);
+    console.error('[dpdp][privacy-request][admin-list] failed');
     return res.status(500).json({ ok: false, success: false, message: 'Unable to load privacy requests' });
   }
 }
@@ -351,7 +344,7 @@ async function resendAdminPrivacyRequestVerification(req, res) {
 
     return res.status(200).json({ success: true, message: 'Verification email resent.' });
   } catch (error) {
-    console.error('[dpdp][privacy-request][resend-verification] failed', error?.message || error);
+    console.error('[dpdp][privacy-request][resend-verification] failed');
     return res.status(500).json({ ok: false, success: false, message: 'Unable to resend verification email' });
   }
 }
@@ -404,6 +397,9 @@ function appendActionSummary(existingSummary, nextSummary) {
 
 function ensureActionablePrivacyRequest(request) {
   if (!request) return { ok: false, statusCode: 404, message: 'Privacy request not found' };
+  if (!request.verifiedAt || !Number.isFinite(new Date(request.verifiedAt).getTime())) {
+    return { ok: false, statusCode: 409, message: 'Verified identity is required before DPDP data processing' };
+  }
   if (!ACTIONABLE_PRIVACY_REQUEST_STATUSES.has(String(request.status || ''))) {
     return {
       ok: false,
@@ -486,7 +482,7 @@ async function getAdminPrivacyRequestMatchingData(req, res) {
     const result = await searchMatchingDataForPrivacyRequest(request);
     return res.status(200).json({ ok: true, success: true, ...result });
   } catch (error) {
-    console.error('[dpdp][privacy-request][matching-data] failed', error?.message || error);
+    console.error('[dpdp][privacy-request][matching-data] failed');
     return res.status(500).json({ ok: false, success: false, message: 'Unable to search matching data' });
   }
 }
@@ -546,9 +542,9 @@ async function postAdminPrivacyRequestDataAction(req, res) {
   } catch (error) {
     const statusCode = Number(error?.statusCode) || 500;
     if (statusCode >= 500) {
-      console.error('[dpdp][privacy-request][data-action] failed', error?.message || error);
+      console.error('[dpdp][privacy-request][data-action] failed');
     }
-    return res.status(statusCode).json({ ok: false, success: false, message: error?.message || 'Unable to process privacy request data action' });
+    return res.status(statusCode).json({ ok: false, success: false, code: error?.code?.startsWith('DPDP_') ? error.code : undefined, message: statusCode < 500 ? error.message : 'Unable to process privacy request data action' });
   }
 }
 
@@ -556,7 +552,7 @@ async function completeAdminPrivacyRequest(req, res) {
   try {
     const request = await getPrivacyRequestById(req.params?.id);
     if (!request) return res.status(404).json({ ok: false, success: false, message: 'Privacy request not found' });
-    if (String(request.status || '') === PENDING_EMAIL_VERIFICATION_STATUS) {
+    if (!request.verifiedAt || String(request.status || '') === PENDING_EMAIL_VERIFICATION_STATUS) {
       return res.status(409).json({ ok: false, success: false, message: 'Privacy request must be verified before completion' });
     }
 

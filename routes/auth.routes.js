@@ -10,6 +10,8 @@ const { recordLoginSession, recordLogoutSession } = require('../lib/teamManageme
 const { normalizeRole, requirePasswordPolicy, safeUserDto } = require('../lib/teamAccess');
 const { ACCOUNT_STATUS, accountLifecycleResponse, expireAccount, lifecycleStatus } = require('../lib/accountLifecycle');
 const { myAccessPayload } = require('./access.routes');
+const { protectAuthRequest } = require('../lib/authRequestSecurity');
+const { isProductionLike } = require('../lib/environmentSafety');
 
 const router = express.Router();
 
@@ -92,7 +94,7 @@ function signRefreshToken(user) {
 }
 
 function cookieOptions(req, maxAge) {
-  const isHttps = Boolean(req.secure) || String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
+  const isHttps = isProductionLike() || Boolean(req.secure);
   return {
     httpOnly: true,
     secure: isHttps,
@@ -135,7 +137,6 @@ async function enforceLoginAccountState(req, res, user) {
     user.lockedUntil = null;
     user.failedLoginCount = 0;
     await user.save();
-    return true;
   }
 
   const resolvedStatus = lifecycleStatus(user, now);
@@ -180,6 +181,7 @@ async function recordFailedLogin(req, user, reason) {
 }
 
 async function loginHandler(req, res) {
+  if (!protectAuthRequest(req, res, 'login')) return;
   try {
     const identifier = String(req.body?.email || req.body?.username || '').trim();
     const password = String(req.body?.password || '');
@@ -223,7 +225,7 @@ async function loginHandler(req, res) {
       user: safeUserDto(user),
     });
   } catch (err) {
-    return bad(res, 500, err?.message || 'Login failed', 'LOGIN_FAILED');
+    return bad(res, 500, 'Login failed', 'LOGIN_FAILED');
   }
 }
 
@@ -236,7 +238,7 @@ async function logoutHandler(req, res) {
     clearAuthCookies(res);
     return res.status(200).json({ ok: true, success: true, status: 200 });
   } catch (err) {
-    return bad(res, 500, err?.message || 'Logout failed', 'LOGOUT_FAILED');
+    return bad(res, 500, 'Logout failed', 'LOGOUT_FAILED');
   }
 }
 
@@ -274,11 +276,12 @@ async function changePasswordHandler(req, res) {
     await logAudit(req, 'AUTH_CHANGE_PASSWORD', String(user._id), null);
     return res.status(200).json({ ok: true, success: true, status: 200, user: safeUserDto(user) });
   } catch (err) {
-    return bad(res, 500, err?.message || 'Password change failed', 'CHANGE_PASSWORD_FAILED');
+    return bad(res, 500, 'Password change failed', 'CHANGE_PASSWORD_FAILED');
   }
 }
 
 async function refreshHandler(req, res) {
+  if (!protectAuthRequest(req, res, 'refresh')) return;
   try {
     if (!jwtSecret()) return bad(res, 500, 'JWT_SECRET missing on server', 'SERVER_MISCONFIGURED');
     if (!isDbReady()) return bad(res, 503, 'Database unavailable', 'DB_UNAVAILABLE');
@@ -288,12 +291,12 @@ async function refreshHandler(req, res) {
 
     let payload;
     try {
-      payload = jwt.verify(refreshToken, jwtSecret());
+      payload = jwt.verify(refreshToken, jwtSecret(), { algorithms: ['HS256'] });
     } catch (_e) {
       return bad(res, 401, 'Unauthorized', 'UNAUTHORIZED');
     }
 
-    if (payload.type !== 'refresh' && payload.typ !== 'refresh') return bad(res, 401, 'Unauthorized', 'UNAUTHORIZED');
+    if ((!payload.type && !payload.typ) || (payload.type && payload.type !== 'refresh') || (payload.typ && payload.typ !== 'refresh')) return bad(res, 401, 'Unauthorized', 'UNAUTHORIZED');
     const userId = payload.sub || payload.userId;
     if (!userId || !mongoose.isValidObjectId(String(userId))) return bad(res, 401, 'Unauthorized', 'UNAUTHORIZED');
 
@@ -303,14 +306,24 @@ async function refreshHandler(req, res) {
     if ((typeof payload.tokenVersion === 'number' ? payload.tokenVersion : 0) !== tokenVersion) {
       return bad(res, 401, 'Unauthorized', 'UNAUTHORIZED');
     }
-    if (!(await enforceLoginAccountState(req, res, user))) return;
-
-    const token = signAccessToken(user);
-    const nextRefreshToken = signRefreshToken(user);
+    const resolvedStatus = lifecycleStatus(user);
+    if (resolvedStatus !== ACCOUNT_STATUS.ACTIVE) return accountLifecycleResponse(res, resolvedStatus);
+    if (user.loginAllowed === false) return bad(res, 403, 'Login disabled', 'LOGIN_DISABLED');
+    const rotated = await User.findOneAndUpdate(
+      { _id: user._id, tokenVersion: tokenVersion === 0 ? { $in: [0, null] } : tokenVersion, status: user.status, accountStatus: user.accountStatus, loginAllowed: { $ne: false } },
+      { $inc: { tokenVersion: 1 } },
+      { new: true },
+    );
+    if (!rotated) return bad(res, 401, 'Unauthorized', 'UNAUTHORIZED');
+    const rotatedStatus = lifecycleStatus(rotated);
+    if (rotatedStatus !== ACCOUNT_STATUS.ACTIVE) return accountLifecycleResponse(res, rotatedStatus);
+    if (rotated.loginAllowed === false) return bad(res, 403, 'Login disabled', 'LOGIN_DISABLED');
+    const token = signAccessToken(rotated);
+    const nextRefreshToken = signRefreshToken(rotated);
     setAuthCookies(req, res, token, nextRefreshToken);
-    return res.status(200).json({ ok: true, success: true, status: 200, token, accessToken: token, refreshToken: nextRefreshToken, user: safeUserDto(user) });
+    return res.status(200).json({ ok: true, success: true, status: 200, token, accessToken: token, refreshToken: nextRefreshToken, user: safeUserDto(rotated) });
   } catch (err) {
-    return bad(res, 500, err?.message || 'Refresh failed', 'REFRESH_FAILED');
+    return bad(res, 500, 'Refresh failed', 'REFRESH_FAILED');
   }
 }
 

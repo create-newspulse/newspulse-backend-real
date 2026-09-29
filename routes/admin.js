@@ -97,6 +97,7 @@ function adminLoginEmailCandidates(localFounderConfig, localDev) {
 // ─────────────────────────────────────────────
 
 // POST /api/admin/login
+router.post('/login', require('./auth.routes').loginHandler);
 router.post('/login', async (req, res, next) => {
   // IMPORTANT: this router is also mounted at /admin in server.js.
   // /admin/login is handled by a dedicated legacy handler in server.js for tests.
@@ -148,6 +149,7 @@ router.post('/login', async (req, res, next) => {
   }
 
   const dbReady = mongoose.connection && mongoose.connection.readyState === 1;
+  if (!dbReady) return res.status(503).json({ ok: false, code: 'AUTH_UNAVAILABLE', message: 'Authentication temporarily unavailable' });
   const dbName = dbReady && mongoose.connection.name ? String(mongoose.connection.name) : null;
   let localDebugUserFound = false;
   let localDebugPasswordMatch = false;
@@ -443,66 +445,15 @@ router.post('/login', async (req, res, next) => {
   });
 });
 
-router.post('/refresh', async (req, res, next) => {
+router.post('/refresh', (req, res, next) => {
   if (req.baseUrl === '/admin') return next();
-
-  logLocalAdminRefresh({
-    phase: 'hit',
-    route: `${req.baseUrl || ''}${req.path || ''}`,
-    hasRefreshToken: !!String(req.body?.refreshToken || '').trim(),
-  });
-
-  const jwtSecret = String(process.env.JWT_SECRET || '').trim();
-  const localFounderConfig = resolveLocalFounderSeedConfig();
-  const fallbackFounderId = process.env.FOUNDER_ID || 'founder-001';
-  const fallbackAdminEmail = String(
-    process.env.ADMIN_EMAIL
-    || process.env.FOUNDER_EMAIL
-    || process.env.ADMIN_SEED_FOUNDER_EMAIL
-    || localFounderConfig.email
-    || ''
-  ).trim().toLowerCase();
-  const fallbackFounderName = process.env.ADMIN_SEED_FOUNDER_NAME || process.env.FOUNDER_NAME || localFounderConfig.fullName || 'Founder';
-  if (!jwtSecret) {
-    logLocalAdminRefresh({ phase: 'error', route: `${req.baseUrl || ''}${req.path || ''}`, status: 500, error: 'JWT_SECRET missing' });
-    return res.status(500).json({ ok: false, success: false, message: 'JWT_SECRET missing' });
-  }
-
-  const refreshToken = String(req.body?.refreshToken || '').trim();
-  if (!refreshToken) {
-    logLocalAdminRefresh({ phase: 'error', route: `${req.baseUrl || ''}${req.path || ''}`, status: 401, error: 'Invalid refresh token' });
-    return res.status(401).json({ ok: false, success: false, message: 'Invalid refresh token' });
-  }
-
-  try {
-    const payload = jwt.verify(refreshToken, jwtSecret);
-    const tokenType = String(payload?.typ || payload?.type || '').toLowerCase();
-    if (tokenType !== 'refresh') {
-      return res.status(401).json({ ok: false, success: false, message: 'Invalid refresh token' });
-    }
-
-    const accessToken = jwt.sign({
-      sub: payload.sub || fallbackFounderId,
-      userId: payload.userId || payload.sub || fallbackFounderId,
-      email: payload.email || fallbackAdminEmail,
-      name: payload.name || fallbackFounderName,
-      role: payload.role || 'founder',
-      tokenVersion: typeof payload.tokenVersion === 'number' ? payload.tokenVersion : 0,
-      type: 'access',
-      typ: 'access',
-    }, jwtSecret, { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '2h' });
-
-    logLocalAdminRefresh({ phase: 'response', route: `${req.baseUrl || ''}${req.path || ''}`, status: 200, dbQueryResultCount: 1, error: null });
-    return res.status(200).json({ ok: true, success: true, accessToken });
-  } catch (_err) {
-    logLocalAdminRefresh({ phase: 'error', route: `${req.baseUrl || ''}${req.path || ''}`, status: 401, dbQueryResultCount: 0, error: 'Invalid refresh token' });
-    return res.status(401).json({ ok: false, success: false, message: 'Invalid refresh token' });
-  }
+  return require('./auth.routes').refreshHandler(req, res);
 });
 
 // POST /api/admin/logout
-router.post('/logout', async (req, res) => {
+router.post('/logout', requireAdminAuth, async (req, res) => {
   try {
+    await User.findByIdAndUpdate(req.admin.id, { $inc: { tokenVersion: 1 } });
     const token = String(req.headers.authorization || '').toLowerCase().startsWith('bearer ')
       ? String(req.headers.authorization || '').slice(7).trim()
       : String(req.cookies?.np_admin_token || req.cookies?.np_token || req.cookies?.token || '').trim();
@@ -525,7 +476,11 @@ router.post('/logout', async (req, res) => {
     res.clearCookie('np_admin_token', opts);
     res.clearCookie('np_admin_email', opts);
     res.clearCookie('np_admin_session', opts);
-  } catch (_) {}
+    for (const name of ['np_token', 'token', 'np_refresh_token']) {
+      res.clearCookie(name, opts);
+      res.clearCookie(name, { path: '/' });
+    }
+  } catch (_) { return res.status(503).json({ ok: false, message: 'Logout unavailable' }); }
   return res.status(200).json({ ok: true });
 });
 

@@ -1,4 +1,5 @@
 const express = require('express');
+const { safeSecurityLog } = require('../lib/securityLog');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
@@ -512,7 +513,7 @@ function shouldLogReporterContactPipeline() {
 function logReporterContactPipeline(payload) {
   if (!shouldLogReporterContactPipeline()) return;
   try {
-    console.log('[reporter-contact-pipeline]', payload);
+    console.log('[reporter-contact-pipeline]', safeSecurityLog(payload));
   } catch (_) {}
 }
 
@@ -525,7 +526,7 @@ function normalizeToken(value) {
 }
 
 function generateOtp() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return crypto.randomInt(100000, 1000000).toString();
 }
 
 function maskEmail(email) {
@@ -645,7 +646,7 @@ function shouldLogReporterOtp() {
 function logReporterOtp(payload) {
   if (!shouldLogReporterOtp()) return;
   try {
-    console.log('[reporter-otp]', payload);
+    console.log('[reporter-otp]', safeSecurityLog(payload));
   } catch (_) {}
 }
 
@@ -1144,7 +1145,7 @@ function buildOtpLogContext(req, email, extra = {}) {
   const forwardedFor = String(req?.get('x-forwarded-for') || '').trim();
   const vercelId = String(req?.get('x-vercel-id') || '').trim();
   const requestBurstDiagnostics = req?.reporterAuthRequestBurstDiagnostics || null;
-  return {
+  return safeSecurityLog({
     path: req.originalUrl || req.url,
     method: req.method,
     ip: getClientIp(req),
@@ -1173,31 +1174,31 @@ function buildOtpLogContext(req, email, extra = {}) {
     jwtExpiresIn: getReporterJwtExpiresIn(),
     ...(requestBurstDiagnostics || {}),
     ...extra,
-  };
+  });
 }
 
 function logReporterAuth(stage, payload) {
-  console.log(`[reporter-auth][${stage}]`, payload);
+  console.log(`[reporter-auth][${stage}]`, safeSecurityLog(payload));
 }
 
 function logReporterAuthError(stage, payload) {
-  console.error(`[reporter-auth][${stage}]`, payload);
+  console.error(`[reporter-auth][${stage}]`, safeSecurityLog(payload));
 }
 
 function logReporterSubmissions(stage, payload) {
-  console.log(`[reporter-submissions][${stage}]`, payload);
+  console.log(`[reporter-submissions][${stage}]`, safeSecurityLog(payload));
 }
 
 function logReporterSubmissionsError(stage, payload) {
-  console.error(`[reporter-submissions][${stage}]`, payload);
+  console.error(`[reporter-submissions][${stage}]`, safeSecurityLog(payload));
 }
 
 function logReporterDashboard(stage, payload) {
-  console.log(`[reporter-dashboard][${stage}]`, payload);
+  console.log(`[reporter-dashboard][${stage}]`, safeSecurityLog(payload));
 }
 
 function logReporterDashboardError(stage, payload) {
-  console.error(`[reporter-dashboard][${stage}]`, payload);
+  console.error(`[reporter-dashboard][${stage}]`, safeSecurityLog(payload));
 }
 
 function logReporterRequestCodeFinal(req, email, statusCode, code, phase, provider = null, extra = {}) {
@@ -2324,7 +2325,7 @@ router.post('/auth/logout', requireReporterPortalOpen, requireReporterPortalAuth
     await logReporterActivity('reporter_portal_logout', req.reporterPortal.email, { ip: getClientIp(req), reporterId: String(reporterDoc._id) });
     return res.status(200).json({ ok: true, message: 'Logged out successfully.' });
   } catch (error) {
-    console.error('[reporter-portal][logout] failed', error && error.message ? error.message : error);
+    console.error('[reporter-portal][logout] failed');
     return res.status(500).json({ ok: false, code: 'LOGOUT_FAILED', message: 'Failed to logout.' });
   }
 });
@@ -2337,7 +2338,7 @@ router.get('/profile', requireReporterPortalOpen, requireReporterPortalAuth, asy
     }
     return res.status(200).json({ ok: true, profile: mapReporterProfile(reporterDoc) });
   } catch (error) {
-    console.error('[reporter-portal][profile] failed', error && error.message ? error.message : error);
+    console.error('[reporter-portal][profile] failed');
     return res.status(500).json({ ok: false, code: 'PROFILE_LOAD_FAILED', message: 'Failed to load profile.' });
   }
 });
@@ -2374,7 +2375,7 @@ router.patch('/profile', requireReporterPortalOpen, requireReporterPortalAuth, a
 
     return res.status(200).json({ ok: true, profile: mapReporterProfile(reporterDoc) });
   } catch (error) {
-    console.error('[reporter-portal][profile-update] failed', error && error.message ? error.message : error);
+    console.error('[reporter-portal][profile-update] failed');
     return res.status(500).json({ ok: false, code: 'PROFILE_UPDATE_FAILED', message: 'Failed to update profile.' });
   }
 });
@@ -2431,10 +2432,10 @@ router.post('/profile/email/request-change', requireReporterPortalOpen, requireR
       ok: true,
       emailMasked: maskEmail(nextEmail),
       message: 'Verification code sent to the new email address.',
-      ...((process.env.NODE_ENV === 'test' || String(process.env.OTP_DEV_ECHO || '') === '1') ? { devCode: code } : {}),
+      ...(shouldExposeDevOtp() ? { devCode: code } : {}),
     });
   } catch (error) {
-    console.error('[reporter-portal][profile-email-request] failed', error && error.message ? error.message : error);
+    console.error('[reporter-portal][profile-email-request] failed');
     return res.status(500).json({ ok: false, code: 'EMAIL_CHANGE_REQUEST_FAILED', message: 'Failed to start email change verification.' });
   }
 });
@@ -2510,7 +2511,7 @@ router.post('/profile/email/confirm-change', requireReporterPortalOpen, requireR
       profile: mapReporterProfile(reporterDoc),
     });
   } catch (error) {
-    console.error('[reporter-portal][profile-email-confirm] failed', error && error.message ? error.message : error);
+    console.error('[reporter-portal][profile-email-confirm] failed');
     return res.status(500).json({ ok: false, code: 'EMAIL_CHANGE_CONFIRM_FAILED', message: 'Failed to confirm email change.' });
   }
 });
@@ -2851,7 +2852,7 @@ router.get('/submissions/:id', requireReporterPortalOpen, requireReporterPortalA
 
     return res.status(200).json({ ok: true, item: mapSubmission(submission) });
   } catch (error) {
-    console.error('[reporter-portal][submission-detail] failed', error && error.message ? error.message : error);
+    console.error('[reporter-portal][submission-detail] failed');
     return res.status(500).json({ ok: false, code: 'SUBMISSION_DETAIL_FAILED', message: 'Failed to load submission detail.' });
   }
 });
@@ -3008,7 +3009,7 @@ router.post('/submissions', requireReporterPortalOpen, requireReporterPortalAuth
 
     return res.status(201).json({ ok: true, item: mapSubmission(submission) });
   } catch (error) {
-    console.error('[reporter-portal][create-submission] failed', error && error.message ? error.message : error);
+    console.error('[reporter-portal][create-submission] failed');
     return res.status(500).json({ ok: false, code: 'SUBMISSION_CREATE_FAILED', message: 'Failed to create submission.' });
   }
 });
@@ -3059,7 +3060,7 @@ router.patch('/submissions/:id', requireReporterPortalOpen, requireReporterPorta
 
     return res.status(200).json({ ok: true, item: mapSubmission(submission) });
   } catch (error) {
-    console.error('[reporter-portal][update-submission] failed', error && error.message ? error.message : error);
+    console.error('[reporter-portal][update-submission] failed');
     return res.status(500).json({ ok: false, code: 'SUBMISSION_UPDATE_FAILED', message: 'Failed to update submission.' });
   }
 });

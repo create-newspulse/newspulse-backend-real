@@ -142,9 +142,10 @@ async function loadUserFromPayload(payload, req = null) {
 
   if (sub && mongoose.isValidObjectId(sub)) {
     countMeQuery(req, 'user');
-    const byId = await User.findById(sub);
-    if (byId) return byId;
+    return User.findById(sub);
   }
+
+  if (sub) return null;
 
   if (email) {
     countMeQuery(req, 'user');
@@ -193,6 +194,7 @@ async function loadRoleForUser(user) {
 
 async function requireAuth(req, res, next) {
   try {
+    if (require('../lib/authRequestSecurity').rejectUnsafeCookieAuth(req, res)) return;
     ensureMeTiming(req);
     const token = timeMeStep(req, 'auth.token_read', () => getAuthToken(req));
     if (!token) {
@@ -207,20 +209,10 @@ async function requireAuth(req, res, next) {
     }
 
     const payload = timeMeStep(req, 'auth.jwt_verify', () => jwt.verify(token, secret, { algorithms: ['HS256'] }));
-    if ((payload.type && payload.type !== 'access') || (payload.typ && payload.typ !== 'access')) return sessionExpired(res);
+    if ((!payload.type && !payload.typ) || (payload.type && payload.type !== 'access') || (payload.typ && payload.typ !== 'access')) return sessionExpired(res);
 
-    // If DB is down, fall back to payload-only auth (keeps dev/test from hard failing).
     if (!isDbReady()) {
-      req.user = timeMeStep(req, 'auth.payload_identity', () => ({
-        id: payload.sub || payload.userId || null,
-        email: payload.email || null,
-        name: payload.name || null,
-        role: normalizeRole(payload.role) || String(payload.role || 'intern').toLowerCase(),
-        tokenVersion: typeof payload.tokenVersion === 'number' ? payload.tokenVersion : 0,
-        isFounder: (normalizeRole(payload.role) || String(payload.role || '').toLowerCase()) === 'founder',
-        isProtected: (normalizeRole(payload.role) || String(payload.role || '').toLowerCase()) === 'founder',
-      }));
-      return next();
+      return res.status(503).json({ ok: false, code: 'AUTH_UNAVAILABLE', message: 'Authentication temporarily unavailable' });
     }
 
     const user = await timeMeStepAsync(req, 'auth.user_lookup', () => loadUserFromPayload(payload, req));

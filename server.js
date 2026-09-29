@@ -3261,38 +3261,13 @@ async function _adminLoginHandler(req, res) {
 }
 
 // POST /admin/login -> returns success + access/refresh tokens
-app.post('/admin/login', _adminLoginHandler);
+app.post('/admin/login', authRoutes.loginHandler);
 // Phase 1 required alias for admin panel proxy
-app.post('/admin-api/admin/login', _adminLoginHandler);
-app.post('/admin-api/api/admin/login', _adminLoginHandler);
+app.post('/admin-api/admin/login', authRoutes.loginHandler);
+app.post('/admin-api/api/admin/login', authRoutes.loginHandler);
 
 // POST /admin/refresh -> requires valid refresh token
-app.post('/admin/refresh', (req, res) => {
-  const body = req.body || {};
-  const rt = String(body.refreshToken || '');
-
-  // Production/dev: accept a signed JWT refresh token.
-  const secret = String(process.env.JWT_SECRET || '').trim();
-  if (!secret) return res.status(500).json({ success: false, message: 'Server misconfigured' });
-  try {
-    const jwt = require('jsonwebtoken');
-    const payload = jwt.verify(rt, secret);
-    if (!payload || String(payload.typ || '') !== 'refresh') {
-      return res.status(401).json({ success: false, message: 'Invalid refresh token' });
-    }
-    const localFounderConfig = resolveLocalFounderSeedConfig();
-    const email = payload.email || process.env.FOUNDER_EMAIL || process.env.ADMIN_EMAIL || localFounderConfig.email || 'founder@example.com';
-    const role = payload.role || 'founder';
-    const accessToken = _issueJwt(
-      { sub: payload.sub || 'founder-1', email, role, name: payload.name || 'Founder', tokenVersion: payload.tokenVersion || 0, typ: 'access' },
-      '15m'
-    );
-    if (!accessToken) return res.status(500).json({ success: false, message: 'Server misconfigured' });
-    return res.json({ success: true, accessToken });
-  } catch (_e) {
-    return res.status(401).json({ success: false, message: 'Invalid refresh token' });
-  }
-});
+app.post('/admin/refresh', authRoutes.refreshHandler);
 
 // GET /admin/metrics -> simple structure for tests
 app.get('/admin/metrics', (req, res) => {

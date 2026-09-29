@@ -8,6 +8,7 @@ const ReporterProfile = require('../models/ReporterProfile');
 const ReporterContact = require('../models/ReporterContact');
 const ReporterStoryLink = require('../models/ReporterStoryLink');
 const User = require('../models/User');
+const documentStorage = require('./reporterDocumentStorage');
 
 const BLOCKED_SOURCE_NAMES = Object.freeze([
   'news',
@@ -25,6 +26,7 @@ const KNOWN_SOURCE_NAMES = Object.freeze([
   'advertise_business_inquiries',
   'community_reporter_requests',
   'journalist_desk_requests',
+  'community_reporter_contacts',
   'user_accounts',
 ]);
 const MANUAL_REVIEW_BLOCKED_REASON = 'Manual review only. This source cannot be deleted from DPDP quick action.';
@@ -108,9 +110,13 @@ function buildSyntheticEmail(sourceName, recordId) {
 }
 
 function buildIdentityCriteria(request) {
+  if (!request?.verifiedAt || !Number.isFinite(new Date(request.verifiedAt).getTime()) || !['Verified', 'In Review'].includes(request.status)) {
+    throw createServiceError('Verified identity is required before DPDP data processing', 409, 'DPDP_IDENTITY_UNVERIFIED');
+  }
+  if (!normalizeEmail(request.email)) throw createServiceError('Verified email is required', 409, 'DPDP_IDENTITY_UNVERIFIED');
   return {
     email: normalizeEmail(request && request.email),
-    mobile: normalizePhone(request && request.mobile),
+    mobile: null,
   };
 }
 
@@ -166,30 +172,34 @@ async function findMany(Model, filter, limit = 50) {
   return normalizeRecords(result).slice(0, limit);
 }
 
-async function findById(Model, id) {
+async function findById(Model, id, session) {
   if (!canQueryModels()) return null;
   if (!isValidRecordId(id)) return null;
-  const result = await resolveQueryResult(Model.findById(id));
+  let query = Model.findById(id);
+  if (session && typeof query?.session === 'function') query = query.session(session);
+  if (Model === CommunitySubmission && typeof query?.select === 'function') query = query.select('+reporterDocumentId');
+  const result = await resolveQueryResult(query);
   return result || null;
 }
 
-async function deleteById(Model, id) {
+async function deleteById(Model, id, session) {
   if (!canQueryModels()) throw createServiceError('Data source is unavailable', 503, 'DPDP_SOURCE_UNAVAILABLE');
   if (!isValidRecordId(id)) throw createServiceError('Invalid record ID for selected item.', 400, 'DPDP_INVALID_RECORD_ID');
-  const result = await Model.deleteOne({ _id: id });
+  const result = await Model.deleteOne({ _id: id }, { session });
   return Number(result && result.deletedCount) > 0;
 }
 
-async function updateById(Model, id, update) {
+async function updateById(Model, id, update, session) {
   if (!canQueryModels()) throw createServiceError('Data source is unavailable', 503, 'DPDP_SOURCE_UNAVAILABLE');
   if (!isValidRecordId(id)) throw createServiceError('Invalid record ID for selected item.', 400, 'DPDP_INVALID_RECORD_ID');
-  await Model.updateOne({ _id: id }, { $set: update });
+  const result = await Model.updateOne({ _id: id }, { $set: update }, { session });
+  if (!result?.matchedCount) throw createServiceError('Selected record was not found', 404, 'DPDP_RECORD_NOT_FOUND');
 }
 
-async function hardDeleteById(Model, id) {
+async function hardDeleteById(Model, id, session) {
   if (!canQueryModels()) throw createServiceError('Data source is unavailable', 503, 'DPDP_SOURCE_UNAVAILABLE');
   if (!isValidRecordId(id)) throw createServiceError('Invalid record ID for selected item.', 400, 'DPDP_INVALID_RECORD_ID');
-  const result = await Model.deleteOne({ _id: id });
+  const result = await Model.deleteOne({ _id: id }, { session });
   return Number(result && result.deletedCount) > 0;
 }
 
@@ -244,7 +254,10 @@ async function detachReporterContactDependencies(contact) {
   };
 }
 
-async function deleteCommunitySubmissionRecord(recordId, doc) {
+async function deleteCommunitySubmissionRecord(recordId, doc, session) {
+  if (doc?.linkedArticleId || /published|approved/i.test(String(doc?.status || ''))) {
+    throw createServiceError('Editorial records must be retained; use anonymize for private identity.', 409, 'DPDP_EDITORIAL_RECORD_RETAINED');
+  }
   const linkedNewsId = stringifyId(doc && doc.linkedArticleId);
   let newsDoc = null;
 
@@ -261,8 +274,8 @@ async function deleteCommunitySubmissionRecord(recordId, doc) {
     await News.updateOne({ _id: linkedNewsId }, { $set: { communityReportId: null } });
   }
 
-  await ReporterStoryLink.deleteMany({ submissionId: recordId });
-  const deleted = await hardDeleteById(CommunitySubmission, recordId);
+  await ReporterStoryLink.deleteMany({ submissionId: recordId }, { session });
+  const deleted = await hardDeleteById(CommunitySubmission, recordId, session);
   if (!deleted) throw createServiceError('Selected record could not be deleted', 404, 'DPDP_RECORD_NOT_FOUND');
 }
 
@@ -294,6 +307,43 @@ function toSearchRecord({ source, label, record, matchedBy, recommendedAction, d
   };
 }
 
+function privateSubmissionIdentity(recordId) {
+  const email = buildSyntheticEmail('submission', recordId);
+  return {
+    fullName: 'Deleted User', reporterName: 'Deleted User', name: 'Deleted User', userName: null,
+    reporterEmail: email, reporterEmailNorm: email, email,
+    phone: null, phoneNumber: null, mobile: null, mobileNumber: null, contactNumber: null, whatsapp: null, whatsappNumber: null,
+    contact: { name: 'Deleted User', email: null, phone: null, preferredContact: 'no_preference', canContactForThisStory: false, canContactForFutureStories: false },
+    reporterId: null, reporterAccountId: null, reporterProfileId: null, userId: null, reporterDocumentId: null,
+    ipAddress: null, userAgent: null, reporterLocation: null, college: null, organisationName: null,
+    organisationType: null, reporterAgeGroup: null, ageGroup: 'UNKNOWN', identityFlags: [], identityResolutionMethod: null,
+    verificationNotes: '[Personal data removed]', editorialNotes: '[Personal data removed]',
+  };
+}
+
+async function eraseLinkedReporterIdentity(contact, session) {
+  const contactId = stringifyId(contact._id);
+  const email = normalizeEmail(contact.email);
+  const filter = { $or: [{ reporterId: contactId }, { reporterAccountId: contactId }, { reporterEmailNorm: email }, { reporterEmail: email }, { email }] };
+  const submissions = await CommunitySubmission.find(filter).select('+reporterDocumentId').session(session).lean();
+  for (const submission of submissions) {
+    await removePrivateDocument(submission);
+    await updateById(CommunitySubmission, submission._id, privateSubmissionIdentity(submission._id), session);
+    await ReporterStoryLink.deleteMany({ submissionId: submission._id }, { session });
+  }
+  await ReporterProfile.updateMany(
+    { $or: [{ reporterContactId: contactId }, { primaryEmail: email }] },
+    { $set: { displayName: 'Deleted User', primaryEmail: null, primaryPhone: null, userId: null, reporterContactId: null, location: {}, labels: [], flags: [], status: 'archived' } },
+    { session },
+  );
+}
+
+async function removePrivateDocument(record) {
+  if (!record?.reporterDocumentId) return;
+  try { await documentStorage.deleteReporterDocument(record.reporterDocumentId); }
+  catch (_) { throw createServiceError('Private document deletion failed; action remains incomplete and may be retried.', 502, 'DPDP_MEDIA_DELETE_FAILED'); }
+}
+
 const SOURCE_HANDLERS = {
   advertise_business_inquiries: {
     source: 'advertise_business_inquiries',
@@ -321,17 +371,17 @@ const SOURCE_HANDLERS = {
         })
         .filter(Boolean);
     },
-    async load(recordId) {
-      const record = await findById(AdInquiry, recordId);
+    async load(recordId, session) {
+      const record = await findById(AdInquiry, recordId, session);
       return record ? { model: AdInquiry, record } : null;
     },
     matchesRequest(record, criteria) {
       const candidate = record && record.record ? record.record : record;
       return collectMatchedBy(candidate, criteria, ['email'], ['phone']);
     },
-    async runAction(action, recordId) {
+    async runAction(action, recordId, _loaded, session) {
       if (action === 'delete') {
-        const deleted = await deleteById(AdInquiry, recordId);
+        const deleted = await deleteById(AdInquiry, recordId, session);
         if (!deleted) throw createServiceError('Selected record could not be deleted', 404, 'DPDP_RECORD_NOT_FOUND');
         return;
       }
@@ -344,8 +394,10 @@ const SOURCE_HANDLERS = {
         phone: null,
         message: '[Personal data removed]',
         name: 'Deleted User',
+        meta: {}, replyHistory: [], lastReplySubject: null, pageUrl: null,
+        campaignGoal: null, preferredDates: null, placement: null, target: null, budget: null,
         updatedAt: new Date(),
-      });
+      }, session);
     },
   },
   community_reporter_requests: {
@@ -409,13 +461,13 @@ const SOURCE_HANDLERS = {
 
       return dedupeById([...submissionRecords, ...reportRecords]);
     },
-    async load(recordId) {
-      const submission = await findById(CommunitySubmission, recordId);
+    async load(recordId, session) {
+      const submission = await findById(CommunitySubmission, recordId, session);
       if (submission && String(submission.sourceType || 'community') !== 'journalist') {
         return { model: CommunitySubmission, kind: 'submission', record: submission };
       }
 
-      const report = await findById(CommunityReport, recordId);
+      const report = await findById(CommunityReport, recordId, session);
       if (report) return { model: CommunityReport, kind: 'legacy_report', record: report };
       return null;
     },
@@ -431,17 +483,18 @@ const SOURCE_HANDLERS = {
         ['phone', 'phoneNumber', 'mobile', 'mobileNumber', 'contactNumber', 'whatsapp', 'whatsappNumber', 'contact.phone', 'contact.whatsappNumber']
       );
     },
-    async runAction(_action, recordId, loaded) {
+    async runAction(_action, recordId, loaded, session) {
       if (!loaded || !loaded.record) throw createServiceError('Selected record was not found', 404, 'DPDP_RECORD_NOT_FOUND');
+      if (loaded.kind !== 'legacy_report') await removePrivateDocument(loaded.record);
 
       if (_action === 'delete') {
         if (loaded.kind === 'legacy_report') {
-          const deleted = await hardDeleteById(CommunityReport, recordId);
+          const deleted = await hardDeleteById(CommunityReport, recordId, session);
           if (!deleted) throw createServiceError('Selected record could not be deleted', 404, 'DPDP_RECORD_NOT_FOUND');
           return;
         }
 
-        await deleteCommunitySubmissionRecord(recordId, loaded.record);
+        await deleteCommunitySubmissionRecord(recordId, loaded.record, session);
         return;
       }
 
@@ -452,9 +505,10 @@ const SOURCE_HANDLERS = {
           reporterName: 'Deleted User',
           reporterEmail: syntheticEmail,
           reporterPhone: null,
+          reporterCity: null, reporterState: null, reporterCountry: null, ageGroup: null,
           reviewNotes: '[Personal data removed]',
           updatedAt: new Date(),
-        });
+        }, session);
         return;
       }
 
@@ -487,22 +541,24 @@ const SOURCE_HANDLERS = {
         verificationNotes: '[Personal data removed]',
         editorialNotes: '[Personal data removed]',
         updatedAt: new Date(),
-      });
+        ...privateSubmissionIdentity(recordId),
+      }, session);
     },
   },
   journalist_desk_requests: {
     source: 'journalist_desk_requests',
+    reporterType: 'journalist',
     label: 'Journalist Desk Requests',
     recommendedAction: 'delete',
     deletable: true,
     anonymizable: true,
     async search(criteria) {
-      const filter = buildMongoIdentityFilter(criteria, ['email', 'emailLower', 'pendingPortalEmail'], ['phoneFull', 'phoneNumber', 'whatsappNumber', 'alternatePhone']);
+      const filter = buildMongoIdentityFilter(criteria, ['email', 'emailLower'], ['phoneFull', 'phoneNumber', 'whatsappNumber', 'alternatePhone']);
       if (!filter) return [];
-      const docs = await findMany(ReporterContact, { reporterType: 'journalist', ...filter });
+      const docs = await findMany(ReporterContact, { reporterType: this.reporterType, ...filter });
       return docs
         .map((record) => {
-          const matchedBy = collectMatchedBy(record, criteria, ['email', 'emailLower', 'pendingPortalEmail'], ['phoneFull', 'phoneNumber', 'whatsappNumber', 'alternatePhone']);
+          const matchedBy = collectMatchedBy(record, criteria, ['email', 'emailLower'], ['phoneFull', 'phoneNumber', 'whatsappNumber', 'alternatePhone']);
           if (!matchedBy.length) return null;
           return toSearchRecord({
             source: this.source,
@@ -517,20 +573,20 @@ const SOURCE_HANDLERS = {
         })
         .filter(Boolean);
     },
-    async load(recordId) {
-      const record = await findById(ReporterContact, recordId);
-      if (!record || String(record.reporterType || '') !== 'journalist') return null;
+    async load(recordId, session) {
+      const record = await findById(ReporterContact, recordId, session);
+      if (!record || String(record.reporterType || 'community') !== this.reporterType) return null;
       return { model: ReporterContact, record };
     },
     matchesRequest(recordWrapper, criteria) {
       const record = recordWrapper && recordWrapper.record ? recordWrapper.record : recordWrapper;
-      return collectMatchedBy(record, criteria, ['email', 'emailLower', 'pendingPortalEmail'], ['phoneFull', 'phoneNumber', 'whatsappNumber', 'alternatePhone']);
+      return collectMatchedBy(record, criteria, ['email', 'emailLower'], ['phoneFull', 'phoneNumber', 'whatsappNumber', 'alternatePhone']);
     },
-    async runAction(_action, recordId, loaded) {
+    async runAction(_action, recordId, loaded, session) {
+      await eraseLinkedReporterIdentity(loaded.record, session);
       if (_action === 'delete') {
         if (!loaded || !loaded.record) throw createServiceError('Selected record was not found', 404, 'DPDP_RECORD_NOT_FOUND');
-        await detachReporterContactDependencies(loaded.record);
-        const deleted = await hardDeleteById(ReporterContact, recordId);
+        const deleted = await hardDeleteById(ReporterContact, recordId, session);
         if (!deleted) throw createServiceError('Selected record could not be deleted', 404, 'DPDP_RECORD_NOT_FOUND');
         return;
       }
@@ -555,8 +611,12 @@ const SOURCE_HANDLERS = {
         journalistNotes: '[Personal data removed]',
         socialLinks: { linkedin: null, twitter: null },
         behaviourNotes: [],
+        phoneCountryCode: null, country: null, stateCode: null, stateName: null, districtName: null, talukaName: null,
+        cityTownVillage: null, areaName: null, directoryManualOverrides: {}, userId: null,
+        portalAccessEnabled: false, portalAuthVersion: Number(loaded.record.portalAuthVersion || 0) + 1,
+        pendingPortalEmailRequestedAt: null, lastPortalLoginAt: null,
         updatedAt: new Date(),
-      });
+      }, session);
     },
   },
   user_accounts: {
@@ -648,11 +708,18 @@ async function searchMatchingDataForPrivacyRequest(request) {
 
 async function performPrivacyDataAction({ request, action, items, handledBy, newStatus }) {
   const criteria = buildIdentityCriteria(request);
+  if (!['delete', 'anonymize'].includes(action) || !Array.isArray(items) || !items.length || items.length > 50) {
+    throw createServiceError('Invalid data action or item count');
+  }
   const prepared = [];
+  const selectedKeys = new Set();
 
   for (const item of items || []) {
     const sourceName = String(item && item.source || '').trim();
     const recordId = String(item && item.recordId || '').trim();
+    const selectedKey = sourceName + ':' + recordId;
+    if (selectedKeys.has(selectedKey)) continue;
+    selectedKeys.add(selectedKey);
 
     if (!KNOWN_SOURCE_NAMES.includes(sourceName)) {
       if (BLOCKED_SOURCE_NAMES.includes(sourceName)) {
@@ -687,20 +754,39 @@ async function performPrivacyDataAction({ request, action, items, handledBy, new
   }
 
   for (const item of prepared) {
-    await item.handler.runAction(action, item.recordId, item.loaded);
+    if (action === 'delete' && ['submission', 'legacy_report'].includes(item.loaded.kind) && (item.loaded.record.linkedArticleId || /published|approved/i.test(String(item.loaded.record.status || '')))) {
+      throw createServiceError('Editorial records must be retained; use anonymize for private identity.', 409, 'DPDP_EDITORIAL_RECORD_RETAINED');
+    }
   }
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const currentItems = [];
+      for (const item of prepared) {
+        const current = await item.handler.load(item.recordId, session);
+        if (!current || !item.handler.matchesRequest(current, criteria).length) throw createServiceError('Record identity changed; review and retry.', 409, 'DPDP_IDENTITY_MISMATCH');
+        if (action === 'delete' && ['submission', 'legacy_report'].includes(current.kind) && (current.record.linkedArticleId || /published|approved/i.test(String(current.record.status || '')))) {
+          throw createServiceError('Editorial records must be retained; use anonymize for private identity.', 409, 'DPDP_EDITORIAL_RECORD_RETAINED');
+        }
+        currentItems.push({ ...item, loaded: current });
+      }
+      for (const item of currentItems) await item.handler.runAction(action, item.recordId, item.loaded, session);
+    });
+  } finally { await session.endSession(); }
 
   const results = prepared.map((item) => ({
     source: item.source,
     recordId: item.recordId,
     matchedBy: item.matchedBy,
     action,
+    outcome: action === 'delete' ? 'selected_record_deleted' : 'structured_private_identity_redacted',
+    requiresEditorialReview: item.source !== 'advertise_business_inquiries',
     handledBy,
   }));
 
   return {
     oldStatus: request.status || null,
-    newStatus,
+    newStatus: results.some(item => item.requiresEditorialReview) ? 'In Review' : newStatus,
     results,
     actionTakenSummary: buildActionTakenSummary(action, results),
   };
@@ -712,4 +798,11 @@ module.exports = {
   isValidRecordId,
   searchMatchingDataForPrivacyRequest,
   performPrivacyDataAction,
+};
+
+SOURCE_HANDLERS.community_reporter_contacts = {
+  ...SOURCE_HANDLERS.journalist_desk_requests,
+  source: 'community_reporter_contacts',
+  reporterType: 'community',
+  label: 'Community Reporter Contacts',
 };

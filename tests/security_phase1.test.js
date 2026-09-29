@@ -22,9 +22,11 @@ app.get('/owner', require('../middleware/requireOwnerKey').requireOwnerKey, (_re
 app.get('/staff', require('../middleware/requireAuth').requireAuth, (_req, res) => res.json({ ok: true }));
 app.get('/queue', require('../middleware/adminAuth').requireAdminModule('communityReporterQueue'), (_req, res) => res.json({ items: [] }));
 const backend = require('../server');
+const accountFixture = require('./helpers/accountAuthFixture').accountAuthFixture();
+test.beforeEach(context => accountFixture.install(context));
 
 function signedToken(role = 'founder', overrides = {}, secret = process.env.JWT_SECRET) {
-  return jwt.sign({ sub: '507f1f77bcf86cd799439011', role, email: 'founder@example.invalid', type: 'access', ...overrides }, secret, { expiresIn: '5m' });
+  return accountFixture.token(role, overrides, secret);
 }
 
 test('unsigned identity cookies and tokens cannot authenticate or grant Founder access', async () => {
@@ -132,7 +134,12 @@ test('persisted staff grants and Founder module locks govern queue access', asyn
   assert.equal((await request(app).get('/queue').auth(signedToken('editor'), { type: 'bearer' })).status, 403);
 });
 
-test('mounted internal queue and media list aliases reject anonymous and unassigned users', async () => {
+test('mounted internal queue and media list aliases reject anonymous and unassigned users', async (context) => {
+  const emptyQuery = { sort() { return this; }, limit() { return this; }, select() { return this; }, lean: async () => [] };
+  context.mock.method(require('../models/CommunitySubmission'), 'find', () => emptyQuery);
+  context.mock.method(require('../models/CommunitySubmission'), 'countDocuments', async () => 0);
+  context.mock.method(require('../models/YouthPulseSubmission'), 'find', () => emptyQuery);
+  context.mock.method(require('../models/YouthPulseSubmission'), 'countDocuments', async () => 0);
   const routes = [
     '/api/community-reporter/queue',
     ...['/api/admin', '/admin-api/admin', '/admin-api/api/admin', '/admin'].map(prefix => prefix + '/community-reporter/queue'),

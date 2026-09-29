@@ -10,6 +10,32 @@ process.env.FOUNDER_PASSWORD = process.env.ADMIN_PASSWORD = require('node:crypto
 process.env.JWT_SECRET = require('node:crypto').randomBytes(32).toString('hex');
 
 const app = require('../server');
+const mongoose = require('mongoose');
+const User = require('../models/User');
+const AuditLog = require('../models/AuditLog');
+let account;
+let previousState;
+test.before(async () => {
+  previousState = mongoose.connection.readyState;
+  account = {
+    _id: '507f1f77bcf86cd799439011', email: process.env.FOUNDER_EMAIL, role: 'founder',
+    status: 'active', accountStatus: 'active', tokenVersion: 0,
+    passwordHash: await require('bcrypt').hash(process.env.FOUNDER_PASSWORD, 4),
+    save: async function () { return this; },
+  };
+  mongoose.connection.readyState = 1;
+  const query = () => ({ select: async () => account, lean: async () => account, then: resolve => Promise.resolve(account).then(resolve) });
+  test.mock.method(User, 'findOne', query);
+  test.mock.method(User, 'findById', query);
+  test.mock.method(User, 'findOneAndUpdate', async filter => {
+    const version = typeof filter.tokenVersion === 'object' ? 0 : filter.tokenVersion;
+    if (version !== account.tokenVersion) return null;
+    account.tokenVersion += 1;
+    return account;
+  });
+  test.mock.method(AuditLog, 'create', async () => ({}));
+});
+test.after(() => { mongoose.connection.readyState = previousState; });
 
 let accessToken = null;
 let refreshToken = null;
@@ -76,4 +102,13 @@ test('Invalid refresh token fails', async () => {
     .set('Accept', 'application/json');
   assert.strictEqual(res.statusCode, 401);
   assert.strictEqual(res.body.success, false);
+});
+
+test('admin compatibility login aliases use persisted account credentials', async () => {
+  for (const route of ['/api/admin/login', '/admin-api/admin/login', '/admin-api/api/admin/login']) {
+    const response = await request(app).post(route).send({ email: account.email, password: process.env.FOUNDER_PASSWORD });
+    assert.strictEqual(response.status, 200, route);
+    assert.strictEqual(response.body.user.role, 'founder');
+    assert.strictEqual(require('jsonwebtoken').decode(response.body.refreshToken).type, 'refresh');
+  }
 });

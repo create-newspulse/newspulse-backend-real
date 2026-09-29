@@ -15,19 +15,19 @@ const REPORTER_PORTAL_LOGIN_CHALLENGE_COOKIE_NAME = 'reporter_portal_login_chall
 const REPORTER_PORTAL_LOGIN_CHALLENGE_PURPOSE = 'reporter_portal_login';
 
 function logReporterSession(payload) {
-  console.log('[reporter-auth][session]', payload);
+  console.log('[reporter-auth][session]', require('../lib/securityLog').safeSecurityLog(payload));
 }
 
 function logReporterSessionError(payload) {
-  console.error('[reporter-auth][session]', payload);
+  console.error('[reporter-auth][session]', require('../lib/securityLog').safeSecurityLog(payload));
 }
 
 function logReporterSubmissionsAuth(payload) {
-  console.log('[reporter-submissions][auth]', payload);
+  console.log('[reporter-submissions][auth]', require('../lib/securityLog').safeSecurityLog(payload));
 }
 
 function logReporterSubmissionsAuthError(payload) {
-  console.error('[reporter-submissions][auth]', payload);
+  console.error('[reporter-submissions][auth]', require('../lib/securityLog').safeSecurityLog(payload));
 }
 
 function buildReporterAuthLogContext(req, extra = {}) {

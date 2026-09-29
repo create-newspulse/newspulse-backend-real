@@ -9,6 +9,7 @@
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const User = require('../models/User');
+const { rejectUnsafeCookieAuth } = require('../lib/authRequestSecurity');
 const { requireModuleAccess } = require('./requireAuth');
 const {
   effectiveAccountControlRights,
@@ -56,6 +57,7 @@ async function requireAdminJwt(req, res, next) {
     const cookieToken = cookies['np_admin_token'] || cookies['np_token'] || cookies['token'] || '';
 
     const token = headerToken || cookieToken;
+    if (rejectUnsafeCookieAuth(req, res)) return;
     if (!token) return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
 
     const secret = String(process.env.JWT_SECRET || '').trim();
@@ -67,7 +69,7 @@ async function requireAdminJwt(req, res, next) {
     let payload;
     try {
       payload = jwt.verify(token, secret, { algorithms: ['HS256'] });
-      if ((payload.type && payload.type !== 'access') || (payload.typ && payload.typ !== 'access')) {
+      if ((!payload.type && !payload.typ) || (payload.type && payload.type !== 'access') || (payload.typ && payload.typ !== 'access')) {
         return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
       }
     } catch (_e) {
@@ -88,14 +90,13 @@ async function requireAdminJwt(req, res, next) {
     const userId = payload.sub || payload.userId || null;
     const email = payload.email || null;
 
-    // If DB is ready, enrich from a user record when available.
-    // Do NOT require a DB record for env-based admin login flows.
+    if (!isDbReady()) return res.status(503).json({ ok: false, code: 'AUTH_UNAVAILABLE', message: 'Authentication temporarily unavailable' });
     if (isDbReady()) {
       let user = null;
       if (userId && mongoose.isValidObjectId(String(userId))) {
         user = await User.findById(String(userId)).lean();
       }
-      if (!user && email) {
+      if (!userId && email) {
         user = await User.findOne({ email: String(email).toLowerCase() }).lean();
       }
 
@@ -145,14 +146,7 @@ async function requireAdminJwt(req, res, next) {
       }
     }
 
-    // DB not ready: fall back to token-only identity.
-    req.admin = {
-      id: userId ? String(userId) : 'unknown',
-      email: email ? String(email) : '',
-      role: normalizedRole,
-      name: payload.name ? String(payload.name) : undefined,
-    };
-    return next();
+    return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
   } catch (_e) {
     return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
   }

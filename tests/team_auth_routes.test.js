@@ -1,6 +1,8 @@
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'team-auth-routes-secret';
+process.env.NODE_ENV = 'test';
+process.env.JWT_SECRET = require('node:crypto').randomBytes(32).toString('hex');
 
 const test = require('node:test');
+test.mock.method(require('dotenv'), 'config', () => ({ parsed: {} }));
 const assert = require('node:assert/strict');
 const express = require('express');
 const mongoose = require('mongoose');
