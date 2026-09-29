@@ -1,5 +1,5 @@
 const express = require('express');
-const { uploadReporterDocument, downloadReporterDocument } = require('../lib/privateReporterDocuments');
+const { uploadReporterDocument, downloadReporterDocument, validateReporterDocumentReference } = require('../lib/privateReporterDocuments');
 const mongoose = require('mongoose');
 const CommunitySubmission = require('../models/CommunitySubmission');
 // Re-use legacy models from nested app for reporter + story linkage
@@ -144,7 +144,7 @@ function externalStatus(internal) {
 }
 
 // POST /api/community-reporter/submissions (public; authenticated reporter ownership is optional)
-router.post('/submissions', requireCommunityReporterOpen, optionalReporterPortalAuth, async (req, res) => {
+router.post('/submissions', requireCommunityReporterOpen, optionalReporterPortalAuth, validateReporterDocumentReference, async (req, res) => {
   try {
     const body = req.body || {};
     const deskMeta = inferSubmissionDeskMetadata(body);
@@ -272,6 +272,7 @@ router.post('/submissions', requireCommunityReporterOpen, optionalReporterPortal
       body: normalizedStory,
       ageGroup: normalizedAgeGroup || undefined,
       reporterAgeGroup: normalizedAgeGroup || undefined,
+      reporterDocumentId: body.reporterDocumentId || null,
       // Normalized location object expected by schema
       location: { city: cityNorm || null, state: stateNorm || null, country: countryNorm || null },
       reporterLocation: cityNorm || undefined,
@@ -404,7 +405,7 @@ router.get('/reporter-stories', requireReporterPortalOpen, requireReporterPortal
       .sort({ createdAt: -1 })
       .lean();
 
-    return res.json({ ok: true, stories });
+    return res.json({ ok: true, stories: stories.map(({ reporterDocumentId, journalistIdFileId, ...story }) => story) });
   } catch (err) {
     console.error('Error in GET /reporter-stories', err);
     return res.status(500).json({ ok: false, error: 'internal_error' });
@@ -413,7 +414,7 @@ router.get('/reporter-stories', requireReporterPortalOpen, requireReporterPortal
 
 // Phase 1 endpoints (public): submit + list by email
 // POST /api/community-reporter/submit
-router.post('/submit', requireCommunityReporterOpen, optionalReporterPortalAuth, async (req, res) => {
+router.post('/submit', requireCommunityReporterOpen, optionalReporterPortalAuth, validateReporterDocumentReference, async (req, res) => {
   try {
     const body = req.body || {};
     const deskMeta = inferSubmissionDeskMetadata(body);
@@ -519,6 +520,7 @@ router.post('/submit', requireCommunityReporterOpen, optionalReporterPortalAuth,
       headline: headlineNorm,
       story: storyNorm,
       ageGroup: ageGroupNorm,
+      reporterDocumentId: body.reporterDocumentId || null,
       status: deskMeta.isYouthPulse ? 'NEW' : 'NEW',
       sourceType: 'community',
       reporterVerificationLevel: 'unverified',

@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const request = require('supertest');
 
 process.env.NODE_ENV = 'test';
+process.env.JWT_SECRET = require('node:crypto').randomBytes(32).toString('hex');
+test.mock.method(require('dotenv'), 'config', () => ({ parsed: {} }));
 
 const communityAiReview = require('../services/communityAiReview');
 communityAiReview.runCommunityAiReview = async () => ({
@@ -237,6 +239,34 @@ test('POST /api/community/submissions ignores extra frontend metadata without 50
     assert.equal(stub.captured[0].reporterVerificationLevel, 'unverified');
     assert.equal(stub.captured[0].confirmTruthful, true);
     assert.equal(stub.captured[0].attachments[0].url, 'https://example.com/photo.jpg');
+  } finally {
+    stub.restore();
+  }
+});
+
+test('public submission stores an opaque reporter document reference without exposing it in its response', async () => {
+  const stub = stubCommunitySubmissionCreate();
+  try {
+    const reporterDocumentId = require('node:crypto').randomUUID() + '.pdf';
+    const body = { fullName: 'Test Reporter', email: 'reporter@example.invalid', city: 'Sample City', category: 'other', headline: 'Sample Headline', story: 'Synthetic story body' };
+    for (const input of [{ reporterDocumentId }, { journalistIdFileId: reporterDocumentId }, { reporterDocumentId, journalistIdFileId: reporterDocumentId }]) {
+      const response = await request(app).post('/api/community/submissions').send({ ...body, ...input });
+      assert.equal(response.status, 201);
+      assert.equal(stub.captured.at(-1).reporterDocumentId, reporterDocumentId);
+      assert.equal(Object.hasOwn(stub.captured.at(-1), 'journalistIdFileId'), false);
+      assert.deepEqual(stub.captured.at(-1).attachments, []);
+      assert.equal(JSON.stringify(response.body).includes(reporterDocumentId), false);
+      assert.doesNotMatch(JSON.stringify(response.body), /reporterDocumentId|journalistIdFileId/);
+    }
+    for (const field of ['reporterDocumentId', 'journalistIdFileId']) {
+      const denied = await request(app).post('/api/community/submissions').send({ ...body, [field]: 'https://res.cloudinary.com/example/document.pdf' });
+      assert.equal(denied.status, 400);
+      assert.equal(denied.body.code, 'INVALID_REPORTER_DOCUMENT_ID');
+    }
+    const conflict = await request(app).post('/api/community/submissions').send({ ...body, reporterDocumentId, journalistIdFileId: require('node:crypto').randomUUID() + '.pdf' });
+    assert.equal(conflict.status, 400);
+    assert.equal(conflict.body.code, 'CONFLICTING_REPORTER_DOCUMENT_IDS');
+    assert.equal(stub.captured.length, 3);
   } finally {
     stub.restore();
   }

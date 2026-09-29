@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const CommunitySubmission = require('../models/CommunitySubmission');
+const { validateReporterDocumentReference } = require('../lib/privateReporterDocuments');
 const YouthPulseSubmission = require('../models/YouthPulseSubmission');
 const { runCommunityAiReview } = require('../services/communityAiReview');
 const {
@@ -253,7 +254,7 @@ router.post('/youth-pulse/submissions', createYouthPulseSubmission);
 router.post('/submissions/youth-pulse', createYouthPulseSubmission);
 
 // Phase-1 public submission endpoint (POST /api/community/submissions)
-router.post('/submissions', async (req, res) => {
+router.post('/submissions', validateReporterDocumentReference, async (req, res) => {
   try {
     const b = req.body || {};
     const deskMeta = inferSubmissionDeskMetadata(b);
@@ -324,6 +325,7 @@ router.post('/submissions', async (req, res) => {
       category: normalizedCategory,
       ageGroup: normalizedAgeGroup || undefined,
       reporterAgeGroup: normalizedAgeGroup || undefined,
+      reporterDocumentId: b.reporterDocumentId || null,
       city: city || undefined,
       state: state || undefined,
       country: country || undefined,

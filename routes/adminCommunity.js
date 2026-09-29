@@ -435,7 +435,7 @@ router.get('/submissions/:id', requireQueueAccess, async (req, res) => {
     if (!isObjectIdLike) {
       return res.status(400).json({ success: false, message: 'Invalid submission id format' });
     }
-    const submission = await CommunitySubmission.findById(id).lean();
+    const submission = await CommunitySubmission.findById(id, '+reporterDocumentId').lean();
     if (!submission) {
       return res.status(404).json({ success: false, message: 'Submission not found' });
     }

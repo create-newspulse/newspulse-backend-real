@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { isReporterDocumentId } = require('../services/reporterDocumentStorage');
 
 // Phase 1 Community Reporter simplified semantics are layered on top of
 // the existing (more advanced) schema. We keep the extended fields for
@@ -21,6 +22,12 @@ const CommunitySubmissionSchema = new mongoose.Schema({
   // Phase-1 required; provide safe default for legacy endpoints that don't send it.
   ageGroup: { type: String, required: true, trim: true, default: 'UNKNOWN' },
   reporterAgeGroup: { type: String, required: false, trim: true },
+  reporterDocumentId: {
+    type: String,
+    default: null,
+    select: false,
+    validate: { validator: value => value == null || isReporterDocumentId(value), message: 'Invalid reporter document identifier' },
+  },
   // Location fields (string legacy fields remain optional for back-compat)
   reporterLocation: { type: String, required: false, trim: true },
   city: { type: String, required: false, trim: true },
