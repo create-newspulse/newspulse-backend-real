@@ -112,6 +112,7 @@ data/
 
 # Uploads (runtime/user content)
 uploads/
+private-uploads/
 
 # Local scratch verification scripts
 tmp-verify-*.js

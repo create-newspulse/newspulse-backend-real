@@ -1,5 +1,6 @@
 const express = require('express');
-const { requireAdminAuth } = require('../../middleware/adminAuth');
+const { requireAdminModule } = require('../../middleware/adminAuth');
+const requireAdminAuth = requireAdminModule('communityReporterQueue');
 const { getCommunityReporterQueue } = require('../../controllers/communityReporterController');
 
 const router = express.Router();

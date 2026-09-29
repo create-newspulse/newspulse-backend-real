@@ -3,6 +3,11 @@ const assert = require('node:assert/strict');
 const request = require('supertest');
 const express = require('express');
 
+process.env.NODE_ENV = 'test';
+process.env.JWT_SECRET = require('node:crypto').randomBytes(32).toString('hex');
+process.env.CLOUDINARY_FOLDER = 'newspulse/articles';
+test.mock.method(require('dotenv'), 'config', () => ({ parsed: {} }));
+
 const app = require('../server');
 const cloudinary = require('../lib/cloudinary');
 const { uploadMediaLibraryFile } = require('../lib/mediaLibraryStorage');
@@ -15,8 +20,8 @@ const {
 const { deriveMediaType } = require('../services/mediaLibraryService');
 const adminCompatRoutes = require('../src/routes/adminCompat.routes');
 
-function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
-  return `np.${Buffer.from(`${email}:${Date.now()}`).toString('base64')}`;
+function makeAdminToken(email = 'admin@example.invalid') {
+  return require('jsonwebtoken').sign({ email, role: 'admin', type: 'access' }, process.env.JWT_SECRET, { expiresIn: '5m' });
 }
 
 const VALID_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]);
@@ -26,7 +31,7 @@ const VALID_MP4 = Buffer.from('\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42', 'b
 
 function makeRoleJwt(role) {
   const jwt = require('jsonwebtoken');
-  return jwt.sign({ sub: 'public-user', email: 'public@example.com', role }, process.env.JWT_SECRET || 'dev-secret-change-me');
+  return jwt.sign({ sub: 'public-user', email: 'public@example.invalid', role }, process.env.JWT_SECRET, { expiresIn: '5m' });
 }
 
 test('accepted MIME type constants match required admin media formats', () => {
@@ -205,7 +210,7 @@ test('Media Library upload rejects local disk fallback unless explicitly enabled
 });
 
 test('POST /admin-api/media/upload rejects unsupported MIME types', async () => {
-  const token = makeOpaqueAdminToken();
+  const token = makeAdminToken();
 
   const res = await request(app)
     .post('/admin-api/media/upload')
@@ -221,7 +226,7 @@ test('POST /admin-api/media/upload rejects unsupported MIME types', async () => 
 });
 
 test('POST /admin-api/media/upload rejects MIME/signature mismatches', async () => {
-  const token = makeOpaqueAdminToken();
+  const token = makeAdminToken();
 
   const res = await request(app)
     .post('/admin-api/media/upload')
@@ -236,7 +241,7 @@ test('POST /admin-api/media/upload rejects MIME/signature mismatches', async () 
 });
 
 test('POST /admin-api/media/upload rejects files above current size limit', async () => {
-  const token = makeOpaqueAdminToken();
+  const token = makeAdminToken();
 
   const res = await request(app)
     .post('/admin-api/media/upload')
@@ -277,7 +282,7 @@ test('POST /api/media/upload rejects anonymous access', async () => {
 });
 
 test('POST /api/uploads/cover rejects unsupported MIME types before Cloudinary upload', async () => {
-  const token = makeOpaqueAdminToken();
+  const token = makeAdminToken();
 
   const res = await request(app)
     .post('/api/uploads/cover')
@@ -357,7 +362,7 @@ test('POST /api/uploads/cover uploads article cover through shared Cloudinary se
     };
   };
 
-  const token = makeOpaqueAdminToken();
+  const token = makeAdminToken();
 
   const res = await request(app)
     .post('/api/uploads/cover')
@@ -396,7 +401,7 @@ test('POST /api/uploads rejects anonymous legacy uploads', async () => {
 });
 
 test('POST /api/uploads preserves legacy upload response for authorized callers', async () => {
-  const token = makeOpaqueAdminToken();
+  const token = makeAdminToken();
 
   const res = await request(app)
     .post('/api/uploads')

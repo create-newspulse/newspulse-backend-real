@@ -23,6 +23,21 @@ Server listens on `PORT` (from `.env` in local dev).
 
 If your frontend dev proxy targets `http://localhost:5000`, make sure your backend `PORT` matches it in local dev. If you hit an `EADDRINUSE` error, free the conflicting process or update the proxy target to the actual backend port.
 
+## Reporter ID Storage: Deployment Requirements
+
+Reporter ID uploads are private. New uploads use `COMMUNITY_REPORTER_UPLOAD_DIR` only when it is outside the public `uploads` trees; otherwise they use `private-uploads/community-reporter-ids` under the repository root. Provision persistent private storage with restrictive permissions before deployment. Public intake still works, but document downloads require signed internal authentication and the `communityReporterQueue` module policy.
+
+Set `COMMUNITY_REPORTER_LEGACY_ID_DIRS` to every historical custom ID directory, especially before changing `COMMUNITY_REPORTER_UPLOAD_DIR`. This is a comma-separated list of filesystem paths, not URLs. Absolute paths are allowed; relative paths resolve from the repository root. Whitespace and empty entries are ignored, and equivalent normalized paths are deduplicated. For example:
+
+```dotenv
+COMMUNITY_REPORTER_UPLOAD_DIR=private-uploads/community-reporter-ids
+COMMUNITY_REPORTER_LEGACY_ID_DIRS=uploads/old-reporter-ids,uploads/older-reporter-ids
+```
+
+Use the actual historical directory names, not these illustrative names. Do not list the entire public `uploads` tree or directories containing ordinary public article media. Commas cannot be part of a listed directory name. The default `uploads/community-reporter-ids` directories and the currently configured directory are always protected; previous custom paths cannot be inferred after configuration changes. Listed directories are blocked by the backend static handler and remain available to authorized internal downloads. This configuration does not move, copy, or delete existing documents.
+
+Before Founder-approved production deployment, verify the directory inventory, persistent volume paths, signed-token configuration, and staff module grants. Check that reverse proxies, static hosting, filesystem aliases/symlinks, and CDN caches cannot independently serve existing ID files. Backend filtering cannot revoke already cached/public copies. Verify that the admin document preview uses authenticated requests; bare public image/PDF URLs will no longer work. Perform production verification only with explicit approval; local tests use synthetic documents and mocked services.
+
 ## Media Upload Status (Admin Contract)
 
 The admin article editor relies on a **stable** media upload status endpoint to decide whether Cover Image uploads are available.

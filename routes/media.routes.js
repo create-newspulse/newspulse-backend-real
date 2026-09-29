@@ -24,7 +24,7 @@ const {
   verifyIndexedMediaRecordReadable,
   verifyIndexedMediaRecordVisible,
 } = require('../services/mediaLibraryService');
-const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireAdminAuth, requireAdminModule } = require('../middleware/adminAuth');
 const { optionalAdminAuth } = require('../middleware/optionalAdminAuth');
 const { shouldLog } = require('../lib/logThrottle');
 const { assertAllowedAdminMediaUpload } = require('../lib/mediaUploadValidation');
@@ -230,7 +230,7 @@ router.get('/status', optionalAdminAuth, (req, res) => {
 
 // GET /api/media/items
 // GET /admin-api/media/items
-router.get('/items', requireAdminAuth, (req, res) => {
+router.get('/items', requireAdminModule('media'), (req, res) => {
   return Promise.resolve().then(async () => {
     logLocalMediaRoute('[media.list.local]', {
       phase: 'hit',
@@ -282,7 +282,7 @@ router.get('/items', requireAdminAuth, (req, res) => {
   });
 });
 
-router.post('/bulk-usage-check', requireAdminAuth, async (req, res) => {
+router.post('/bulk-usage-check', requireAdminModule('media'), async (req, res) => {
   try {
     const ids = normalizeMediaIds(req.body?.ids);
     if (!ids.length) return res.status(400).json({ ok: false, success: false, message: 'ids is required', results: [] });
@@ -326,7 +326,7 @@ router.delete('/bulk-permanent-delete', requireAdminAuth, async (req, res) => {
   }
 });
 
-router.get('/items/:itemId', requireAdminAuth, async (req, res) => {
+router.get('/items/:itemId', requireAdminModule('media'), async (req, res) => {
   try {
     logLocalMediaRoute('[media.detail.local]', {
       phase: 'hit',
@@ -378,7 +378,7 @@ router.get('/items/:itemId', requireAdminAuth, async (req, res) => {
   }
 });
 
-router.get('/stats', requireAdminAuth, async (req, res) => {
+router.get('/stats', requireAdminModule('media'), async (req, res) => {
   try {
     logLocalMediaRoute('[media.stats.local]', {
       phase: 'hit',

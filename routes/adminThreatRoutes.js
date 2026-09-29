@@ -6,52 +6,7 @@
 const express = require('express');
 const router = express.Router();
 
-// Enhanced admin/founder auth gate.
-// Accepts:
-// - Bearer access JWT with role founder|admin
-// - Legacy np_admin cookie (treat as admin)
-// Falls back to 401 with consistent message string used elsewhere.
-function requireAdmin(req, res, next) {
-  try {
-    const authHeader = String(req.headers['authorization'] || '');
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice('Bearer '.length).trim() : '';
-    const cookieHeader = req.headers.cookie || '';
-    let legacyAdminEmail = '';
-    if (cookieHeader) {
-      cookieHeader.split(';').forEach(c => {
-        const [k, ...v] = c.trim().split('=');
-        if (k === 'np_admin') legacyAdminEmail = decodeURIComponent(v.join('=') || '');
-      });
-    }
-
-    const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
-    if (token) {
-      try {
-        const payload = require('jsonwebtoken').verify(token, secret);
-        const role = payload.role;
-        if (role === 'admin' || role === 'founder') {
-          req.admin = { id: payload.sub, email: payload.email, role, name: payload.name };
-          return next();
-        }
-        return res.status(403).json({ success: false, code: 'FORBIDDEN' });
-      } catch (e) {
-        // fall through to legacy cookie if present
-        if (!legacyAdminEmail) {
-          return res.status(401).json({ success: false, code: 'UNAUTHORIZED' });
-        }
-      }
-    }
-
-    if (legacyAdminEmail) {
-      req.admin = { id: 'legacy-admin', email: legacyAdminEmail, role: 'admin', name: 'Admin' };
-      return next();
-    }
-
-    return res.status(401).json({ success: false, code: 'UNAUTHORIZED' });
-  } catch (e) {
-    return res.status(401).json({ success: false, code: 'UNAUTHORIZED' });
-  }
-}
+const { requireFounderOrAdmin: requireAdmin } = require('../middleware/adminAuth');
 
 // GET /threat-stats
 router.get('/threat-stats', requireAdmin, async (req, res) => {

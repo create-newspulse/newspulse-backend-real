@@ -191,6 +191,8 @@ router.post('/auth/options', requireFounderAuth, async (req, res) => {
 // POST /api/owner/passkey/auth/verify
 router.post('/auth/verify', requireFounderAuth, async (req, res) => {
   try {
+    const secret = String(process.env.JWT_SECRET || '').trim();
+    if (!secret) return res.status(500).json({ ok: false, code: 'SERVER_ERROR', message: 'Server misconfigured' });
     const { rpID, origin } = getPasskeyConfig();
     const cookies = parseCookies(req.headers.cookie || '');
     const challengeId = String(cookies.owner_passkey_challenge || '').trim();
@@ -237,7 +239,6 @@ router.post('/auth/verify', requireFounderAuth, async (req, res) => {
     );
 
     // Issue 10-minute owner key token as httpOnly secure cookie
-    const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
     const ownerKey = jwt.sign({ sub: OWNER_ID, type: 'owner_key' }, secret, { expiresIn: '10m' });
     res.cookie('owner_key', ownerKey, cookieOpts({ maxAgeMs: 10 * 60 * 1000 }));
 

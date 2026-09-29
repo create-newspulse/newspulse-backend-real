@@ -18,10 +18,11 @@ function requireOwnerKey(req, res, next) {
       return res.status(401).json({ ok: false, success: false, status: 401, code: 'OWNER_KEY_REQUIRED', message: 'Owner key required' });
     }
 
-    const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
+    const secret = String(process.env.JWT_SECRET || '').trim();
+    if (!secret) return res.status(500).json({ ok: false, code: 'SERVER_ERROR', message: 'Server misconfigured' });
     let payload;
     try {
-      payload = jwt.verify(token, secret);
+      payload = jwt.verify(token, secret, { algorithms: ['HS256'] });
     } catch (e) {
       return res.status(401).json({ ok: false, success: false, status: 401, code: 'OWNER_KEY_INVALID', message: 'Owner key invalid or expired' });
     }

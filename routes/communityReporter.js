@@ -1,8 +1,5 @@
 const express = require('express');
-const path = require('path');
-const fs = require('fs');
-const crypto = require('crypto');
-const multer = require('multer');
+const { uploadReporterDocument, downloadReporterDocument } = require('../lib/privateReporterDocuments');
 const mongoose = require('mongoose');
 const CommunitySubmission = require('../models/CommunitySubmission');
 // Re-use legacy models from nested app for reporter + story linkage
@@ -26,7 +23,7 @@ const {
 const { getEffectiveCommunityAccessState } = require('../services/communityAccessToggleService');
 // NOTE: Phase-1 /submit handler is implemented inline below for clarity and
 // to keep it fully aligned with the public form payload.
-const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireAdminAuth, requireAdminModule } = require('../middleware/adminAuth');
 const { optionalReporterPortalAuth, requireReporterPortalAuth } = require('../middleware/reporterPortalAuth');
 
 const router = express.Router();
@@ -107,144 +104,10 @@ function getAuthenticatedReporterOwner(req, fallbackReporterId) {
   };
 }
 
-function _parseMaxUploadBytes() {
-  const rawMb = process.env.COMMUNITY_REPORTER_MAX_UPLOAD_MB;
-  const mb = Number(rawMb);
-  const safeMb = Number.isFinite(mb) && mb > 0 ? mb : 5;
-  return Math.floor(safeMb * 1024 * 1024);
-}
-
-function _resolveUploadDir() {
-  const root = path.join(__dirname, '..');
-  const dirFromEnv = (process.env.COMMUNITY_REPORTER_UPLOAD_DIR || 'uploads/community-reporter-ids').trim();
-  const abs = path.isAbsolute(dirFromEnv) ? dirFromEnv : path.join(root, dirFromEnv);
-  return { root, abs, dirFromEnv };
-}
-
-function _safeOriginalName(name) {
-  const base = path.basename(String(name || '')).replace(/[\r\n\t]/g, ' ').trim();
-  if (!base) return 'file';
-  return base.length > 180 ? base.slice(0, 180) : base;
-}
-
-function _generateFileId() {
-  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
-  return crypto.randomBytes(16).toString('hex');
-}
-
-const _allowedMimeToExt = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'application/pdf': 'pdf',
-};
-
-function _publicUrlOrPathForStoredFile(root, absUploadDir, filename) {
-  const uploadsRoot = path.join(root, 'uploads');
-  const normalizedUploadsRoot = path.normalize(uploadsRoot + path.sep);
-  const normalizedAbsDir = path.normalize(absUploadDir + path.sep);
-
-  if (normalizedAbsDir.startsWith(normalizedUploadsRoot)) {
-    const relDir = path.relative(uploadsRoot, absUploadDir).split(path.sep).filter(Boolean).join('/');
-    const safeFile = encodeURIComponent(path.basename(String(filename || '')));
-    const url = relDir ? `/uploads/${relDir}/${safeFile}` : `/uploads/${safeFile}`;
-    return { url };
-  }
-
-  return { path: path.join(absUploadDir, path.basename(String(filename || ''))) };
-}
-
-const _communityReporterIdUpload = (() => {
-  const { root, abs } = _resolveUploadDir();
-  const maxBytes = _parseMaxUploadBytes();
-
-  const storage = multer.diskStorage({
-    destination: (_req, _file, cb) => {
-      try { fs.mkdirSync(abs, { recursive: true }); } catch (_) {}
-      cb(null, abs);
-    },
-    filename: (req, file, cb) => {
-      const ext = _allowedMimeToExt[String(file.mimetype || '').toLowerCase()] || 'bin';
-      const fileId = req._communityReporterIdFileId || _generateFileId();
-      req._communityReporterIdFileId = fileId;
-      cb(null, `${fileId}.${ext}`);
-    },
-  });
-
-  const upload = multer({
-    storage,
-    limits: { fileSize: maxBytes },
-    fileFilter: (req, file, cb) => {
-      const mime = String(file.mimetype || '').toLowerCase();
-      if (!_allowedMimeToExt[mime]) {
-        const err = new Error('INVALID_FILE_TYPE');
-        err.code = 'INVALID_FILE_TYPE';
-        return cb(err);
-      }
-      // Stash a fileId early so it exists even if we later add other metadata.
-      req._communityReporterIdFileId = req._communityReporterIdFileId || _generateFileId();
-      return cb(null, true);
-    },
-  });
-
-  return {
-    handler(req, res) {
-      upload.single('file')(req, res, (err) => {
-        try {
-          if (err) {
-            const code = err.code || err.message;
-            const meta = {
-              code,
-              message: err.message,
-              email: req.body && req.body.email ? String(req.body.email).slice(0, 120) : undefined,
-              reporterId: req.body && req.body.reporterId ? String(req.body.reporterId).slice(0, 80) : undefined,
-            };
-            console.error('[COMMUNITY_REPORTER][upload-id] failed', meta);
-
-            if (code === 'LIMIT_FILE_SIZE') {
-              return res.status(413).json({ ok: false, message: 'FILE_TOO_LARGE' });
-            }
-            if (code === 'INVALID_FILE_TYPE') {
-              return res.status(400).json({ ok: false, message: 'INVALID_FILE_TYPE' });
-            }
-            if (code === 'LIMIT_UNEXPECTED_FILE') {
-              return res.status(400).json({ ok: false, message: 'UNEXPECTED_FILE_FIELD' });
-            }
-
-            return res.status(400).json({ ok: false, message: 'UPLOAD_FAILED' });
-          }
-
-          if (!req.file) {
-            return res.status(400).json({ ok: false, message: 'FILE_REQUIRED' });
-          }
-
-          const { root, abs: absUploadDir } = _resolveUploadDir();
-          const file = req.file;
-          const fileId = req._communityReporterIdFileId || _generateFileId();
-          const originalName = _safeOriginalName(file.originalname);
-          const location = _publicUrlOrPathForStoredFile(root, absUploadDir, file.filename);
-
-          const payload = {
-            ok: true,
-            fileId,
-            mime: file.mimetype,
-            size: file.size,
-            originalName,
-            ...location,
-          };
-
-          return res.status(201).json(payload);
-        } catch (e) {
-          console.error('[COMMUNITY_REPORTER][upload-id] error', e?.message || e);
-          return res.status(500).json({ ok: false, message: 'UPLOAD_FAILED' });
-        }
-      });
-    },
-  };
-})();
-
 // POST /api/community-reporter/upload-id
 // multipart/form-data: file (required), email (optional), reporterId (optional), note (optional)
-router.post('/upload-id', requireCommunityReporterOpen, (req, res) => _communityReporterIdUpload.handler(req, res));
+router.post('/upload-id', requireCommunityReporterOpen, uploadReporterDocument);
+router.get('/id-documents/:filename', requireAdminModule('communityReporterQueue'), downloadReporterDocument);
 
 // POST /api/public/community-reporter/:id/withdraw
 router.post('/:id/withdraw', requireReporterPortalOpen, requireReporterPortalAuth, async (req, res) => {

@@ -1,5 +1,6 @@
 const express = require('express');
-const { requireAdminAuth, requireFounderOrAdmin } = require('../middleware/adminAuth');
+const { requireAdminAuth, requireAdminModule, requireFounderOrAdmin } = require('../middleware/adminAuth');
+const requireQueueAccess = requireAdminModule('communityReporterQueue');
 const ReporterContact = require('../models/ReporterContact');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const YouthPulseSubmission = require('../models/YouthPulseSubmission');
@@ -60,15 +61,15 @@ const {
 const router = express.Router();
 
 // --- Final contract: contacts + stories (ONLY under /api/admin/community-reporter) ---
-router.get('/contacts/summary', requireAdminAuth, getReporterContactDirectorySummary);
-router.get('/contacts/state-integrity', requireAdminAuth, getReporterContactDirectoryStateIntegrity);
-router.get('/contacts', requireAdminAuth, adminListReporterContacts);
-router.get('/contacts/removed', requireAdminAuth, listHiddenReporterContacts);
-router.get('/contacts/removed-from-directory', requireAdminAuth, listHiddenReporterContacts);
-router.get('/contacts/:id', requireAdminAuth, getReporterContactDetail);
-router.get('/contacts/:id/profile', requireAdminAuth, getReporterContactProfile);
+router.get('/contacts/summary', requireQueueAccess, getReporterContactDirectorySummary);
+router.get('/contacts/state-integrity', requireQueueAccess, getReporterContactDirectoryStateIntegrity);
+router.get('/contacts', requireQueueAccess, adminListReporterContacts);
+router.get('/contacts/removed', requireQueueAccess, listHiddenReporterContacts);
+router.get('/contacts/removed-from-directory', requireQueueAccess, listHiddenReporterContacts);
+router.get('/contacts/:id', requireQueueAccess, getReporterContactDetail);
+router.get('/contacts/:id/profile', requireQueueAccess, getReporterContactProfile);
 router.patch('/contacts/:id', requireFounderOrAdmin, updateReporterContactDirectoryProfile);
-router.get('/contacts/:id/stories', requireAdminAuth, adminListReporterContactStories);
+router.get('/contacts/:id/stories', requireQueueAccess, adminListReporterContactStories);
 router.post('/contacts/backfill', requireFounderOrAdmin, backfillReporterContactsFromSubmissions);
 router.post('/contacts/rebuild', requireFounderOrAdmin, backfillReporterContactsFromSubmissions);
 router.post('/contacts/state-integrity/repair', requireFounderOrAdmin, repairReporterContactDirectoryStateIntegrity);
@@ -444,7 +445,7 @@ async function createSubmissionPublishHandoff(req, res) {
 
 // Placeholder admin community-reporter routes to ensure server boots.
 // Keep responses minimal; real implementations can extend these.
-router.get('/submissions', requireAdminAuth, (req, res) => listAdminSubmissions(req, res));
+router.get('/submissions', requireQueueAccess, (req, res) => listAdminSubmissions(req, res));
 router.patch('/submissions/:id/status', requireAdminAuth, updateSubmissionWorkflowStatus);
 router.post('/submissions/:id/publish-handoff', requireAdminAuth, createSubmissionPublishHandoff);
 
@@ -533,9 +534,9 @@ async function createYouthPulseQueueDraft(req, res) {
   }
 }
 
-router.get('/youth-pulse', requireAdminAuth, listYouthPulseQueue);
-router.get('/youth-pulse/submissions', requireAdminAuth, listYouthPulseQueue);
-router.get('/youth-pulse/submissions/:id', requireAdminAuth, async (req, res) => {
+router.get('/youth-pulse', requireQueueAccess, listYouthPulseQueue);
+router.get('/youth-pulse/submissions', requireQueueAccess, listYouthPulseQueue);
+router.get('/youth-pulse/submissions/:id', requireQueueAccess, async (req, res) => {
   try {
     const submission = await loadYouthPulseQueueSubmission(req.params.id);
     if (!submission) return res.status(404).json({ ok: false, message: 'Youth Pulse submission not found' });
@@ -558,7 +559,7 @@ router.post('/youth-pulse/submissions/:id/create-draft', requireAdminAuth, creat
 router.post('/youth-pulse/submissions/:id/publish-handoff', requireAdminAuth, createYouthPulseQueueDraft);
 
 // GET /admin/community/journalist-applications
-router.get('/journalist-applications', requireAdminAuth, async (req, res) => {
+router.get('/journalist-applications', requireQueueAccess, async (req, res) => {
   try {
     const { status = 'pending' } = req.query || {};
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
@@ -704,7 +705,7 @@ module.exports = router;
 
 // Detail view alias: GET /api/admin/community-reporter/submissions/:id
 // Reuse the same response shape as legacy admin route
-router.get('/submissions/:id', requireAdminAuth, async (req, res) => {
+router.get('/submissions/:id', requireQueueAccess, async (req, res) => {
   try {
     const { id } = req.params || {};
     if (!id) {
@@ -757,7 +758,7 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
     const hardDelete = Boolean(req.query.hard === '1' || req.query.hard === 'true' || req.body?.hard === true || req.body?.hardDelete === true);
 
     try {
-      console.log('[ADMIN_COMMUNITY][decision] id=%s body=%j hard=%s by=%s', id, req.body || {}, hardDelete, (req.admin && (req.admin.email || req.admin.id)) || 'system');
+      console.log('[ADMIN_COMMUNITY][decision]', { hardDelete });
     } catch (_) {}
 
     // Extended synonym lists
@@ -804,7 +805,7 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
     } catch (_) {}
 
     try {
-      console.log('[ADMIN_COMMUNITY][decision][pre-save]', { id: submission._id.toString(), status: submission.status, rejectReason: submission.rejectReason });
+      console.log('[ADMIN_COMMUNITY][decision][pre-save]', { status: submission.status });
       if (typeof submission.save === 'function') {
         await submission.save();
       }
@@ -1135,7 +1136,7 @@ router.post('/submissions/:id/hard-delete', requireAdminAuth, async (req, res) =
 });
 
 // Debug route to inspect raw document quickly (admin only)
-router.get('/submissions/:id/debug', requireAdminAuth, async (req, res) => {
+router.get('/submissions/:id/debug', requireQueueAccess, async (req, res) => {
   try {
     const { id } = req.params || {};
     if (!id || !/^[a-fA-F0-9]{24}$/.test(id)) {

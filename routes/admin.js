@@ -508,7 +508,9 @@ router.post('/logout', async (req, res) => {
       : String(req.cookies?.np_admin_token || req.cookies?.np_token || req.cookies?.token || '').trim();
     if (token) {
       try {
-        const payload = jwt.verify(token, String(process.env.JWT_SECRET || '').trim() || 'dev-secret-change-me');
+        const secret = String(process.env.JWT_SECRET || '').trim();
+        if (!secret) throw new Error('Missing signing key');
+        const payload = jwt.verify(token, secret, { algorithms: ['HS256'] });
         const userId = payload?.sub || payload?.userId || null;
         if (userId) await recordLogoutSession(req, userId, 'logout');
       } catch (_e) {

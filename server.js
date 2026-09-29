@@ -899,7 +899,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // Serve uploaded files publicly
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+app.use('/uploads', require('./lib/privateReporterDocuments').blockPrivateReporterDocuments, express.static(path.join(process.cwd(), 'uploads')));
 
 // Upload routes (must be mounted before global 404)
 const uploadRoutes = require('./routes/uploads.routes');
@@ -1570,20 +1570,10 @@ app.post('/api/auth/login', (req, res) => {
 
 // ✅ Verify Bearer token (must be valid)
 function requireAuth(req, res, next) {
-  try {
-    const auth = req.headers.authorization || '';
-    const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-
-    if (!token) {
-      return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
-    }
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
+  return requireAdminAuth(req, res, () => {
+    req.user = req.admin;
     return next();
-  } catch (e) {
-    return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
-  }
+  });
 }
 
 // ✅ Only admin/founder can access
@@ -1865,7 +1855,7 @@ app.use('/api/community', communityRoutes);
 // Reporter portal: My Community Stories
 app.use('/api/community', communityStoriesRouter);
 // PUBLIC routes – must be before any /api auth-protected mounts
-app.get('/api/community-reporter/queue', getCommunityReporterQueue);
+app.get('/api/community-reporter/queue', require('./middleware/adminAuth').requireAdminModule('communityReporterQueue'), getCommunityReporterQueue);
 app.use('/api/community-reporter', communityReporterRoutes);
 // Public alias to match frontend expectation
 app.use('/api/public/community-reporter', communityReporterRoutes);
@@ -2228,6 +2218,7 @@ if (adminMetaRoutes) {
 // Community Reporter Queue (admin protected)
 app.use('/api/admin', adminCommunityReporterQueueRouter);
 app.use('/admin-api/admin', adminCommunityReporterQueueRouter);
+app.use('/admin-api/api/admin', adminCommunityReporterQueueRouter);
 app.use('/admin', adminCommunityReporterQueueRouter);
 // Security & Lockdown and Alerts routers
 app.use('/api/security', securityRouter);
@@ -2236,7 +2227,7 @@ app.use('/api/alerts', alertsRouter);
 app.use('/api/dashboard', adminThreatRouter);
 app.use('/api/admin', adminThreatRouter);
 // Explicit alias to ensure GET /api/admin/community-reporter/queue returns 200 with auth
-app.get('/api/admin/community-reporter/queue', requireAdminAuth, async (req, res) => {
+app.get('/api/admin/community-reporter/queue', require('./middleware/adminAuth').requireAdminModule('communityReporterQueue'), async (req, res) => {
   try {
     const result = await getCommunityReporterQueue(req, {
       status: (code) => ({ json: (payload) => ({ code, payload }) }),
@@ -2283,7 +2274,7 @@ for (const p of [
   '/admin-api/api/admin/community/contributors',
   '/admin/community/contributors',
 ]) {
-  app.get(p, requireAdminAuth, getReporterDirectory);
+  app.get(p, require('./middleware/adminAuth').requireAdminModule('communityReporterQueue'), getReporterDirectory);
 }
 // Public website settings (safe keys only)
 async function _publicSettingsNoAuth(_req, res) {
@@ -3168,14 +3159,6 @@ app.get('/api/aira/bulletins', (req, res) => {
 // --- Legacy Admin Auth compatibility endpoints for local tests ---
 // In-memory token store (ephemeral; fine for local/dev tests)
 const _issuedTokens = { access: new Set(), refresh: new Set() };
-function _makeToken(prefix) {
-  return `${prefix}.${Buffer.from(String(Date.now())).toString('base64')}`;
-}
-
-function _isTestEnv() {
-  return String(process.env.NODE_ENV || '').toLowerCase() === 'test';
-}
-
 function _issueJwt(payload, expiresIn) {
   const secret = String(process.env.JWT_SECRET || '').trim();
   if (!secret) return null;
@@ -3221,14 +3204,6 @@ async function _adminLoginHandler(req, res) {
           const role = String(user.role || 'founder').toLowerCase();
           const name = user.name || localFounderConfig.fullName || 'Founder';
 
-          if (_isTestEnv()) {
-            const accessToken = _makeToken('access');
-            const refreshToken = _makeToken('refresh');
-            _issuedTokens.access.add(accessToken);
-            _issuedTokens.refresh.add(refreshToken);
-            return res.json({ success: true, accessToken, refreshToken, user: { email: user.email } });
-          }
-
           const accessToken = _issueJwt(
             { sub: String(user._id || 'founder-1'), email: user.email, role, name, tokenVersion: user.tokenVersion || 0, typ: 'access' },
             '15m'
@@ -3263,15 +3238,6 @@ async function _adminLoginHandler(req, res) {
     const matchesFounderEnv = Boolean(founderEnvEmail && founderEnvPass && email === founderEnvEmail && password === founderEnvPass);
     if (!matchesPrimaryEnv && !matchesFounderEnv) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
-    // In tests, keep the historical access.* tokens that /admin-auth/session accepts.
-    if (_isTestEnv()) {
-      const accessToken = _makeToken('access');
-      const refreshToken = _makeToken('refresh');
-      _issuedTokens.access.add(accessToken);
-      _issuedTokens.refresh.add(refreshToken);
-      return res.json({ success: true, accessToken, refreshToken, user: { email } });
-    }
-
     // In production/dev, issue real JWTs so protected endpoints (requireAdminAuth) accept them.
     const role = 'founder';
     const accessToken = _issueJwt(
@@ -3300,30 +3266,10 @@ app.post('/admin/login', _adminLoginHandler);
 app.post('/admin-api/admin/login', _adminLoginHandler);
 app.post('/admin-api/api/admin/login', _adminLoginHandler);
 
-// GET /admin-auth/session -> success true/false based on token; invalid returns success=false
-app.get('/admin-auth/session', (req, res) => {
-  const auth = String(req.headers['authorization'] || '');
-  const token = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
-  if (!token) return res.status(200).json({ success: false, user: null });
-  if (token === 'invalidtoken') return res.status(200).json({ success: false, user: null });
-  const ok = _issuedTokens.access.has(token) || token.startsWith('np.') || token.startsWith('access.');
-  if (!ok) return res.status(200).json({ success: false, user: null });
-  const localFounderConfig = resolveLocalFounderSeedConfig();
-  const email = process.env.FOUNDER_EMAIL || process.env.ADMIN_EMAIL || localFounderConfig.email || 'founder@example.com';
-  return res.json({ success: true, user: { email } });
-});
-
 // POST /admin/refresh -> requires valid refresh token
 app.post('/admin/refresh', (req, res) => {
   const body = req.body || {};
   const rt = String(body.refreshToken || '');
-
-  if (_isTestEnv()) {
-    if (!_issuedTokens.refresh.has(rt)) return res.status(401).json({ success: false, message: 'Invalid refresh token' });
-    const accessToken = _makeToken('access');
-    _issuedTokens.access.add(accessToken);
-    return res.json({ success: true, accessToken });
-  }
 
   // Production/dev: accept a signed JWT refresh token.
   const secret = String(process.env.JWT_SECRET || '').trim();

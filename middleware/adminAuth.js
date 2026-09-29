@@ -1,15 +1,15 @@
 // middleware/adminAuth.js
-// Shared admin/founder JWT + legacy cookie auth.
+// Shared admin/founder signed JWT authentication.
 // Attaches req.admin on success.
 // Responses:
-// 401 -> missing/invalid token & no legacy cookie
+// 401 -> missing/invalid token
 // 403 -> present token but disallowed role
 // Designed to align with other working admin endpoints expecting Authorization Bearer access tokens.
 
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const User = require('../models/User');
-const { shouldLog } = require('../lib/logThrottle');
+const { requireModuleAccess } = require('./requireAuth');
 const {
   effectiveAccountControlRights,
   effectivePermissions,
@@ -25,9 +25,6 @@ const {
   lifecycleStatus,
 } = require('../lib/accountLifecycle');
 
-const OFFICIAL_FOUNDER_EMAIL = 'kiran@newspulse.co.in';
-const FOUNDER_RECOVERY_EMAIL = 'newspulse.team@gmail.com';
-
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
 }
@@ -37,180 +34,19 @@ function parseCookies(header) {
   (header || '').split(';').forEach(c => {
     const [k, ...v] = c.trim().split('=');
     if (!k) return;
-    cookies[k] = decodeURIComponent(v.join('=') || '');
+    try { cookies[k] = decodeURIComponent(v.join('=') || ''); } catch (_) {}
   });
   return cookies;
 }
 
-function getFounderEmails() {
-  const env = String(process.env.NODE_ENV || 'development').toLowerCase();
-  const productionLike = env === 'production' || !!(process.env.RENDER || process.env.RENDER_SERVICE_ID || process.env.RENDER_EXTERNAL_URL);
-  return Array.from(new Set([
-    OFFICIAL_FOUNDER_EMAIL,
-    process.env.FOUNDER_EMAIL,
-    process.env.ADMIN_EMAIL,
-    process.env.FOUNDER_ALT_EMAIL,
-    process.env.ADMIN_ALT_EMAIL,
-    !productionLike ? 'founder@example.com' : null,
-  ].map((value) => String(value || '').trim().toLowerCase()).filter((value) => value && value !== FOUNDER_RECOVERY_EMAIL)));
-}
-
 async function requireAdminAuth(req, res, next) {
-  const authHeader = String(req.headers['authorization'] || '');
-  const token = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice('Bearer '.length).trim() : '';
-  const cookies = parseCookies(req.headers.cookie || '');
-  // Accept multiple legacy cookie keys for backward compatibility with older admin panel builds
-  // Common variants observed in production/admin panel: np_admin, np_admin_email, np_admin_session
-  const legacyEmail = cookies['np_admin'] || cookies['np_admin_email'] || cookies['np_admin_session'] || '';
-  // Optional explicit access cookie (contains email value). Not considered privileged beyond email identification.
-  const accessEmail = cookies['np_admin_access'] || '';
-  // Some builds store an opaque admin token in a cookie; treat it like Bearer if present
-  const cookieToken = cookies['np_admin_token'] || '';
-
-  if (!token && !legacyEmail && !accessEmail && !cookieToken) {
-    console.warn('[ADMIN_AUTH][401][missing]', {
-      path: req.originalUrl,
-      method: req.method,
-      reason: 'no bearer token or recognized admin cookie',
-      origin: req.headers.origin || null,
-    });
-    return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
-  }
-
-  const effectiveToken = token || cookieToken;
-  if (effectiveToken) {
-    try {
-      // Accept opaque admin tokens issued by /admin-auth/login (prefix np.)
-      if (effectiveToken.startsWith('np.')) {
-        const decoded = decodeNpOpaqueToken(effectiveToken);
-        const email = decoded && decoded.email ? decoded.email : 'admin@newspulse.ai';
-        const founderEmails = getFounderEmails();
-        const role = founderEmails.includes(String(email).toLowerCase()) ? 'founder' : 'admin';
-        req.admin = { id: 'opaque', email, role, name: role === 'founder' ? 'Founder' : 'Admin' };
-        return next();
-      }
-      const secret = process.env.JWT_SECRET || 'dev-secret-change-me';
-      const payload = jwt.verify(effectiveToken, secret);
-      const role = normalizeRole(payload && payload.role ? payload.role : '') || String(payload && payload.role ? payload.role : '').toLowerCase();
-      if (!role || (role === 'legal' ? false : !normalizeRole(role))) {
-        console.warn('[ADMIN_AUTH][403][role] disallowed role', {
-          path: req.originalUrl,
-          method: req.method,
-          role,
-        });
-        return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' });
-      }
-      // If DB is ready and token is tied to a user, enforce account status + tokenVersion
-      // and enrich req.admin with persisted permissions/status fields.
-      if (isDbReady()) {
-        const sub = payload && payload.sub ? String(payload.sub) : '';
-        const email = payload && payload.email ? String(payload.email).toLowerCase() : '';
-        let user = null;
-        if (sub && mongoose.isValidObjectId(sub)) {
-          user = await User.findById(sub).lean();
-        }
-        if (!user && email) {
-          user = await User.findOne({ email }).lean();
-        }
-
-        if (user) {
-          const now = new Date();
-          const resolvedStatus = lifecycleStatus(user, now);
-          if (resolvedStatus !== ACCOUNT_STATUS.ACTIVE) {
-            if (resolvedStatus === ACCOUNT_STATUS.EXPIRED) await expireAccount(User, user, { now });
-            return accountLifecycleResponse(res, resolvedStatus);
-          }
-          const accountStatus = String(user.accountStatus || user.status || 'active').toLowerCase();
-          if (user.loginAllowed === false) {
-            return res.status(403).json({ ok: false, success: false, status: 403, code: 'LOGIN_DISABLED', message: 'Login disabled' });
-          }
-          const jwtTv = typeof payload.tokenVersion === 'number' ? payload.tokenVersion : 0;
-          const userTv = typeof user.tokenVersion === 'number' ? user.tokenVersion : 0;
-          if (jwtTv !== userTv) {
-            return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
-          }
-
-          req.admin = {
-            id: payload.sub,
-            email: payload.email,
-            staffId: user.staffId || null,
-            role,
-            name: payload.name,
-            moduleAccess: normalizeModuleAccess(user.moduleAccessOverride),
-            permissions: effectivePermissions(user),
-            specialRights: effectiveSpecialRights(user),
-            taskRights: effectiveTaskRights(user),
-            accountControlRights: effectiveAccountControlRights(user),
-            status: user.status || 'active',
-            accountStatus: user.accountStatus || accountStatus,
-            accountExpiresAt: user.noExpiry === true ? null : (user.accessExpiresAt || null),
-            accessExpiresAt: user.noExpiry === true ? null : (user.accessExpiresAt || null),
-            noExpiry: Boolean(user.noExpiry || user.accessExpiresAt == null),
-            onlineStatus: user.onlineStatus || 'offline',
-            tokenVersion: userTv,
-            lastLoginAt: user.lastLoginAt || null,
-            mustChangePassword: Boolean(user.mustChangePassword || user.forceReset),
-            isFounder: Boolean(user.isFounder || normalizeRole(user.role) === 'founder'),
-            isProtected: Boolean(user.isProtected || normalizeRole(user.role) === 'founder'),
-          };
-          return next();
-        }
-      }
-
-      req.admin = { id: payload.sub, email: payload.email, role, name: payload.name };
-      return next();
-    } catch (e) {
-      if (e && e.message === 'jwt expired') {
-        // Throttle noisy expired token logs (once per 60s per route key)
-        const key = `adminAuth.expired:${req.method}:${req.originalUrl.split('?')[0]}`;
-        if (shouldLog(key, 60_000)) {
-          console.info('[ADMIN_AUTH][token] expired', {
-            path: req.originalUrl,
-            method: req.method,
-            reason: 'access token expired',
-          });
-        }
-      } else {
-        console.warn('[ADMIN_AUTH][token-verify-failed]', {
-          path: req.originalUrl,
-          method: req.method,
-          message: e?.message,
-        });
-      }
-      if (!legacyEmail) {
-        // Provide a machine-readable code to help clients trigger refresh.
-        return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
-      }
-    }
-  }
-
-  if (legacyEmail || accessEmail) {
-    const emailValRaw = (legacyEmail || accessEmail);
-    const emailVal = String(emailValRaw || '').toLowerCase();
-    const founderEmails = getFounderEmails();
-    const isFounder = founderEmails.includes(emailVal);
-    req.admin = {
-      id: isFounder ? 'founder' : 'legacy-admin',
-      email: emailValRaw,
-      role: isFounder ? 'founder' : 'admin',
-      name: isFounder ? 'Founder' : 'Admin',
-    };
-    return next();
-  }
-
-  console.warn('[ADMIN_AUTH][401][fallback]', {
-    path: req.originalUrl,
-    method: req.method,
-    reason: 'no valid token or cookie after checks',
-    origin: req.headers.origin || null,
-  });
-  return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+  return requireAdminJwt(req, res, next);
 }
 
 // Strict admin auth for session probes (e.g. GET /admin-api/admin/me).
-// - Bearer token required (no legacy email cookies)
+// - Signed bearer/cookie token required (no legacy email cookies)
 // - Missing/invalid/expired token => 401 JSON
-// - If DB is connected, user must exist; otherwise treat as not logged in
+// - Persisted accounts enforce lifecycle, token version and current role
 async function requireAdminJwt(req, res, next) {
   try {
     const authHeader = String(req.headers['authorization'] || '');
@@ -220,7 +56,7 @@ async function requireAdminJwt(req, res, next) {
     const cookieToken = cookies['np_admin_token'] || cookies['np_token'] || cookies['token'] || '';
 
     const token = headerToken || cookieToken;
-    if (!token) return res.status(401).json({ ok: false, message: 'Unauthorized' });
+    if (!token) return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
 
     const secret = String(process.env.JWT_SECRET || '').trim();
     if (!secret) {
@@ -230,20 +66,23 @@ async function requireAdminJwt(req, res, next) {
 
     let payload;
     try {
-      payload = jwt.verify(token, secret);
+      payload = jwt.verify(token, secret, { algorithms: ['HS256'] });
+      if ((payload.type && payload.type !== 'access') || (payload.typ && payload.typ !== 'access')) {
+        return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
+      }
     } catch (_e) {
-      return res.status(401).json({ ok: false, message: 'Unauthorized' });
+      return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
     }
 
     const role = payload && payload.role ? String(payload.role) : '';
     const normalizedRole = normalizeRole(role) || String(role).toLowerCase();
     if (!normalizedRole) {
-      return res.status(401).json({ ok: false, message: 'Unauthorized' });
+      return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
     }
 
     // Keep this aligned with requireAdminAuth.
     if (normalizedRole !== 'legal' && !normalizeRole(normalizedRole)) {
-      return res.status(403).json({ ok: false, message: 'Forbidden' });
+      return res.status(403).json({ ok: false, success: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' });
     }
 
     const userId = payload.sub || payload.userId || null;
@@ -269,15 +108,16 @@ async function requireAdminJwt(req, res, next) {
         }
         const accountStatus = String(user.accountStatus || user.status || 'active').toLowerCase();
         if (user.loginAllowed === false) {
-          return res.status(403).json({ ok: false, message: 'Forbidden' });
+          return res.status(403).json({ ok: false, success: false, status: 403, code: 'LOGIN_DISABLED', message: 'Login disabled' });
         }
 
         const jwtTv = typeof payload.tokenVersion === 'number' ? payload.tokenVersion : 0;
         const userTv = typeof user.tokenVersion === 'number' ? user.tokenVersion : 0;
         if (jwtTv !== userTv) {
-          return res.status(401).json({ ok: false, message: 'Unauthorized' });
+          return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
         }
 
+        req._authUserDoc = user;
         req.admin = {
           id: String(user._id),
           email: user.email,
@@ -296,6 +136,8 @@ async function requireAdminJwt(req, res, next) {
           noExpiry: Boolean(user.noExpiry || user.accessExpiresAt == null),
           onlineStatus: user.onlineStatus || 'offline',
           tokenVersion: userTv,
+          lastLoginAt: user.lastLoginAt || null,
+          mustChangePassword: Boolean(user.mustChangePassword || user.forceReset),
           isFounder: Boolean(user.isFounder || normalizeRole(user.role) === 'founder'),
           isProtected: Boolean(user.isProtected || normalizeRole(user.role) === 'founder'),
         };
@@ -312,23 +154,16 @@ async function requireAdminJwt(req, res, next) {
     };
     return next();
   } catch (_e) {
-    return res.status(401).json({ ok: false, message: 'Unauthorized' });
+    return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
   }
 }
 
-function decodeNpOpaqueToken(tok) {
-  // Token format: np.<base64(email:timestamp)>
-  try {
-    const raw = String(tok || '');
-    if (!raw.startsWith('np.')) return null;
-    const b64 = raw.slice('np.'.length);
-    const decoded = Buffer.from(b64, 'base64').toString('utf8');
-    const [email] = decoded.split(':');
-    const cleaned = String(email || '').trim();
-    return cleaned ? { email: cleaned } : null;
-  } catch (_) {
-    return null;
-  }
+function requireAdminModule(moduleKey) {
+  const authorize = requireModuleAccess(moduleKey);
+  return (req, res, next) => requireAdminAuth(req, res, () => {
+    req.user = req.admin;
+    return authorize(req, res, next);
+  });
 }
 
 function requireFounderOnly(req, res, next) {
@@ -367,4 +202,4 @@ function requireFounderOrAdmin(req, res, next) {
   });
 }
 
-module.exports = { requireAdminAuth, requireAdminJwt, requireFounderOnly, requireFounderAuth, requireFounderOrAdmin };
+module.exports = { requireAdminAuth, requireAdminJwt, requireAdminModule, requireFounderOnly, requireFounderAuth, requireFounderOrAdmin };

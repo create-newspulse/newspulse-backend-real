@@ -4,7 +4,7 @@ const multer = require('multer');
 const cloudinaryUploads = require('../lib/cloudinary');
 const { getMediaLibraryProviderStatus } = require('../lib/mediaLibraryStorage');
 const { getIndexedMediaStats, listIndexedMediaRecords } = require('../services/mediaLibraryService');
-const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireAdminAuth, requireAdminModule } = require('../middleware/adminAuth');
 const { assertAllowedArticleCoverUpload } = require('../lib/mediaUploadValidation');
 
 const { shouldLog } = require('../lib/logThrottle');
@@ -62,7 +62,7 @@ function pickCoverFile(req) {
 }
 
 // GET /api/uploads -> media library listing used by admin clients
-router.get('/', (req, res) => {
+router.get('/', requireAdminModule('media'), (req, res) => {
   return Promise.resolve().then(async () => {
     const includeDeleted = String(req.query.includeDeleted || '').trim() === '1' || String(req.query.deleted || '').trim() === '1';
     const providerStatus = getMediaLibraryProviderStatus();

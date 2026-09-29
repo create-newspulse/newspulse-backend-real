@@ -200,13 +200,14 @@ async function requireAuth(req, res, next) {
       return sessionExpired(res);
     }
 
-    const secret = process.env.JWT_SECRET;
+    const secret = String(process.env.JWT_SECRET || '').trim();
     if (!secret) {
       finishMeTiming(req, res, { status: 500, result: 'missing_secret' });
       return res.status(500).json({ ok: false, success: false, status: 500, code: 'SERVER_ERROR', message: 'JWT_SECRET missing' });
     }
 
-    const payload = timeMeStep(req, 'auth.jwt_verify', () => jwt.verify(token, secret));
+    const payload = timeMeStep(req, 'auth.jwt_verify', () => jwt.verify(token, secret, { algorithms: ['HS256'] }));
+    if ((payload.type && payload.type !== 'access') || (payload.typ && payload.typ !== 'access')) return sessionExpired(res);
 
     // If DB is down, fall back to payload-only auth (keeps dev/test from hard failing).
     if (!isDbReady()) {

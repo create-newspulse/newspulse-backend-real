@@ -1,9 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
+process.env.NODE_ENV = 'test';
+process.env.JWT_SECRET = require('node:crypto').randomBytes(32).toString('hex');
+test.mock.method(require('dotenv'), 'config', () => ({ parsed: {} }));
 const app = require('../server');
 
-// Verify /api/admin/community-reporter/queue is protected and returns 200 with legacy cookie
+const signedCookie = 'np_admin_token=' + require('jsonwebtoken').sign({ role: 'founder', type: 'access' }, process.env.JWT_SECRET, { expiresIn: '5m' });
 
 test('GET /api/admin/community-reporter/queue without auth returns 401', async () => {
   const res = await request(app).get('/api/admin/community-reporter/queue?status=pending');
@@ -12,10 +15,10 @@ test('GET /api/admin/community-reporter/queue without auth returns 401', async (
   assert.ok(res.body.ok === false);
 });
 
-test('GET /api/admin/community-reporter/queue with legacy cookie returns 200 JSON', async () => {
+test('GET /api/admin/community-reporter/queue with signed Founder cookie returns 200 JSON', async () => {
   const res = await request(app)
     .get('/api/admin/community-reporter/queue?status=pending')
-    .set('Cookie', 'np_admin=admin@example.com');
+    .set('Cookie', signedCookie);
   assert.equal(res.status, 200);
   assert.equal(typeof res.body, 'object');
   assert.ok(res.body.ok === true);

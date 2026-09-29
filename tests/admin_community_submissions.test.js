@@ -2,7 +2,9 @@ const test = require('node:test');
 const assert = require('node:assert');
 const request = require('supertest');
 process.env.NODE_ENV = 'test';
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
+process.env.JWT_SECRET = require('node:crypto').randomBytes(32).toString('hex');
+test.mock.method(require('dotenv'), 'config', () => ({ parsed: {} }));
+const signedCookie = 'np_admin_token=' + require('jsonwebtoken').sign({ role: 'founder', type: 'access', email: 'founder@example.invalid' }, process.env.JWT_SECRET, { expiresIn: '5m' });
 
 const app = require('../server');
 const CommunitySubmission = require('../models/CommunitySubmission');
@@ -170,7 +172,7 @@ YouthPulseSubmission.countDocuments = async (filter) => {
 test('Admin community submissions pending returns legacy + community docs', async () => {
   const res = await request(app)
     .get('/admin/community-reporter/submissions?source=community&status=pending')
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .set('Cookie', signedCookie)
     .send();
   assert.strictEqual(res.statusCode, 200);
   assert.ok(res.body.success);
@@ -182,7 +184,7 @@ test('Admin community submissions pending returns legacy + community docs', asyn
 test('Admin community submissions source=all returns both docs', async () => {
   const res = await request(app)
     .get('/admin/community-reporter/submissions?source=all&status=pending')
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .set('Cookie', signedCookie)
     .send();
   assert.strictEqual(res.statusCode, 200);
   assert.ok(res.body.success);
@@ -193,7 +195,7 @@ test('Admin community submissions source=all returns both docs', async () => {
 test('Admin Youth Pulse desk route returns only youth pulse submissions with metadata', async () => {
   const res = await request(app)
     .get('/admin/community-reporter/youth-pulse?status=new')
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .set('Cookie', signedCookie)
     .send();
 
   assert.strictEqual(res.statusCode, 200);
@@ -225,7 +227,7 @@ test('Admin community submissions status=rejected returns only rejected set', as
   };
   const res = await request(app)
     .get('/admin/community-reporter/submissions?status=rejected')
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .set('Cookie', signedCookie)
     .send();
   assert.strictEqual(res.statusCode, 200);
   assert.ok(res.body.success);
@@ -261,7 +263,7 @@ test('GET /api/admin/community-reporter/submissions/:id returns submission detai
   // supertest path
   const res = await request(app)
     .get(`/api/admin/community-reporter/submissions/${testId}`)
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .set('Cookie', signedCookie)
     .send();
   assert.strictEqual(res.statusCode, 200);
   assert.ok(res.body.success);
@@ -291,7 +293,7 @@ test('Admin community submissions status=approved returns approved variants', as
   };
   const res = await request(app)
     .get('/admin/community-reporter/submissions?status=approved')
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .set('Cookie', signedCookie)
     .send();
   assert.strictEqual(res.statusCode, 200);
   assert.ok(res.body.success);
@@ -304,7 +306,7 @@ test('Admin community submissions status=approved returns approved variants', as
 test('Admin community submissions unknown status falls back to equality', async () => {
   const res = await request(app)
     .get('/admin/community-reporter/submissions?source=community&status=foobar')
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .set('Cookie', signedCookie)
     .send();
   assert.strictEqual(res.statusCode, 200);
   assert.ok(res.body.success);
@@ -332,7 +334,7 @@ test('POST /api/admin/community-reporter/submissions/:id/decision approve sets A
   });
   const res = await request(app)
     .post(`/api/admin/community-reporter/submissions/${testId}/decision`)
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .set('Cookie', signedCookie)
     .send({ decision: 'approve' });
   assert.strictEqual(res.statusCode, 200);
   assert.ok(res.body.success);
@@ -364,7 +366,7 @@ test('POST /api/admin/community-reporter/submissions/:id/decision reject sets RE
   });
   const res = await request(app)
     .post(`/api/admin/community-reporter/submissions/${testId}/decision`)
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .set('Cookie', signedCookie)
     .send({ decision: 'reject', rejectReason: 'Low quality' });
   assert.strictEqual(res.statusCode, 200);
   assert.ok(res.body.success);
@@ -392,7 +394,7 @@ test('PATCH /api/admin/community-reporter/youth-pulse/submissions/:id/status upd
 
   const res = await request(app)
     .patch(`/api/admin/community-reporter/youth-pulse/submissions/${testId}/status`)
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .set('Cookie', signedCookie)
     .send({ status: 'under_review' });
 
   assert.strictEqual(res.statusCode, 200);
@@ -418,7 +420,7 @@ test('POST /api/admin/community-reporter/submissions/:id/decision invalid return
   });
   const res = await request(app)
     .post(`/api/admin/community-reporter/submissions/${testId}/decision`)
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
+    .set('Cookie', signedCookie)
     .send({ decision: 'not-valid' });
   assert.strictEqual(res.statusCode, 400);
   assert.ok(res.body && res.body.message && /invalid decision/i.test(res.body.message));

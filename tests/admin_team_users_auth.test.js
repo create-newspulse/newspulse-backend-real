@@ -1,10 +1,12 @@
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'team-users-test-secret';
-process.env.FOUNDER_EMAIL = process.env.FOUNDER_EMAIL || 'founder@example.com';
+process.env.NODE_ENV = 'test';
+process.env.JWT_SECRET = require('node:crypto').randomBytes(32).toString('hex');
+process.env.FOUNDER_EMAIL = 'founder@example.invalid';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const jwt = require('jsonwebtoken');
 const request = require('supertest');
+test.mock.method(require('dotenv'), 'config', () => ({ parsed: {} }));
 
 const app = require('../server');
 

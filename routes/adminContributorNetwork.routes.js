@@ -1,6 +1,7 @@
 const express = require('express');
 
-const { requireAdminAuth, requireFounderOrAdmin } = require('../middleware/adminAuth');
+const { requireAdminAuth, requireAdminModule, requireFounderOrAdmin } = require('../middleware/adminAuth');
+const requireQueueAccess = requireAdminModule('communityReporterQueue');
 const {
   queueUnresolved,
   queueMissingEmail,
@@ -20,21 +21,21 @@ const {
 const router = express.Router();
 
 // Queues
-router.get('/queues/unresolved', requireAdminAuth, queueUnresolved);
-router.get('/queues/missing-email', requireAdminAuth, queueMissingEmail);
-router.get('/queues/missing-phone', requireAdminAuth, queueMissingPhone);
-router.get('/queues/missing-location', requireAdminAuth, queueMissingLocation);
+router.get('/queues/unresolved', requireQueueAccess, queueUnresolved);
+router.get('/queues/missing-email', requireQueueAccess, queueMissingEmail);
+router.get('/queues/missing-phone', requireQueueAccess, queueMissingPhone);
+router.get('/queues/missing-location', requireQueueAccess, queueMissingLocation);
 
 // Lists/insights
-router.get('/inactive', requireAdminAuth, listInactiveContributors);
-router.get('/insights/high-contribution-unverified', requireAdminAuth, highContributionUnverified);
-router.get('/insights/top-contributors', requireAdminAuth, topContributors);
+router.get('/inactive', requireQueueAccess, listInactiveContributors);
+router.get('/insights/high-contribution-unverified', requireQueueAccess, highContributionUnverified);
+router.get('/insights/top-contributors', requireQueueAccess, topContributors);
 
 // Reporter Contact Directory (unified reporter-centric dataset)
-router.get('/directory', requireAdminAuth, getReporterDirectory);
+router.get('/directory', requireQueueAccess, getReporterDirectory);
 
 // CRM primitives
-router.get('/profiles/:profileId/debug', requireAdminAuth, profileDebug);
+router.get('/profiles/:profileId/debug', requireQueueAccess, profileDebug);
 router.post('/profiles/:profileId/notes', requireAdminAuth, addNote);
 router.post('/profiles/:profileId/tasks', requireAdminAuth, createTask);
 

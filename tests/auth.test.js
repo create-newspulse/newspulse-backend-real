@@ -2,12 +2,12 @@ const test = require('node:test');
 const assert = require('node:assert');
 const request = require('supertest');
 process.env.NODE_ENV = 'test';
-require('dotenv').config();
+test.mock.method(require('dotenv'), 'config', () => ({ parsed: {} }));
 
 // Ensure founder env set for tests (fallback values)
-process.env.FOUNDER_EMAIL = process.env.FOUNDER_EMAIL || 'founder@example.com';
-process.env.FOUNDER_PASSWORD = process.env.FOUNDER_PASSWORD || 'local-test-credential';
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
+process.env.FOUNDER_EMAIL = process.env.ADMIN_EMAIL = 'founder@example.invalid';
+process.env.FOUNDER_PASSWORD = process.env.ADMIN_PASSWORD = require('node:crypto').randomBytes(24).toString('hex');
+process.env.JWT_SECRET = require('node:crypto').randomBytes(32).toString('hex');
 
 const app = require('../server');
 

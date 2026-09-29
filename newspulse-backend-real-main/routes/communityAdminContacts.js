@@ -1,6 +1,7 @@
 const express = require('express');
 // Use middleware from root workspace (one level above nested project)
-const { requireAdminAuth, requireFounderOrAdmin } = require('../../middleware/adminAuth');
+const { requireAdminModule, requireFounderOrAdmin } = require('../../middleware/adminAuth');
+const requireAdminAuth = requireAdminModule('communityReporterQueue');
 const {
   safeDecodeURIComponent,
   normalizeEmail,

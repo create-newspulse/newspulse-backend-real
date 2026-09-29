@@ -2,7 +2,8 @@ const express = require('express');
 const CommunitySubmission = require('../models/CommunitySubmission');
 const YouthPulseContributor = require('../models/YouthPulseContributor');
 const YouthPulseSubmission = require('../models/YouthPulseSubmission');
-const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireAdminAuth, requireAdminModule } = require('../middleware/adminAuth');
+const requireQueueAccess = requireAdminModule('communityReporterQueue');
 const { getCommunityReporterSettings, updateCommunityReporterSettings } = require('../newspulse-backend-real-main/controllers/communityReporterSettingsController');
 const { adminListReporterContacts } = require('../controllers/communityReporterController');
 const {
@@ -34,7 +35,7 @@ function adminActor(req) {
   return req.admin?.email || req.admin?.id || 'admin';
 }
 
-router.get('/youth-pulse/submissions', requireAdminAuth, async (req, res) => {
+router.get('/youth-pulse/submissions', requireQueueAccess, async (req, res) => {
   try {
     const page = Math.max(parseInt(String(req.query.page || '1'), 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(String(req.query.limit || '20'), 10) || 20, 1), 100);
@@ -60,7 +61,7 @@ router.get('/youth-pulse/submissions', requireAdminAuth, async (req, res) => {
   }
 });
 
-router.get('/youth-pulse/submissions/:id', requireAdminAuth, async (req, res) => {
+router.get('/youth-pulse/submissions/:id', requireQueueAccess, async (req, res) => {
   try {
     const submission = await loadYouthPulseSubmission(req, res);
     if (!submission) return;
@@ -266,7 +267,7 @@ async function createYouthPulseDraftHandler(req, res) {
 router.post('/youth-pulse/submissions/:id/create-draft', requireAdminAuth, createYouthPulseDraftHandler);
 router.post('/youth-pulse/submissions/:id/publish', requireAdminAuth, createYouthPulseDraftHandler);
 
-router.get('/youth-pulse/contributors', requireAdminAuth, async (req, res) => {
+router.get('/youth-pulse/contributors', requireQueueAccess, async (req, res) => {
   try {
     const page = Math.max(parseInt(String(req.query.page || '1'), 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(String(req.query.limit || '20'), 10) || 20, 1), 100);
@@ -292,7 +293,7 @@ router.get('/youth-pulse/contributors', requireAdminAuth, async (req, res) => {
   }
 });
 
-router.get('/youth-pulse/contributors/:id', requireAdminAuth, async (req, res) => {
+router.get('/youth-pulse/contributors/:id', requireQueueAccess, async (req, res) => {
   try {
     const contributor = await YouthPulseContributor.findById(req.params.id).lean();
     if (!contributor) {
@@ -332,9 +333,8 @@ router.patch('/youth-pulse/contributors/:id', requireAdminAuth, async (req, res)
   }
 });
 
-// TODO: protect with admin auth again before production
 // GET /api/admin/community/submissions (admin queue listing)
-router.get('/submissions', async (req, res) => {
+router.get('/submissions', requireQueueAccess, async (req, res) => {
   try {
     const { category } = req.query || {};
     // Map external status values to internal stored statuses; default to pending group.
@@ -424,7 +424,7 @@ router.patch('/submissions/:id/status', requireAdminAuth, async (req, res) => {
 });
 
 // GET /api/admin/community/submissions/:id (detail view)
-router.get('/submissions/:id', requireAdminAuth, async (req, res) => {
+router.get('/submissions/:id', requireQueueAccess, async (req, res) => {
   try {
     const { id } = req.params || {};
     if (!id) {
@@ -453,4 +453,4 @@ router.get('/settings/community-reporter', requireAdminAuth, getCommunityReporte
 router.put('/settings/community-reporter', requireAdminAuth, updateCommunityReporterSettings);
 
 // GET /api/admin/community/reporter-contacts
-router.get('/reporter-contacts', requireAdminAuth, adminListReporterContacts);
+router.get('/reporter-contacts', requireQueueAccess, adminListReporterContacts);
