@@ -1719,6 +1719,10 @@ app.use('/admin-api/api/admin/glossary', adminGlossaryRouter);
 
 // Admin Pulse Dialogue contributor API (Phase 1 backend foundation)
 app.use('/api/admin/pulse-dialogue/contributors', adminPulseDialogueContributorsRouter);
+const adminPulseDialogueCurationRouter = require('./routes/adminPulseDialogueCuration.routes');
+app.use('/api/admin/pulse-dialogue/curation', adminPulseDialogueCurationRouter);
+app.use('/admin-api/admin/pulse-dialogue/curation', adminPulseDialogueCurationRouter);
+app.use('/admin-api/api/admin/pulse-dialogue/curation', adminPulseDialogueCurationRouter);
 app.use('/admin-api/admin/pulse-dialogue/contributors', adminPulseDialogueContributorsRouter);
 app.use('/admin-api/api/admin/pulse-dialogue/contributors', adminPulseDialogueContributorsRouter);
 app.use('/api/admin/pulse-dialogue/series', adminPulseDialogueSeriesRouter);

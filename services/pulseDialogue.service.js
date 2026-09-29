@@ -426,6 +426,7 @@ async function findContributorsByIds(contributorIds, timingContext) {
   const Contributor = require('../models/Contributor');
   const find = () => {
     const query = Contributor.find({ _id: { $in: ids } });
+    if (timingContext?.queryMaxTimeMS && typeof query.maxTimeMS === 'function') query.maxTimeMS(timingContext.queryMaxTimeMS);
     if (query && typeof query.lean === 'function') return query.lean();
     return query;
   };

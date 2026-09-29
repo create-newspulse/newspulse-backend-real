@@ -176,6 +176,7 @@ function queryResult(docs, single = false) {
 }
 
 function stubReads(context, Model, docs) {
+  if (Model === News) require('./helpers/pulseDialogueAggregate').stubAggregate(context, Model, docs);
   context.mock.method(Model, 'find', (filter) => queryResult(docs.filter((doc) => matches(doc, filter))));
   context.mock.method(Model, 'findOne', (filter) => queryResult(docs.filter((doc) => matches(doc, filter)), true));
   context.mock.method(Model, 'countDocuments', async (filter) => docs.filter((doc) => matches(doc, filter)).length);

@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 
 const KINDS = [
+  ...require('./ArticleAnalyticsEvent').DISCOVERY_EVENT_TYPES,
   'view_cooldown',
   'unique_reader_day',
   'engaged_session',

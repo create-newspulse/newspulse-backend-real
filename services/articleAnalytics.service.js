@@ -282,13 +282,14 @@ async function _createDedupKey(doc) {
   }
 }
 
-async function _checkCooldownAndTouch({ kind, articleId, visitorId, sessionId, cooldownMs, ttlMs, now }) {
+async function _checkCooldownAndTouch({ kind, articleId, visitorId, sessionId, cooldownMs, ttlMs, now, maxTimeMS }) {
   const threshold = new Date(now.getTime() - cooldownMs);
   const key = { kind, articleId, visitorId, sessionId, dateKey: '0', milestone: -1 };
 
   const updated = await ArticleAnalyticsDedup.updateOne(
     { ...key, lastAt: { $lt: threshold } },
     { $set: { lastAt: now, expiresAt: new Date(now.getTime() + ttlMs) } },
+    ...(maxTimeMS ? [{ maxTimeMS }] : []),
   );
 
   if (updated && updated.modifiedCount > 0) return true;
@@ -692,6 +693,7 @@ async function ingestHeartbeat(req, payload) {
 }
 
 module.exports = {
+  checkCooldownAndTouch: _checkCooldownAndTouch,
   utcDateKey,
   normalizeSource,
   shouldSkipAnalytics,

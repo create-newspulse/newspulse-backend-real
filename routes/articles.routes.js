@@ -791,6 +791,7 @@ async function _resolveGroupedCategoryNewsItems({
   if (siblingClauses.length) {
     const siblingQuery = {
       ...baseQuery,
+      ...(categoryQuery.category ? { category: categoryQuery.category } : {}),
       $and: [
         ...((baseQuery && Array.isArray(baseQuery.$and)) ? baseQuery.$and : []),
         { $or: siblingClauses },

@@ -22,6 +22,31 @@ function makeFindOneResult(doc) {
   };
 }
 
+test('PublicArticle fallback projection preserves canonical Pulse Series and contributor metadata', async (context) => {
+  const previous = mongoose.connection.readyState;
+  mongoose.connection.readyState = 1;
+  context.after(() => { mongoose.connection.readyState = previous; });
+  context.mock.method(News, 'findOne', () => makeFindOneResult(null));
+  const contributorId = '507f1f77bcf86cd799439096';
+  context.mock.method(require('../models/Contributor'), 'findById', () => makeFindOneResult(null));
+  const pulseDialogue = { contributorId, series: 'Display label', seriesSlug: 'canonical-series',
+    dialogueFormat: 'essay', bylineSnapshot: { name: 'Writer' }, editorNote: 'Existing note' };
+  const doc = { _id: '507f1f77bcf86cd799439097', category: 'pulse-dialogue', language: 'en', originalLang: 'en',
+    title: 'Title', summary: 'Summary', content: 'Body', slug: 'pulse-fallback', pulseDialogue };
+  context.mock.method(PublicArticle, 'findOne', () => {
+    let fields;
+    return { select(value) { fields = new Set(value.split(' ')); return this; },
+      lean: async () => Object.fromEntries(Object.entries(doc).filter(([key]) => key === '_id' || fields.has(key))) };
+  });
+  const response = await request(app).get(`/api/public/news/${doc._id}?lang=en`);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.pulseDialogue.series, 'Display label');
+  assert.equal(response.body.pulseDialogue.seriesSlug, 'canonical-series');
+  assert.equal(response.body.pulseDialogue.contributorId, contributorId);
+  assert.deepEqual(response.body.pulseDialogue.bylineSnapshot, pulseDialogue.bylineSnapshot);
+  assert.equal(response.body.pulseDialogue.editorNote, 'Existing note');
+});
+
 test('GET /api/public/news/:slugOrId resolves PublicArticle _id when News is missing', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const newsOriginals = { findOne: News.findOne };

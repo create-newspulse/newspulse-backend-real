@@ -1,7 +1,6 @@
 const express = require('express');
 const Contributor = require('../models/Contributor');
 const Series = require('../models/PulseDialogueSeries');
-const News = require('../models/News');
 const { slugifyUnicode } = require('../lib/slug');
 const { buildPubliclyVisibleNewsArticleFilter } = require('../services/publicArticleVisibility.service');
 const {
@@ -9,10 +8,10 @@ const {
   isContributorProfilePublic,
   normalizePulseDialogueLanguage,
 } = require('../services/pulseDialogue.service');
-const { resolveGroupedPublicNewsItems, resolvePublicNewsListRequest } = require('../controllers/publicNewsController');
-const { getPublicContentGroupKey } = require('../services/publicCategoryListing.service');
+const { resolvePublicNewsListRequest } = require('../controllers/publicNewsController');
 
 const router = express.Router();
+const discovery = require('../services/pulseDialogueDiscovery.service');
 const contributorVisibility = { profileVisible: true, status: { $in: ['active', 'inactive'] } };
 const contributorSelect = '_id slug canonicalName photo.url publicDesignation shortBio profileVisible status';
 
@@ -39,8 +38,7 @@ function archiveLanguage(req) {
 }
 
 async function storyCount(filter) {
-  const docs = await News.find(filter).select('_id translationKey translationGroupId slugs slug').lean();
-  return new Set(docs.map(getPublicContentGroupKey)).size;
+  return discovery.countStories(filter);
 }
 
 function validSlug(value) {
@@ -51,12 +49,12 @@ function metadata(total, page, limit, count) {
   return { total, count, page, limit, totalPages: Math.ceil(total / limit), hasNextPage: page * limit < total };
 }
 
-function handle(handler) {
+function handle(handler, unavailableStatus = 500) {
   return async (req, res) => {
     res.set('Cache-Control', 'no-store');
     try { return await handler(req, res); }
     catch (error) {
-      return res.status(error.statusCode === 400 ? 400 : 500).json({ ok: false,
+      return res.status(error.statusCode === 400 ? 400 : unavailableStatus).json({ ok: false,
         message: error.statusCode === 400 ? error.message : 'Unable to load Pulse Dialogue' });
     }
   };
@@ -87,18 +85,18 @@ async function seriesSummary(series) {
 async function archive(filter, req) {
   const { page, limit } = pagination(req.query);
   const lang = archiveLanguage(req);
-  const { items, total } = await resolveGroupedPublicNewsItems({
-    baseFilter: filter,
-    categoryFilter: filter,
-    requestedLang: lang,
-    page,
-    limit,
-    sort: { publishedAt: -1, createdAt: -1, _id: -1 },
-    categorySlug: 'pulse-dialogue',
-    normalizedCategoryKey: 'pulse-dialogue',
-  });
-  return { items, lang, ...metadata(total, page, limit, items.length) };
+  return discovery.listArticles({ lang, page, limit, sort: 'newest' }, { filter, includeBody: true });
 }
+
+router.get('/articles', handle(async (req, res) => {
+  const result = await discovery.listArticles(discovery.parseRequest(req.query));
+  return res.json({ ok: true, ...result });
+}, 503));
+
+router.get('/discovery', handle(async (req, res) => {
+  const { lang } = discovery.parseRequest(req.query, { discovery: true });
+  return res.json({ ok: true, ...await require('../services/pulseDialogueCuration.service').getDiscovery(lang) });
+}, 503));
 
 router.get('/contributors', handle(async (req, res) => {
   const { page, limit } = pagination(req.query);

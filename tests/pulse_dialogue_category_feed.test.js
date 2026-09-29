@@ -131,6 +131,29 @@ function makeVisiblePulseDataset() {
   ];
 }
 
+test('category search never selects a translation sibling from another category', async (context) => {
+  const previous = mongoose.connection.readyState;
+  mongoose.connection.readyState = 1;
+  context.after(() => { mongoose.connection.readyState = previous; });
+  const docs = [makePulseDoc('hi'), makePulseDoc('en', { category: 'national', pulseDialogue: undefined })];
+  context.mock.method(News, 'find', query => makeNewsQuery(docs.filter(doc => matchesQuery(doc, query))));
+  context.mock.method(Contributor, 'find', () => makeContributorQuery([]));
+  for (const path of ['/api/public/news', '/api/public/articles']) {
+    const pulse = await request(app).get(`${path}?category=pulse-dialogue&q=body&lang=en`);
+    assert.equal(pulse.status, 200);
+    const pulseItems = pulse.body.items || pulse.body.data.items;
+    assert.equal(pulseItems.length, 1);
+    assert.equal(pulseItems[0].category, 'pulse-dialogue');
+    assert.equal(pulseItems[0].resolvedLang, 'hi');
+    const national = await request(app).get(`${path}?category=national&q=body&lang=hi`);
+    assert.equal(national.status, 200);
+    const nationalItems = national.body.items || national.body.data.items;
+    assert.equal(nationalItems.length, 1);
+    assert.equal(nationalItems[0].category, 'national');
+    assert.equal(nationalItems[0].pulseDialogue, undefined);
+  }
+});
+
 test('GET /api/public/news Pulse category includes public-safe contributor data for EN HI GU without N+1 lookup', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { newsFind: News.find, contributorFind: Contributor.find, contributorFindById: Contributor.findById };

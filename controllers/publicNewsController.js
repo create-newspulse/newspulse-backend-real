@@ -601,6 +601,7 @@ const PUBLIC_DETAIL_SELECT = `${PUBLIC_SELECT} originalLang translations transla
 const PUBLIC_FEED_SELECT = `${PUBLIC_SELECT} originalLang translations translationStatus`;
 
 const PUBLIC_ARTICLE_DETAIL_SELECT = [
+  'pulseDialogue',
   'authorByline.enabled',
   'authorByline.snapshot',
   'title',
@@ -1044,6 +1045,7 @@ async function _resolveGroupedCategoryNewsItems({
   if (siblingClauses.length) {
     const siblingFilter = {
       ...baseFilter,
+      ...(categoryFilter.category ? { category: categoryFilter.category } : {}),
       $and: [
         ...((baseFilter && Array.isArray(baseFilter.$and)) ? baseFilter.$and : []),
         { $or: siblingClauses },
@@ -2001,7 +2003,19 @@ async function getPublicNewsBySlug(req, res) {
   }
 }
 
+function serializePublicNewsGroup(groupDocs, requestedLang) {
+  const picked = _pickBestLocalizedGroupedNewsDoc(groupDocs, requestedLang);
+  if (!picked) return null;
+  const out = withCoverImageUrl(picked.doc);
+  attachLocalizationFields(out, requestedLang);
+  _attachPublicRouteData(out, requestedLang, { fallbackEnabled: true });
+  for (const field of ['translations', 'translationStatus', 'translationError', 'translationNextRetryAt']) delete out[field];
+  return attachMobileResponseFields(out);
+}
+
 module.exports = {
+  PUBLIC_FEED_SELECT,
+  serializePublicNewsGroup,
   resolveGroupedPublicNewsItems: _resolveGroupedCategoryNewsItems,
   resolvePublicNewsListRequest,
   listPublicBreakingNews,
