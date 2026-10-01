@@ -333,6 +333,21 @@ Response shape (unchanged):
 
 ## Broadcast Center (Breaking + Live Updates)
 
+Editorial configuration writes use `services/broadcastCenter.service.js`:
+`patchSettings` merges provided channel fields, synchronizes legacy mirrors and
+triggers the existing Broadcast event/version, public-config version and cache
+invalidation after saving. Canonical `tickerSpeedSeconds` wins over duration
+aliases; durations retain the 12-30 second clamp. Configured `maxItems` remains
+configuration only; existing content query limits are unchanged.
+
+Broadcast-backed ticker settings aliases retain their response envelopes and
+legacy toggle semantics (Breaking mode controls enabled; Live enabled controls
+mode). Omitted fields, including pause-on-hover, are preserved. Canonical Broadcast
+routes keep enabled and mode independent. These aliases still write live settings,
+not a separate draft. `/admin` SiteSetting draft/publish paths and PublicSiteSettings
+remain separate and unchanged during this phase; no cross-store merge or migration
+is performed. Paid Ticker Ads and editorial content workflows are unaffected.
+
 ### Public
 
 #### GET /api/public/broadcast

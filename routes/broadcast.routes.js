@@ -81,12 +81,11 @@ router.get('/settings', requireAdminAuthIfAdminApi, async (req, res, next) => {
 router.patch('/settings', requireAdminAuthIfAdminApi, async (req, res) => {
 	if (!_isAdminApiMount(req)) return res.status(404).json({ ok: false, message: 'Not found' });
 
-	const result = await patchSettings(req.body);
+	const result = await patchSettings(req.body, { reason: 'admin_patch_settings_v2' });
 	if (!result.ok) {
 		return res.status(result.status).json({ ok: false, message: result.message });
 	}
 	const settingsDoc = await getOrCreateSettingsV2();
-	emitBroadcastUpdated({ reason: 'admin_patch_settings_v2' }).catch(() => {});
 	return res.status(200).json({ ok: true, settings: adminSettingsResponse(settingsDoc) });
 });
 
@@ -240,22 +239,21 @@ router.get('/settings', blockLegacyBroadcastEndpointsInProd, requireAdminAuthIfA
 router.put('/settings', blockLegacyBroadcastEndpointsInProd, requireAdminAuthIfAdminApi, async (req, res) => {
 	if (!ensureDbOr503(res)) return;
 
-	const s = await getOrCreateSettings();
 	const body = req.body && typeof req.body === 'object' ? req.body : {};
+	const payload = {};
+	for (const channel of ['breaking', 'live']) {
+		const next = {};
+		if (Object.prototype.hasOwnProperty.call(body, `${channel}Enabled`)) {
+			next.enabled = Boolean(body[`${channel}Enabled`]);
+		}
+		const mode = sanitizeMode(body[`${channel}Mode`]);
+		if (mode) next.mode = mode;
+		if (Object.keys(next).length) payload[channel] = next;
+	}
 
-	if (Object.prototype.hasOwnProperty.call(body, 'breakingEnabled')) s.breakingEnabled = !!body.breakingEnabled;
-	if (Object.prototype.hasOwnProperty.call(body, 'liveEnabled')) s.liveEnabled = !!body.liveEnabled;
-
-	const bm = sanitizeMode(body.breakingMode);
-	const lm = sanitizeMode(body.liveMode);
-	if (bm) s.breakingMode = bm;
-	if (lm) s.liveMode = lm;
-	s.updatedAt = new Date();
-
-	await s.save();
-	emitBroadcastUpdated({ reason: 'admin_put_settings_legacy' }).catch(() => {});
-	invalidateBroadcastCaches().catch(() => {});
-	return res.json(pickSettingsResponse(s));
+	const result = await patchSettings(payload, { reason: 'admin_put_settings_legacy' });
+	if (!result.ok) return res.status(result.status).json({ ok: false, message: result.message });
+	return res.json(pickSettingsResponse(result.settings));
 });
 
 // ADMIN: GET /api/broadcast/items?type=breaking|live&language=en|hi|gu

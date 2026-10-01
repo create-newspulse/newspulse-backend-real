@@ -1,10 +1,16 @@
 const express = require('express');
+const { z } = require('zod');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const SiteSetting = require('../models/SiteSetting');
-const BroadcastSettings = require('../models/BroadcastSettings');
+const {
+  getOrCreateSettings: getOrCreateBroadcastSettings,
+  adminSettingsResponse,
+  computePublicEnabled,
+  patchSettings,
+} = require('../services/broadcastCenter.service');
 const { DEFAULT_TICKERS_CONFIG, TickersConfigSchema } = require('../schemas/tickersConfig.schema');
 const { bumpPublicConfigVersion } = require('../services/publicConfigVersion.service');
 const { invalidateBroadcastCaches } = require('../lib/cache');
@@ -13,6 +19,16 @@ const router = express.Router();
 
 const SCOPE = 'public';
 const KEY = 'tickers';
+const BroadcastTickersPatchSchema = TickersConfigSchema.extend({
+  tickers: TickersConfigSchema.shape.tickers.extend({
+    breaking: TickersConfigSchema.shape.tickers.shape.breaking.extend({
+      tickerSpeedSeconds: z.number().optional(),
+    }),
+    live: TickersConfigSchema.shape.tickers.shape.live.extend({
+      tickerSpeedSeconds: z.number().optional(),
+    }),
+  }).deepPartial(),
+});
 
 function isDbConnected() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -29,32 +45,16 @@ function shouldUseBroadcastAlias(req) {
   return String(req.baseUrl || '') !== '/admin';
 }
 
-async function getOrCreateBroadcastSettings() {
-  let doc = await BroadcastSettings.findOne({});
-  if (!doc) {
-    try {
-      doc = await BroadcastSettings.create({});
-    } catch (_) {
-      doc = await BroadcastSettings.findOne({});
-    }
-  }
-  return doc;
-}
-
 function tickersConfigFromBroadcastSettings(doc) {
   const def = DEFAULT_TICKERS_CONFIG;
+  const settings = adminSettingsResponse(doc);
   const breakingDoc = doc && doc.breaking ? doc.breaking : {};
   const liveDoc = doc && doc.live ? doc.live : {};
   const pauseOnHover = typeof doc?.pauseOnHover === 'boolean' ? doc.pauseOnHover : def.tickers.pauseOnHover;
 
-  let breakingMode = typeof breakingDoc.mode === 'string' ? breakingDoc.mode : undefined;
-  if (!breakingMode) {
-    if (breakingDoc.enabled === false) breakingMode = 'off';
-    else breakingMode = def.tickers.breaking.mode;
-  }
-  if (breakingMode !== 'auto' && breakingMode !== 'force_on' && breakingMode !== 'off') {
-    breakingMode = def.tickers.breaking.mode;
-  }
+  const breakingMode = computePublicEnabled(settings.breaking.enabled, settings.breaking.mode)
+    ? settings.breaking.mode
+    : 'off';
 
   const showOn = Array.isArray(liveDoc.showOn) ? liveDoc.showOn : def.tickers.live.showOn;
 
@@ -62,13 +62,13 @@ function tickersConfigFromBroadcastSettings(doc) {
     tickers: {
       pauseOnHover,
       live: {
-        enabled: typeof liveDoc.enabled === 'boolean' ? liveDoc.enabled : def.tickers.live.enabled,
-        speedSec: typeof liveDoc.speedSec === 'number' ? liveDoc.speedSec : def.tickers.live.speedSec,
+        enabled: computePublicEnabled(settings.live.enabled, settings.live.mode),
+        speedSec: settings.live.speedSec,
         refreshSec:
           typeof liveDoc.refreshIntervalSec === 'number'
             ? liveDoc.refreshIntervalSec
             : def.tickers.live.refreshSec,
-        maxItems: typeof liveDoc.maxItems === 'number' ? liveDoc.maxItems : def.tickers.live.maxItems,
+        maxItems: settings.live.maxItems,
         showOn,
         placeholder: def.tickers.live.placeholder,
       },
@@ -78,12 +78,12 @@ function tickersConfigFromBroadcastSettings(doc) {
           typeof breakingDoc.showWhenEmpty === 'boolean'
             ? breakingDoc.showWhenEmpty
             : def.tickers.breaking.showWhenEmpty,
-        speedSec: typeof breakingDoc.speedSec === 'number' ? breakingDoc.speedSec : def.tickers.breaking.speedSec,
+        speedSec: settings.breaking.speedSec,
         freshnessMinutes:
           typeof breakingDoc.freshnessMin === 'number'
             ? breakingDoc.freshnessMin
             : def.tickers.breaking.freshnessMinutes,
-        maxItems: typeof breakingDoc.maxItems === 'number' ? breakingDoc.maxItems : def.tickers.breaking.maxItems,
+        maxItems: settings.breaking.maxItems,
         placeholder: def.tickers.breaking.placeholder,
       },
     },
@@ -95,44 +95,36 @@ async function saveBroadcastSettingsFromTickersConfig(config) {
   const breaking = config && config.tickers ? config.tickers.breaking : null;
   const pauseOnHover = config && config.tickers ? config.tickers.pauseOnHover : undefined;
 
-  const update = {
-    updatedAt: new Date(),
-  };
+  const update = {};
 
   if (typeof pauseOnHover === 'boolean') {
     update.pauseOnHover = pauseOnHover;
   }
 
   if (breaking) {
-    const breakingModeRaw = String(breaking.mode || '').trim().toLowerCase();
-    const breakingMode =
-      breakingModeRaw === 'off' ? 'force_off'
-      : (breakingModeRaw === 'force_on' ? 'force_on' : 'auto');
-    update.breaking = {
-      enabled: breakingMode !== 'force_off',
-      mode: breakingMode,
-      showWhenEmpty: breaking.showWhenEmpty,
-      speedSec: breaking.speedSec,
-      freshnessMin: breaking.freshnessMinutes,
-      maxItems: breaking.maxItems,
-    };
+    update.breaking = {};
+    // This legacy editor represents the Breaking toggle with mode, not enabled.
+    if (Object.prototype.hasOwnProperty.call(breaking, 'mode')) {
+      update.breaking.mode = breaking.mode === 'off' ? 'force_off' : breaking.mode;
+      update.breaking.enabled = breaking.mode !== 'off';
+    }
+    for (const key of ['tickerSpeedSeconds', 'speedSec', 'maxItems']) {
+      if (Object.prototype.hasOwnProperty.call(breaking, key)) update.breaking[key] = breaking[key];
+    }
   }
 
   if (live) {
-    const liveEnabled = !!live.enabled;
-    update.live = {
-      enabled: liveEnabled,
-      // Preserve existing behavior: when explicitly disabled, force off at the mode layer too.
-      mode: liveEnabled ? 'auto' : 'force_off',
-      speedSec: live.speedSec,
-      refreshIntervalSec: live.refreshSec,
-      maxItems: live.maxItems,
-      showOn: live.showOn,
-    };
+    update.live = {};
+    if (Object.prototype.hasOwnProperty.call(live, 'enabled')) {
+      update.live.enabled = live.enabled;
+      update.live.mode = live.enabled ? 'auto' : 'force_off';
+    }
+    for (const key of ['tickerSpeedSeconds', 'speedSec', 'maxItems']) {
+      if (Object.prototype.hasOwnProperty.call(live, key)) update.live[key] = live[key];
+    }
   }
 
-  const doc = await BroadcastSettings.findOneAndUpdate({}, { $set: update }, { upsert: true, new: true });
-  return doc;
+  return patchSettings(update, { reason: 'admin_tickers_compat_save' });
 }
 
 function getPreviewSecret() {
@@ -250,16 +242,16 @@ router.put(ADMIN_PATHS.base, requireAdminAuth, asyncHandler(async (req, res) => 
       return res.status(400).json({ ok: false, success: false, message: 'Only status=draft is supported for PUT; use /public-settings/tickers/publish to publish' });
     }
 
-    const parsed = TickersConfigSchema.safeParse(req.body);
+    const schema = shouldUseBroadcastAlias(req) ? BroadcastTickersPatchSchema : TickersConfigSchema;
+    const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ ok: false, success: false, message: 'Invalid tickers config', issues: formatZodError(parsed.error) });
     }
 
     if (shouldUseBroadcastAlias(req)) {
-      const doc = await saveBroadcastSettingsFromTickersConfig(parsed.data);
-      bumpPublicConfigVersion().catch(() => {});
-      invalidateBroadcastCaches().catch(() => {});
-      return res.json({ ok: true, success: true, status: 200, setting: broadcastSettingEnvelope('draft', doc).setting, source: 'broadcast' });
+      const result = await saveBroadcastSettingsFromTickersConfig(parsed.data);
+      if (!result.ok) return res.status(result.status).json({ ok: false, success: false, message: result.message });
+      return res.json({ ok: true, success: true, status: 200, setting: broadcastSettingEnvelope('draft', result.settings).setting, source: 'broadcast' });
     }
 
     const admin = req.admin || {};
@@ -286,16 +278,16 @@ router.put(ADMIN_PATHS.draft, requireAdminAuth, asyncHandler(async (req, res) =>
       return res.status(503).json({ ok: false, success: false, status: 503, message: 'Database unavailable' });
     }
 
-    const parsed = TickersConfigSchema.safeParse(req.body);
+    const schema = shouldUseBroadcastAlias(req) ? BroadcastTickersPatchSchema : TickersConfigSchema;
+    const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ ok: false, success: false, message: 'Invalid tickers config', issues: formatZodError(parsed.error) });
     }
 
     if (shouldUseBroadcastAlias(req)) {
-      const doc = await saveBroadcastSettingsFromTickersConfig(parsed.data);
-      bumpPublicConfigVersion().catch(() => {});
-      invalidateBroadcastCaches().catch(() => {});
-      return res.json({ ok: true, success: true, status: 200, setting: broadcastSettingEnvelope('draft', doc).setting, source: 'broadcast' });
+      const result = await saveBroadcastSettingsFromTickersConfig(parsed.data);
+      if (!result.ok) return res.status(result.status).json({ ok: false, success: false, message: result.message });
+      return res.json({ ok: true, success: true, status: 200, setting: broadcastSettingEnvelope('draft', result.settings).setting, source: 'broadcast' });
     }
 
     const admin = req.admin || {};

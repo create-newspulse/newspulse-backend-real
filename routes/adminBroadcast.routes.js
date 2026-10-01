@@ -169,7 +169,7 @@ function _buildConfigPatchPayload(type, body) {
       }
     }
 
-    // Prefer durationSec (requested contract), but accept legacy names too.
+    // Forward aliases without overwriting the canonical input.
     if (Object.prototype.hasOwnProperty.call(next, 'durationSec')) {
       payload[ch].durationSeconds = next.durationSec;
     }
@@ -184,6 +184,9 @@ function _buildConfigPatchPayload(type, body) {
     }
     if (Object.prototype.hasOwnProperty.call(next, 'tickerSpeedSeconds')) {
       payload[ch].tickerSpeedSeconds = next.tickerSpeedSeconds;
+    }
+    for (const key of ['speedSec', 'speedSeconds', 'speed']) {
+      if (Object.prototype.hasOwnProperty.call(next, key)) payload[ch][key] = next[key];
     }
   }
 
@@ -282,7 +285,7 @@ function buildPatchPayload(body) {
       payload[channel].mode = next.mode;
     }
 
-    // Preferred canonical field
+    // Public response shorthand; canonical write precedence is resolved by the service.
     if (Object.prototype.hasOwnProperty.call(next, 'durationSec')) {
       payload[channel].durationSec = next.durationSec;
     }
@@ -315,9 +318,13 @@ function buildPatchPayload(body) {
 
     // Some clients may send speedSeconds
     if (Object.prototype.hasOwnProperty.call(next, 'speedSeconds')) {
-      payload[channel].tickerSpeedSeconds = next.speedSeconds;
+      payload[channel].speedSeconds = next.speedSeconds;
+    }
+    if (Object.prototype.hasOwnProperty.call(next, 'maxItems')) {
+      payload[channel].maxItems = next.maxItems;
     }
   }
+  if (Object.prototype.hasOwnProperty.call(b, 'pauseOnHover')) payload.pauseOnHover = b.pauseOnHover;
   return payload;
 }
 
@@ -430,7 +437,7 @@ router.put('/config', requireAdminAuth, async (req, res) => {
     return fail(res, 400, 'BAD_REQUEST', 'PUT /broadcast/config requires both breaking and live objects');
   }
 
-  const result = await patchSettings(_buildConfigPatchPayload(null, body));
+  const result = await patchSettings(_buildConfigPatchPayload(null, body), { reason: 'admin_config_put' });
   if (!result.ok) {
     const status = typeof result.status === 'number' ? result.status : 400;
     const code = status === 503 ? 'DB_UNAVAILABLE' : 'BAD_REQUEST';
@@ -441,9 +448,6 @@ router.put('/config', requireAdminAuth, async (req, res) => {
   const settings = adminSettingsResponse(doc);
   const itemsBy = await listItemsLast24hByChannel();
 
-  emitBroadcastUpdated({ reason: 'admin_config_put' }).catch(() => {});
-  bumpPublicConfigVersion().catch(() => {});
-  invalidateBroadcastCaches().catch(() => {});
   return res.status(200).json(toAdminConfigContract(settings, itemsBy));
 });
 
@@ -469,7 +473,7 @@ router.patch('/config', requireAdminAuth, async (req, res) => {
     console.log('[broadcast][config][patch]', { keys: touched });
   } catch (_) {}
 
-  const result = await patchSettings(payload);
+  const result = await patchSettings(payload, { reason: 'admin_config_patch_merge' });
   if (!result.ok) {
     const status = typeof result.status === 'number' ? result.status : 400;
     const code = status === 503 ? 'DB_UNAVAILABLE' : 'BAD_REQUEST';
@@ -480,9 +484,6 @@ router.patch('/config', requireAdminAuth, async (req, res) => {
   const settings = adminSettingsResponse(doc);
   const itemsBy = await listItemsLast24hByChannel();
 
-  emitBroadcastUpdated({ reason: 'admin_config_patch_merge' }).catch(() => {});
-  bumpPublicConfigVersion().catch(() => {});
-  invalidateBroadcastCaches().catch(() => {});
   return res.status(200).json(toAdminConfigContract(settings, itemsBy));
 });
 
@@ -502,7 +503,7 @@ router.patch('/config/:type', requireAdminAuth, async (req, res) => {
     console.log('[broadcast][config][patch-one]', { type, keys: _summarizePatchKeys({ [type]: body }) });
   } catch (_) {}
 
-  const result = await patchSettings(payload);
+  const result = await patchSettings(payload, { reason: 'admin_config_patch' });
   if (!result.ok) {
     const status = typeof result.status === 'number' ? result.status : 400;
     const code = status === 503 ? 'DB_UNAVAILABLE' : 'BAD_REQUEST';
@@ -513,9 +514,6 @@ router.patch('/config/:type', requireAdminAuth, async (req, res) => {
   const settings = adminSettingsResponse(doc);
   const itemsBy = await listItemsLast24hByChannel();
 
-  emitBroadcastUpdated({ reason: 'admin_config_patch' }).catch(() => {});
-  bumpPublicConfigVersion().catch(() => {});
-  invalidateBroadcastCaches().catch(() => {});
   return res.status(200).json(toAdminConfigContract(settings, itemsBy));
 });
 
@@ -524,7 +522,7 @@ async function _updateBroadcastSettings(req, res) {
   if (!ensureDbOr503(res)) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
-  const result = await patchSettings(buildPatchPayload(body));
+  const result = await patchSettings(buildPatchPayload(body), { reason: 'admin_settings_save' });
   if (!result.ok) {
     const status = typeof result.status === 'number' ? result.status : 400;
     const code = status === 503 ? 'DB_UNAVAILABLE' : 'BAD_REQUEST';
@@ -542,9 +540,6 @@ async function _updateBroadcastSettings(req, res) {
   const doc = await getOrCreateSettings();
   const settings = adminSettingsResponse(doc);
 
-  emitBroadcastUpdated({ reason: 'admin_settings_save' }).catch(() => {});
-  bumpPublicConfigVersion().catch(() => {});
-  invalidateBroadcastCaches().catch(() => {});
   return ok(res, toAdminContract(settings));
 }
 

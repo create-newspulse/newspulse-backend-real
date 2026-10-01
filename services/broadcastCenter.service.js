@@ -344,48 +344,14 @@ function applySettingsPatch(doc, payload) {
       doc[channel].mode = m;
     }
 
-    if (Object.prototype.hasOwnProperty.call(next, 'speedSec')) {
-      const s = clampScrollDurationSeconds(next.speedSec);
-      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.tickerSpeedSeconds. Expected number` };
-      doc[channel].tickerSpeedSeconds = s;
-      doc[channel].speedSec = s;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(next, 'tickerSpeedSeconds')) {
-      const s = clampScrollDurationSeconds(next.tickerSpeedSeconds);
-      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.tickerSpeedSeconds. Expected number` };
-      doc[channel].tickerSpeedSeconds = s;
-      doc[channel].speedSec = s;
-    }
-
-    // Phase 1 UI alias
-    if (Object.prototype.hasOwnProperty.call(next, 'durationSeconds')) {
-      const s = clampScrollDurationSeconds(next.durationSeconds);
-      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.durationSeconds. Expected number` };
-      doc[channel].tickerSpeedSeconds = s;
-      doc[channel].speedSec = s;
-    }
-
-    // Requested shorthand
-    if (Object.prototype.hasOwnProperty.call(next, 'durationSec')) {
-      const s = clampScrollDurationSeconds(next.durationSec);
-      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.durationSec. Expected number` };
-      doc[channel].tickerSpeedSeconds = s;
-      doc[channel].speedSec = s;
-    }
-
-    // Requested field name from admin panel: scrollDurationSeconds
-    if (Object.prototype.hasOwnProperty.call(next, 'scrollDurationSeconds')) {
-      const s = clampScrollDurationSeconds(next.scrollDurationSeconds);
-      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.scrollDurationSeconds. Expected number` };
-      doc[channel].tickerSpeedSeconds = s;
-      doc[channel].speedSec = s;
-    }
-
-    // Also accept scrollDurationSec
-    if (Object.prototype.hasOwnProperty.call(next, 'scrollDurationSec')) {
-      const s = clampScrollDurationSeconds(next.scrollDurationSec);
-      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.scrollDurationSec. Expected number` };
+    // Canonical input wins; otherwise retain the existing legacy alias precedence.
+    const durationKey = [
+      'tickerSpeedSeconds', 'scrollDurationSec', 'scrollDurationSeconds',
+      'durationSec', 'durationSeconds', 'speedSeconds', 'speedSec', 'speed',
+    ].find((key) => Object.prototype.hasOwnProperty.call(next, key));
+    if (durationKey) {
+      const s = clampScrollDurationSeconds(next[durationKey]);
+      if (s === null) return { ok: false, status: 400, message: `Invalid ${channel}.${durationKey}. Expected number` };
       doc[channel].tickerSpeedSeconds = s;
       doc[channel].speedSec = s;
     }
@@ -404,7 +370,7 @@ function applySettingsPatch(doc, payload) {
   return { ok: true, status: 200 };
 }
 
-async function patchSettings(payload) {
+async function patchSettings(payload, { reason = 'broadcast_settings_save' } = {}) {
   if (!isDbReady()) {
     return { ok: false, status: 503, message: 'Database unavailable' };
   }
@@ -417,6 +383,20 @@ async function patchSettings(payload) {
 
   applyLegacyMirrors(doc);
   await doc.save();
+
+  // Load lazily because SSE snapshots consume this service.
+  const { emitBroadcastUpdated } = require('./broadcastSse.service');
+  const { bumpPublicConfigVersion } = require('./publicConfigVersion.service');
+  const { invalidateBroadcastCaches } = require('../lib/cache');
+  emitBroadcastUpdated({ reason }).catch((error) => {
+    console.warn('[broadcast][config] update notification failed', error?.message || error);
+  });
+  bumpPublicConfigVersion().catch((error) => {
+    console.warn('[broadcast][config] public version update failed', error?.message || error);
+  });
+  invalidateBroadcastCaches().catch((error) => {
+    console.warn('[broadcast][config] cache invalidation failed', error?.message || error);
+  });
 
   return { ok: true, status: 200, settings: doc.toObject({ virtuals: true }) };
 }
