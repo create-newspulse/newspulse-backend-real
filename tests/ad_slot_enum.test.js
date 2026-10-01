@@ -2,6 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const Ad = require('../models/Ad');
+const AdPerformanceDaily = require('../models/AdPerformanceDaily');
+const { AD_SLOTS, normalizeSlot } = require('../lib/ads');
 const {
   AD_SLOT_MEDIA_KIT_METADATA,
   CANONICAL_AD_OPPORTUNITIES,
@@ -21,6 +23,7 @@ const REAL_SLOTS = [
   'BREAKING_SPONSOR',
   'ARTICLE_INLINE',
   'ARTICLE_END',
+  'TOP_HOME_BILLBOARD_970x250',
 ];
 
 const ALL_OPPORTUNITIES = [
@@ -45,6 +48,7 @@ test('Ad model allows known ad slots', () => {
     'HOME_BILLBOARD_970x250',
     'BREAKING_SPONSOR',
     'LIVE_UPDATE_SPONSOR',
+    'TOP_HOME_BILLBOARD_970x250',
   ];
 
   for (const slot of slots) {
@@ -62,13 +66,35 @@ test('Ad model allows known ad slots', () => {
   }
 });
 
-test('canonical ad opportunity registry includes 11 real slots and 17 total opportunities', () => {
+test('canonical ad opportunity registry includes 12 real slots and 18 total opportunities', () => {
   assert.deepEqual(REAL_TOGGLEABLE_AD_SLOTS, REAL_SLOTS);
   assert.deepEqual(CANONICAL_AD_OPPORTUNITIES, ALL_OPPORTUNITIES);
-  assert.equal(CANONICAL_AD_OPPORTUNITIES.length, 17);
+  assert.equal(REAL_TOGGLEABLE_AD_SLOTS.length, 12);
+  assert.equal(CANONICAL_AD_OPPORTUNITIES.length, 18);
   assert.equal(normalizeAdOpportunityKey('SPONSORED_FEATURE_ARTICLE_COMBO'), 'COMBO_CAMPAIGN');
   assert.equal(normalizeAdOpportunityKey('sponsored feature article combo'), 'COMBO_CAMPAIGN');
   assert.equal(normalizeAdOpportunityKey('HOME_RIGHT_RAIL'), 'HOME_RIGHT_300x250');
+});
+
+test('top-home billboard is a distinct display and performance slot, not an alias', () => {
+  const slot = 'TOP_HOME_BILLBOARD_970x250';
+  assert.equal(AD_SLOTS.filter((value) => value === slot).length, 1);
+  assert.equal(normalizeSlot('top home billboard 970x250'), slot);
+  assert.equal(normalizeAdOpportunityKey(slot), slot);
+  assert.equal(normalizeSlot('HOME_RIGHT_RAIL'), 'HOME_RIGHT_300x250');
+  assert.equal(normalizeSlot('HOME_728x90'), 'HOME_728x90');
+  assert.equal(normalizeSlot('HOME_BILLBOARD_970x250'), 'HOME_BILLBOARD_970x250');
+  const ad = new Ad({ slot, imageUrl: 'https://example.com/ad.jpg', isClickable: false });
+  assert.equal(ad.validateSync(), undefined);
+  assert.equal(ad.isActive, false);
+  assert.equal(ad.priority, 0);
+  assert.equal(ad.startAt, null);
+  assert.equal(ad.endAt, null);
+  assert.deepEqual(ad.stats.toObject(), { impressions: 0, clicks: 0 });
+  const daily = new AdPerformanceDaily({ adId: ad._id, dateKey: '2026-10-01', slot });
+  assert.equal(daily.validateSync(), undefined);
+  assert.ok(AdPerformanceDaily.schema.path('slot').enumValues.includes(slot));
+  assert.equal(AD_SLOT_MEDIA_KIT_METADATA[slot], undefined);
 });
 
 test('Ad slot metadata includes Home Left Rail rate-card entry', () => {

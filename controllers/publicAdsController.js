@@ -61,6 +61,7 @@ const DEFAULT_SLOT_ENABLED = {
     HOME_LEFT_300x600: false,
     HOME_RIGHT_300x600: false,
     HOME_BILLBOARD_970x250: false,
+    TOP_HOME_BILLBOARD_970x250: false,
     BREAKING_SPONSOR: false,
     LIVE_UPDATE_SPONSOR: false,
   }),
@@ -92,6 +93,9 @@ function normalizeSlotEnabled(raw) {
   }
   if (typeof raw.HOME_BILLBOARD_970x250 !== 'boolean') {
     out.HOME_BILLBOARD_970x250 = false;
+  }
+  if (typeof raw.TOP_HOME_BILLBOARD_970x250 !== 'boolean') {
+    out.TOP_HOME_BILLBOARD_970x250 = false;
   }
   if (typeof raw.BREAKING_SPONSOR !== 'boolean') {
     out.BREAKING_SPONSOR = false;

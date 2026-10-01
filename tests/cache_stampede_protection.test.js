@@ -137,6 +137,30 @@ function capturePublicNewsCacheKey(t) {
   return key;
 }
 
+test('top-home billboard cache keys and invalidation stay independent of existing home slots', async (t) => {
+  const redis = new FakeRedis();
+  const loaded = loadCache(redis);
+  const { cache } = loaded;
+  t.after(loaded.restore);
+  const slots = ['HOME_728x90', 'HOME_BILLBOARD_970x250', 'TOP_HOME_BILLBOARD_970x250'];
+  const keys = slots.map(cache.buildAdsCacheKey);
+  assert.equal(new Set(keys).size, 3);
+  for (let index = 0; index < keys.length; index += 1) {
+    assert.ok(keys[index].endsWith(`:ads:${slots[index]}`));
+  }
+  for (const target of slots) {
+    for (const key of keys) {
+      await cache.safeSetCacheWithStale(key, { status: 200, body: { key } }, 60);
+    }
+    await cache.invalidateAdsCaches(target);
+    for (let index = 0; index < keys.length; index += 1) {
+      for (const key of [keys[index], cache.buildStaleCacheKey(keys[index])]) {
+        assert.equal((await redis.get(key)) === null, slots[index] === target);
+      }
+    }
+  }
+});
+
 test('canonical latest keys are stable, language-isolated and alone eligible for LKG', (t) => {
   const key = capturePublicNewsCacheKey(t);
   const variant = 'ee2450384fc7c547774c0e16dd90fbb20b1648e155856157ebd274df26231b08';

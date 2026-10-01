@@ -23,6 +23,19 @@ Server listens on `PORT` (from `.env` in local dev).
 
 If your frontend dev proxy targets `http://localhost:5000`, make sure your backend `PORT` matches it in local dev. If you hit an `EADDRINUSE` error, free the conflicting process or update the proxy target to the actual backend port.
 
+## Display-ad slots
+
+The shared registry is `src/constants/adSlots.js`. `TOP_HOME_BILLBOARD_970x250`
+is an independent display product, disabled by default (including missing keys in
+older settings). Authorized Admin settings updates can explicitly enable it.
+Existing ad CRUD, public single-slot responses, schedules, priorities and counters
+apply unchanged; no pixel-dimension validation or Media Kit pricing is added.
+The Public Frontend owns choosing this premium product or `HOME_728x90` for one
+top-home position. Backend does not suppress either slot.
+`HOME_BILLBOARD_970x250` remains a separate placement.
+No manual migration/backfill is required; existing settings read-time
+normalization can persist the new OFF key.
+
 ## Reporter ID Storage: Deployment Requirements
 
 Reporter ID uploads are private. `services/reporterDocumentStorage.js` owns upload, access, and deletion through `uploadReporterDocument`, `getReporterDocumentAccess`, and `deleteReporterDocument`. Its current implementation uses Cloudinary authenticated raw assets (including PNG/JPEG/PDF); no public-media helper or local upload fallback is used. It uses the existing Cloudinary configuration (`CLOUDINARY_URL` or the `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` variables). Missing configuration fails closed. Verify authenticated raw upload/delivery permissions in the intended Cloudinary environment before deployment.

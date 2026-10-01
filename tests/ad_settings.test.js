@@ -37,6 +37,7 @@ test('GET /api/public/ad-settings returns defaults when DB not connected', async
     FOOTER_BANNER_728x90: true,
     BREAKING_SPONSOR: false,
     LIVE_UPDATE_SPONSOR: false,
+    TOP_HOME_BILLBOARD_970x250: false,
   });
 });
 

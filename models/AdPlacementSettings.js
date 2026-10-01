@@ -13,6 +13,7 @@ const AdPlacementSettingsSchema = new mongoose.Schema(
         HOME_LEFT_300x600: false,
         HOME_RIGHT_300x600: false,
         HOME_BILLBOARD_970x250: false,
+        TOP_HOME_BILLBOARD_970x250: false,
         BREAKING_SPONSOR: false,
         LIVE_UPDATE_SPONSOR: false,
       }),

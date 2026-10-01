@@ -122,6 +122,67 @@ function stubLifetimeAggregate(t, docs) {
   }]);
 }
 
+test('top-home billboard lifetime, daily and placement analytics stay separate from other home products', async (t) => {
+  stubReadyState(t, 1);
+  const slots = ['HOME_728x90', 'HOME_BILLBOARD_970x250', 'TOP_HOME_BILLBOARD_970x250'];
+  const ads = slots.map((slot) => ({
+    _id: new mongoose.Types.ObjectId(), slot, isClickable: true, isActive: true,
+    stats: { impressions: 20, clicks: 3 },
+  }));
+  const daily = installDailyUpdateStore(t);
+  stubMethod(t, Ad, 'findByIdAndUpdate', async (id, update) => {
+    const ad = ads.find((item) => String(item._id) === id);
+    assert.deepEqual(update, { $inc: { 'stats.impressions': 1 } });
+    ad.stats.impressions += 1;
+    return ad;
+  });
+  stubMethod(t, Ad, 'findById', (id) => ({
+    select: () => ({ lean: async () => ads.find((item) => String(item._id) === id) }),
+  }));
+  stubMethod(t, Ad, 'updateOne', async (filter, update) => {
+    assert.deepEqual(update, { $inc: { 'stats.clicks': 1 } });
+    ads.find((item) => String(item._id) === filter._id).stats.clicks += 1;
+  });
+  for (let index = 0; index < ads.length; index += 1) {
+    for (let count = 0; count <= index; count += 1) {
+      for (const action of ['impression', 'click']) {
+        const res = await request(publicApp()).post(`/api/public/ads/${ads[index]._id}/${action}`);
+        assert.equal(res.status, 200);
+        assert.deepEqual(res.body, { ok: true });
+      }
+    }
+    assert.deepEqual(ads[index].stats, { impressions: 21 + index, clicks: 4 + index });
+  }
+  const rows = Array.from(daily.rows.values());
+  assert.equal(rows.length, 3);
+  slots.forEach((slot, index) => {
+    const row = rows.find((item) => item.slot === slot);
+    assert.equal(String(row.adId), String(ads[index]._id));
+    assert.equal(row.impressions, index + 1);
+    assert.equal(row.clicks, index + 1);
+  });
+  stubDailyFind(t, rows);
+  stubAdFind(t, ads);
+  const User = require('../models/User');
+  const userId = '507f1f77bcf86cd799439101';
+  stubMethod(t, User, 'findById', () => ({ lean: async () => ({
+    _id: userId, role: 'founder', status: 'active', noExpiry: true, tokenVersion: 0,
+  }) }));
+  const token = require('jsonwebtoken').sign({
+    sub: userId, role: 'founder', type: 'access', tokenVersion: 0,
+  }, process.env.JWT_SECRET, { algorithm: 'HS256', expiresIn: '1h' });
+  const res = await request(analyticsApp()).get('/api/admin/analytics/ad-performance?dateRange=today')
+    .set('Authorization', `Bearer ${token}`);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.source, 'ads_manager');
+  assert.equal(res.body.placements.length, 3);
+  slots.forEach((slot, index) => {
+    assert.deepEqual(res.body.placements.find((row) => row.slot === slot), {
+      slot, impressions: index + 1, clicks: index + 1, ctr: 100, adsWithActivity: 1,
+    });
+  });
+});
+
 test('public impression preserves lifetime counter and increments daily aggregate', async (t) => {
   stubReadyState(t, 1);
   const adId = new mongoose.Types.ObjectId();

@@ -11,6 +11,7 @@ const AD_SLOTS = Object.freeze([
   'FOOTER_BANNER_728x90',
   'BREAKING_SPONSOR',
   'LIVE_UPDATE_SPONSOR',
+  'TOP_HOME_BILLBOARD_970x250',
 ]);
 
 const REAL_TOGGLEABLE_AD_SLOTS = Object.freeze([
@@ -25,6 +26,7 @@ const REAL_TOGGLEABLE_AD_SLOTS = Object.freeze([
   'BREAKING_SPONSOR',
   'ARTICLE_INLINE',
   'ARTICLE_END',
+  'TOP_HOME_BILLBOARD_970x250',
 ]);
 
 const PACKAGE_AD_OPPORTUNITIES = Object.freeze([
