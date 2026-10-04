@@ -10,6 +10,7 @@ const app = require('../server');
 const feedRouter = require('../routes/feed');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
+const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
 
 function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
   return `np.${Buffer.from(`${email}:0`, 'utf8').toString('base64')}`;
@@ -199,6 +200,59 @@ function stubModels({ news = [], publicArticles = [] }) {
     },
   };
 }
+
+test('synchronized Gujarat copies pass the unchanged Regional query without admitting ineligible sources', { concurrency: false }, withDbReady(async () => {
+  const originalUpsert = PublicArticle.findOneAndUpdate;
+  const copies = [];
+  const sources = [
+    { location: { state: 'Gujarat', stateSlug: null } },
+    { location: { state: null, stateSlug: 'gujarat' } },
+    { location: null, state: 'Gujarat' },
+    { location: { state: 'Maharashtra' } },
+    { location: null, title: 'Gujarat headline without geographic metadata', stateTags: ['gujarat'] },
+    { location: { state: 'Gujarat' }, status: 'draft' },
+    { location: { state: 'Gujarat' }, translationStatus: { en: 'pending' } },
+    { location: { state: 'Gujarat' }, translations: { en: { title: 'Incomplete', summary: '', content: '' } } },
+    { location: { state: 'Gujarat' }, category: 'national' },
+  ];
+  PublicArticle.findOneAndUpdate = (_filter, update) => ({
+    lean: async () => {
+      const copy = { _id: update.$set.sourceNewsId, ...update.$setOnInsert, ...update.$set };
+      copies.push(copy);
+      return copy;
+    },
+  });
+  let stubs;
+  try {
+    for (const [index, metadata] of sources.entries()) {
+      await syncPublicArticleFromNews({
+        _id: `507f1f77bcf86cd7994395${String(index).padStart(2, '0')}`,
+        title: 'Source title',
+        description: 'Source summary',
+        content: '<p>Source body</p>',
+        slug: `regional-sync-${index}`,
+        category: 'regional',
+        status: 'published',
+        publishedAt: new Date('2026-01-02T00:00:00.000Z'),
+        language: 'gu',
+        originalLang: 'gu',
+        geo: { state: null, district: null, city: null },
+        translations: { en: { title: 'English translation', summary: 'English summary', content: 'English body' } },
+        translationStatus: { en: 'ready' },
+        ...metadata,
+      });
+    }
+    stubs = stubModels({ publicArticles: copies });
+    const res = await request(app).get('/api/public/regional?state=gujarat&lang=en&limit=30');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.data.items.map((item) => item.slug), ['regional-sync-0', 'regional-sync-1', 'regional-sync-2']);
+    assert.ok(res.body.data.items.every((item) => item.title === 'English translation'));
+    assert.equal(stubs.captured.publicFind[0].category, 'regional');
+  } finally {
+    if (stubs) stubs.restore();
+    PublicArticle.findOneAndUpdate = originalUpsert;
+  }
+}));
 
 test('GET /api/public/news returns published articles and excludes draft, scheduled, rejected, private, archived, deleted, and future-dated records', { concurrency: false }, withDbReady(async () => {
   const future = new Date('2999-01-01T00:00:00.000Z');

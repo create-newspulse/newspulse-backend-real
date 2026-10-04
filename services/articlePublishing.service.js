@@ -376,7 +376,7 @@ async function syncPublicFallbacks(doc, now, logger = console) {
   try {
     if (String(process.env.NODE_ENV || '').toLowerCase() === 'test'
       && (!mongoose.connection || !mongoose.connection.db)) {
-      return;
+      return true;
     }
     const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
     const slugs = new Set();
@@ -398,18 +398,17 @@ async function syncPublicFallbacks(doc, now, logger = console) {
       or.push({ translationKey: groupKey });
       or.push({ translationGroupId: groupKey });
     }
-    if (!or.length) return;
+    if (!or.length) return true;
 
     const geoState = doc?.geo?.state ?? doc?.location?.stateSlug;
     const geoDistrict = doc?.geo?.district ?? doc?.location?.districtSlug;
     const geoCity = doc?.geo?.city ?? doc?.location?.citySlug;
-    await PublicArticle.updateMany(
+    const metadataResult = await PublicArticle.updateMany(
       { $or: or },
       {
         $set: {
           status: 'published',
           deletedAt: null,
-          publishedAt: now,
           category: doc.category,
           ...(geoState ? { 'geo.state': geoState } : {}),
           ...(geoDistrict ? { 'geo.district': geoDistrict } : {}),
@@ -418,8 +417,21 @@ async function syncPublicFallbacks(doc, now, logger = console) {
       },
       { runValidators: false }
     );
-  } catch (error) {
-    logger.warn?.('[articles.publish] public legacy publish fallback failed', error?.message || error);
+    const timestampResult = await PublicArticle.updateMany(
+      { $or: or, publishedAt: null },
+      { $set: { publishedAt: doc.publishedAt || now } },
+      { runValidators: false }
+    );
+    if (metadataResult?.acknowledged === false || timestampResult?.acknowledged === false) {
+      throw new Error('Public article fallback synchronization was not acknowledged');
+    }
+    return true;
+  } catch (_) {
+    logger.warn?.('[articles.publish] public legacy publish fallback failed', {
+      code: 'PUBLIC_ARTICLE_SYNC_FAILED',
+      sourceNewsId: doc?._id ? String(doc._id) : null,
+    });
+    return false;
   }
 }
 
@@ -483,6 +495,7 @@ async function publishCanonicalArticle(articleIdOrDoc, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const previous = readiness.readyDocs.map((doc) => ({ doc, state: snapshotPublishState(doc) }));
   const changedDocs = [];
+  const failedPublicArticleIds = [];
 
   try {
     const bylineSource = readiness.readyDocs.find((doc) => isSourceTranslationDoc(doc)) || sourceDoc;
@@ -523,8 +536,17 @@ async function publishCanonicalArticle(articleIdOrDoc, options = {}) {
     }
 
     for (const doc of readiness.readyDocs) {
-      await syncPublicArticleFromNews(doc, { logger });
-      await syncPublicFallbacks(doc, now, logger);
+      let publicArticle = null;
+      try {
+        publicArticle = await syncPublicArticleFromNews(doc, { logger });
+      } catch (_) {
+        logger.warn?.('[articles.publish] public synchronization failed', {
+          code: 'PUBLIC_ARTICLE_SYNC_FAILED',
+          sourceNewsId: String(doc._id),
+        });
+      }
+      const legacySynced = await syncPublicFallbacks(doc, now, logger);
+      if (!publicArticle?._id || !legacySynced) failedPublicArticleIds.push(String(doc._id));
     }
   } catch (error) {
     await rollbackPublishedDocs(previous);
@@ -570,6 +592,7 @@ async function publishCanonicalArticle(articleIdOrDoc, options = {}) {
     article: sourcePublishedDoc,
     generated,
     changed: changedDocs.length > 0,
+    publicSync: { ok: failedPublicArticleIds.length === 0, failedArticleIds: failedPublicArticleIds },
   };
 }
 

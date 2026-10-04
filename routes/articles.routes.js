@@ -922,11 +922,17 @@ async function logEditorialArticleAudit(req, action, docLike, meta = {}) {
 }
 
 async function syncArticleFromNews(doc) {
+  let publicArticle = null;
   try {
-    return await syncPublicArticleFromNews(doc, { logger: console });
+    publicArticle = await syncPublicArticleFromNews(doc, { logger: console });
   } catch (_) {
-    return null;
+    console.warn('[articles.syncArticleFromNews] failed', {
+      code: 'PUBLIC_ARTICLE_SYNC_FAILED',
+      sourceNewsId: doc?._id ? String(doc._id) : null,
+    });
   }
+  const ok = Boolean(publicArticle?._id);
+  return { ok, failedArticleIds: !ok && doc?._id ? [String(doc._id)] : [] };
 }
 
 function _parseStringListInput(value) {
@@ -1620,6 +1626,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
           article: withCoverImageUrl(publishedObj),
           translationGroupId: publishResult.translationGroupId,
           publishedLanguages: publishResult.publishedLanguages,
+          publicSync: publishResult.publicSync,
         });
       } catch (publishErr) {
         return res.status(publishErr?.statusCode || publishErr?.status || 500).json({
@@ -3107,6 +3114,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         article: withCoverImageUrl(obj),
         translationGroupId: publishResult.translationGroupId,
         publishedLanguages: publishResult.publishedLanguages,
+        publicSync: publishResult.publicSync,
       });
     }
 
@@ -3183,6 +3191,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
     let didMetaOnlyUpdate = false;
     let doc = null;
+    let publicSync;
     try {
       if (isMetaOnlyUpdate && nextStatusNorm !== 'published') {
         // Meta-only status/schedule updates: avoid full schema validation.
@@ -3234,7 +3243,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     // Keep the public Article copy in sync when editing already-published CMS News.
     // (Draft/scheduled edits should not affect the public site.)
     if (doc && [before?.status, doc.status].some((value) => String(value || '').toLowerCase() === 'published')) {
-      await syncArticleFromNews(doc);
+      publicSync = await syncArticleFromNews(doc);
     }
     if (doc && hasArticleContentEdit(update)) {
       await markSiblingTranslationsOutdated(doc, { reason: 'source_updated' }).catch(() => null);
@@ -3349,7 +3358,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     // Meta-only updates are intentionally returned early to avoid later full-document validation.
     if (didMetaOnlyUpdate) {
       if (doc && String(doc.status || '').toLowerCase() === 'published') {
-        await syncArticleFromNews(doc);
+        publicSync = await syncArticleFromNews(doc);
       }
       await syncMasterArticleGroup(doc, {
         reason: 'article_update_meta_only',
@@ -3385,6 +3394,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         message: 'Article updated',
         data: { article: withCoverImageUrl(obj0) },
         article: withCoverImageUrl(obj0),
+        ...(publicSync ? { publicSync } : {}),
       });
     }
 
@@ -3421,7 +3431,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     });
 
     if (String(doc.status || '').toLowerCase() === 'published') {
-      await syncArticleFromNews(doc);
+      publicSync = await syncArticleFromNews(doc);
     }
     await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_UPDATED', doc, {
       before,
@@ -3456,6 +3466,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       message: 'Article updated',
       data: { article: withCoverImageUrl(obj) },
       article: withCoverImageUrl(obj),
+      ...(publicSync ? { publicSync } : {}),
     });
   } catch (err) {
     try { console.error('ArticleUpdate error:', err); } catch (_) {}
@@ -3492,6 +3503,7 @@ async function publishArticleTranslationGroup(req, res) {
       translationGroupId: publishResult.translationGroupId,
       publishedLanguages: publishResult.publishedLanguages,
       articles: publishResult.articles.map((doc) => withCoverImageUrl(doc.toObject ? doc.toObject({ virtuals: true }) : doc)),
+      publicSync: publishResult.publicSync,
     });
   } catch (e) {
     console.error('[articles.publishGroup] error:', e?.message || e);
@@ -3538,6 +3550,7 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
       article: withCoverImageUrl(obj),
       translationGroupId: publishResult.translationGroupId,
       publishedLanguages: publishResult.publishedLanguages,
+      publicSync: publishResult.publicSync,
     });
   } catch (e) {
     if ((e?.statusCode || e?.status) === 409) return res.status(409).json({ ok: false, success: false, status: 409, message: e.message || 'Slug already exists', ...(e?.details || {}) });

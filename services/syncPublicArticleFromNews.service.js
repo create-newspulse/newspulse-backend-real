@@ -193,8 +193,7 @@ function _buildTranslationBucket(src, options = {}) {
   return out;
 }
 
-async function syncPublicArticleFromNews(newsDoc, options = {}) {
-  const logger = options.logger || console;
+async function _syncPublicArticleFromNews(newsDoc) {
   if (!newsDoc) return null;
 
   const categoryNorm = String(newsDoc.category || '').trim().toLowerCase();
@@ -207,6 +206,31 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
   const language = normalizeLang(newsDoc.language || newsDoc.lang) || 'en';
   const originalLang = normalizeLang(newsDoc.originalLang) || language;
   const track = normalizeTrackValue(newsDoc.track);
+  const fromDoc = newsDoc.geo && typeof newsDoc.geo === 'object' && !Array.isArray(newsDoc.geo) ? newsDoc.geo : null;
+  const location = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location) ? newsDoc.location : null;
+  let tags = ensureTrackTag(Array.isArray(newsDoc.tags) ? newsDoc.tags : [], track);
+  const fromTags = _geoFromTags(tags);
+  const geo = {};
+  for (const field of ['state', 'district', 'city']) {
+    if (categoryNorm === 'regional') {
+      const value = _normalizeNullableString(fromDoc?.[field])
+        || _normalizeNullableString(location?.[`${field}Slug`])
+        || _normalizeNullableString(location?.[field])
+        || _normalizeNullableString(newsDoc[field])
+        || fromTags[field];
+      geo[field] = field === 'state'
+        ? (canonicalStateSlugFromAny(value) || value || null)
+        : (value ? slugifyUnicode(value, { maxLength: 80 }) || null : null);
+    } else {
+      geo[field] = fromDoc && fromDoc[field] !== undefined
+        ? fromDoc[field]
+        : ((location && location[`${field}Slug`] !== undefined) ? location[`${field}Slug`] : fromTags[field]);
+    }
+  }
+  if (categoryNorm === 'regional') {
+    if (location) tags = _mergeLocationTags(tags, location);
+    if (Object.values(geo).some(Boolean)) tags = _mergeLocationTags(tags, geo);
+  }
   const coverUrl =
     (newsDoc.coverImage && typeof newsDoc.coverImage === 'object' && !Array.isArray(newsDoc.coverImage) ? newsDoc.coverImage.url : null) ||
     newsDoc.coverImageUrl ||
@@ -279,7 +303,7 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     status: normalizedStatus || (isPublished ? 'published' : 'draft'),
     scheduledAt: newsDoc.scheduledAt || null,
     publishAt: newsDoc.publishAt || null,
-    publishedAt: isPublished ? (newsDoc.publishedAt || new Date()) : null,
+    publishedAt: isPublished ? newsDoc.publishedAt : null,
     deletedAt: normalizedStatus === 'deleted' ? (newsDoc.deletedAt || new Date()) : null,
     spotlightEnabled: Boolean(newsDoc.spotlightEnabled),
     spotlightPinned: Boolean(newsDoc.spotlightPinned),
@@ -308,66 +332,18 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
           canonicalUrl: _safeStr(newsDoc.seo.canonicalUrl) || null,
         }
       : { metaTitle: null, metaDescription: null, canonicalUrl: null },
-    tags: (() => {
-      const baseTags = ensureTrackTag(Array.isArray(newsDoc.tags) ? newsDoc.tags : [], track);
-      const loc = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location)
-        ? {
-            state: newsDoc.location.state ?? null,
-            district: newsDoc.location.district ?? null,
-            city: newsDoc.location.city ?? null,
-          }
-        : null;
-
-      // For regional stories, always ensure stable location tags exist.
-      // These tags are additive and should not affect /latest, homepage modules, or category feeds.
-      if (categoryNorm === 'regional' && loc) {
-        return _mergeLocationTags(baseTags, loc);
-      }
-      return baseTags;
-    })(),
-
-    geo: (() => {
-      const fromDoc = newsDoc.geo && typeof newsDoc.geo === 'object' && !Array.isArray(newsDoc.geo) ? newsDoc.geo : null;
-      const mergedTags = Array.isArray(newsDoc.tags) ? newsDoc.tags : [];
-      const fromTags = _geoFromTags(mergedTags);
-      const fromLocation = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location) ? newsDoc.location : null;
-
-      const pickedState = fromDoc && fromDoc.state !== undefined
-        ? fromDoc.state
-        : ((fromLocation && fromLocation.stateSlug !== undefined) ? fromLocation.stateSlug : fromTags.state);
-      const canonState = categoryNorm === 'regional' ? canonicalStateSlugFromAny(pickedState) : null;
-
-      return {
-        state: canonState || pickedState || null,
-        district: fromDoc && fromDoc.district !== undefined
-          ? fromDoc.district
-          : ((fromLocation && fromLocation.districtSlug !== undefined) ? fromLocation.districtSlug : fromTags.district),
-        city: fromDoc && fromDoc.city !== undefined
-          ? fromDoc.city
-          : ((fromLocation && fromLocation.citySlug !== undefined) ? fromLocation.citySlug : fromTags.city),
-      };
-    })(),
+    tags,
+    geo,
 
     // Human-readable location fields (legacy). Only normalize for regional.
     ...(categoryNorm === 'regional'
       ? {
-          state: (() => {
-            const loc = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location) ? newsDoc.location : null;
-            const s = loc && loc.state ? String(loc.state).trim() : '';
-            if (s) return s;
-            const canon = canonicalStateSlugFromAny(loc?.stateSlug) || canonicalStateSlugFromAny(newsDoc?.geo?.state);
-            return canon ? (STATE_SLUG_TO_DISPLAY.get(canon) || null) : null;
-          })(),
-          district: (() => {
-            const loc = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location) ? newsDoc.location : null;
-            const s = loc && loc.district ? String(loc.district).trim() : '';
-            return s || null;
-          })(),
-          city: (() => {
-            const loc = newsDoc.location && typeof newsDoc.location === 'object' && !Array.isArray(newsDoc.location) ? newsDoc.location : null;
-            const s = loc && loc.city ? String(loc.city).trim() : '';
-            return s || null;
-          })(),
+          state: _normalizeNullableString(location?.state)
+            || _normalizeNullableString(newsDoc.state)
+            || STATE_SLUG_TO_DISPLAY.get(canonicalStateSlugFromAny(geo.state))
+            || null,
+          district: _normalizeNullableString(location?.district) || _normalizeNullableString(newsDoc.district) || geo.district || null,
+          city: _normalizeNullableString(location?.city) || _normalizeNullableString(newsDoc.city) || geo.city || null,
         }
       : {}),
 
@@ -376,28 +352,35 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     stateNames: Array.isArray(newsDoc.stateNames) ? newsDoc.stateNames : [],
   };
 
+  const or = [{ slug }];
+  if (newsDoc._id) or.unshift({ sourceNewsId: newsDoc._id });
+
+  const updateOp = { $set: update };
+  if (!pulseDialogue) updateOp.$unset = { pulseDialogue: '' };
+  if (isPublished && !newsDoc.publishedAt) {
+    // A legacy source without a timestamp must not republish an existing copy.
+    delete update.publishedAt;
+    updateOp.$setOnInsert = { publishedAt: new Date() };
+  }
+
+  return PublicArticle.findOneAndUpdate(
+    { $or: or },
+    updateOp,
+    { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
+  ).lean();
+}
+
+async function syncPublicArticleFromNews(newsDoc, options = {}) {
+  const logger = options.logger || console;
   try {
-    const or = [{ slug }];
-    if (newsDoc._id) or.unshift({ sourceNewsId: newsDoc._id });
-
-    const updateOp = { $set: update };
-    if (!pulseDialogue) updateOp.$unset = { pulseDialogue: '' };
-
-    const saved = await PublicArticle.findOneAndUpdate(
-      { $or: or },
-      updateOp,
-      { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
-    ).lean();
-
+    const saved = await _syncPublicArticleFromNews(newsDoc);
+    if (!saved?._id) throw new Error('Public article synchronization produced no record');
     return saved;
-  } catch (e) {
-    try {
-      logger.warn?.('[articles.syncPublicArticleFromNews] failed', {
-        slug,
-        message: e?.message || String(e),
-        errorName: e?.name,
-      });
-    } catch (_) {}
+  } catch (_) {
+    logger.warn?.('[articles.syncPublicArticleFromNews] failed', {
+      code: 'PUBLIC_ARTICLE_SYNC_FAILED',
+      sourceNewsId: newsDoc?._id ? String(newsDoc._id) : null,
+    });
     return null;
   }
 }

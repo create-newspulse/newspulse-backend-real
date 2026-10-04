@@ -235,6 +235,14 @@ Unknown routes return:
 
 ## Public Articles API (Frontend Feeds)
 
+### CMS to Public Article Synchronization
+
+The existing sync upserts by `sourceNewsId` or the stored slug; it does not merge language siblings by translation-group ID. Regional copies normalize only explicit source geography (geo, location, legacy location fields, or location tags). Null geo defaults do not hide available location metadata. No state is inferred from article text, and Regional feed eligibility, sorting, limits, and deduplication are unchanged.
+
+Synchronization preserves existing copy IDs, creation timestamps, and analytics fields. It copies the source publication timestamp when present; a legacy source without one only supplies a timestamp on insertion. The legacy publication fallback fills missing publication timestamps without resetting existing dates.
+
+Publish responses and edits that synchronize a public copy include an additive `publicSync: { ok, failedArticleIds }` result. The IDs identify CMS News records whose public sync is incomplete. A false result does not roll back an already-saved News record or change the existing success status; callers must not interpret it as completed public synchronization. Sync warnings contain a fixed error code and source ID, not raw database errors. Existing cache invalidation and translation workflows remain in place. This behavior does not repair historical production copies automatically.
+
 ### Optional Author Byline
 
 Normal newsroom articles may carry `authorByline` in both CMS `News` and public `Article` records. It is absent on legacy records; `enabled` defaults to false when supplied. No migration is required. Authors do not need a User account, staff role, or ID. This is independent of Pulse Dialogue contributors and community Reporter Portal profiles.

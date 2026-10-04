@@ -166,6 +166,65 @@ function installDraftRestoreStubs(t, draftDoc, options = {}) {
   return { doc, findOneQueries, get saveCount() { return saveCount; } };
 }
 
+test('editing a published Regional child syncs content and media without changing publication identity', async (t) => {
+  const mongoose = require('mongoose');
+  const user = { _id: '507f1f77bcf86cd799439712', email: 'founder@example.com', role: 'founder', status: 'active', noExpiry: true };
+  const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState');
+  Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, writable: true, value: 1 });
+  t.after(() => {
+    if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor);
+    else delete mongoose.connection.readyState;
+  });
+  t.mock.method(require('../models/User'), 'findById', () => ({ lean: async () => user }));
+  t.mock.method(require('../models/PublicSiteSettings'), 'getOrCreate', async () => ({ published: { languageTheme: { languages: ['en', 'hi', 'gu'] } } }));
+  const token = require('jsonwebtoken').sign({ sub: user._id, role: user.role, type: 'access' }, process.env.JWT_SECRET, { expiresIn: '5m' });
+  const before = makeArticle({
+    category: 'regional',
+    status: 'published',
+    publishedAt: new Date('2026-01-02T00:00:00.000Z'),
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    views: 31,
+    sourceLanguage: 'gu',
+    location: { state: 'Gujarat' },
+    geo: { state: null, district: null, city: null },
+  });
+  installUpdateStubs(t, before);
+  let current = { ...before };
+  News.findByIdAndUpdate = async (_id, op) => {
+    current = { ...current, ...op.$set };
+    return makeDoc(current);
+  };
+  const copies = [];
+  PublicArticle.findOneAndUpdate = (filter, update) => {
+    copies.push({ filter, update });
+    return { lean: async () => ({ _id: '507f1f77bcf86cd799439b11', ...update.$set }) };
+  };
+  const res = await request(app).put(`/api/articles/${before._id}`).auth(token, { type: 'bearer' }).send({
+    title: 'Edited Regional title',
+    content: '<p>Edited Regional body</p>',
+    coverImage: { url: 'https://images.example/child-edited.jpg', publicId: 'child-edited', alt: 'Child image' },
+    seo: { metaTitle: 'Edited Regional SEO' },
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.publicSync, { ok: true, failedArticleIds: [] });
+  assert.equal(res.body.article._id, before._id);
+  assert.equal(res.body.article.slug, before.slug);
+  assert.equal(res.body.article.views, before.views);
+  assert.equal(res.body.article.publishedAt, before.publishedAt.toISOString());
+  assert.ok(copies.length > 0);
+  const copy = copies.at(-1).update.$set;
+  assert.equal(copy.sourceNewsId, before._id);
+  assert.equal(copy.status, 'published');
+  assert.deepEqual(copy.publishedAt, before.publishedAt);
+  assert.equal(copy.title, 'Edited Regional title');
+  assert.equal(copy.coverImage.publicId, 'child-edited');
+  assert.equal(copy.seo.metaTitle, 'Edited Regional SEO');
+  assert.equal(copy.geo.state, 'gujarat');
+  assert.equal(copy.sourceArticleId, before.sourceArticleId);
+  assert.equal(copy.translationKey, before.translationKey);
+  assert.equal(Object.hasOwn(copy, 'views'), false);
+});
+
 test('PUT existing EN article edit does not perform a false duplicate-language conflict', async (t) => {
   const id = '507f1f77bcf86cd799439a11';
   const stubs = installUpdateStubs(t, makeArticle({ _id: id, language: 'en', lang: 'en', originalLang: 'en' }));

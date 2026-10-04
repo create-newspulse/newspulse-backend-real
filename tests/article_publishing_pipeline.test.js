@@ -10,6 +10,7 @@ const News = require('../models/News');
 const PublicArticle = require('../models/Article');
 const PushHistory = require('../models/PushHistory');
 const { publishCanonicalArticle } = require('../services/articlePublishing.service');
+const mongoose = require('mongoose');
 
 function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
   const b64 = Buffer.from(`${email}:0`, 'utf8').toString('base64');
@@ -422,6 +423,104 @@ test('canonical publish reuses existing cached translations and retry does not d
   assert.equal(docs.filter((doc) => doc.language === 'hi').length, 1);
   assert.equal(docs.filter((doc) => doc.language === 'gu').length, 1);
   assert.equal(state.pushHistory.length, 1);
+});
+
+for (const mode of ['throw', 'null']) {
+  test(`canonical publication exposes ${mode} public sync failure without rolling back saved News`, async (t) => {
+    const publishedAt = new Date('2026-01-02T00:00:00.000Z');
+    const docs = ['en', 'hi', 'gu'].map((lang) => makeLanguageDoc(lang, { status: 'published', publishedAt, views: 17 }));
+    const ids = docs.map((doc) => doc._id);
+    const state = installPublishMocks(t, docs);
+    const warnings = [];
+    PublicArticle.findOneAndUpdate = () => ({
+      lean: async () => {
+        if (mode === 'throw') throw new Error('private-sync-error-must-not-leak');
+        return null;
+      },
+    });
+    const result = await publishCanonicalArticle(docs[0], { logger: { warn: (...args) => warnings.push(args) } });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.publicSync, { ok: false, failedArticleIds: ids });
+    assert.equal(JSON.stringify(result).includes('private-sync-error'), false);
+    assert.equal(JSON.stringify(warnings).includes('private-sync-error'), false);
+    assert.ok(warnings.length > 0);
+    assert.equal(state.getFetchCalls(), 0);
+    assert.deepEqual(docs.map((doc) => doc._id), ids);
+    for (const doc of docs) {
+      assert.equal(doc.status, 'published');
+      assert.deepEqual(doc.publishedAt, publishedAt);
+      assert.equal(doc.views, 17);
+    }
+  });
+}
+
+test('legacy publication fallback only fills missing publication dates and never upserts groups', async (t) => {
+  const docs = ['en', 'hi', 'gu'].map((lang, index) => makeLanguageDoc(lang, {
+    status: 'published',
+    publishedAt: new Date(`2026-01-0${index + 2}T00:00:00.000Z`),
+  }));
+  const state = installPublishMocks(t, docs);
+  const previousDb = mongoose.connection.db;
+  mongoose.connection.db = {};
+  t.after(() => { mongoose.connection.db = previousDb; });
+  const writes = [];
+  PublicArticle.updateMany = async (filter, update, options) => {
+    writes.push({ filter, update, options });
+    return { acknowledged: true, matchedCount: 1, modifiedCount: 0 };
+  };
+  const result = await publishCanonicalArticle(docs[0]);
+  assert.deepEqual(result.publicSync, { ok: true, failedArticleIds: [] });
+  assert.equal(writes.length, 6);
+  for (const write of writes) {
+    assert.notEqual(write.options.upsert, true);
+    if (Object.hasOwn(write.update.$set, 'publishedAt')) {
+      assert.equal(write.filter.publishedAt, null);
+    }
+  }
+  assert.deepEqual(state.publicCopies.map((copy) => copy.publishedAt), docs.map((doc) => doc.publishedAt));
+});
+
+for (const mode of ['throw', 'unacknowledged']) {
+  test(`legacy public sync ${mode} is visible even when the canonical upsert succeeds`, async (t) => {
+    const docs = ['en', 'hi', 'gu'].map((lang) => makeLanguageDoc(lang));
+    installPublishMocks(t, docs);
+    const previousDb = mongoose.connection.db;
+    mongoose.connection.db = {};
+    t.after(() => { mongoose.connection.db = previousDb; });
+    const warnings = [];
+    PublicArticle.updateMany = async () => {
+      if (mode === 'throw') throw new Error('private-legacy-error-must-not-leak');
+      return { acknowledged: false };
+    };
+    const result = await publishCanonicalArticle(docs[0], { logger: { warn: (...args) => warnings.push(args) } });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.publicSync, { ok: false, failedArticleIds: docs.map((doc) => doc._id) });
+    assert.ok(docs.every((doc) => doc.status === 'published'));
+    assert.equal(warnings.length, 3);
+    assert.equal(JSON.stringify(warnings).includes('private-legacy-error'), false);
+  });
+}
+
+test('publish API exposes an incomplete public sync without leaking the driver error', async (t) => {
+  const docs = ['en', 'hi', 'gu'].map((lang) => makeLanguageDoc(lang));
+  installPublishMocks(t, docs);
+  const user = { _id: '507f1f77bcf86cd799439711', email: 'founder@example.com', role: 'founder', status: 'active', noExpiry: true };
+  const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState');
+  Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, writable: true, value: 1 });
+  t.after(() => {
+    if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor);
+    else delete mongoose.connection.readyState;
+  });
+  t.mock.method(require('../models/User'), 'findById', () => ({ lean: async () => user }));
+  const token = require('jsonwebtoken').sign({ sub: user._id, role: user.role, type: 'access' }, process.env.JWT_SECRET, { expiresIn: '5m' });
+  PublicArticle.findOneAndUpdate = () => ({ lean: async () => null });
+  const res = await request(app)
+    .post(`/api/articles/${docs[0]._id}/publish`)
+    .auth(token, { type: 'bearer' })
+    .send();
+  assert.equal(res.status, 200);
+  assert.equal(res.body.article.status, 'published');
+  assert.deepEqual(res.body.publicSync, { ok: false, failedArticleIds: docs.map((doc) => doc._id) });
 });
 
 test('canonical publish failure leaves article drafts unpublished', async (t) => {
