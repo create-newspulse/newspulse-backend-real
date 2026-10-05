@@ -339,6 +339,82 @@ Response shape (unchanged):
 { "items": [], "page": 1, "limit": 30, "total": 0, "totalPages": 1 }
 ```
 
+### One-time published Regional Public Article resynchronization
+
+[scripts/resyncPublishedRegionalArticles.js](scripts/resyncPublishedRegionalArticles.js)
+repairs missing or stale Public Article copies through the existing
+[canonical sync service](services/syncPublicArticleFromNews.service.js).
+It is not publication, a scheduler, or a migration of CMS News records.
+Founder review and approval are required before any production execution.
+
+Configure `REGIONAL_RESYNC_MONGODB_URI` and `REGIONAL_RESYNC_DBNAME` securely in
+the operator's environment, explicitly selecting the approved target. The utility
+does **not** load `.env` or fall back to `MONGODB_URI` / `MONGO_URI`. Existing local
+database isolation checks still apply, including refusal of the live database
+named `test` from local development. Rehearse against an isolated development
+copy; do not switch environment modes just to bypass these checks. Prefer
+read-only database credentials for dry runs. No URI or database error details
+are printed.
+
+From the repository root (PowerShell):
+
+```powershell
+# Default: read-only dry run.
+node scripts\resyncPublishedRegionalArticles.js
+
+# Optional single-record inspection; replace the placeholder with a News ObjectId.
+node scripts\resyncPublishedRegionalArticles.js --news-id=<24-hex-news-id>
+
+# WRITES: only after Founder approval and review of the dry-run results.
+node scripts\resyncPublishedRegionalArticles.js --apply --news-id=<24-hex-news-id>
+node scripts\resyncPublishedRegionalArticles.js --apply
+```
+
+Only exact `category: "regional"` / `status: "published"` News candidates are
+scanned. Deleted markers, sponsored/Breaking flags, and Community Reporter /
+Youth Pulse provenance are excluded. Each source is reread through the existing
+public News visibility filter, so private, locked, embargoed, future-dated, or
+no-longer-published records are skipped too. `--news-id` never widens this scope.
+Existing `sourceArticleId` ancestry is checked read-only for protected provenance,
+including translated children whose own sponsorship/Reporter markers are missing.
+Parent content, geography, translations, and media are not used as replacements
+for the child's fields. Missing, malformed, or cyclic parent links fail closed.
+Unknown arguments, malformed IDs, and `--apply --dry-run` fail closed.
+
+Dry runs do not call synchronization or any write method; automatic collection
+and index creation are disabled. Apply mode processes one source at a time using
+the canonical upsert only, matching source linkage or the existing slug. It
+does not save News, publish, generate translations, invoke translation providers,
+or replace child-language media with a parent's media. Geography is copied and
+normalized only by the canonical service from existing source metadata; no
+Gujarat inference is added. No new cache system or invalidation workflow is added.
+
+Preflight rejects ambiguous copies, source-slug collisions, noncanonical/missing
+slugs, missing historical publication dates, incompatible language metadata, and
+conflicting existing IDs/linkage, publication dates, slugs, or canonical URLs.
+Existing non-Regional, unpublished, deleted, or sponsored public copies are not
+republished or overwritten. These cases require separate Founder investigation,
+not guessed repairs. Existing Public Article IDs, creation dates, views, and
+analytics are left to the canonical in-place update; missing copies receive a
+new Public Article ID/creation timestamp, but use the source's historical
+`publishedAt`. CMS IDs, dates, views, media, and translation records are never
+written.
+
+The summary reports mode, scanned/eligible counts, present/missing public copies,
+would-create/would-update (or created/updated), skipped, failed, and completion.
+Present/missing counts cover successfully inspected eligible sources;
+would-update means a safe canonical sync candidate, not a computed field diff.
+Failures print only News ObjectIds and fixed safe codes. One record failure does
+not stop later records; a scan/connection failure marks the run incomplete.
+Any record or run failure exits nonzero. No match for `--news-id` yields zero
+scanned records. Repeated runs reuse existing copies and preserve historical
+identity.
+
+Run a single operator instance. Although apply rereads each source immediately
+before sync and rejects detected changes, this is not a transaction spanning
+News and Article. Coordinate an approved maintenance window without concurrent
+editing, publishing, slug changes, or deletion of the targeted records.
+
 ## Broadcast Center (Breaking + Live Updates)
 
 Editorial configuration writes use `services/broadcastCenter.service.js`:
