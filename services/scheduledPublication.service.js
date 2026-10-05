@@ -3,53 +3,6 @@ const { prepareAuthorBylineForPublication } = require('./authorByline.service');
 
 const { publishCanonicalArticle } = require('./articlePublishing.service');
 const { isPulseDialogueArticle } = require('./pulseDialogue.service');
-const { isOrdinaryPublication } = require('./ordinaryPublicNews.service');
-const { syncPublicArticleFromNews } = require('./syncPublicArticleFromNews.service');
-const { invalidateArticleCaches } = require('../lib/cache');
-const { buildPubliclyVisibleNewsArticleFilter } = require('./publicArticleVisibility.service');
-
-async function synchronizeOrdinaryPublication(doc, News, stats, options, logger) {
-  if (!isOrdinaryPublication(doc)) return;
-  let current = doc;
-  const seen = new Set([String(doc._id)]);
-  try {
-    while (current.sourceArticleId && String(current.sourceArticleId) !== String(current._id)) {
-      const parentId = String(current.sourceArticleId);
-      if (seen.has(parentId)) throw new Error('Translation source cycle');
-      seen.add(parentId);
-      current = await News.findById(parentId);
-      if (!current) throw new Error('Missing translation source');
-      if (!isOrdinaryPublication(current)) return;
-    }
-    const visibleCount = await News.countDocuments({
-      $and: [
-        buildPubliclyVisibleNewsArticleFilter({ now: options.now || new Date() }),
-        { _id: { $in: [...seen] } },
-      ],
-    });
-    if (visibleCount !== seen.size) throw new Error('News source is not publicly visible');
-    stats.publicSync = stats.publicSync || { ok: true, synced: 0, failedArticleIds: [] };
-    const sync = options.syncPublicArticleFromNews || syncPublicArticleFromNews;
-    const saved = await sync(doc, { logger, preserveExistingProjection: true });
-    if (!saved?._id) throw new Error('Public projection synchronization failed');
-    stats.publicSync.synced += 1;
-  } catch (_) {
-    stats.publicSync = stats.publicSync || { ok: true, synced: 0, failedArticleIds: [] };
-    stats.publicSync.ok = false;
-    stats.publicSync.failedArticleIds.push(String(doc._id));
-    logger.warn?.('[scheduler] ordinary public synchronization failed', {
-      code: 'PUBLIC_ARTICLE_SYNC_FAILED', sourceNewsId: String(doc._id),
-    });
-  }
-  try {
-    const invalidate = options.invalidateArticleCaches || invalidateArticleCaches;
-    await invalidate();
-  } catch (_) {
-    logger.warn?.('[scheduler] ordinary cache invalidation failed', {
-      code: 'PUBLIC_CACHE_INVALIDATION_FAILED', sourceNewsId: String(doc._id),
-    });
-  }
-}
 
 async function publishDueScheduledArticles(options = {}) {
   const logger = options.logger || console;
@@ -135,8 +88,6 @@ async function publishDueScheduledArticles(options = {}) {
         await News.updateOne({ _id: bylineSource._id }, { $set: { authorByline: doc.authorByline } });
       }
       if (doc.authorByline !== undefined) authorSnapshots.set(bylineGroup, doc.authorByline);
-
-      await synchronizeOrdinaryPublication(doc, News, stats, options, logger);
 
       try {
         await PushHistory.create({

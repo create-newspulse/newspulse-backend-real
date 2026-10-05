@@ -95,7 +95,6 @@ function makeFindQuery(items) {
   let rows = Array.isArray(items) ? [...items] : [];
   return {
     select() { return this; },
-    maxTimeMS() { return this; },
     sort() { return this; },
     skip(n) { rows = rows.slice(n); return this; },
     limit(n) { rows = rows.slice(0, n); return this; },
@@ -202,10 +201,9 @@ function stubModels({ news = [], publicArticles = [] }) {
   };
 }
 
-test('canonical Regional News remains visible independently of copy metadata without admitting ineligible sources', { concurrency: false }, withDbReady(async () => {
+test('synchronized Gujarat copies pass the unchanged Regional query without admitting ineligible sources', { concurrency: false }, withDbReady(async () => {
   const originalUpsert = PublicArticle.findOneAndUpdate;
   const copies = [];
-  const news = [];
   const sources = [
     { location: { state: 'Gujarat', stateSlug: null } },
     { location: { state: null, stateSlug: 'gujarat' } },
@@ -227,7 +225,7 @@ test('canonical Regional News remains visible independently of copy metadata wit
   let stubs;
   try {
     for (const [index, metadata] of sources.entries()) {
-      const source = {
+      await syncPublicArticleFromNews({
         _id: `507f1f77bcf86cd7994395${String(index).padStart(2, '0')}`,
         title: 'Source title',
         description: 'Source summary',
@@ -242,19 +240,14 @@ test('canonical Regional News remains visible independently of copy metadata wit
         translations: { en: { title: 'English translation', summary: 'English summary', content: 'English body' } },
         translationStatus: { en: 'ready' },
         ...metadata,
-      };
-      news.push(source);
-      await syncPublicArticleFromNews(source);
+      });
     }
-    stubs = stubModels({ news, publicArticles: copies });
+    stubs = stubModels({ publicArticles: copies });
     const res = await request(app).get('/api/public/regional?state=gujarat&lang=en&limit=30');
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body.data.items.map((item) => item.slug), [
-      'regional-sync-0', 'regional-sync-1', 'regional-sync-2', 'regional-sync-3', 'regional-sync-4',
-    ]);
+    assert.deepEqual(res.body.data.items.map((item) => item.slug), ['regional-sync-0', 'regional-sync-1', 'regional-sync-2']);
     assert.ok(res.body.data.items.every((item) => item.title === 'English translation'));
-    assert.equal(matchesFilter(news[0], stubs.captured.newsFind[0]), true);
-    assert.equal(matchesFilter(news[8], stubs.captured.newsFind[0]), false);
+    assert.equal(stubs.captured.publicFind[0].category, 'regional');
   } finally {
     if (stubs) stubs.restore();
     PublicArticle.findOneAndUpdate = originalUpsert;
@@ -338,24 +331,19 @@ test('category feeds do not expose a draft multilingual sibling from a published
     const res = await request(app).get('/api/public/news?category=science-technology&lang=hi&limit=10');
 
     assert.equal(res.status, 200);
-    assert.equal(res.body.items.length, 0);
-    assert.ok(JSON.stringify(stubs.captured.newsFind[0]).includes('published'));
-    assert.ok(JSON.stringify(stubs.captured.newsFind.at(-1)).includes('published'));
+    assert.equal(res.body.items.length, 1);
+    assert.equal(res.body.items[0].title, 'English group story');
+    assert.notEqual(res.body.items[0].title, 'Hindi draft group story');
+    assert.equal(stubs.captured.newsFind.every((filter) => filter.$and.some((clause) => clause.status === 'published')), true);
   } finally {
     stubs.restore();
   }
 }));
 
-test('ordinary story feeds honor News visibility while public detail still excludes draft copies', { concurrency: false }, withDbReady(async () => {
+test('public Article category and story feeds exclude draft public copies at query time', { concurrency: false }, withDbReady(async () => {
   const visible = publishedPublicArticle({ title: 'Visible story', slug: 'visible-story' });
   const hiddenDraft = publishedPublicArticle({ title: 'Draft story', slug: 'draft-story', status: 'draft' });
-  const stubs = stubModels({
-    news: [
-      publishedNews({ title: 'Visible story', slug: 'visible-story' }),
-      publishedNews({ _id: '507f1f77bcf86cd799439302', title: 'Draft story', slug: 'draft-story', status: 'draft' }),
-    ],
-    publicArticles: [visible, hiddenDraft],
-  });
+  const stubs = stubModels({ publicArticles: [visible, hiddenDraft] });
 
   try {
     const listRes = await request(app).get('/api/public/stories?category=science-technology&lang=en&limit=10');
@@ -364,7 +352,7 @@ test('ordinary story feeds honor News visibility while public detail still exclu
 
     const draftSlugRes = await request(app).get('/api/public/stories/draft-story?lang=en');
     assert.equal(draftSlugRes.status, 404);
-    assert.ok(JSON.stringify(stubs.captured.newsFind[0]).includes('published'));
+    assert.equal(stubs.captured.publicFind.every((filter) => filter.$and.some((clause) => clause.status === 'published')), true);
     assert.equal(stubs.captured.publicFindOne.every((filter) => filter.$and.some((clause) => clause.status === 'published')), true);
   } finally {
     stubs.restore();

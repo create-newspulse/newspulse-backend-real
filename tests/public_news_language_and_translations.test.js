@@ -4,7 +4,6 @@ const request = require('supertest');
 const app = require('../server');
 const mongoose = require('mongoose');
 const News = require('../models/News');
-const { installFeedModels } = require('./helpers/publicFeedModels');
 
 function makeChainableQuery(items) {
   let working = Array.isArray(items) ? items.slice() : [];
@@ -156,11 +155,7 @@ test('Model default lang is en when omitted', () => {
   assert.equal(doc.language, 'en');
 });
 
-test('GET /api/public/news supports lang=en and returns feed shape', async (t) => {
-  const previous = mongoose.connection.readyState;
-  mongoose.connection.readyState = 1;
-  t.after(() => { mongoose.connection.readyState = previous; });
-  installFeedModels(t);
+test('GET /api/public/news supports lang=en and returns feed shape', async () => {
   const res = await request(app).get('/api/public/news?category=national&lang=en&limit=5');
   assert.equal(res.status, 200);
   assert.ok(res.body);
@@ -171,7 +166,7 @@ test('GET /api/public/news supports lang=en and returns feed shape', async (t) =
   assert.equal(typeof res.body.totalPages, 'number');
 });
 
-test('GET /api/public/news defaults to strict Gujarati-published results and includes safe route metadata', async (t) => {
+test('GET /api/public/news defaults to strict Gujarati-published results and includes safe route metadata', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const prevFind = News.find;
   const prevCount = News.countDocuments;
@@ -189,7 +184,6 @@ test('GET /api/public/news defaults to strict Gujarati-published results and inc
         slugs: { en: 'english-base', gu: 'gujarati-localized' },
         lang: 'en',
         originalLang: 'en',
-        category: 'business',
         status: 'published',
         translations: {
           gu: { title: 'ગુજરાતી શીર્ષક', summary: 'ગુજરાતી સારાંશ', content: 'ગુજરાતી વિગતો' },
@@ -198,7 +192,15 @@ test('GET /api/public/news defaults to strict Gujarati-published results and inc
       },
     ];
 
-    installFeedModels(t, { news: dataset });
+    const seenFilters = [];
+    News.find = (filter) => {
+      seenFilters.push(filter);
+      return makeChainableQuery(dataset);
+    };
+    News.countDocuments = async (filter) => {
+      seenFilters.push(filter);
+      return dataset.length;
+    };
 
     const res = await request(app).get('/api/public/news?category=business&limit=10');
     assert.equal(res.status, 200);
@@ -423,11 +425,7 @@ test('GET /api/public/news plain latest request returns empty only when no eligi
   }
 });
 
-test('GET /api/public/news supports lang=hi and returns feed shape', async (t) => {
-  const previous = mongoose.connection.readyState;
-  mongoose.connection.readyState = 1;
-  t.after(() => { mongoose.connection.readyState = previous; });
-  installFeedModels(t);
+test('GET /api/public/news supports lang=hi and returns feed shape', async () => {
   const res = await request(app).get('/api/public/news?category=national&lang=hi&limit=5');
   assert.equal(res.status, 200);
   assert.ok(res.body);

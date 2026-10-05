@@ -16,7 +16,6 @@ const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey, getPublicCateg
 const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode, detectSlugLocale } = require('../lib/slug');
 const { timeAsync } = require('../lib/timingDiagnostics');
-const { isOrdinaryNewsCategory, listPublicStories } = require('../services/ordinaryPublicNews.service');
 const {
   getPublicContentGroupKey,
   getPublicContentLookup,
@@ -1441,28 +1440,6 @@ async function listPublicNews(req, res) {
       type,
     });
     if (topic) filter.$and.push({ topic: new RegExp(`^${escapeRegExp(topic)}$`, 'i') });
-    if (isOrdinaryNewsCategory(category)) {
-      const result = await listPublicStories({
-        category, lang: desired, state, district: req.query.district, city: req.query.city,
-        page, limit, additionalFilter: filter, legacyShape: 'public-news',
-      });
-      const items = result.items.map((item) => {
-        const out = withCoverImageUrl(item);
-        out.locale = desired;
-        out.articleId = String(out._id);
-        out.localizedSlug = out.canonicalSlug;
-        out.localizedTitle = out.title;
-        out.localizedContent = out.content;
-        out.translations = Object.fromEntries(['en', 'hi', 'gu'].map((locale) => [locale, out.availableLocales.includes(locale)]));
-        out.translationAvailability.translations = defaultRealTranslationAvailability();
-        out.requestedLanguage = desired;
-        out.resolvedLanguage = desired;
-        out.canonicalDetailUrl = _buildFrontendNewsPath(out, desired);
-        out.detailApiUrl = _buildPublicNewsApiPath(out, desired, { fallbackEnabled: true });
-        return attachMobileResponseFields(out);
-      });
-      return res.status(200).json({ ...result, items });
-    }
     if (state) filter.$and.push({ 'location.state': new RegExp(`^${escapeRegExp(state)}$`, 'i') });
 
     const isGroupedCategoryListing = Boolean(category);
@@ -1551,8 +1528,7 @@ async function listPublicNews(req, res) {
 
     return res.status(200).json({ items, page, limit, total, totalPages });
   } catch (e) {
-    const status = isOrdinaryNewsCategory(req.query.category) && e?.statusCode === 400 ? 400 : 500;
-    return res.status(status).json({ items: [], page: 1, limit: 30, total: 0, totalPages: 1, message: e?.message || String(e) });
+    return res.status(500).json({ items: [], page: 1, limit: 30, total: 0, totalPages: 1, message: e?.message || String(e) });
   }
 }
 

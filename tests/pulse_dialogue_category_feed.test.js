@@ -8,8 +8,6 @@ process.env.NODE_ENV = 'test';
 const app = require('../server');
 const News = require('../models/News');
 const Contributor = require('../models/Contributor');
-const PublicArticle = require('../models/Article');
-const { makeQuery } = require('./helpers/publicFeedModels');
 
 const CONTRIBUTOR_ID = '507f1f77bcf86cd799439d01';
 const CONTRIBUTOR_PHOTO = {
@@ -63,7 +61,6 @@ function makeNewsQuery(items) {
   let working = Array.isArray(items) ? items.slice() : [];
   return {
     select() { return this; },
-    maxTimeMS() { return this; },
     sort(sortParam) {
       if (sortParam && typeof sortParam === 'object') {
         working = working.slice().sort((left, right) => {
@@ -140,7 +137,6 @@ test('category search never selects a translation sibling from another category'
   context.after(() => { mongoose.connection.readyState = previous; });
   const docs = [makePulseDoc('hi'), makePulseDoc('en', { category: 'national', pulseDialogue: undefined })];
   context.mock.method(News, 'find', query => makeNewsQuery(docs.filter(doc => matchesQuery(doc, query))));
-  context.mock.method(PublicArticle, 'find', () => makeQuery([]));
   context.mock.method(Contributor, 'find', () => makeContributorQuery([]));
   for (const path of ['/api/public/news', '/api/public/articles']) {
     const pulse = await request(app).get(`${path}?category=pulse-dialogue&q=body&lang=en`);
@@ -152,7 +148,9 @@ test('category search never selects a translation sibling from another category'
     const national = await request(app).get(`${path}?category=national&q=body&lang=hi`);
     assert.equal(national.status, 200);
     const nationalItems = national.body.items || national.body.data.items;
-    assert.equal(nationalItems.length, 0, 'ordinary National has no published Hindi variant and must not fall back');
+    assert.equal(nationalItems.length, 1);
+    assert.equal(nationalItems[0].category, 'national');
+    assert.equal(nationalItems[0].pulseDialogue, undefined);
   }
 });
 
@@ -260,8 +258,7 @@ test('GET /api/public/news Pulse category keeps no-photo contributor safe and ne
   }
 });
 
-test('GET /api/public/news category feed leaves non-Pulse payload unchanged and skips contributor lookup', async (t) => {
-  t.mock.method(PublicArticle, 'find', () => makeQuery([]));
+test('GET /api/public/news category feed leaves non-Pulse payload unchanged and skips contributor lookup', async () => {
   const prevReadyState = mongoose.connection.readyState;
   const originals = { newsFind: News.find, contributorFind: Contributor.find };
   let contributorFindCount = 0;

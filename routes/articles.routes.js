@@ -76,7 +76,6 @@ const { assertTranslationGroupLanguageUnique } = require('../services/articleLan
 const { resolveFacebookShareUrl } = require('../services/googleTranslationService');
 const { invalidateArticleCaches } = require('../lib/cache');
 const { logAudit } = require('../lib/audit');
-const { isOrdinaryNewsCategory, listPublicStories } = require('../services/ordinaryPublicNews.service');
 
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
@@ -1828,23 +1827,6 @@ router.get('/public/articles', async (req, res, next) => {
     const categoryNorm = categoryRaw ? getCanonicalPublicCategoryKey(categoryRaw) : null;
     const isGroupedCategoryListing = Boolean(categoryRaw);
 
-    if (isOrdinaryNewsCategory(categoryNorm)) {
-      const additionalFilter = {};
-      if (qRaw) {
-        const rx = new RegExp(_escapeRegex(qRaw), 'i');
-        additionalFilter.$or = [{ title: rx }, { description: rx }, { content: rx }];
-      }
-      const result = await listPublicStories({
-        category: categoryNorm, lang: desired || 'en', page, limit, legacyShape: 'news',
-        state: req.query.state, district: req.query.district, city: req.query.city,
-        additionalFilter,
-      });
-      return res.status(200).json({
-        ok: true, success: true, status: 200,
-        data: { ...result, items: result.items.map(withCoverImageUrl).map(withPublicAuthorByline) },
-      });
-    }
-
     if (!isGroupedCategoryListing && (desired === 'hi' || desired === 'en')) {
       const originalMatch = _buildOriginalLangMatch(desired);
       const readyMatch = _buildReadyTranslationMatch(desired);
@@ -2202,26 +2184,144 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
 
     const page = Math.max(_parseIntOrDefault(req.query.page, 1), 1);
     const limit = _clampInt(_parseIntOrDefault(req.query.limit, 20), 1, 100);
+    const skip = (page - 1) * limit;
 
-    const result = await listPublicStories({
-      category: 'regional', lang: desired, state: stateSlug,
-      district: districtSlug, city: citySlug, page, limit,
+    const andClauses = [];
+    const stateAliases = _getStateAliasSlugs(stateSlug);
+    const stateClause = _buildGeoOrTagClauseAny('state', 'state', stateAliases, { legacyField: 'state' });
+    if (stateClause) andClauses.push(stateClause);
+    if (districtSlug) {
+      const districtClause = _buildGeoOrTagClauseAny('district', 'district', districtSlug, { legacyField: 'district' });
+      if (districtClause) andClauses.push(districtClause);
+    }
+    if (citySlug) {
+      const cityClause = _buildGeoOrTagClauseAny('city', 'city', citySlug, { legacyField: 'city' });
+      if (cityClause) andClauses.push(cityClause);
+    }
+
+    const filter = buildPubliclyVisiblePublicArticleFilter();
+    filter.category = 'regional';
+    if (andClauses.length) {
+      filter.$and = (filter.$and || []).concat(andClauses);
+    }
+
+    // Optional debug logging for live diagnosis.
+    // Enable with DEBUG_REGIONAL_FEED=1 (or REGIONAL_FEED_DEBUG=1).
+    const debugRegional = _isTruthyEnv(process.env.DEBUG_REGIONAL_FEED) || _isTruthyEnv(process.env.REGIONAL_FEED_DEBUG);
+    if (debugRegional && stateSlug === 'gujarat') {
+      const safeJson = (obj) => {
+        try {
+          return JSON.stringify(
+            obj,
+            (_k, v) => {
+              if (v instanceof RegExp) return v.toString();
+              return v;
+            },
+            2
+          );
+        } catch (_) {
+          return '[unstringifiable]';
+        }
+      };
+
+      try {
+        console.log('[public.regional][debug] request', {
+          path: req.path,
+          stateInput: stateInput || null,
+          rawState: rawState || null,
+          stateSlug,
+          rawDistrict: rawDistrict || null,
+          districtSlug: districtSlug || null,
+          rawCity: rawCity || null,
+          citySlug: citySlug || null,
+          lang: desired,
+          page,
+          limit,
+          query: req.query,
+        });
+        console.log('[public.regional][debug] filter', safeJson(filter));
+      } catch (_) {}
+    }
+
+    // Query rules:
+    // - If requested lang matches the original language => show originals
+    // - Else => show ONLY fully-ready cached translations for that language
+    if (desired === 'hi' || desired === 'en') {
+      const originalMatch = _buildOriginalLangMatch(desired);
+      const readyMatch = _buildReadyTranslationMatch(desired);
+      filter.$and = (filter.$and || []).concat([{ $or: [originalMatch, readyMatch].filter(Boolean) }]);
+    }
+
+    const [itemsRaw, total] = await Promise.all([
+      PublicArticle.find(filter)
+        .select('title summary content slug slugs language originalLang translations translationStatus coverImage publishedAt createdAt updatedAt geo tags category translationKey translationGroupId spotlightEnabled spotlightPinned spotlightPriority spotlightExpiresAt authorByline.enabled authorByline.snapshot')
+        .sort({ publishedAt: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      PublicArticle.countDocuments(filter),
+    ]);
+
+    if ((_isTruthyEnv(process.env.DEBUG_REGIONAL_FEED) || _isTruthyEnv(process.env.REGIONAL_FEED_DEBUG)) && stateSlug === 'gujarat') {
+      try {
+        console.log('[public.regional][debug] result', { stateSlug, lang: desired, total, returned: (itemsRaw || []).length });
+      } catch (_) {}
+    }
+
+    // Dedupe across language-variants of the same story.
+    // Prefer originals in the requested lang over translated variants.
+    const bestByKey = new Map();
+    for (const doc of (itemsRaw || [])) {
+      const imageUrl = _resolveImageUrlFromNewsDoc(doc);
+      const mapped = localizeArticleForLang(doc, desired, { fallbackToBase: desired === 'gu' });
+      if (!mapped) continue;
+
+      const storedSlug = String(doc.slug || mapped.slug || '').trim();
+      const out = {
+        _id: String(doc._id),
+        slug: storedSlug || mapped.slug,
+        canonicalSlug: mapped.canonicalSlug,
+        slugs: doc.slugs || null,
+        category: doc.category || null,
+        stateSlug,
+        imageUrl,
+        title: mapped.title,
+        summary: mapped.summary,
+        content: mapped.content,
+        generatedAt: mapped.generatedAt || null,
+        provider: mapped.provider || 'google',
+        __isTranslated: Boolean(mapped.isTranslated),
+        ...(withPublicAuthorByline(doc).authorByline ? { authorByline: withPublicAuthorByline(doc).authorByline } : {}),
+      };
+
+      const slugs = doc && doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
+      const canonicalSlug = String(
+        (slugs && (slugs.en || slugs.gu || slugs.hi))
+        || mapped.canonicalSlug
+        || storedSlug
+        || ''
+      ).trim();
+      const groupKey = normalizeTranslationGroupKey(doc.translationKey)
+        || normalizeTranslationGroupKey(doc.translationGroupId);
+      const key = groupKey
+        ? `group:${groupKey}`
+        : (canonicalSlug ? `cslug:${canonicalSlug}` : (out.slug ? `slug:${out.slug}` : `id:${out._id}`));
+      const prev = bestByKey.get(key);
+      if (!prev) {
+        bestByKey.set(key, out);
+        continue;
+      }
+      if (prev.__isTranslated && !out.__isTranslated) {
+        bestByKey.set(key, out);
+      }
+    }
+
+    const items = Array.from(bestByKey.values()).map((it) => {
+      try { delete it.__isTranslated; } catch (_) {}
+      return it;
     });
-    const items = result.items.map((doc) => ({
-      ...withPublicAuthorByline(doc),
-      _id: doc.publicArticleId || String(doc._id),
-      id: doc.publicArticleId || doc.id,
-      slug: doc.storedSlug || doc.slug,
-      createdAt: doc.publicCreatedAt || doc.createdAt,
-      stateSlug,
-      imageUrl: _resolveImageUrlFromNewsDoc(doc),
-      generatedAt: doc.translationGeneratedAt || null,
-      provider: doc.translationProvider || 'google',
-    }));
-    return res.status(200).json({
-      ok: true, success: true, status: 200,
-      data: { ...result, items, stateSlug, lang: desired },
-    });
+
+    return res.status(200).json({ ok: true, success: true, status: 200, data: { items, page, limit, total, stateSlug, lang: desired } });
   } catch (err) {
     return next(err);
   }
@@ -2334,16 +2434,66 @@ router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
 
     const page = Math.max(_parseIntOrDefault(req.query.page, 1), 1);
     const limit = _clampInt(_parseIntOrDefault(req.query.limit, 20), 1, 100);
-    const result = await listPublicStories({
-      category: 'national', lang: desired || normalizeLanguage(req.lang) || 'gu',
-      nationalState: stateSlug, page, limit, legacyShape: 'news',
-    });
-    const items = result.items.map(withCoverImageUrl).map(withPublicAuthorByline);
+    const skip = (page - 1) * limit;
+
+    const query = buildPubliclyVisibleNewsArticleFilter();
+    query.category = 'national';
+    query.stateTags = stateSlug;
+    if (desired === 'hi' || desired === 'en') {
+      const originalMatch = _buildOriginalLangMatch(desired);
+      const readyMatch = _buildReadyTranslationMatch(desired);
+      query.$and = (query.$and || []).concat([{ $or: [originalMatch, readyMatch].filter(Boolean) }]);
+    }
+    const [itemsRaw, total] = await Promise.all([
+      News.find(query).sort({ publishedAt: -1, createdAt: -1 }).skip(skip).limit(limit).lean(),
+      News.countDocuments(query),
+    ]);
+
+    let items = (itemsRaw || []).map(withCoverImageUrl).map(withPublicAuthorByline);
+    if (desired) {
+      const bestByKey = new Map();
+      for (const doc of items) {
+        const mapped = localizeArticleForLang(doc, desired, { fallbackToBase: desired === 'gu' });
+        if (!mapped) continue;
+
+        // Preserve the existing payload shape but localize fields.
+        const out = { ...doc };
+        out.title = mapped.title;
+        out.description = mapped.summary;
+        out.content = mapped.content;
+        out.slug = mapped.slug;
+        out.canonicalSlug = mapped.canonicalSlug;
+        out.lang = mapped.lang;
+        out.language = mapped.lang;
+        out.translationProvider = mapped.provider || 'google';
+        out.translationGeneratedAt = mapped.generatedAt || null;
+        out.__isTranslated = Boolean(mapped.isTranslated);
+
+        const canonicalSlug = String(mapped.canonicalSlug || '').trim();
+        const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
+        const key = groupKey
+          ? `group:${groupKey}`
+          : (canonicalSlug ? `cslug:${canonicalSlug}` : (out.slug ? `slug:${out.slug}` : `id:${String(out._id || '')}`));
+        const prev = bestByKey.get(key);
+        if (!prev) {
+          bestByKey.set(key, out);
+          continue;
+        }
+        if (prev.__isTranslated && !out.__isTranslated) {
+          bestByKey.set(key, out);
+        }
+      }
+
+      items = Array.from(bestByKey.values()).map((it) => {
+        try { delete it.__isTranslated; } catch (_) {}
+        return it;
+      });
+    }
     return res.status(200).json({
       ok: true,
       success: true,
       status: 200,
-      data: { ...result, items, stateSlug, ...(desired ? { lang: desired } : {}) },
+      data: { items, page, limit, total, stateSlug, ...(desired ? { lang: desired } : {}) },
     });
   } catch (err) {
     return next(err);
