@@ -1,4 +1,5 @@
 const PublicArticle = require('../models/Article');
+const { Types } = require('mongoose');
 const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 const { INDIA_STATES_UTS, isValidStateSlug } = require('../src/utils/locationTagger');
 const { ensureTrackTag, normalizeTrackValue } = require('./communitySubmissionWorkflow');
@@ -193,7 +194,7 @@ function _buildTranslationBucket(src, options = {}) {
   return out;
 }
 
-async function _syncPublicArticleFromNews(newsDoc) {
+async function _syncPublicArticleFromNews(newsDoc, options = {}) {
   if (!newsDoc) return null;
 
   const categoryNorm = String(newsDoc.category || '').trim().toLowerCase();
@@ -358,6 +359,80 @@ async function _syncPublicArticleFromNews(newsDoc) {
   const or = [{ slug }];
   if (newsDoc._id) or.unshift({ sourceNewsId: newsDoc._id });
 
+  let filter = { $or: or };
+  let upsert = true;
+  if (options.preserveExistingProjection === true) {
+    const copies = await PublicArticle.find(filter).limit(2).lean();
+    if (copies.length > 1) throw new Error('Ambiguous public projection');
+    const existing = copies[0];
+    if (existing) {
+      for (const field of ['sourceNewsId', 'sourceArticleId', 'category', 'slug', 'translationKey', 'translationGroupId', 'language', 'originalLang', 'sourceLanguage']) {
+        if (existing[field] != null && existing[field] !== '' && String(existing[field]) !== String(update[field])) {
+          throw new Error('Public projection identity conflict');
+        }
+      }
+      if (existing.publishedAt != null
+        && new Date(existing.publishedAt).getTime() !== new Date(update.publishedAt).getTime()) {
+        throw new Error('Public projection publication date conflict');
+      }
+      for (const field of ['title', 'summary', 'content']) {
+        if (_isNonEmptyString(existing[field]) && existing[field] !== update[field]) {
+          throw new Error('Public projection content ownership conflict');
+        }
+      }
+      for (const lang of SUPPORTED_LANGS) {
+        if (existing.slugs?.[lang] && existing.slugs[lang] !== update.slugs?.[lang]) {
+          throw new Error('Public projection URL conflict');
+        }
+        const oldBucket = existing.translations?.[lang];
+        const nextBucket = update.translations[lang];
+        if (['title', 'summary', 'content'].some((field) =>
+          _isNonEmptyString(oldBucket?.[field]) && oldBucket[field] !== nextBucket[field])) {
+          throw new Error('Public projection translation ownership conflict');
+        }
+        if (_hasFullTranslationBucket(oldBucket)) {
+          if (existing.translationStatus?.[lang] !== update.translationStatus[lang]) {
+            throw new Error('Public projection translation ownership conflict');
+          }
+          update.translations[lang] = oldBucket;
+        }
+        for (const field of ['title', 'summary', 'content']) {
+          if (_isNonEmptyString(existing.i18n?.[field]?.[lang])
+            && existing.i18n[field][lang] !== update.i18n[field][lang]) {
+            throw new Error('Public projection i18n ownership conflict');
+          }
+        }
+      }
+      const existingCoverUrl = [
+        existing.coverImage?.url, existing.coverImage, existing.coverImageUrl, existing.imageURL, existing.imageUrl,
+      ].find(_isNonEmptyString);
+      if (_isNonEmptyString(existingCoverUrl) && _isNonEmptyString(update.coverImage?.url)
+        && existingCoverUrl !== update.coverImage.url) {
+        throw new Error('Public projection media ownership conflict');
+      }
+      if (_isNonEmptyString(existingCoverUrl)) {
+        // Leave owned media untouched, including legacy metadata outside the current schema.
+        delete update.coverImage;
+      }
+      for (const field of ['gallery', 'embeds', 'externalUrls']) {
+        if (!Array.isArray(existing[field]) || !existing[field].some(_isNonEmptyString)) continue;
+        if (update[field].length && JSON.stringify(existing[field]) !== JSON.stringify(update[field])) {
+          throw new Error('Public projection media ownership conflict');
+        }
+        delete update[field];
+      }
+      if (existing.seo?.canonicalUrl && existing.seo.canonicalUrl !== update.seo?.canonicalUrl) {
+        throw new Error('Public projection canonical URL conflict');
+      }
+      // Fence the preflight against concurrent edits or deletion; never upsert a lost match.
+      filter = { _id: existing._id, updatedAt: existing.updatedAt ?? null };
+      upsert = false;
+    } else {
+      // A concurrent insert must not become an unguarded update after the preflight.
+      filter = { _id: new Types.ObjectId() };
+    }
+  }
+
   const updateOp = { $set: update };
   if (!pulseDialogue) updateOp.$unset = { pulseDialogue: '' };
   if (isPublished && !newsDoc.publishedAt) {
@@ -367,16 +442,16 @@ async function _syncPublicArticleFromNews(newsDoc) {
   }
 
   return PublicArticle.findOneAndUpdate(
-    { $or: or },
+    filter,
     updateOp,
-    { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
+    { upsert, new: true, setDefaultsOnInsert: true, runValidators: true }
   ).lean();
 }
 
 async function syncPublicArticleFromNews(newsDoc, options = {}) {
   const logger = options.logger || console;
   try {
-    const saved = await _syncPublicArticleFromNews(newsDoc);
+    const saved = await _syncPublicArticleFromNews(newsDoc, options);
     if (!saved?._id) throw new Error('Public article synchronization produced no record');
     return saved;
   } catch (_) {

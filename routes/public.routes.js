@@ -9,6 +9,7 @@ const { getSlugCandidates } = require('../lib/slug');
 const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { ensureOnDemandArticleTranslation, normalizeLang, detectLangFromContent, hasFullTranslation } = require('../services/articleTranslation.service');
 const { localizeArticleForLang } = require('../services/mapArticleForLang');
+const { isOrdinaryNewsCategory, listPublicStories } = require('../services/ordinaryPublicNews.service');
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
 const {
   buildPubliclyVisiblePublicArticleFilter,
@@ -188,6 +189,18 @@ router.get('/stories', async (req, res) => {
 
     const desired = normalizeLang(negotiatedLangRaw);
     const normalizedCategoryKey = category ? getCanonicalPublicCategoryKey(category) : null;
+    if (isOrdinaryNewsCategory(normalizedCategoryKey)) {
+      const result = await listPublicStories({
+        category: normalizedCategoryKey, lang: desired || 'en',
+        state: req.query.state, district: req.query.district, city: req.query.city,
+        page: Math.max(parseInt(page, 10) || 1, 1),
+        limit: Math.min(Math.max(parseInt(limit, 10) || 20, 1), 50),
+        additionalFilter: trackFilter || {}, legacyShape: 'public-article',
+      });
+      const { items, ...pagination } = result;
+      const stories = items.map(withNormalizedImageUrl);
+      return res.json({ success: true, data: stories, ...pagination });
+    }
     if (!isGroupedCategoryListing && desired === 'gu') {
       // Legacy behavior: Gujarati feed shows Gujarati originals immediately.
       q.language = 'gu';
@@ -312,7 +325,8 @@ router.get('/stories', async (req, res) => {
 
     return res.json({ success: true, data: stories });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err?.message || String(err) });
+    const status = isOrdinaryNewsCategory(req.query.category) && err?.statusCode === 400 ? 400 : 500;
+    return res.status(status).json({ success: false, message: err?.message || String(err) });
   }
 });
 

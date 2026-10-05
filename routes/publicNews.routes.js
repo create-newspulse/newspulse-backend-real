@@ -9,6 +9,7 @@ const {
 } = require('../lib/cache');
 const { setRequestTimingCacheContext } = require('../lib/timingDiagnostics');
 const noCache = require('../middleware/noCache');
+const { isOrdinaryNewsCategory } = require('../services/ordinaryPublicNews.service');
 
 const {
   resolvePublicNewsListRequest,
@@ -28,6 +29,7 @@ function isDbReady() {
 }
 
 function buildPublicNewsCacheKey(req) {
+  if (isOrdinaryNewsCategory(req.query.category)) return null;
   if (!isDbReady()) return null;
   const { page, limit, category, track, topic, state, founderOnly, type, desired: lang, fallbackEnabled, q } = resolvePublicNewsListRequest(req);
   if (!Number.isSafeInteger(page) || !Number.isFinite(limit) || (req.query.track !== undefined && !track)) return null;
