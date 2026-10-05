@@ -237,7 +237,7 @@ Unknown routes return:
 
 ### CMS to Public Article Synchronization
 
-The existing sync upserts by `sourceNewsId` or the stored slug; it does not merge language siblings by translation-group ID. Regional copies normalize only explicit source geography (geo, location, legacy location fields, or location tags). Null geo defaults do not hide available location metadata. No state is inferred from article text, and Regional feed eligibility, sorting, limits, and deduplication are unchanged.
+The existing sync upserts by `sourceNewsId` or the stored slug; it does not merge language siblings by translation-group ID. Exact `category === "regional"` denotes the Gujarat desk: canonical sync ensures `geo.state: "gujarat"`, legacy `state: "Gujarat"`, and a `state:gujarat` tag. Existing district/city metadata and geographic tags are preserved using the existing geography normalization and tag merger. Null geo defaults do not hide available location metadata. Other categories receive no automatic Gujarat metadata. No state is inferred from article text, and Regional feed eligibility, sorting, limits, and deduplication are unchanged. Historical public copies require a separately approved resync; this mapping change does not repair production data automatically.
 
 Synchronization preserves existing copy IDs, creation timestamps, and analytics fields. It copies the source publication timestamp when present; a legacy source without one only supplies a timestamp on insertion. The legacy publication fallback fills missing publication timestamps without resetting existing dates.
 

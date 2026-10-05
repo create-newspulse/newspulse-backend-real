@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
 const Article = require('../models/Article');
+const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
 
 process.env.NODE_ENV = 'test';
 const app = require('../server');
@@ -405,4 +406,64 @@ test('GET /api/public/regional/:state rejects invalid state (400)', async () => 
   const res = await request(app).get('/api/public/regional/not-a-real-state?lang=gu');
   assert.equal(res.status, 400);
   assert.equal(res.body.ok, false);
+});
+
+test('canonical Regional sync satisfies the unchanged Gujarat state predicate', async (t) => {
+  const sources = [[], ['district:ahmedabad'], ['city:vadodara']].map((tags, index) => ({
+    _id: `507f1f77bcf86cd79943940${index}`,
+    slug: `regional-metadata-${index}`,
+    title: `Local transport update ${index}`,
+    description: 'Local summary',
+    content: '<p>Local details</p>',
+    category: 'regional',
+    status: 'published',
+    language: 'en',
+    originalLang: 'en',
+    publishedAt: new Date('2026-01-02T00:00:00.000Z'),
+    geo: { state: null, district: null, city: null },
+    location: null,
+    tags,
+  }));
+  t.mock.method(Article, 'findOneAndUpdate', (_filter, update) => ({
+    lean: async () => ({ _id: update.$set.sourceNewsId, ...update.$set }),
+  }));
+  const synced = await Promise.all(sources.map((source) => syncPublicArticleFromNews(source)));
+  const capture = {};
+  const matchingState = (doc, stateClause) => stateClause.$or.some((clause) =>
+    Object.entries(clause).every(([field, condition]) => {
+      const value = field.split('.').reduce((item, key) => item?.[key], doc);
+      if (condition instanceof RegExp) {
+        return (Array.isArray(value) ? value : [value]).some((item) =>
+          typeof item === 'string' && condition.test(item)
+        );
+      }
+      assert.ok(Array.isArray(condition.$in), 'Use the actual endpoint state alternatives');
+      return condition.$in.includes(value);
+    })
+  );
+  const filterItems = (filter) => {
+    assert.equal(filter.category, 'regional');
+    const stateClause = filter.$and.find((clause) =>
+      clause.$or?.some((alternative) => Object.hasOwn(alternative, 'geo.state'))
+    );
+    assert.ok(stateClause, 'The existing feed must still require state metadata');
+    for (const [index, doc] of synced.entries()) {
+      assert.ok(doc);
+      assert.equal(matchingState(sources[index], stateClause), false);
+      assert.equal(matchingState(doc, stateClause), true);
+      assert.equal(matchingState({ geo: doc.geo }, stateClause), true);
+      assert.equal(matchingState({ tags: ['state:gujarat'] }, stateClause), true);
+      assert.equal(matchingState({ state: doc.state }, stateClause), true);
+      assert.equal(matchingState({ tags: sources[index].tags }, stateClause), false);
+    }
+    return synced.filter((doc) => matchingState(doc, stateClause));
+  };
+  t.mock.method(Article, 'find', (filter) => makeChainableQuery(filterItems(filter), capture));
+  t.mock.method(Article, 'countDocuments', async (filter) => filterItems(filter).length);
+
+  const res = await request(app).get('/api/public/regional?state=gujarat&lang=en');
+  assert.equal(res.status, 200);
+  assert.equal(res.body.data.total, 3);
+  assert.deepEqual(res.body.data.items.map((item) => item.slug), sources.map((source) => source.slug));
+  assert.deepEqual(capture.sortArg, { publishedAt: -1, createdAt: -1 });
 });

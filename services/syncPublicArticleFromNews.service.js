@@ -227,6 +227,8 @@ async function _syncPublicArticleFromNews(newsDoc) {
         : ((location && location[`${field}Slug`] !== undefined) ? location[`${field}Slug`] : fromTags[field]);
     }
   }
+  // The exact Regional category denotes the Gujarat desk, independent of article text.
+  if (newsDoc.category === 'regional') geo.state = canonicalStateSlugFromAny('gujarat');
   if (categoryNorm === 'regional') {
     if (location) tags = _mergeLocationTags(tags, location);
     if (Object.values(geo).some(Boolean)) tags = _mergeLocationTags(tags, geo);
@@ -338,7 +340,8 @@ async function _syncPublicArticleFromNews(newsDoc) {
     // Human-readable location fields (legacy). Only normalize for regional.
     ...(categoryNorm === 'regional'
       ? {
-          state: _normalizeNullableString(location?.state)
+          state: (newsDoc.category === 'regional' ? STATE_SLUG_TO_DISPLAY.get(geo.state) : null)
+            || _normalizeNullableString(location?.state)
             || _normalizeNullableString(newsDoc.state)
             || STATE_SLUG_TO_DISPLAY.get(canonicalStateSlugFromAny(geo.state))
             || null,

@@ -134,17 +134,81 @@ for (const [label, metadata] of [
   });
 }
 
-test('Regional synchronization does not infer Gujarat from article text or national stateTags', async (t) => {
+for (const [label, metadata, expectedGeo] of [
+  ['no explicit geography', { location: null }, { state: 'gujarat', district: null, city: null }],
+  ['district tag only', { location: null, tags: ['district:ahmedabad'] }, { state: 'gujarat', district: 'ahmedabad', city: null }],
+  ['city tag only', { location: null, tags: ['city:vadodara'] }, { state: 'gujarat', district: null, city: 'vadodara' }],
+  ['district/city location without state', { location: { district: 'Ahmedabad', city: 'Vadodara' } }, { state: 'gujarat', district: 'ahmedabad', city: 'vadodara' }],
+  ['conflicting state with preserved geography', {
+    geo: { state: 'maharashtra', district: 'ahmedabad', city: 'vadodara' },
+    location: { state: 'Maharashtra', district: 'Ahmedabad', city: 'Vadodara' },
+    tags: ['state:maharashtra', 'district:ahmedabad', 'city:vadodara'],
+  }, { state: 'gujarat', district: 'ahmedabad', city: 'vadodara' }],
+]) {
+  test(`exact Regional category supplies Gujarat for ${label} without changing identity`, async (t) => {
+    const source = regionalSource(metadata);
+    const before = structuredClone(source);
+    const existing = {
+      _id: '507f1f77bcf86cd799439214',
+      sourceNewsId: source._id,
+      slug: source.slug,
+      status: source.status,
+      publishedAt: source.publishedAt,
+      createdAt: source.createdAt,
+      views: 432,
+      analyticsId: 'regional-analytics',
+    };
+    const store = installPublicCopyStore(t, [existing]);
+    const result = await syncPublicArticleFromNews(source);
+    assert.deepEqual(source, before);
+    assert.equal(store.copies.length, 1);
+    assert.deepEqual(result.geo, expectedGeo);
+    assert.equal(result.state, 'Gujarat');
+    assert.ok(result.tags.includes('state:gujarat'));
+    assert.ok(source.tags.every((tag) => result.tags.includes(tag)));
+    for (const key of ['_id', 'sourceNewsId', 'slug', 'status', 'publishedAt', 'createdAt', 'views', 'analyticsId']) {
+      assert.deepEqual(result[key], existing[key], key);
+    }
+    assert.equal(Object.hasOwn(store.writes[0].update, '$setOnInsert'), false);
+    await syncPublicArticleFromNews(source);
+    assert.equal(store.copies.length, 1);
+    assert.equal(store.copies[0].tags.filter((tag) => tag === 'state:gujarat').length, 1);
+  });
+}
+
+for (const category of [
+  'national', 'international', 'business', 'sports', 'glamour', 'editorial',
+  'pulse-dialogue', 'science/technology', 'tech', 'tech-gadgets', 'breaking',
+  'sponsored', 'community-reporter', 'youth-pulse', 'Regional', ' regional ', '',
+]) {
+  test(`category ${JSON.stringify(category)} does not receive automatic Gujarat metadata`, async (t) => {
+    installPublicCopyStore(t);
+    const result = await syncPublicArticleFromNews(regionalSource({
+      category,
+      title: 'Ahmedabad Gujarat transport update',
+      location: null,
+      tags: ['district:ahmedabad', 'city:vadodara'],
+      stateTags: ['gujarat'],
+      stateNames: ['Gujarat'],
+    }));
+    assert.equal(result.geo.state, null);
+    assert.equal(result.state ?? null, null);
+    assert.equal(result.tags.some((tag) => tag.startsWith('state:')), false);
+    assert.deepEqual(result.tags, ['district:ahmedabad', 'city:vadodara']);
+  });
+}
+
+test('non-Regional synchronization retains explicit non-Gujarat geography', async (t) => {
   installPublicCopyStore(t);
-  const result = await syncPublicArticleFromNews(regionalSource({
-    title: 'Ahmedabad Gujarat transport update',
+  const source = regionalSource({
+    category: 'national',
+    geo: { state: 'maharashtra', district: 'pune', city: 'pune' },
     location: null,
-    stateTags: ['gujarat'],
-    stateNames: ['Gujarat'],
-  }));
-  assert.equal(result.geo.state, null);
-  assert.equal(result.state, null);
-  assert.equal(result.tags.some((tag) => tag.startsWith('state:')), false);
+    tags: ['state:maharashtra', 'district:pune', 'city:pune'],
+  });
+  const result = await syncPublicArticleFromNews(source);
+  assert.deepEqual(result.geo, source.geo);
+  assert.deepEqual(result.tags, source.tags);
 });
 
 test('missing source publishedAt does not reset an existing public publication date', async (t) => {
@@ -171,19 +235,25 @@ test('EN HI GU copies retain separate source links, manual translations and chil
       originalLang: language,
       sourceLanguage: 'gu',
       sourceArticleId: '507f1f77bcf86cd799439302',
+      location: null,
+      slugs: { en: 'regional-en', hi: 'regional-hi', gu: 'regional-gu' },
       humanEdited: true,
       coverImage: { url: `https://images.example/${language}.jpg`, publicId: language, alt: language },
-      translations: { en: { title: 'Manual title', summary: 'Manual summary', content: 'Manual content', provider: 'manual', generatedAt: new Date('2026-01-01T00:00:00.000Z') } },
+      translations: Object.fromEntries(['en', 'hi', 'gu'].map((lang) => [
+        lang,
+        { title: `Manual ${lang} title`, summary: `Manual ${lang} summary`, content: `Manual ${lang} content`, provider: 'manual', generatedAt: new Date('2026-01-01T00:00:00.000Z') },
+      ])),
       translationStatus: { en: 'ready', hi: 'pending', gu: 'ready' },
     });
     const before = JSON.stringify(source);
     const result = await syncPublicArticleFromNews(source);
     assert.equal(JSON.stringify(source), before);
-    for (const key of ['language', 'originalLang', 'sourceLanguage', 'sourceArticleId', 'translationKey', 'translationGroupId', 'coverImage', 'translationStatus']) {
+    for (const key of ['language', 'originalLang', 'sourceLanguage', 'sourceArticleId', 'translationKey', 'translationGroupId', 'coverImage', 'translationStatus', 'slugs', 'translations']) {
       assert.deepEqual(result[key], source[key], key);
     }
     assert.equal(result.sourceNewsId, source._id);
-    assert.deepEqual(result.translations.en, source.translations.en);
+    assert.equal(result.geo.state, 'gujarat');
+    assert.ok(result.tags.includes('state:gujarat'));
   }
   assert.equal(store.copies.length, 3);
   assert.equal(new Set(store.copies.map((copy) => copy._id)).size, 3);
