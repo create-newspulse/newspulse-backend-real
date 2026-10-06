@@ -15,29 +15,63 @@ function put(doc, path, value) {
 const comparable = value => value instanceof Date ? value.getTime() : value?.toHexString ? value.toHexString() : value;
 const equal = (left, right) => comparable(left) === comparable(right);
 
-function expression(value, doc) {
+function expression(value, doc, variables = {}) {
   if (value === '$$ROOT') return doc;
+  if (typeof value === 'string' && value.startsWith('$$')) return get(variables, value.slice(2));
   if (typeof value === 'string' && value.startsWith('$')) return get(doc, value.slice(1));
-  if (Array.isArray(value)) return value.map(item => expression(item, doc));
+  if (Array.isArray(value)) return value.map(item => expression(item, doc, variables));
   if (!value || typeof value !== 'object' || value instanceof Date || value.toHexString) return value;
   const [operator, operand] = Object.entries(value)[0] || [];
-  const args = () => expression(operand, doc);
-  if (!operator?.startsWith('$')) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, expression(item, doc)]));
+  const evaluate = item => expression(item, doc, variables);
+  const args = () => evaluate(operand);
+  if (!operator?.startsWith('$')) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, evaluate(item)]));
   switch (operator) {
-    case '$ifNull': return args().find(item => item !== null && item !== undefined) ?? null;
-    case '$trim': return expression(operand.input, doc).trim();
-    case '$toString': return String(expression(operand, doc));
+    case '$ifNull': {
+      for (const item of operand) {
+        const result = evaluate(item);
+        if (result !== null && result !== undefined) return result;
+      }
+      return null;
+    }
+    case '$trim': return evaluate(operand.input).trim();
+    case '$toString': return String(evaluate(operand));
+    case '$toLower': return evaluate(operand).toLowerCase();
+    case '$type': {
+      const result = evaluate(operand);
+      if (result === undefined) return 'missing';
+      if (result === null) return 'null';
+      if (Array.isArray(result)) return 'array';
+      return typeof result;
+    }
     case '$concat': return args().join('');
     case '$eq': return equal(...args());
     case '$ne': return !equal(...args());
+    case '$gt': { const [left, right] = args(); return comparable(left) > comparable(right); }
+    case '$gte': { const [left, right] = args(); return comparable(left) >= comparable(right); }
     case '$and': return args().every(Boolean);
     case '$or': return args().some(Boolean);
     case '$in': { const [item, values] = args(); return values.some(entry => equal(item, entry)); }
     case '$indexOfArray': { const [values, item] = args(); return values.findIndex(entry => equal(item, entry)); }
-    case '$cond': return expression(expression(operand[0], doc) ? operand[1] : operand[2], doc);
+    case '$arrayElemAt': { const [values, index] = args(); return values.at(index); }
+    case '$size': return evaluate(operand).length;
+    case '$regexMatch': return operand.regex.test(evaluate(operand.input));
+    case '$regexFindAll': {
+      const pattern = new RegExp(operand.regex.source, operand.regex.flags.replace('g', '') + 'g');
+      return Array.from(evaluate(operand.input).matchAll(pattern), match => ({
+        match: match[0], idx: match.index, captures: match.slice(1).map(item => item ?? null),
+      }));
+    }
+    case '$let': {
+      const scope = { ...variables, ...Object.fromEntries(Object.entries(operand.vars).map(([name, item]) => [name, evaluate(item)])) };
+      return expression(operand.in, doc, scope);
+    }
+    case '$reduce': return evaluate(operand.input).reduce((result, item) => (
+      expression(operand.in, doc, { ...variables, value: result, this: item })
+    ), evaluate(operand.initialValue));
+    case '$cond': return evaluate(evaluate(operand[0]) ? operand[1] : operand[2]);
     case '$switch': {
-      const branch = operand.branches.find(item => expression(item.case, doc));
-      return expression(branch ? branch.then : operand.default, doc);
+      const branch = operand.branches.find(item => evaluate(item.case));
+      return evaluate(branch ? branch.then : operand.default);
     }
     default: throw new Error(`Unsupported test expression ${operator}`);
   }
@@ -55,6 +89,7 @@ function matches(doc, filter) {
     return Object.entries(expected).every(([operator, value]) => {
       if (operator === '$in') return value.some(item => equal(actual, item));
       if (operator === '$ne') return !equal(actual, value);
+      if (operator === '$not' && value instanceof RegExp) return !value.test(String(actual || ''));
       if (operator === '$exists') return (actual !== undefined) === value;
       const left = value instanceof Date ? new Date(actual).getTime() : comparable(actual);
       if (operator === '$lte') return actual != null && left <= comparable(value);

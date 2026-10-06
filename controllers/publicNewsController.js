@@ -17,6 +17,12 @@ const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services
 const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode, detectSlugLocale } = require('../lib/slug');
 const { timeAsync } = require('../lib/timingDiagnostics');
 const {
+  UNAVAILABLE_MESSAGE: FAITH_UNAVAILABLE_MESSAGE,
+  FaithPaginationError,
+  parseFaithCulturePagination,
+  listFaithCultureNews,
+} = require('../services/faithCultureNews.service');
+const {
   getPublicContentGroupKey,
   getPublicContentLookup,
   buildPublicContentSiblingOrClauses,
@@ -1403,10 +1409,16 @@ async function tryAcquireNewsTranslationLock({ id, lang, now = new Date() }) {
 }
 
 function resolvePublicNewsListRequest(req) {
+  const category = normalizeCategorySlug(req.query.category);
+  const pagination = category === 'faith-culture'
+    ? parseFaithCulturePagination(req.query)
+    : {
+      page: Math.max(parseInt(req.query.page || '1', 10), 1),
+      limit: Math.min(Math.max(parseInt(req.query.limit || '30', 10), 1), 100),
+    };
   return {
-    page: Math.max(parseInt(req.query.page || '1', 10), 1),
-    limit: Math.min(Math.max(parseInt(req.query.limit || '30', 10), 1), 100),
-    category: normalizeCategorySlug(req.query.category),
+    ...pagination,
+    category,
     track: normalizeTrackValue(req.query.track),
     topic: normalizeTopicSlug(req.query.topic),
     state: normalizeLocationPart(req.query.state || req.query.locationState),
@@ -1420,11 +1432,13 @@ function resolvePublicNewsListRequest(req) {
 
 // GET /api/public/news?category=&type=video&founderOnly=true&limit=30&page=1
 async function listPublicNews(req, res) {
+  const isFaithCulture = normalizeCategorySlug(req.query.category) === 'faith-culture';
   try {
     res.set('Cache-Control', 'no-store');
     const { page, limit, category, track, topic, state, founderOnly, type, desired, fallbackEnabled, q } = resolvePublicNewsListRequest(req);
 
     if (!isDbReady()) {
+      if (isFaithCulture) return res.status(503).json({ message: FAITH_UNAVAILABLE_MESSAGE });
       return res.status(200).json({ items: [], page, limit, total: 0, totalPages: 1 });
     }
 
@@ -1441,6 +1455,21 @@ async function listPublicNews(req, res) {
     });
     if (topic) filter.$and.push({ topic: new RegExp(`^${escapeRegExp(topic)}$`, 'i') });
     if (state) filter.$and.push({ 'location.state': new RegExp(`^${escapeRegExp(state)}$`, 'i') });
+
+    if (isFaithCulture) {
+      const { docs, total, totalPages, hasMore } = await listFaithCultureNews({
+        filter, lang: desired, page, limit, select: PUBLIC_FEED_SELECT, timingContext: { req, res },
+      });
+      const items = _preparePublicNewsFeedItems(docs.map(doc => ({
+        ...doc, description: doc.description || doc.summary || '',
+      })), desired, { fallbackToBase: false });
+      if (items.length !== docs.length || items.some(item => item.resolvedLanguage !== desired
+          || !hasFullTranslation({ title: item.title, summary: item.summary, content: item.content }))) {
+        throw new Error('Faith page eligibility changed during hydration');
+      }
+      await attachPublicPulseDialogueContributorsBatch(items, undefined, { req, res });
+      return res.status(200).json({ items, page, limit, total, totalPages, hasMore });
+    }
 
     const isGroupedCategoryListing = Boolean(category);
     const isPlainLatestRequest = !isGroupedCategoryListing
@@ -1528,6 +1557,11 @@ async function listPublicNews(req, res) {
 
     return res.status(200).json({ items, page, limit, total, totalPages });
   } catch (e) {
+    if (isFaithCulture) {
+      if (e instanceof FaithPaginationError) return res.status(400).json({ message: e.message });
+      console.error('[public-news][faith-culture] Feed query failed');
+      return res.status(503).json({ message: FAITH_UNAVAILABLE_MESSAGE });
+    }
     return res.status(500).json({ items: [], page: 1, limit: 30, total: 0, totalPages: 1, message: e?.message || String(e) });
   }
 }

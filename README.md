@@ -318,7 +318,7 @@ Returns **published** news stories (no auth required).
 
 Query params:
 - `category` (existing)
-- `lang` (new) — `en|hi|gu` (default is `gu`; missing `lang` in DB is treated as `gu`)
+- `lang` — `en|hi|gu` (requested-language default is `gu`; see the Faith-specific contract below)
 - `q` (existing search)
 - `page` (default 1), `limit` (default 30)
 
@@ -337,6 +337,57 @@ MONGODB_URI="<your-mongo-uri>" node scripts/backfill-news-lang.js
 Response shape (unchanged):
 ```json
 { "items": [], "page": 1, "limit": 30, "total": 0, "totalPages": 1 }
+```
+
+#### Faith & Culture strict pagination
+
+Only canonical `category=faith-culture` uses the strict pagination contract:
+
+```text
+GET /api/public/news?category=faith-culture&lang=hi&page=1&limit=30
+```
+
+- EN/HI/GU pages contain only public, published requested-language representations
+  with nonblank title, summary and content. Native records and complete `ready`
+  translation buckets remain supported. Pending, failed, rejected, missing-status
+  and incomplete translation buckets are not served. `APPROVED` alone is not
+  readiness; editorial review metadata never substitutes for publication.
+- `strictLocale` and fallback flags cannot enable cross-language filling for Faith.
+  Inspect `resolvedLanguage` and `isFallback`; successful Faith items resolve to the
+  requested language without fallback. No second widened request is needed.
+- Eligibility precedes logical-story deduplication, counting and database pagination.
+  Identity uses translation key/group ID, otherwise canonical slug, otherwise `_id`.
+  A native eligible representation is preferred to a cached translation.
+- Ordering uses `publishedAt`, falling back only when absent to `publishAt`, then
+  `createdAt`, then epoch zero. The selected `_id` descending is the final tie-breaker.
+  `updatedAt` never promotes a story.
+- Defaults are page 1 and limit 30. Malformed/nonpositive/unsafe pagination values
+  return HTTP 400; valid limits above 100 are capped at 100.
+- Responses add `hasMore`. `total` counts eligible logical stories, and
+  `totalPages = max(1, ceil(total / limit))`. An empty feed has one empty page and
+  `hasMore=false`; out-of-range pages are empty without changing the requested page.
+- Database unavailability, query deadlines or a page becoming ineligible during
+  hydration return a generic HTTP 503, not a successful empty feed.
+- MongoDB aggregates compact group IDs/counts and applies skip/limit before the
+  application receives candidates. Full-record hydration is restricted to at most
+  the page limit. Queries have a 2.5-second deadline; aggregation may spill to disk.
+  Exact grouped totals still require database work proportional to eligible
+  candidates, and deep offsets are not constant-time. No indexes are created.
+- Exact case-insensitive category matching excludes stored `faith_culture` and
+  `faith-culture-extra`; request aliases still follow canonical normalization.
+  Group identifiers remain case-sensitive. This uses simple collation and an
+  anchored category regex, so the existing case-insensitive category index cannot
+  be assumed to provide efficient string bounds. Deployed query plans and latency
+  require a separately authorized environment-specific check.
+- Faith cache keys have a separate version; other categories retain their existing
+  cache keys and listing behavior. Offset pages/cache entries are not a snapshot
+  across concurrent publishing, deletion or translation changes.
+
+Focused fixtures run without reading `.env` or connecting to databases/external
+services:
+
+```powershell
+node --require .\tests\helpers\publicNewsIsolation.js --test .\tests\public_news_faith_pagination.test.js
 ```
 
 ### One-time published Regional Public Article resynchronization

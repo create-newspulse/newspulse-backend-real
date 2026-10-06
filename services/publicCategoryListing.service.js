@@ -25,6 +25,21 @@ function getPublicContentGroupKey(doc) {
   return `id:${_safeString(doc?._id)}`;
 }
 
+function buildPublicContentGroupExpression() {
+  const text = field => ({ $trim: { input: { $ifNull: [field, ''] } } });
+  const branches = [
+    ...['translationKey', 'translationGroupId'].map(field => ({
+      case: { $ne: [text(`$${field}`), ''] },
+      then: { $concat: ['group:', text(`$${field}`)] },
+    })),
+    ...['slugs.en', 'slug', 'slugs.hi', 'slugs.gu'].map(field => ({
+      case: { $ne: [text(`$${field}`), ''] },
+      then: { $concat: ['slug:', text(`$${field}`)] },
+    })),
+  ];
+  return { $switch: { branches, default: { $concat: ['id:', { $toString: '$_id' }] } } };
+}
+
 function getPublicContentLookup(doc) {
   return {
     groupKey: _safeString(doc?.translationKey) || _safeString(doc?.translationGroupId) || null,
@@ -119,6 +134,7 @@ function pickBestLocalizedGroupDoc(groupDocs, requestedLang, { fallbackToBase = 
 
 module.exports = {
   getPublicContentGroupKey,
+  buildPublicContentGroupExpression,
   getPublicContentLookup,
   buildPublicContentSiblingOrClauses,
   pickBestLocalizedGroupDoc,

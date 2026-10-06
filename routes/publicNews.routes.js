@@ -9,6 +9,7 @@ const {
 } = require('../lib/cache');
 const { setRequestTimingCacheContext } = require('../lib/timingDiagnostics');
 const noCache = require('../middleware/noCache');
+const { UNAVAILABLE_MESSAGE: FAITH_UNAVAILABLE_MESSAGE } = require('../services/faithCultureNews.service');
 
 const {
   resolvePublicNewsListRequest,
@@ -43,7 +44,8 @@ function buildPublicNewsCacheKey(req) {
   })).digest('hex');
 
   if (category) {
-    const cacheKey = `${buildCategoryCacheKey(category, lang, page)}:v2:${variant}`;
+    const version = category === 'faith-culture' ? 'faith-v1' : 'v2';
+    const cacheKey = `${buildCategoryCacheKey(category, lang, page)}:${version}:${variant}`;
     setRequestTimingCacheContext(req, {
       cacheFamily: 'category',
       cacheKey,
@@ -78,7 +80,9 @@ const latestCache = createJsonCacheMiddleware({
     rebuildConcurrencyGroup: 'public-news',
     rebuildConcurrencyLimit: 2,
     lockTtlSeconds: 60,
-    onRebuildUnavailable: (req, res) => res.status(503).json({
+    onRebuildUnavailable: (req, res) => normalizeCategorySlugForCache(req.query.category) === 'faith-culture'
+      ? res.status(503).json({ message: FAITH_UNAVAILABLE_MESSAGE })
+      : res.status(503).json({
       items: [],
       page: Math.max(parseInt(req.query.page || '1', 10) || 1, 1),
       limit: Math.min(Math.max(parseInt(req.query.limit || '30', 10) || 30, 1), 100),
