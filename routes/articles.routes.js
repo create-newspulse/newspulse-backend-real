@@ -21,6 +21,7 @@ const {
 const { createIndexedMediaRecord } = require('../services/mediaLibraryService');
 const PushHistory = require('../models/PushHistory');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
+const { isFaithCultureCategory, buildFaithTopicPatch, isFaithTopicOnlyUpdate } = require('../lib/faithCultureTopics');
 const { canonicalizeSlug, detectSlugLocale, getSlugCandidates, safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 const { INDIA_STATES_UTS, tagStatesFromText, isValidStateSlug } = require('../src/utils/locationTagger');
@@ -1145,8 +1146,19 @@ async function syncMasterArticleGroup(doc, options = {}) {
       logger: console,
       reason: options.reason || 'article_sync',
       invalidate: options.invalidate,
+      faithTopicOnly: options.faithTopicOnly,
+      previousCategory: options.previousCategory,
     });
-  } catch (_) {
+  } catch (error) {
+    if (options.requireFaithTopicSync) {
+      console.error('[articles.faithTopic] sibling synchronization failed', {
+        code: typeof error?.code === 'number' ? error.code : null,
+      });
+      const failure = new Error('Faith topic synchronization failed. Retry the update.');
+      failure.statusCode = 503;
+      await invalidateArticleCaches();
+      throw failure;
+    }
     return null;
   }
 }
@@ -1387,6 +1399,25 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     }
 
     const categoryNorm = _normalizeCategoryValue(category);
+    const faithTopicPatch = buildFaithTopicPatch({
+      category: categoryNorm,
+      topic: body0.topic,
+      topicProvided: Object.prototype.hasOwnProperty.call(body0, 'topic'),
+    });
+    if (!faithTopicPatch.ok) {
+      return res.status(400).json({ ok: false, success: false, message: faithTopicPatch.message });
+    }
+    if (isFaithCultureCategory(categoryNorm) && sharedSyncFields.sourceArticleId) {
+      const source = await News.findById(sharedSyncFields.sourceArticleId).select('category topic sourceArticleId').lean();
+      if (!source || !isFaithCultureCategory(source.category) || !_isSourceTranslationDoc(source)) {
+        return res.status(409).json({ ok: false, message: 'Faith translations require a source Faith & Culture article' });
+      }
+      const sourceTopic = buildFaithTopicPatch({ category: source.category, topic: source.topic ?? null, topicProvided: true });
+      if (!sourceTopic.ok || (faithTopicPatch.value !== undefined && faithTopicPatch.value !== sourceTopic.value)) {
+        return res.status(409).json({ ok: false, message: 'Change the Faith topic on the source article to keep translations aligned' });
+      }
+      faithTopicPatch.value = sourceTopic.value;
+    }
     const authorByline = await buildAuthorBylinePatch(body0, { category: categoryNorm || category });
     const pulseDialogueFields = await _buildPulseDialoguePatchFromBody(body0, { category: categoryNorm || category, partial: false });
     if (!pulseDialogueFields.ok) {
@@ -1517,6 +1548,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       description: normalizedDescription,
       content: content ?? body ?? '',
       category: categoryNorm || category,
+      ...(faithTopicPatch.value !== undefined ? { topic: faithTopicPatch.value } : {}),
       ...(editorialPatch.value !== undefined ? { editorialType: editorialPatch.value } : {}),
       ...(sharedSyncFields.track !== undefined ? { track: sharedSyncFields.track } : {}),
       language: langNorm,
@@ -1598,6 +1630,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       await syncMasterArticleGroup(doc, {
         reason: 'article_create',
         invalidate: String(doc.status || '').toLowerCase() === 'published',
+        requireFaithTopicSync: faithTopicPatch.value !== undefined,
       });
     }
 
@@ -2844,21 +2877,61 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     let before = null;
     try {
       before = await News.findById(rawId)
-        .select('title description content translations translationStatus translationError translationNextRetryAt translationUpdatedAt category editorialType pulseDialogue authorByline status workflowStage translationGroupId translationKey sourceArticleId originalLang lang language slugs coverImage coverImageUrl imageURL syncVersion machineGenerated humanEdited translationReviewStatus sourceHash translationMeta')
+        .select('title description content translations translationStatus translationError translationNextRetryAt translationUpdatedAt category topic editorialType pulseDialogue authorByline status workflowStage translationGroupId translationKey sourceArticleId originalLang lang language slugs coverImage coverImageUrl imageURL syncVersion machineGenerated humanEdited translationReviewStatus sourceHash translationMeta')
         .lean();
     } catch (_) {
       // ignore
     }
 
-    if (!before && Object.prototype.hasOwnProperty.call(requestBody, 'authorByline')) {
-      const publicCopy = await PublicArticle.findById(rawId).select('sourceNewsId').lean();
-      if (!publicCopy?.sourceNewsId) {
-        return res.status(409).json({ ok: false, message: 'Author byline changes require a source newsroom article' });
+    const topicProvided = Object.prototype.hasOwnProperty.call(requestBody, 'topic');
+    const bylineProvided = Object.prototype.hasOwnProperty.call(requestBody, 'authorByline');
+    if (!before && (bylineProvided || topicProvided)) {
+      const publicCopy = await PublicArticle.findById(rawId).select('sourceNewsId category').lean();
+      const faithTopicRequested = topicProvided && (isFaithCultureCategory(category) || isFaithCultureCategory(publicCopy?.category));
+      if (bylineProvided || faithTopicRequested) {
+        if (!publicCopy?.sourceNewsId) {
+          return res.status(409).json({
+            ok: false,
+            message: faithTopicRequested
+              ? 'Faith topic changes require a source newsroom article'
+              : 'Author byline changes require a source newsroom article',
+          });
+        }
+        rawId = String(publicCopy.sourceNewsId);
+        before = await News.findById(rawId).lean();
+        if (!before) return res.status(404).json({ ok: false, message: 'Source newsroom article not found' });
+        if (faithTopicRequested && !isFaithCultureCategory(category ?? before.category) && !isFaithCultureCategory(before.category)) {
+          return res.status(409).json({ ok: false, message: 'Change the Faith topic on a source Faith & Culture article' });
+        }
       }
-      rawId = String(publicCopy.sourceNewsId);
+    }
+
+    if (before && topicProvided && (isFaithCultureCategory(before.category) || isFaithCultureCategory(category))) {
+      // Compare the full persisted form before deciding that only topic metadata changed.
+      const previousCategory = before.category;
       before = await News.findById(rawId).lean();
       if (!before) return res.status(404).json({ ok: false, message: 'Source newsroom article not found' });
+      if (before.category !== previousCategory) {
+        return res.status(409).json({ ok: false, message: 'Article category changed; reload and retry the update' });
+      }
     }
+    const faithTopicPatch = buildFaithTopicPatch({
+      category,
+      existingCategory: before?.category,
+      topic: requestBody.topic,
+      topicProvided,
+    });
+    if (!faithTopicPatch.ok) {
+      return res.status(400).json({ ok: false, success: false, message: faithTopicPatch.message });
+    }
+    if (before && faithTopicPatch.value !== undefined && !_isSourceTranslationDoc(before, rawId)) {
+      const previousTopic = String(before.topic ?? '').trim().toLowerCase() || null;
+      if (faithTopicPatch.value !== previousTopic) {
+        return res.status(409).json({ ok: false, message: 'Change the Faith topic on the source article to keep translations aligned' });
+      }
+      faithTopicPatch.value = undefined;
+    }
+    const requireFaithTopicSync = faithTopicPatch.value !== undefined;
 
     const beforeStatusForLifecycle = String(before?.status || '').toLowerCase();
     const isLifecycleTakedownStatus = requestedStatusNorm === 'draft' || requestedStatusNorm === 'archived';
@@ -2975,6 +3048,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const update = {
+      ...(faithTopicPatch.value !== undefined ? { topic: faithTopicPatch.value } : {}),
       ...(authorByline !== undefined ? { authorByline } : {}),
       ...(title !== undefined ? { title } : {}),
       ...(summaryOrDescription !== undefined ? { description: String(summaryOrDescription).trim() } : {}),
@@ -3011,6 +3085,37 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     _stripUndefinedKeysInPlace(update);
     if (editorialPatch.shouldUnset) {
       delete update.editorialType;
+    }
+
+    if (before && _isSourceTranslationDoc(before, rawId) && isFaithTopicOnlyUpdate(before, update, {
+      ignoreLanguageRepair: shouldFixMislabel && !requestedLanguageChangesIdentity,
+    })) {
+      const { lastSyncedAt, syncVersion, contentFingerprint } = prepareSourceSyncMetadata({ ...before, topic: update.topic });
+      const doc = await News.findOneAndUpdate({
+        _id: rawId,
+        category: before.category,
+        sourceArticleId: before.sourceArticleId ?? null,
+        syncVersion: before.syncVersion ?? null,
+      }, { $set: { topic: update.topic, lastSyncedAt, syncVersion, contentFingerprint } }, { new: true, runValidators: true });
+      if (!doc) {
+        return res.status(409).json({ ok: false, message: 'Article changed; reload and retry the topic update' });
+      }
+      await syncMasterArticleGroup(doc, {
+        reason: 'faith_topic_update',
+        faithTopicOnly: true,
+        requireFaithTopicSync: true,
+        invalidate: true,
+      });
+      await invalidateArticleCaches();
+      const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
+      return res.json({
+        ok: true,
+        success: true,
+        status: 200,
+        message: 'Article updated',
+        data: { article: withCoverImageUrl(obj) },
+        article: withCoverImageUrl(obj),
+      });
     }
 
     if (before?.machineGenerated && hasArticleContentEdit(update)) {
@@ -3073,6 +3178,17 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
           message: publishErr?.message || 'Failed to publish article',
           ...(publishErr?.details || {}),
         });
+      }
+
+      if (requireFaithTopicSync) {
+        await syncMasterArticleGroup(publishResult.article, {
+          reason: 'faith_topic_publish',
+          faithTopicOnly: true,
+          previousCategory: before.category,
+          requireFaithTopicSync: true,
+          invalidate: true,
+        });
+        await invalidateArticleCaches();
       }
 
       await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_UPDATED', doc, {
@@ -3186,7 +3302,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     }
 
     const updateKeys = Object.keys(update);
-    const META_ONLY_KEYS = new Set(['status', 'scheduledAt', 'publishAt', 'publishedAt', 'deletedAt', 'syncMode', 'sourceArticleId', 'sourceLanguage', 'lastSyncedAt', 'syncVersion', 'contentFingerprint']);
+    const META_ONLY_KEYS = new Set(['topic', 'status', 'scheduledAt', 'publishAt', 'publishedAt', 'deletedAt', 'syncMode', 'sourceArticleId', 'sourceLanguage', 'lastSyncedAt', 'syncVersion', 'contentFingerprint']);
     const isMetaOnlyUpdate = updateKeys.length > 0 && updateKeys.every((k) => META_ONLY_KEYS.has(k));
 
     let didMetaOnlyUpdate = false;
@@ -3363,6 +3479,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       await syncMasterArticleGroup(doc, {
         reason: 'article_update_meta_only',
         invalidate: ['published', 'scheduled', 'archived', 'deleted'].includes(String(doc?.status || '').toLowerCase()),
+        requireFaithTopicSync,
       });
       await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_UPDATED', doc, {
         before,
@@ -3428,6 +3545,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     await syncMasterArticleGroup(doc, {
       reason: 'article_update',
       invalidate: ['published', 'scheduled', 'archived', 'deleted'].includes(String(doc.status || '').toLowerCase()),
+      requireFaithTopicSync,
     });
 
     if (String(doc.status || '').toLowerCase() === 'published') {

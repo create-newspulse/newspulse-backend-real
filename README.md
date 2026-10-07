@@ -320,6 +320,7 @@ Query params:
 - `category` (existing)
 - `lang` — `en|hi|gu` (requested-language default is `gu`; see the Faith-specific contract below)
 - `q` (existing search)
+- `topic` (optional existing topic metadata filter)
 - `page` (default 1), `limit` (default 30)
 
 Examples:
@@ -390,8 +391,53 @@ Focused fixtures run without reading `.env` or connecting to databases/external
 services:
 
 ```powershell
-node --require .\tests\helpers\publicNewsIsolation.js --test .\tests\public_news_faith_pagination.test.js
+node --require .\tests\helpers\publicNewsIsolation.js --test .\tests\faith_culture_topics.test.js .\tests\public_news_faith_pagination.test.js .\tests\translation_group_sync.test.js
 ```
+
+#### Faith & Culture topic authoring
+
+Authenticated CMS `POST /api/articles` and `PUT /api/articles/:id` (including
+their existing admin aliases) use the optional existing `News.topic` field.
+For `category=faith-culture`, the nonempty codes are exactly:
+
+```text
+faith-spiritual-life
+living-heritage
+food-agricultural-heritage
+architecture-art-public-heritage
+community-social-traditions
+folk-arts-festivals-textiles
+language-cultural-identity
+```
+
+- Codes are trimmed and lowercased, not slugified. Unsupported strings and
+  non-string values other than JSON `null` return HTTP 400.
+- Omission preserves an existing topic. JSON `null`, `""`, or a whitespace-only
+  string explicitly clears it to `null`. Topic-less Faith stories remain valid.
+- A changed/cleared topic on a translated child returns HTTP 409: edit the source
+  article instead. Resubmitting an unchanged topic does not block child text edits.
+  CMS-created Faith translation children inherit their canonical Faith source's
+  topic; a conflicting supplied topic (including a clear) also returns 409.
+- Leaving Faith clears the Faith topic; entering Faith without a supplied topic
+  clears any foreign topic value. Other categories keep their existing metadata
+  rules, including Youth Pulse topic/track compatibility. No global schema enum,
+  new database field, migration, or index change is required.
+- Topic-only source edits (including full forms whose other values are unchanged)
+  synchronize topic and existing synchronization metadata to linked EN/HI/GU Faith
+  News siblings. They do not rewrite translation text, slugs, language identity,
+  readiness/review state, or publication fields, and do not enqueue translations.
+  Topic participates in the Faith content fingerprint, not the translation-text hash.
+- Synchronization failures return an error instead of a false success. These are
+  multi-document updates, not a transaction; retrying the same topic or clear value
+  repairs eligible sibling metadata after a partial failure.
+- The News-backed public feed already filters topic before eligibility, logical
+  counting, and pagination. For example:
+  `GET /api/public/news?category=faith-culture&topic=living-heritage&lang=gu&page=1&limit=30`.
+  `total`, `totalPages`, and `hasMore` describe that topic's requested-language
+  result set. No frontend widening or cross-language filling is needed.
+- The separate public-copy `Article` model still has no topic parity. Topic-only
+  edits do not write those copies. A CMS public-copy ID can resolve through its
+  existing `sourceNewsId`; without a canonical News source, topic edits return 409.
 
 These fixtures validate the MongoDB driver's BSON-bound script patterns before
 evaluating them, including empty EN/HI/GU feeds. Character-equivalence checks cover

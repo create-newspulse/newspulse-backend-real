@@ -197,6 +197,49 @@ for (const lang of languages) {
     assert.equal(new Set(ids).size, 61);
   });
 
+  test(`Faith ${lang}: exact topic filtering precedes logical counting and pagination`, async context => {
+    const docs = [];
+    let number = 1;
+    for (const [topic, count] of [['living-heritage', 31], ['food-agricultural-heritage', 45], [undefined, 1], ['living-heritage-extra', 1]]) {
+      for (let index = 0; index < count; index++) {
+        for (const locale of languages) {
+          docs.push(story(number++, locale, { topic, translationKey: `${topic || 'untagged'}-${index}` }));
+        }
+      }
+    }
+    docs.push(story(number++, lang, { topic: 'living-heritage', status: 'draft' }));
+    docs.push(story(number++, lang, { topic: 'living-heritage', category: 'national' }));
+    docs.push(story(number++, lang, { topic: 'living-heritage', content: '' }));
+    const state = setup(context, docs);
+    const ids = [];
+    for (const page of [1, 2, 3]) {
+      const result = success(await state.get({ lang, topic: ' LIVING-HERITAGE ', page: String(page) }));
+      assert.equal(result.total, 31);
+      assert.equal(result.totalPages, 2);
+      assert.equal(result.page, page);
+      assert.equal(result.limit, 30);
+      assert.equal(result.hasMore, page === 1);
+      assert.equal(result.items.length, page === 1 ? 30 : page === 2 ? 1 : 0);
+      assert.ok(result.items.every(item => item.topic === 'living-heritage' && item.resolvedLanguage === lang && !item.isFallback));
+      ids.push(...result.items.map(item => item._id));
+    }
+    assert.equal(new Set(ids).size, 31);
+    for (const pipeline of state.aggregates) {
+      assert.equal(matches(docs.find(doc => doc.topic === 'food-agricultural-heritage' && doc.lang === lang), pipeline[0].$match), false);
+    }
+    const food = success(await state.get({ lang, topic: 'food-agricultural-heritage', page: '2' }));
+    assert.equal(food.total, 45);
+    assert.equal(food.totalPages, 2);
+    assert.equal(food.hasMore, false);
+    assert.equal(food.items.length, 15);
+    assert.ok(food.items.every(item => item.topic === 'food-agricultural-heritage'));
+    const unfiltered = success(await state.get({ lang, page: '3' }));
+    assert.equal(unfiltered.total, 78, 'untagged Faith stories remain part of the full feed');
+    assert.ok(unfiltered.items.some(item => item.topic == null));
+    const empty = success(await state.get({ lang, topic: 'language-cultural-identity' }));
+    assert.deepEqual(empty, { items: [], page: 1, limit: 30, total: 0, totalPages: 1, hasMore: false });
+  });
+
   test(`Faith ${lang}: eligibility precedes grouping, pagination and totals`, async context => {
     const base = lang === 'en' ? 'gu' : 'en';
     const docs = Array.from({ length: 100 }, (_, i) => story(i + 1, base, i >= 90 ? {
@@ -475,6 +518,8 @@ test('Faith cache is versioned and page/limit/language-specific without changing
   assert.equal(new Set(keys).size, 9);
   assert.ok(keys.every(key => key.includes(':faith-v1:')));
   assert.notEqual(keys[0], options.buildKey(req({ limit: '31' })));
+  assert.notEqual(keys[0], options.buildKey(req({ topic: 'living-heritage' })));
+  assert.notEqual(options.buildKey(req({ topic: 'living-heritage' })), options.buildKey(req({ topic: 'food-agricultural-heritage' })));
   assert.equal(keys[0], options.buildKey(req({ strictLocale: 'false', fallback: 'true' })));
   for (const category of ordinaryCategories) assert.ok(options.buildKey(req({ category })).includes(':v2:'));
   assert.throws(() => options.buildKey(req({ page: 'abc' })), /Invalid page/);

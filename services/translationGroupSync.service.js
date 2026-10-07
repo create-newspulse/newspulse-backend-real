@@ -8,6 +8,8 @@ const {
   notifyPublicContentInvalidation,
 } = require('./publicContentInvalidation.service');
 const { slugifyUnicode } = require('../lib/slug');
+const { FAITH_TOPIC_CODES, isFaithCultureCategory } = require('../lib/faithCultureTopics');
+const { normalizeLanguage } = require('../middleware/lang');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 
@@ -125,6 +127,7 @@ function computeContentFingerprint(docLike) {
     translationStatus: cloneSimple(doc.translationStatus || null),
     pulseDialogue: cloneSimple(doc.pulseDialogue || null),
     ...(doc.authorByline !== undefined ? { authorByline: cloneSimple(doc.authorByline) } : {}),
+    ...(isFaithCultureCategory(doc.category) ? { topic: normalizeNullableString(doc.topic)?.toLowerCase() || null } : {}),
   };
 
   return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
@@ -262,6 +265,9 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
     slug: localizedSlug,
     slugs: cloneSimple(master.slugs || {}),
     category: normalizeNullableString(master.category),
+    ...(isFaithCultureCategory(master.category)
+      ? { topic: master.topic ?? null }
+      : isFaithCultureCategory(child.category) ? { topic: null } : {}),
     tags: normalizeStringArray(master.tags),
     geo: cloneSimple(master.geo || null),
     location: cloneSimple(master.location || null),
@@ -322,6 +328,13 @@ function collectTranslationGroupInvalidationTargets(masterDoc, childDocs = []) {
 async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
   const logger = options.logger || console;
   const master = isPlainObject(masterDoc) ? masterDoc : null;
+  const faithTopicOnly = options.faithTopicOnly === true;
+  const leavingFaith = isFaithCultureCategory(options.previousCategory) && !isFaithCultureCategory(master?.category);
+  if (faithTopicOnly && (!master?._id
+    || (!isFaithCultureCategory(master.category) && !leavingFaith)
+    || (master.sourceArticleId && String(master.sourceArticleId) !== String(master._id)))) {
+    throw new Error('Faith topic synchronization requires a source newsroom article');
+  }
   if (!master || !master._id) {
     return { ok: false, childrenUpdated: 0, childIds: [] };
   }
@@ -353,7 +366,38 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
       continue;
     }
 
-    const patch = buildChildNewsSyncPatch(master, child.toObject ? child.toObject({ virtuals: true }) : child, { now, metadata });
+    const childObject = child.toObject ? child.toObject({ virtuals: true }) : child;
+    if (faithTopicOnly) {
+      if (!normalizeLanguage(child.lang) && !normalizeLanguage(child.language) && !normalizeLanguage(child.originalLang)) continue;
+      if (!isFaithCultureCategory(child.category) && !(leavingFaith && FAITH_TOPIC_CODES.includes(child.topic))) continue;
+      if (Number(child.syncVersion || 0) > metadata.syncVersion) {
+        throw new Error('Faith topic synchronization was superseded by a newer update');
+      }
+      const patch = {
+        topic: leavingFaith ? null : (master.topic ?? null),
+        lastSyncedAt: metadata.lastSyncedAt || now,
+        syncVersion: metadata.syncVersion,
+        contentFingerprint: metadata.contentFingerprint,
+      };
+      // Query updates avoid document hooks that normalize translation content and readiness.
+      const result = await News.updateOne({
+        _id: child._id,
+        category: child.category,
+        sourceArticleId: child.sourceArticleId ?? null,
+        lang: child.lang ?? null,
+        language: child.language ?? null,
+        originalLang: child.originalLang ?? null,
+        syncVersion: child.syncVersion ?? null,
+        $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }],
+      }, { $set: patch }, { runValidators: true });
+      if (!result.acknowledged || result.matchedCount !== 1) {
+        throw new Error('Faith topic sibling changed during synchronization; retry the update');
+      }
+      updatedChildren.push({ ...childObject, ...patch });
+      continue;
+    }
+
+    const patch = buildChildNewsSyncPatch(master, childObject, { now, metadata });
 
     Object.assign(child, patch);
     await child.save({ validateModifiedOnly: true });
