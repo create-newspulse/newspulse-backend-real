@@ -13,7 +13,9 @@ const { langMiddleware } = require('../middleware/lang');
 const router = require('../routes/publicNews.routes');
 const controller = require('../controllers/publicNewsController');
 const { getPublicContentGroupKey, buildPublicContentGroupExpression } = require('../services/publicCategoryListing.service');
+const { buildFaithCulturePagePipeline } = require('../services/faithCultureNews.service');
 const { matches, runPipeline } = require('./helpers/pulseDialogueAggregate');
+const { BSON } = mongoose.mongo;
 
 const objectId = number => new mongoose.Types.ObjectId(number.toString(16).padStart(24, '0'));
 const languages = ['en', 'hi', 'gu'];
@@ -22,6 +24,30 @@ const ordinaryCategories = [
   'editorial', 'web-stories', 'viral-videos', 'pulse-dialogue', 'youth-pulse', 'community-reporter', 'inspiration-hub',
 ];
 const bucket = lang => ({ title: `${lang} translated title`, summary: `${lang} translated summary`, content: `${lang} translated content` });
+const scriptRanges = [
+  { name: 'Gujarati', start: 0x0A80, end: 0x0AFF, intended: /[\u0A80-\u0AFF]/ },
+  { name: 'Devanagari', start: 0x0900, end: 0x097F, intended: /[\u0900-\u097F]/ },
+];
+
+function assertMongoScriptRegexes(pipeline) {
+  const bound = BSON.deserialize(BSON.serialize({ pipeline }), { bsonRegExp: true });
+  const regexes = [];
+  function collect(value) {
+    if (value instanceof BSON.BSONRegExp) regexes.push(value);
+    else if (value && typeof value === 'object') Object.values(value).forEach(collect);
+  }
+  collect(bound.pipeline);
+  for (const regex of regexes) {
+    assert.doesNotMatch(regex.pattern, /\\u[0-9a-f]{4}/i, 'Mongo-bound patterns must not contain JavaScript Unicode escapes');
+  }
+  for (const range of scriptRanges) {
+    const expected = `[${String.fromCharCode(range.start)}-${String.fromCharCode(range.end)}]`;
+    const matches = regexes.filter(regex => regex.pattern === expected);
+    assert.equal(matches.length, 4, `${range.name}: both language fields, content detection and script counting`);
+    for (const regex of matches) assert.equal(regex.options, '');
+  }
+  return regexes;
+}
 
 function story(number, lang = 'en', overrides = {}) {
   const publishedAt = new Date(Date.UTC(2020, 0, 1) - number * 1000);
@@ -47,7 +73,10 @@ function setup(context, initial = [], { legacy = false } = {}) {
     return { option(options) {
       assert.deepEqual(options, { maxTimeMS: 2500, allowDiskUse: true, collation: { locale: 'simple' } });
       return this;
-    }, exec: async () => runPipeline(state.docs, pipeline) };
+    }, exec: async () => {
+      assertMongoScriptRegexes(pipeline);
+      return runPipeline(state.docs, pipeline);
+    } };
   });
   context.mock.method(News, 'find', filter => {
     if (state.beforeHydrate) state.beforeHydrate();
@@ -87,7 +116,53 @@ function success(response) {
   return response.body;
 }
 
+test('Faith aggregation serializes Mongo-compatible script ranges for EN/HI/GU', () => {
+  for (const lang of languages) {
+    assertMongoScriptRegexes(buildFaithCulturePagePipeline({ category: 'faith-culture' }, { lang, page: 1, limit: 30 }));
+  }
+});
+
+for (const range of scriptRanges) {
+  test(`Faith ${range.name} script range preserves original character matching`, () => {
+    const pipeline = buildFaithCulturePagePipeline({ category: 'faith-culture' }, { lang: 'en', page: 1, limit: 30 });
+    const expected = `[${String.fromCharCode(range.start)}-${String.fromCharCode(range.end)}]`;
+    const bound = assertMongoScriptRegexes(pipeline).find(regex => regex.pattern === expected);
+    const actual = new RegExp(bound.pattern, bound.options);
+    const samples = [
+      ['Gujarati letters', '\u0A85\u0AB9'],
+      ['Devanagari letters', '\u0905\u0939'],
+      ['Gujarati digits', '\u0AE6\u0AEF'],
+      ['Devanagari digits', '\u0966\u096F'],
+      ['Latin letters', 'Az'],
+      ['ASCII digits', '0123456789'],
+      ['punctuation', '.,!?;:()'],
+      ['Devanagari punctuation', '\u0964'],
+      ['whitespace', ' \t\r\n\u00A0\u2003'],
+      ['supplementary character', '\u{1F642}'],
+      ['empty string', ''],
+      ...[range.start - 1, range.start, range.end, range.end + 1].map(codePoint => (
+        [`boundary U+${codePoint.toString(16)}`, String.fromCharCode(codePoint)]
+      )),
+    ];
+    for (const [label, value] of samples) {
+      assert.equal(actual.test(value), range.intended.test(value), label);
+    }
+    for (let codePoint = 0; codePoint <= 0xFFFF; codePoint++) {
+      const value = String.fromCharCode(codePoint);
+      assert.equal(actual.test(value), range.intended.test(value), `U+${codePoint.toString(16)}`);
+    }
+  });
+}
+
 for (const lang of languages) {
+  test(`Faith ${lang}: empty feed executes BSON-compatible aggregation and returns HTTP 200`, async context => {
+    const state = setup(context);
+    const result = success(await state.get({ lang, language: lang }));
+    assert.deepEqual(result, { items: [], page: 1, limit: 30, total: 0, totalPages: 1, hasMore: false });
+    assert.equal(state.aggregates.length, 1);
+    assert.equal(state.finds.length, 0);
+  });
+
   test(`Faith ${lang}: 100 stories paginate 30/30/30/10 without overlap or updatedAt promotion`, async context => {
     const docs = Array.from({ length: 100 }, (_, i) => story(i + 1, lang));
     docs[99].updatedAt = new Date('2999-01-01');
@@ -343,6 +418,13 @@ test('Faith unavailable, timed-out, inconsistent and concurrently changed pages 
   assert.equal((await state.get({ lang: 'hi' })).status, 503);
   context.mock.method(News, 'aggregate', () => ({ option() { return this; }, exec: async () => [] }));
   assert.equal((await state.get()).status, 503);
+  context.mock.method(News, 'aggregate', () => ({
+    option() { return this; },
+    exec: async () => { throw Object.assign(new Error('fixture-query-deadline'), { code: 50, codeName: 'MaxTimeMSExpired' }); },
+  }));
+  const timedOut = await state.get();
+  assert.equal(timedOut.status, 503);
+  assert.deepEqual(timedOut.body, disconnected.body);
   context.mock.method(News, 'aggregate', () => { throw new Error('fixture-private-database-detail'); });
   const failed = await state.get();
   assert.equal(failed.status, 503);

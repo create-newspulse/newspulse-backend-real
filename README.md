@@ -373,6 +373,9 @@ GET /api/public/news?category=faith-culture&lang=hi&page=1&limit=30
   the page limit. Queries have a 2.5-second deadline; aggregation may spill to disk.
   Exact grouped totals still require database work proportional to eligible
   candidates, and deep offsets are not constant-time. No indexes are created.
+- Script-detection regexes are constructed from strings so JavaScript resolves
+  Unicode escapes before BSON serialization. Mongo-bound patterns contain actual
+  Gujarati/Devanagari range characters, not PCRE-incompatible literal `\uXXXX`.
 - Exact case-insensitive category matching excludes stored `faith_culture` and
   `faith-culture-extra`; request aliases still follow canonical normalization.
   Group identifiers remain case-sensitive. This uses simple collation and an
@@ -389,6 +392,11 @@ services:
 ```powershell
 node --require .\tests\helpers\publicNewsIsolation.js --test .\tests\public_news_faith_pagination.test.js
 ```
+
+These fixtures validate the MongoDB driver's BSON-bound script patterns before
+evaluating them, including empty EN/HI/GU feeds. Character-equivalence checks cover
+all 65,536 BMP code points per range plus representative strings and boundaries.
+They do not connect to a real MongoDB server.
 
 ### One-time published Regional Public Article resynchronization
 

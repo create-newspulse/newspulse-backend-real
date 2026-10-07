@@ -45,8 +45,8 @@ function normalizedLanguage(value) {
         initialValue: '', in: { $concat: ['$$value', '$$this.match'] },
       } },
     }, in: { $switch: { branches: [
-      { case: regex('$$raw', /[\u0A80-\u0AFF]/), then: 'gu' },
-      { case: regex('$$raw', /[\u0900-\u097F]/), then: 'hi' },
+      { case: regex('$$raw', new RegExp('[\u0A80-\u0AFF]')), then: 'gu' },
+      { case: regex('$$raw', new RegExp('[\u0900-\u097F]')), then: 'hi' },
       ...['en', 'hi', 'gu'].map(lang => ({
         case: regex('$$lower', new RegExp(`^${lang}(?:[-_]|$)`)), then: lang,
       })),
@@ -65,12 +65,12 @@ function baseLanguage() {
     in: { $concat: ['$$value', { $ifNull: [{ $arrayElemAt: ['$$this.captures', 0] }, ' '] }] },
   } };
   const detected = { $switch: { branches: [
-    { case: regex(content, /[\u0A80-\u0AFF]/), then: 'gu' },
-    { case: regex(content, /[\u0900-\u097F]/), then: 'hi' },
+    { case: regex(content, new RegExp('[\u0A80-\u0AFF]')), then: 'gu' },
+    { case: regex(content, new RegExp('[\u0900-\u097F]')), then: 'hi' },
   ], default: 'en' } };
   const inferred = { $let: { vars: {
-    gu: { $size: { $regexFindAll: { input: plain, regex: /[\u0A80-\u0AFF]/ } } },
-    hi: { $size: { $regexFindAll: { input: plain, regex: /[\u0900-\u097F]/ } } },
+    gu: { $size: { $regexFindAll: { input: plain, regex: new RegExp('[\u0A80-\u0AFF]') } } },
+    hi: { $size: { $regexFindAll: { input: plain, regex: new RegExp('[\u0900-\u097F]') } } },
   }, in: { $switch: { branches: [
     { case: { $and: [{ $gte: ['$$gu', 12] }, { $gt: ['$$gu', '$$hi'] }] }, then: 'gu' },
     { case: { $and: [{ $gte: ['$$hi', 12] }, { $gt: ['$$hi', '$$gu'] }] }, then: 'hi' },
