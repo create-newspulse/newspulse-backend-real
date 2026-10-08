@@ -36,6 +36,52 @@ top-home position. Backend does not suppress either slot.
 No manual migration/backfill is required; existing settings read-time
 normalization can persist the new OFF key.
 
+### Optional creative preparation
+
+`POST /api/ads/upload-image` retains its existing Admin authentication. A
+file-only multipart request still returns `{ "hostedUrl": "..." }` without
+resizing. To prepare a creative, submit either:
+
+- Multipart fields `file`, `slot`, and optional `fit=cover`.
+- JSON `{ "imageUrl": "https://cdn.example/ad.png", "slot": "CATEGORY_TOP_970x90" }`.
+
+Send exactly one source. Preparation requires Cloudinary; it does not fall back
+to an unprepared image when the provider is unavailable. The response contains
+`hostedUrl`, `slot`, `width`, `height`, `originalImageUrl`, `sourceWidth`,
+`sourceHeight`, `fit`, and `warnings`. No campaign, placement, pricing, public
+DTO, or tracking data is saved or changed. Campaign Save remains a separate
+existing operation; the returned original URL is not automatically attached to a
+campaign.
+
+`AD_IMAGE_SLOT_SIZES` in `src/constants/adSlots.js` defines the eleven dimensioned
+image slots. Preparation supports the existing `HOME_RIGHT_RAIL` alias as
+`HOME_RIGHT_300x250`. `ARTICLE_INLINE` and `ARTICLE_END` both use 300x250 (6:5)
+through the same centered cover pipeline. Effective `width` and `height` always
+describe the prepared derivative (300 and 250 for article slots); original
+dimensions remain separately labeled `sourceWidth` and `sourceHeight`. They do
+not override the creative dimensions or get saved to a campaign by preparation.
+`BREAKING_SPONSOR` and `LIVE_UPDATE_SPONSOR` have no defined pixel size and return
+`422 AD_SLOT_SIZE_UNDEFINED`; their existing upload/save behavior is unchanged.
+Text-only TickerAd placements and package opportunities are not image slots.
+
+Sources accept JPEG, PNG, WebP, and GIF, limited to 5 MB. HTTPS downloads use
+public-address validation, pinned DNS, no proxies, at most three redirects, and
+a ten-second total DNS/download budget. Redirects must remain HTTPS; credentials,
+private/special addresses, MIME mismatches, SVG, and non-image payloads are refused.
+Cloudinary also decodes/validates the source. Images above 40 megapixels are rejected.
+
+Preparation stores a unique, untransformed original under `ADS_IMAGE_FOLDER/sources`
+(default `ads/sources`) with overwriting disabled, then requests a synchronous
+centered `fill` derivative at the slot's exact 1x size. Output is static PNG, never
+stretched. GIF/multipage sources receive a static-output warning. No metadata-retention
+transformation is requested. A source smaller than either target dimension is
+rejected with `422 SOURCE_TOO_SMALL` and a `LOW_SOURCE_RESOLUTION` warning instead
+of upscaling. Provider failures return sanitized errors. Because dimension checks
+follow provider decoding, an unsuccessful preparation can leave an original media
+asset; it never creates a campaign or deletes an existing asset. Local tests mock
+provider calls; verify real generation in an approved non-production media account
+before enabling this workflow in Ads Manager.
+
 ## Reporter ID Storage: Deployment Requirements
 
 Reporter ID uploads are private. `services/reporterDocumentStorage.js` owns upload, access, and deletion through `uploadReporterDocument`, `getReporterDocumentAccess`, and `deleteReporterDocument`. Its current implementation uses Cloudinary authenticated raw assets (including PNG/JPEG/PDF); no public-media helper or local upload fallback is used. It uses the existing Cloudinary configuration (`CLOUDINARY_URL` or the `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` variables). Missing configuration fails closed. Verify authenticated raw upload/delivery permissions in the intended Cloudinary environment before deployment.

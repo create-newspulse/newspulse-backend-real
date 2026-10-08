@@ -5,6 +5,7 @@ const Ad = require('../models/Ad');
 const AdPerformanceDaily = require('../models/AdPerformanceDaily');
 const { AD_SLOTS, normalizeSlot } = require('../lib/ads');
 const {
+  AD_IMAGE_SLOT_SIZES,
   AD_SLOT_MEDIA_KIT_METADATA,
   CANONICAL_AD_OPPORTUNITIES,
   REAL_TOGGLEABLE_AD_SLOTS,
@@ -121,6 +122,31 @@ test('category-top is an independent display and analytics slot with dimensions 
     displayName: 'Category Top Banner 970×90',
     dimensions: '970x90',
   });
+});
+
+test('creative sizes cover dimensioned image slots without inventing unsized placement dimensions', () => {
+  assert.deepEqual(Object.keys(AD_IMAGE_SLOT_SIZES), [
+    'HOME_728x90', 'CATEGORY_TOP_970x90', 'FOOTER_BANNER_728x90',
+    'HOME_LEFT_300x250', 'HOME_RIGHT_300x250', 'ARTICLE_INLINE', 'ARTICLE_END', 'HOME_LEFT_300x600',
+    'HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250', 'TOP_HOME_BILLBOARD_970x250',
+  ]);
+  for (const [slot, size] of Object.entries(AD_IMAGE_SLOT_SIZES)) {
+    assert.ok(AD_SLOTS.includes(slot));
+    assert.equal(size.slot, slot);
+    if (slot === 'ARTICLE_INLINE' || slot === 'ARTICLE_END') {
+      assert.equal(size.width, 300);
+      assert.equal(size.height, 250);
+      assert.equal(size.aspectRatio, 6 / 5);
+    } else {
+      assert.ok(slot.endsWith(`${size.width}x${size.height}`));
+    }
+    assert.equal(size.aspectRatio, size.width / size.height);
+    assert.ok(Object.isFrozen(size));
+  }
+  assert.equal(AD_IMAGE_SLOT_SIZES[normalizeSlot('HOME_RIGHT_RAIL')].width, 300);
+  for (const slot of ['BREAKING_SPONSOR', 'LIVE_UPDATE_SPONSOR']) {
+    assert.equal(AD_IMAGE_SLOT_SIZES[slot], undefined);
+  }
 });
 
 test('Ad slot metadata includes Home Left Rail rate-card entry', () => {

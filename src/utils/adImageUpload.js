@@ -13,6 +13,14 @@ const MAX_REDIRECTS = 3;
 
 const ALLOWED_MIME_TYPES = new Set(AD_IMAGE_ACCEPTED_MIME_TYPES);
 
+const PUBLIC_IPV6 = new net.BlockList();
+PUBLIC_IPV6.addSubnet('2000::', 3, 'ipv6');
+const RESERVED_IPV6 = new net.BlockList();
+RESERVED_IPV6.addSubnet('2001::', 23, 'ipv6');
+RESERVED_IPV6.addSubnet('2001:db8::', 32, 'ipv6');
+RESERVED_IPV6.addSubnet('2002::', 16, 'ipv6');
+RESERVED_IPV6.addSubnet('3fff::', 20, 'ipv6');
+
 function isHttpUrl(url) {
   try {
     const u = new URL(String(url || '').trim());
@@ -52,12 +60,6 @@ function parseIpv4Bytes(address) {
   return bytes;
 }
 
-function getMappedIpv4FromIpv6(address) {
-  const value = normalizeHostname(address).split('%')[0];
-  const match = value.match(/^(?:0*:)*ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
-  return match ? match[1] : '';
-}
-
 function isPrivateIpv4Address(address) {
   const bytes = parseIpv4Bytes(address);
   if (!bytes) return false;
@@ -69,6 +71,7 @@ function isPrivateIpv4Address(address) {
   if (a === 192 && b === 168) return true;
   if (a === 192 && b === 0 && c === 0) return true;
   if (a === 192 && b === 0 && c === 2) return true;
+  if (a === 192 && b === 88 && c === 99) return true;
   if (a === 198 && (b === 18 || b === 19)) return true;
   if (a === 198 && b === 51 && c === 100) return true;
   if (a === 203 && b === 0 && c === 113) return true;
@@ -78,17 +81,7 @@ function isPrivateIpv4Address(address) {
 
 function isPrivateIpv6Address(address) {
   const value = normalizeHostname(address).split('%')[0];
-  if (!value) return true;
-  const mappedIpv4 = getMappedIpv4FromIpv6(value);
-  if (mappedIpv4) return isPrivateIpv4Address(mappedIpv4);
-  if (value === '::' || value === '::1') return true;
-  const firstHextet = parseInt(value.split(':')[0] || '0', 16);
-  if (!Number.isFinite(firstHextet)) return true;
-  if ((firstHextet & 0xfe00) === 0xfc00) return true;
-  if ((firstHextet & 0xffc0) === 0xfe80) return true;
-  if ((firstHextet & 0xff00) === 0xff00) return true;
-  if (value.startsWith('2001:db8:') || value === '2001:db8::') return true;
-  return false;
+  return !PUBLIC_IPV6.check(value, 'ipv6') || RESERVED_IPV6.check(value, 'ipv6');
 }
 
 function isPrivateIpAddress(address) {
@@ -107,7 +100,7 @@ function getHttpClient() {
   return global.__NEWS_PULSE_AD_IMAGE_HTTP_CLIENT__ || axios;
 }
 
-async function resolveRemoteImageHost(hostname) {
+async function resolveRemoteImageHost(hostname, timeoutMs = FETCH_TIMEOUT_MS) {
   const host = normalizeHostname(hostname);
   if (isPrivateHostname(host)) {
     throw buildRemoteImageError('Remote image URL is not allowed', 400, 'UNSAFE_REMOTE_IMAGE_HOST');
@@ -122,10 +115,19 @@ async function resolveRemoteImageHost(hostname) {
   }
 
   let addresses;
+  let timer;
   try {
-    addresses = await getLookup()(host, { all: true, verbatim: true });
-  } catch (_) {
+    addresses = await Promise.race([
+      getLookup()(host, { all: true, verbatim: true }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(buildRemoteImageError('Timed out fetching image (10s)', 400, 'REMOTE_IMAGE_TIMEOUT')), timeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    if (error?.code === 'REMOTE_IMAGE_TIMEOUT') throw error;
     throw buildRemoteImageError('Remote image host could not be resolved', 400, 'REMOTE_IMAGE_DNS_FAILED');
+  } finally {
+    clearTimeout(timer);
   }
 
   const normalizedAddresses = Array.isArray(addresses)
@@ -139,7 +141,7 @@ async function resolveRemoteImageHost(hostname) {
   return normalizedAddresses;
 }
 
-async function assertSafeRemoteImageUrl(value) {
+async function assertSafeRemoteImageUrl(value, { httpsOnly = false, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
   let parsed;
   try {
     parsed = new URL(String(value || '').trim());
@@ -151,7 +153,14 @@ async function assertSafeRemoteImageUrl(value) {
     throw buildRemoteImageError('imageUrl must be a valid http(s) URL', 400, 'INVALID_REMOTE_IMAGE_URL');
   }
 
-  const addresses = await resolveRemoteImageHost(parsed.hostname);
+  if (httpsOnly && parsed.protocol !== 'https:') {
+    throw buildRemoteImageError('Creative preparation requires HTTPS image URLs', 400, 'HTTPS_IMAGE_REQUIRED');
+  }
+  if (parsed.username || parsed.password) {
+    throw buildRemoteImageError('Image URLs must not contain credentials', 400, 'INVALID_REMOTE_IMAGE_URL');
+  }
+
+  const addresses = await resolveRemoteImageHost(parsed.hostname, timeoutMs);
   return { url: parsed, addresses };
 }
 
@@ -194,7 +203,7 @@ function safePublicId(value) {
     .slice(0, 120);
 }
 
-async function downloadImageToBuffer(url) {
+async function downloadImageToBuffer(url, { httpsOnly = false } = {}) {
   const u = String(url || '').trim();
   if (!isHttpUrl(u)) {
     throw buildRemoteImageError('imageUrl must be a valid http(s) URL', 400, 'INVALID_REMOTE_IMAGE_URL');
@@ -203,15 +212,25 @@ async function downloadImageToBuffer(url) {
   let res;
   let currentUrl = new URL(u);
   let redirectCount = 0;
+  const deadline = Date.now() + FETCH_TIMEOUT_MS;
+  const remainingTimeout = () => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw buildRemoteImageError('Timed out fetching image (10s)', 400, 'REMOTE_IMAGE_TIMEOUT');
+    return remaining;
+  };
 
   while (true) {
-    const safeTarget = await assertSafeRemoteImageUrl(currentUrl.toString());
+    const safeTarget = await assertSafeRemoteImageUrl(currentUrl.toString(), { httpsOnly, timeoutMs: remainingTimeout() });
     const agents = createPinnedAgents(safeTarget.addresses);
+    const timeoutMs = remainingTimeout();
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), timeoutMs);
 
     try {
       res = await getHttpClient().get(safeTarget.url.toString(), {
         responseType: 'arraybuffer',
-        timeout: FETCH_TIMEOUT_MS,
+        timeout: timeoutMs,
+        signal: abortController.signal,
         maxContentLength: MAX_BYTES,
         maxBodyLength: MAX_BYTES,
         maxRedirects: 0,
@@ -227,14 +246,17 @@ async function downloadImageToBuffer(url) {
       });
     } catch (e) {
       const tooLarge = String(e?.message || '').toLowerCase().includes('maxcontentlength') || String(e?.message || '').toLowerCase().includes('max body length');
-      const msg = e?.code === 'ECONNABORTED'
+      const timedOut = ['ECONNABORTED', 'ERR_CANCELED', 'ETIMEDOUT'].includes(e?.code);
+      const msg = timedOut
         ? 'Timed out fetching image (10s)'
         : tooLarge
           ? 'Image too large (max 5MB)'
-          : (e?.message || 'Failed to download image');
-      const err = new Error(msg);
-      err.status = tooLarge ? 413 : 400;
-      throw err;
+          : 'Failed to download image';
+      throw buildRemoteImageError(msg, tooLarge ? 413 : 400, timedOut ? 'REMOTE_IMAGE_TIMEOUT' : 'REMOTE_IMAGE_REJECTED');
+    } finally {
+      clearTimeout(timer);
+      agents.httpAgent.destroy();
+      agents.httpsAgent.destroy();
     }
 
     const status = Number(res?.status || 0);
@@ -244,7 +266,11 @@ async function downloadImageToBuffer(url) {
       }
       const location = String(res?.headers?.location || '').trim();
       if (!location) throw buildRemoteImageError('Remote image redirect was invalid', 400, 'REMOTE_IMAGE_INVALID_REDIRECT');
-      currentUrl = new URL(location, safeTarget.url);
+      try {
+        currentUrl = new URL(location, safeTarget.url);
+      } catch (_) {
+        throw buildRemoteImageError('Remote image redirect was invalid', 400, 'REMOTE_IMAGE_INVALID_REDIRECT');
+      }
       redirectCount += 1;
       continue;
     }

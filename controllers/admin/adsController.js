@@ -24,6 +24,7 @@ const {
 } = require('../../lib/ads');
 const { invalidateAdsCaches } = require('../../lib/cache');
 const { bumpPublicConfigVersion } = require('../../services/publicConfigVersion.service');
+const { prepareAdCreative } = require('../../services/adCreativeService');
 
 function isDbReady() {
   return mongoose.connection.readyState === 1;
@@ -285,7 +286,7 @@ async function updateAd(req, res) {
 async function uploadAdImage(req, res) {
   const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: MAX_BYTES },
+    limits: { fileSize: MAX_BYTES, files: 1, fields: 3, fieldSize: 4096, parts: 4 },
     fileFilter: (_req, file, cb) => {
       const mt = String(file?.mimetype || '').toLowerCase();
       if (!ALLOWED_MIME_TYPES.has(mt)) {
@@ -308,6 +309,17 @@ async function uploadAdImage(req, res) {
       }
 
       const file = req.file;
+      const body = req.body || {};
+      if (body.slot !== undefined || body.imageUrl !== undefined || body.fit !== undefined) {
+        const prepared = await prepareAdCreative({
+          slot: body.slot,
+          buffer: file?.buffer,
+          contentType: file?.mimetype,
+          imageUrl: body.imageUrl,
+          fit: body.fit,
+        });
+        return res.status(200).json(prepared);
+      }
       if (!file || !file.buffer || !Buffer.isBuffer(file.buffer)) {
         return res.status(400).json({ hostedUrl: null, error: "No file received. Use multipart field 'file'." });
       }
@@ -331,7 +343,13 @@ async function uploadAdImage(req, res) {
       return res.status(200).json({ hostedUrl });
     } catch (e) {
       const status = typeof e?.status === 'number' ? e.status : 500;
-      return res.status(status).json({ hostedUrl: null, error: e?.message || 'Upload failed' });
+      const preparation = req.body && (req.body.slot !== undefined || req.body.imageUrl !== undefined || req.body.fit !== undefined);
+      return res.status(status).json({
+        hostedUrl: null,
+        error: e?.message || 'Upload failed',
+        ...(preparation && e?.code ? { code: e.code } : {}),
+        ...(preparation && e?.warnings ? { warnings: e.warnings } : {}),
+      });
     }
   });
 }

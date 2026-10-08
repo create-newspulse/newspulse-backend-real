@@ -122,3 +122,55 @@ test('remote ad image accepts a safe public HTTPS image path with matching signa
   assert.deepEqual(result.buffer, VALID_JPEG);
   assert.equal(result.contentType, 'image/jpeg');
 });
+
+test('remote image blocks IPv6 mapped, translated, tunnel, and metadata addresses', async () => {
+  for (const host of ['::ffff:127.0.0.1', '::ffff:7f00:1', '::ffff:a9fe:a9fe', '64:ff9b::a9fe:a9fe', '2002:7f00:1::', '::127.0.0.1']) {
+    await assertRejectsUrl(`https://[${host}]/image.png`, 'UNSAFE_REMOTE_IMAGE_HOST');
+  }
+  assert.equal(adImageUpload.isPrivateIpAddress('2606:4700:4700::1111'), false);
+});
+
+test('HTTPS-only preparation rejects credentials, other protocols and redirect downgrades', async (t) => {
+  installLookup(t, { 'public.example': '93.184.216.34' });
+  installHttpClient(t, async () => ({ status: 302, headers: { location: 'http://public.example/image.png' } }));
+  for (const url of ['file:///image.png', 'http://public.example/image.png', 'https://user:pass@public.example/image.png', 'https://public.example/redirect']) {
+    await assert.rejects(() => adImageUpload.downloadImageToBuffer(url, { httpsOnly: true }), { status: 400 });
+  }
+});
+
+test('remote image pins public DNS and disables proxies and automatic redirects', async (t) => {
+  installLookup(t, { 'public.example': '93.184.216.34' });
+  installHttpClient(t, async (_url, options) => {
+    assert.equal(options.maxRedirects, 0);
+    assert.equal(options.proxy, false);
+    assert.equal(options.maxContentLength, adImageUpload.MAX_BYTES);
+    assert.ok(options.timeout <= adImageUpload.FETCH_TIMEOUT_MS);
+    assert.ok(options.signal instanceof AbortSignal);
+    const address = await new Promise((resolve, reject) => options.httpsAgent.options.lookup('public.example', {}, (error, result) => error ? reject(error) : resolve(result)));
+    assert.equal(address, '93.184.216.34');
+    return { status: 200, headers: { 'content-type': 'image/png' }, data: VALID_PNG };
+  });
+  await adImageUpload.downloadImageToBuffer('https://public.example/safe.png', { httpsOnly: true });
+});
+
+test('remote image bounds DNS and download time and sanitizes upstream errors', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  installLookup(t, { 'public.example': '93.184.216.34' });
+  t.mock.method(global, '__NEWS_PULSE_AD_IMAGE_LOOKUP__', () => new Promise(() => {}));
+  const pending = adImageUpload.downloadImageToBuffer('https://public.example/image.png');
+  const rejected = assert.rejects(pending, { code: 'REMOTE_IMAGE_TIMEOUT' });
+  t.mock.timers.tick(adImageUpload.FETCH_TIMEOUT_MS);
+  await rejected;
+});
+
+test('remote image timeout and transport oversize errors are safe', async (t) => {
+  installLookup(t, { 'public.example': '93.184.216.34' });
+  for (const [code, message, expected] of [
+    ['ECONNABORTED', 'private-provider-details', /Timed out/],
+    ['ERR_BAD_RESPONSE', 'maxContentLength exceeded', /max 5MB/],
+    ['OTHER', 'private-provider-details', /^Failed to download image$/],
+  ]) {
+    installHttpClient(t, async () => { throw Object.assign(new Error(message), { code }); });
+    await assertRejectsUrl('https://public.example/image.png', expected);
+  }
+});

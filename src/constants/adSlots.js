@@ -54,6 +54,20 @@ const AD_OPPORTUNITY_ALIASES = Object.freeze({
   SPONSORED_FEATURE_ARTICLE_COMBO: 'COMBO_CAMPAIGN',
 });
 
+const AD_IMAGE_SLOT_SIZES = Object.freeze(Object.fromEntries([
+  ['HOME_728x90', 728, 90],
+  ['CATEGORY_TOP_970x90', 970, 90],
+  ['FOOTER_BANNER_728x90', 728, 90],
+  ['HOME_LEFT_300x250', 300, 250],
+  ['HOME_RIGHT_300x250', 300, 250],
+  ['ARTICLE_INLINE', 300, 250],
+  ['ARTICLE_END', 300, 250],
+  ['HOME_LEFT_300x600', 300, 600],
+  ['HOME_RIGHT_300x600', 300, 600],
+  ['HOME_BILLBOARD_970x250', 970, 250],
+  ['TOP_HOME_BILLBOARD_970x250', 970, 250],
+].map(([slot, width, height]) => [slot, Object.freeze({ slot, width, height, aspectRatio: width / height })])));
+
 const AD_SLOT_MEDIA_KIT_METADATA = Object.freeze({
   CATEGORY_TOP_970x90: Object.freeze({
     slot: 'CATEGORY_TOP_970x90',
@@ -118,6 +132,7 @@ module.exports = {
   TICKER_SPECIAL_AD_OPPORTUNITIES,
   CANONICAL_AD_OPPORTUNITIES,
   AD_OPPORTUNITY_ALIASES,
+  AD_IMAGE_SLOT_SIZES,
   AD_SLOT_MEDIA_KIT_METADATA,
   buildSlotEnabledDefaults,
   normalizeAdOpportunityKey,
