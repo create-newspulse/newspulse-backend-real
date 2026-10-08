@@ -300,30 +300,18 @@ test('revenue query failure returns a safe non-connected state', async (t) => {
   assert.equal(JSON.stringify(res.body).includes('sensitive internals'), false);
 });
 
-test('traffic analytics dashboard remains unchanged in database-unavailable fallback', async (t) => {
+test('readership dashboard reports database unavailability instead of zero traffic', async (t) => {
   stubReadyState(t, 0);
+  const { getDashboard } = require('../controllers/adminAnalyticsController');
+  const res = {
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.body = body; return this; },
+  };
 
-  const res = await auth(request(app()).get('/api/admin/analytics/dashboard'));
+  await getDashboard({ query: {} }, res);
 
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.ok, true);
-  for (const key of [
-    'avgReadTimeSec',
-    'categoryBreakdown',
-    'languageBreakdown',
-    'last24hViews',
-    'last7dViews',
-    'topArticles',
-    'topSources',
-    'totalEngagedReads',
-    'totalUniqueReaders',
-    'totalViews',
-  ]) {
-    assert.ok(Object.prototype.hasOwnProperty.call(res.body.data, key), `missing ${key}`);
-  }
-  assert.equal(res.body.data.totalViews, 0);
-  assert.equal(res.body.data.totalUniqueReaders, 0);
-  assert.equal(res.body.data.totalEngagedReads, 0);
+  assert.equal(res.statusCode, 503);
+  assert.deepEqual(res.body, { ok: false, message: 'Analytics temporarily unavailable' });
 });
 
 test('Ads Manager and Finance mutation routes remain registered outside Admin Analytics', () => {

@@ -98,9 +98,11 @@ async function getArticleBasicsCached(articleId) {
 
   if (!isDbReady()) return null;
 
-  const doc = await Article.findById(id)
-    .select('slug category language status publishedAt')
-    .lean();
+  const fields = 'slug category language status publishedAt';
+  let doc = await Article.findById(id).select(fields).lean();
+  if (!doc) {
+    doc = await Article.findOne({ sourceNewsId: id }).select(fields).lean();
+  }
 
   const value = doc
     ? {

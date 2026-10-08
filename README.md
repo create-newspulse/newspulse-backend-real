@@ -23,6 +23,38 @@ Server listens on `PORT` (from `.env` in local dev).
 
 If your frontend dev proxy targets `http://localhost:5000`, make sure your backend `PORT` matches it in local dev. If you hit an `EADDRINUSE` error, free the conflicting process or update the proxy target to the actual backend port.
 
+## First-party readership analytics
+
+Public ingestion remains `POST /api/analytics/article/view`,
+`/article/engagement`, `/article/scroll`, and `/article/heartbeat` under the same
+`/api/analytics` prefix. Each requires `articleId`, `visitorId`, and `sessionId`.
+The frontend remains responsible for consent and nonblocking telemetry delivery.
+
+`articleId` accepts an existing Article ID or a public News ID linked by
+`Article.sourceNewsId`. Resolution tries Article `_id` first, then `sourceNewsId`.
+All event, deduplication, daily, and summary writes use the resolved Article `_id`.
+There is no slug fallback, content creation/sync, ID rewrite, or historical repair.
+Lookup hits and misses retain the existing five-minute, bounded process cache,
+keyed by the supplied ID; a miss is cached only after both lookups find no record.
+Existing publication, preview, bot, localhost, cooldown, and threshold rules apply
+equally to either input ID.
+
+Recorded events keep HTTP 200 with `{ "ok": true, "skipped": false }`; intentional
+skips keep HTTP 200 with `{ "ok": true, "skipped": true }`. `?debug=1` retains the
+existing safe `reason` field. An unavailable database now returns HTTP 503; unexpected lookup
+or persistence failures return HTTP 500. These failures have `ok:false`,
+`skipped:true`, and a generic `message`, never raw database errors or stack traces.
+Telemetry failure must not block article rendering/navigation. A failure may
+follow a partial write; it does not promise rollback or change duplicate rules.
+
+Under `/api/admin/analytics`, the authenticated `/dashboard`, `/articles`,
+`/articles/:articleId`, and `/categories` readership handlers retain their existing
+successful response shapes, including genuine zero/empty datasets. Database
+unavailability returns HTTP 503 and query/aggregation failures return HTTP 500,
+with `{ "ok": false, "message": "..." }` and no fabricated metrics. Existing route
+aliases and authentication remain unchanged. Readership date semantics remain UTC.
+Vercel/Google analytics remain separate; no import, backfill, or migration is run.
+
 ## Display-ad slots
 
 The shared registry is `src/constants/adSlots.js`. `TOP_HOME_BILLBOARD_970x250`

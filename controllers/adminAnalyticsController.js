@@ -361,23 +361,7 @@ function mergeCategoryMetric(categories, row) {
 async function getDashboard(req, res) {
   try {
     if (!isDbReady()) {
-      return res.status(200).json({ ok: true, data: {
-        totalViews: 0,
-        totalUniqueReaders: 0,
-        uniqueReaders: 0,
-        uniqueVisitors: 0,
-        totalEngagedReads: 0,
-        avgReadTimeSec: 0,
-        completionRate: 0,
-        topSources: [],
-        languageBreakdown: [],
-        topArticles: [],
-        categoryBreakdown: [],
-        last24hViews: 0,
-        last7dViews: 0,
-        scope: 'lifetime',
-        dateRange: { dateFrom: null, dateTo: null, semantics: 'all stored analytics events' },
-      }});
+      return res.status(503).json({ ok: false, message: 'Analytics temporarily unavailable' });
     }
 
     const range = parseAnalyticsRange(req.query || {});
@@ -387,23 +371,24 @@ async function getDashboard(req, res) {
     const since24h = new Date(now.getTime() - 24 * 60 * 60_000);
     const since7d = new Date(now.getTime() - 7 * 24 * 60 * 60_000);
 
+    // Attach rejection handlers before any query can throw synchronously.
     const [totals, topSourcesAgg, langAgg, articleMetrics, last24hViews, last7dViews] = await Promise.all([
-      aggregateOverallEventMetrics(range),
-      ArticleAnalyticsEvent.aggregate([
+      () => aggregateOverallEventMetrics(range),
+      () => ArticleAnalyticsEvent.aggregate([
         { $match: analyticsEventMatch(range, { eventType: 'view' }) },
         { $group: { _id: { $ifNull: ['$source', 'unknown'] }, count: { $sum: 1 } } },
         { $sort: { count: -1 } },
         { $limit: 10 },
       ]),
-      ArticleAnalyticsEvent.aggregate([
+      () => ArticleAnalyticsEvent.aggregate([
         { $match: analyticsEventMatch(range, { eventType: 'view' }) },
         { $group: { _id: { $ifNull: ['$language', 'unknown'] }, count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]),
-      aggregateEventMetricsByArticle(range),
-      ArticleAnalyticsEvent.countDocuments({ eventType: 'view', createdAt: { $gte: since24h } }),
-      ArticleAnalyticsEvent.countDocuments({ eventType: 'view', createdAt: { $gte: since7d } }),
-    ]);
+      () => aggregateEventMetricsByArticle(range),
+      () => ArticleAnalyticsEvent.countDocuments({ eventType: 'view', createdAt: { $gte: since24h } }),
+      () => ArticleAnalyticsEvent.countDocuments({ eventType: 'view', createdAt: { $gte: since7d } }),
+    ].map(query => Promise.resolve().then(query)));
 
     const articleIds = (articleMetrics || []).map((row) => row.articleId).filter(Boolean);
     const articles = articleIds.length ? await Article.find(buildActiveArticleRecordFilter({ _id: { $in: articleIds }, status: 'published' }))
@@ -475,31 +460,15 @@ async function getDashboard(req, res) {
         ...analyticsScopePayload(range),
       },
     });
-  } catch (e) {
-    console.error('[admin-analytics][dashboard] failed', e?.message || e);
-    return res.status(200).json({ ok: true, data: {
-      totalViews: 0,
-      totalUniqueReaders: 0,
-      uniqueReaders: 0,
-      uniqueVisitors: 0,
-      totalEngagedReads: 0,
-      avgReadTimeSec: 0,
-      completionRate: 0,
-      topSources: [],
-      languageBreakdown: [],
-      topArticles: [],
-      categoryBreakdown: [],
-      last24hViews: 0,
-      last7dViews: 0,
-      scope: 'lifetime',
-      dateRange: { dateFrom: null, dateTo: null, semantics: 'all stored analytics events' },
-    }});
+  } catch (_) {
+    console.error('[admin-analytics][dashboard] failed');
+    return res.status(500).json({ ok: false, message: 'Failed to load analytics dashboard' });
   }
 }
 
 async function listArticles(req, res) {
   try {
-    if (!isDbReady()) return res.status(200).json({ ok: true, items: [], total: 0, page: 1, pageSize: 20 });
+    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Analytics temporarily unavailable' });
 
     const page = Math.max(parseIntSafe(req.query.page, 1), 1);
     const pageSize = Math.min(Math.max(parseIntSafe(req.query.limit ?? req.query.pageSize, 20), 1), 100);
@@ -524,15 +493,15 @@ async function listArticles(req, res) {
     const items = allItems.slice(skip, skip + pageSize);
 
     return res.status(200).json({ ok: true, items, total, page, pageSize, ...analyticsScopePayload(range) });
-  } catch (e) {
-    console.error('[admin-analytics][articles] failed', e?.message || e);
-    return res.status(200).json({ ok: true, items: [], total: 0, page: 1, pageSize: 20 });
+  } catch (_) {
+    console.error('[admin-analytics][articles] failed');
+    return res.status(500).json({ ok: false, message: 'Failed to load article analytics' });
   }
 }
 
 async function getArticleDetails(req, res) {
   try {
-    if (!isDbReady()) return res.status(200).json({ ok: true, data: null });
+    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Analytics temporarily unavailable' });
 
     const articleId = String(req.params.articleId || '').trim();
     if (!mongoose.isValidObjectId(articleId)) return res.status(400).json({ ok: false, message: 'Invalid articleId' });
@@ -654,9 +623,9 @@ async function getArticleDetails(req, res) {
         recentTrend: trend,
       },
     });
-  } catch (e) {
-    console.error('[admin-analytics][article-details] failed', e?.message || e);
-    return res.status(200).json({ ok: true, data: null });
+  } catch (_) {
+    console.error('[admin-analytics][article-details] failed');
+    return res.status(500).json({ ok: false, message: 'Failed to load article analytics' });
   }
 }
 
@@ -1006,7 +975,7 @@ async function getRevenueAnalytics(req, res) {
 
 async function listCategories(req, res) {
   try {
-    if (!isDbReady()) return res.status(200).json({ ok: true, items: [] });
+    if (!isDbReady()) return res.status(503).json({ ok: false, message: 'Analytics temporarily unavailable' });
 
     const range = parseAnalyticsRange(req.query || {});
     if (!range.ok) return res.status(400).json({ ok: false, message: range.message });
@@ -1063,9 +1032,9 @@ async function listCategories(req, res) {
     }).sort((a, b) => b.views - a.views);
 
     return res.status(200).json({ ok: true, items, ...analyticsScopePayload(range) });
-  } catch (e) {
-    console.error('[admin-analytics][categories] failed', e?.message || e);
-    return res.status(200).json({ ok: true, items: [] });
+  } catch (_) {
+    console.error('[admin-analytics][categories] failed');
+    return res.status(500).json({ ok: false, message: 'Failed to load category analytics' });
   }
 }
 
