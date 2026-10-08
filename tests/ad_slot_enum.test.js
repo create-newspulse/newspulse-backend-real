@@ -24,6 +24,7 @@ const REAL_SLOTS = [
   'ARTICLE_INLINE',
   'ARTICLE_END',
   'TOP_HOME_BILLBOARD_970x250',
+  'CATEGORY_TOP_970x90',
 ];
 
 const ALL_OPPORTUNITIES = [
@@ -66,11 +67,11 @@ test('Ad model allows known ad slots', () => {
   }
 });
 
-test('canonical ad opportunity registry includes 12 real slots and 18 total opportunities', () => {
+test('canonical ad opportunity registry includes 13 real slots and 19 total opportunities', () => {
   assert.deepEqual(REAL_TOGGLEABLE_AD_SLOTS, REAL_SLOTS);
   assert.deepEqual(CANONICAL_AD_OPPORTUNITIES, ALL_OPPORTUNITIES);
-  assert.equal(REAL_TOGGLEABLE_AD_SLOTS.length, 12);
-  assert.equal(CANONICAL_AD_OPPORTUNITIES.length, 18);
+  assert.equal(REAL_TOGGLEABLE_AD_SLOTS.length, 13);
+  assert.equal(CANONICAL_AD_OPPORTUNITIES.length, 19);
   assert.equal(normalizeAdOpportunityKey('SPONSORED_FEATURE_ARTICLE_COMBO'), 'COMBO_CAMPAIGN');
   assert.equal(normalizeAdOpportunityKey('sponsored feature article combo'), 'COMBO_CAMPAIGN');
   assert.equal(normalizeAdOpportunityKey('HOME_RIGHT_RAIL'), 'HOME_RIGHT_300x250');
@@ -95,6 +96,31 @@ test('top-home billboard is a distinct display and performance slot, not an alia
   assert.equal(daily.validateSync(), undefined);
   assert.ok(AdPerformanceDaily.schema.path('slot').enumValues.includes(slot));
   assert.equal(AD_SLOT_MEDIA_KIT_METADATA[slot], undefined);
+});
+
+test('category-top is an independent display and analytics slot with dimensions and no pricing', () => {
+  const slot = 'CATEGORY_TOP_970x90';
+  assert.deepEqual(AD_SLOTS, [
+    'HOME_728x90', 'HOME_BILLBOARD_970x250', 'HOME_LEFT_300x250',
+    'HOME_LEFT_300x600', 'HOME_RIGHT_300x250', 'HOME_RIGHT_300x600',
+    'HOME_RIGHT_RAIL', 'ARTICLE_INLINE', 'ARTICLE_END', 'FOOTER_BANNER_728x90',
+    'BREAKING_SPONSOR', 'LIVE_UPDATE_SPONSOR', 'TOP_HOME_BILLBOARD_970x250', slot,
+  ]);
+  assert.equal(normalizeSlot(slot), slot);
+  assert.equal(normalizeAdOpportunityKey(slot), slot);
+  assert.equal(normalizeSlot('UNKNOWN'), null);
+  assert.equal(normalizeSlot('CATEGORY_TOP_BILLBOARD'), null);
+  const ad = new Ad({ slot, imageUrl: 'https://example.com/ad.jpg', isClickable: false });
+  assert.equal(ad.validateSync(), undefined);
+  const daily = new AdPerformanceDaily({ adId: ad._id, dateKey: '2026-10-08', slot });
+  assert.equal(daily.validateSync(), undefined);
+  const invalid = new Ad({ slot: 'UNKNOWN', imageUrl: ad.imageUrl, isClickable: false });
+  assert.ok(invalid.validateSync().errors.slot);
+  assert.deepEqual(AD_SLOT_MEDIA_KIT_METADATA[slot], {
+    slot,
+    displayName: 'Category Top Banner 970×90',
+    dimensions: '970x90',
+  });
 });
 
 test('Ad slot metadata includes Home Left Rail rate-card entry', () => {

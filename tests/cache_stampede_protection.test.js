@@ -137,14 +137,14 @@ function capturePublicNewsCacheKey(t) {
   return key;
 }
 
-test('top-home billboard cache keys and invalidation stay independent of existing home slots', async (t) => {
+test('category-top and home billboard cache keys and invalidation stay independent', async (t) => {
   const redis = new FakeRedis();
   const loaded = loadCache(redis);
   const { cache } = loaded;
   t.after(loaded.restore);
-  const slots = ['HOME_728x90', 'HOME_BILLBOARD_970x250', 'TOP_HOME_BILLBOARD_970x250'];
+  const slots = ['HOME_728x90', 'HOME_BILLBOARD_970x250', 'TOP_HOME_BILLBOARD_970x250', 'CATEGORY_TOP_970x90'];
   const keys = slots.map(cache.buildAdsCacheKey);
-  assert.equal(new Set(keys).size, 3);
+  assert.equal(new Set(keys).size, slots.length);
   for (let index = 0; index < keys.length; index += 1) {
     assert.ok(keys[index].endsWith(`:ads:${slots[index]}`));
   }

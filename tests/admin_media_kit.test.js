@@ -128,6 +128,24 @@ test('Founder can access protected media kit through canonical route', async (t)
   assert.equal(res.body.data.placements.some((placement) => placement.slot === 'HOME_728x90'), true);
 });
 
+test('category-top media-kit placement is opt-in, dimensioned and unpriced', async (t) => {
+  const founder = makeUser({ role: 'founder', noExpiry: true });
+  stubAuthenticatedUser(t, founder);
+  const token = signToken(founder);
+  const disabled = await request(app).get('/api/admin/media-kit').set('Authorization', `Bearer ${token}`);
+  assert.equal(disabled.status, 200);
+  assert.equal(disabled.body.data.placements.some((placement) => placement.slot === 'CATEGORY_TOP_970x90'), false);
+  AdSettings.findByIdAndUpdate = () => ({ lean: async () => ({
+    _id: 'global', slotEnabled: buildSlotEnabledDefaults(false, { CATEGORY_TOP_970x90: true }),
+  }) });
+  const enabled = await request(app).get('/api/admin/media-kit').set('Authorization', `Bearer ${token}`);
+  assert.equal(enabled.status, 200);
+  assert.deepEqual(enabled.body.data.placements, [{
+    slot: 'CATEGORY_TOP_970x90', enabled: true,
+    displayName: 'Category Top Banner 970\u00d790', dimensions: '970x90',
+  }]);
+});
+
 test('Founder can access protected media kit through admin-api compatibility route', async (t) => {
   const founder = makeUser({
     _id: '507f1f77bcf86cd799439112',

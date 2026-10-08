@@ -12,6 +12,7 @@ const AD_SLOTS = Object.freeze([
   'BREAKING_SPONSOR',
   'LIVE_UPDATE_SPONSOR',
   'TOP_HOME_BILLBOARD_970x250',
+  'CATEGORY_TOP_970x90',
 ]);
 
 const REAL_TOGGLEABLE_AD_SLOTS = Object.freeze([
@@ -27,6 +28,7 @@ const REAL_TOGGLEABLE_AD_SLOTS = Object.freeze([
   'ARTICLE_INLINE',
   'ARTICLE_END',
   'TOP_HOME_BILLBOARD_970x250',
+  'CATEGORY_TOP_970x90',
 ]);
 
 const PACKAGE_AD_OPPORTUNITIES = Object.freeze([
@@ -53,6 +55,11 @@ const AD_OPPORTUNITY_ALIASES = Object.freeze({
 });
 
 const AD_SLOT_MEDIA_KIT_METADATA = Object.freeze({
+  CATEGORY_TOP_970x90: Object.freeze({
+    slot: 'CATEGORY_TOP_970x90',
+    displayName: 'Category Top Banner 970×90',
+    dimensions: '970x90',
+  }),
   HOME_LEFT_300x250: Object.freeze({
     slot: 'HOME_LEFT_300x250',
     displayName: 'Home Left Rail 300×250',

@@ -20,6 +20,7 @@ const publicSettingsRouter = require('../routes/publicAdSettings.routes');
 const publicAdsRouter = require('../routes/publicAds.routes');
 
 const SLOT = 'TOP_HOME_BILLBOARD_970x250';
+const CATEGORY_SLOT = 'CATEGORY_TOP_970x90';
 const EXISTING_DEFAULTS = {
   HOME_728x90: true,
   HOME_BILLBOARD_970x250: false,
@@ -33,6 +34,7 @@ const EXISTING_DEFAULTS = {
   FOOTER_BANNER_728x90: true,
   BREAKING_SPONSOR: false,
   LIVE_UPDATE_SPONSOR: false,
+  CATEGORY_TOP_970x90: false,
 };
 const PUBLIC_AD_KEYS = [
   'id', 'slot', 'title', 'imageUrl', 'isClickable', 'targetUrl',
@@ -247,7 +249,116 @@ test('top-home retains inclusive schedules, active filtering and descending prio
   assert.equal(res.body.ad.id, String(winner._id));
 });
 
-test('authenticated top-home create/list/update retains DTOs, defaults, counters and validation', async (t) => {
+test('category-top missing and explicit settings preserve legacy values and partial updates', async (t) => {
+  const legacy = { ...EXISTING_DEFAULTS, [SLOT]: true, ARTICLE_END: false };
+  delete legacy[CATEGORY_SLOT];
+  for (const raw of [null, {}, new Map()]) {
+    assert.equal(settingsStore.normalizeSlotEnabled(raw)[CATEGORY_SLOT], false);
+    stubSettings(t, raw);
+    const res = await request(app).get('/api/public/ad-settings');
+    assert.equal(res.body.slotEnabled[CATEGORY_SLOT], false);
+  }
+  for (const value of [undefined, false, true]) {
+    const raw = { ...legacy, ...(value === undefined ? {} : { [CATEGORY_SLOT]: value }) };
+    const expected = { ...legacy, [CATEGORY_SLOT]: value === true };
+    const stored = stubSettings(t, raw);
+    assert.deepEqual(settingsStore.normalizeSlotEnabled(raw), expected);
+    assert.deepEqual(settingsStore.normalizeSlotEnabled(new Map(Object.entries(raw))), expected);
+    assert.deepEqual(await settingsStore.readSettings(), expected);
+    const read = await auth(request(app).get('/api/admin/ad-settings'));
+    assert.deepEqual(read.body, { ok: true, slotEnabled: expected });
+    const saved = await auth(request(app).put('/api/admin/ad-settings')).send({ slotEnabled: legacy });
+    assert.deepEqual(saved.body, { ok: true, slotEnabled: expected });
+    assert.deepEqual(stored(), expected);
+    for (const enabled of [true, false]) {
+      const changed = await auth(request(app).put('/api/admin/ad-settings'))
+        .send({ slotEnabled: { [CATEGORY_SLOT]: enabled } });
+      assert.deepEqual(changed.body, { ok: true, slotEnabled: { ...legacy, [CATEGORY_SLOT]: enabled } });
+    }
+  }
+  const invalid = await auth(request(app).put('/api/admin/ad-settings'))
+    .send({ slotEnabled: { [CATEGORY_SLOT]: 'true' } });
+  assert.equal(invalid.status, 400);
+  const unauthenticated = await request(app).put('/api/admin/ad-settings')
+    .send({ slotEnabled: { [CATEGORY_SLOT]: true } });
+  assert.equal(unauthenticated.status, 401);
+});
+
+test('category-top public contracts and bidirectional Home isolation hold in every language', async (t) => {
+  const enabled = Object.fromEntries([...Object.keys(EXISTING_DEFAULTS), SLOT].map((slot) => [slot, true]));
+  const homeSlots = Object.keys(enabled).filter((slot) => slot.startsWith('HOME_') || slot === SLOT);
+  const categoryAd = makeAd(CATEGORY_SLOT, { priority: 999 });
+  const homeAds = homeSlots.map((slot) => makeAd(slot));
+  for (const path of [`/api/public/ads?slot=${CATEGORY_SLOT}`, `/api/public/ads/slot/${CATEGORY_SLOT}`]) {
+    for (const value of [undefined, false]) {
+      const raw = { ...enabled };
+      delete raw[CATEGORY_SLOT];
+      if (value !== undefined) raw[CATEGORY_SLOT] = value;
+      stubSettings(t, raw);
+      const filters = stubPublicAds(t, [categoryAd, ...homeAds]);
+      const res = await request(app).get(path);
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body, { ok: false, enabled: false, ad: null });
+      assert.equal(filters.length, 0);
+    }
+    stubSettings(t, enabled);
+    stubPublicAds(t, homeAds);
+    const empty = await request(app).get(path);
+    assert.deepEqual(empty.body, { ok: false, enabled: true, ad: null });
+    const filters = stubPublicAds(t, [categoryAd, ...homeAds]);
+    for (const lang of ['en', 'hi', 'gu']) {
+      const found = await request(app).get(path).query({ lang });
+      assert.equal(found.status, 200);
+      assert.equal(found.body.ok, true);
+      assert.equal(found.body.enabled, true);
+      assert.deepEqual(Object.keys(found.body.ad).sort(), PUBLIC_AD_KEYS);
+      assert.equal(found.body.ad.id, String(categoryAd._id));
+      assert.equal(found.body.ad.slot, CATEGORY_SLOT);
+      assert.equal(found.body.ad.imageUrl, categoryAd.imageUrl);
+      assert.equal(found.body.ad.targetUrl, categoryAd.targetUrl);
+      assert.equal(found.body.ad.isClickable, true);
+    }
+    assert.deepEqual(filters, Array.from({ length: 3 }, () => ({ slot: { $in: [CATEGORY_SLOT] }, isActive: true })));
+  }
+  stubPublicAds(t, [categoryAd]);
+  for (const slot of homeSlots) {
+    const res = await request(app).get('/api/public/ads').query({ slot });
+    assert.deepEqual(res.body, { ok: false, enabled: true, ad: null });
+  }
+});
+
+test('category-top inherits active, inclusive schedule, priority and updatedAt rules', async (t) => {
+  const now = new Date('2026-10-08T12:00:00Z');
+  t.mock.timers.enable({ apis: ['Date'], now });
+  stubSettings(t, { ...EXISTING_DEFAULTS, [CATEGORY_SLOT]: true });
+  for (const [values, eligible] of [
+    [{ isActive: false }, false],
+    [{ startAt: new Date(now.getTime() + 1) }, false],
+    [{ endAt: new Date(now.getTime() - 1) }, false],
+    [{ startAt: 'invalid' }, false],
+    [{ startAt: now, endAt: now }, true],
+    [{ startAt: new Date(now.getTime() - 1), endAt: new Date(now.getTime() + 1) }, true],
+    [{}, true],
+  ]) {
+    stubPublicAds(t, [makeAd(CATEGORY_SLOT, values)]);
+    const res = await request(app).get('/api/public/ads').query({ slot: CATEGORY_SLOT });
+    assert.equal(res.body.ok, eligible);
+    assert.equal(res.body.ad !== null, eligible);
+  }
+  const winner = makeAd(CATEGORY_SLOT, { priority: 10, updatedAt: now });
+  stubPublicAds(t, [
+    makeAd(CATEGORY_SLOT, { priority: 1 }),
+    makeAd(CATEGORY_SLOT, { priority: 100, isActive: false }),
+    makeAd(CATEGORY_SLOT, { priority: 99, startAt: new Date(now.getTime() + 1) }),
+    makeAd(CATEGORY_SLOT, { priority: 98, endAt: new Date(now.getTime() - 1) }),
+    makeAd(CATEGORY_SLOT, { priority: 10 }),
+    winner,
+  ]);
+  const res = await request(app).get(`/api/public/ads/slot/${CATEGORY_SLOT}`);
+  assert.equal(res.body.ad.id, String(winner._id));
+});
+
+async function assertSlotCrud(t, slot) {
   let stored;
   t.mock.method(Ad, 'create', async (payload) => {
     const doc = new Ad(payload);
@@ -256,7 +367,7 @@ test('authenticated top-home create/list/update retains DTOs, defaults, counters
     return stored;
   });
   t.mock.method(Ad, 'find', (filter) => {
-    assert.deepEqual(filter, { slot: SLOT });
+    assert.deepEqual(filter, { slot });
     return { sort() { return this; }, lean: async () => [stored] };
   });
   t.mock.method(Ad, 'findById', () => ({ lean: async () => stored }));
@@ -266,29 +377,34 @@ test('authenticated top-home create/list/update retains DTOs, defaults, counters
     return stored;
   });
   const payload = {
-    slot: SLOT, title: 'Premium', imageUrl: makeAd().imageUrl,
+    slot, title: 'Premium', imageUrl: makeAd(slot).imageUrl,
     targetUrl: 'https://example.test', stats: { impressions: 999, clicks: 999 },
   };
   assert.equal((await request(app).post('/api/admin/ads').send(payload)).status, 401);
   const created = await auth(request(app).post('/api/admin/ads')).send(payload);
   assert.equal(created.status, 201);
   assert.deepEqual(Object.keys(created.body.ad).sort(), ADMIN_AD_KEYS);
-  assert.equal(created.body.ad.slot, SLOT);
+  assert.equal(created.body.ad.slot, slot);
   assert.equal(created.body.ad.isActive, false);
   assert.equal(created.body.ad.priority, 0);
   assert.equal(created.body.ad.startAt, null);
   assert.equal(created.body.ad.endAt, null);
   assert.deepEqual(created.body.ad.stats, { impressions: 0, clicks: 0 });
-  const listed = await auth(request(app).get(`/api/admin/ads?slot=${SLOT}`));
+  const listed = await auth(request(app).get(`/api/admin/ads?slot=${slot}`));
   assert.deepEqual(listed.body, { ok: true, ads: [created.body.ad] });
   stored.stats = { impressions: 7, clicks: 2 };
+  stored.originalImageUrl = 'https://example.test/original.png';
   const updated = await auth(request(app).put(`/api/admin/ads/${created.body.ad.id}`)).send({
     ...payload, isActive: true, priority: 9,
     startAt: '2026-10-01T00:00:00Z', endAt: '2026-10-31T00:00:00Z',
   });
   assert.equal(updated.status, 200);
   assert.deepEqual(Object.keys(updated.body.ad).sort(), ADMIN_AD_KEYS);
-  assert.equal(updated.body.ad.slot, SLOT);
+  assert.equal(updated.body.ad.slot, slot);
+  assert.equal(updated.body.ad.imageUrl, payload.imageUrl);
+  assert.equal(updated.body.ad.originalImageUrl, stored.originalImageUrl);
+  assert.equal(updated.body.ad.targetUrl, payload.targetUrl);
+  assert.equal(updated.body.ad.isClickable, true);
   assert.equal(updated.body.ad.isActive, true);
   assert.equal(updated.body.ad.priority, 9);
   assert.equal(updated.body.ad.startAt, '2026-10-01T00:00:00.000Z');
@@ -308,4 +424,13 @@ test('authenticated top-home create/list/update retains DTOs, defaults, counters
       assert.equal(res.body.ok, false);
     }
   }
-});
+  const nonClickable = await auth(request(app).put(`/api/admin/ads/${created.body.ad.id}`))
+    .send({ ...payload, isClickable: false, targetUrl: null });
+  assert.equal(nonClickable.status, 200);
+  assert.equal(nonClickable.body.ad.isClickable, false);
+  assert.equal(nonClickable.body.ad.targetUrl, null);
+  assert.equal(nonClickable.body.ad.originalImageUrl, 'https://example.test/original.png');
+}
+
+test('authenticated top-home create/list/update retains DTOs, defaults, counters and validation', (t) => assertSlotCrud(t, SLOT));
+test('authenticated category-top create/list/update retains DTOs, creative, clickability and validation', (t) => assertSlotCrud(t, CATEGORY_SLOT));

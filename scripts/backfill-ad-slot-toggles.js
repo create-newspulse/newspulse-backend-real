@@ -28,6 +28,7 @@ async function main() {
     HOME_RIGHT_300x600: false,
     HOME_BILLBOARD_970x250: false,
     TOP_HOME_BILLBOARD_970x250: false,
+    CATEGORY_TOP_970x90: false,
     BREAKING_SPONSOR: false,
     LIVE_UPDATE_SPONSOR: false,
   });
@@ -52,7 +53,7 @@ async function main() {
 
     // Safety defaults for newly-added slots: if the persisted record predates the key,
     // treat it as disabled until explicitly enabled.
-    for (const key of ['FOOTER_BANNER_728x90', 'HOME_LEFT_300x250', 'HOME_LEFT_300x600', 'HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250', 'BREAKING_SPONSOR', 'LIVE_UPDATE_SPONSOR', 'TOP_HOME_BILLBOARD_970x250']) {
+    for (const key of ['FOOTER_BANNER_728x90', 'HOME_LEFT_300x250', 'HOME_LEFT_300x600', 'HOME_RIGHT_300x600', 'HOME_BILLBOARD_970x250', 'BREAKING_SPONSOR', 'LIVE_UPDATE_SPONSOR', 'TOP_HOME_BILLBOARD_970x250', 'CATEGORY_TOP_970x90']) {
       const rawVal = typeof raw.get === 'function' ? raw.get(key) : raw[key];
       if (typeof rawVal !== 'boolean') slotEnabled[key] = false;
     }

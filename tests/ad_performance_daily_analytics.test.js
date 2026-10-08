@@ -122,9 +122,9 @@ function stubLifetimeAggregate(t, docs) {
   }]);
 }
 
-test('top-home billboard lifetime, daily and placement analytics stay separate from other home products', async (t) => {
+test('category-top and home billboard lifetime, daily and placement analytics stay separate', async (t) => {
   stubReadyState(t, 1);
-  const slots = ['HOME_728x90', 'HOME_BILLBOARD_970x250', 'TOP_HOME_BILLBOARD_970x250'];
+  const slots = ['HOME_728x90', 'HOME_BILLBOARD_970x250', 'TOP_HOME_BILLBOARD_970x250', 'CATEGORY_TOP_970x90'];
   const ads = slots.map((slot) => ({
     _id: new mongoose.Types.ObjectId(), slot, isClickable: true, isActive: true,
     stats: { impressions: 20, clicks: 3 },
@@ -154,7 +154,7 @@ test('top-home billboard lifetime, daily and placement analytics stay separate f
     assert.deepEqual(ads[index].stats, { impressions: 21 + index, clicks: 4 + index });
   }
   const rows = Array.from(daily.rows.values());
-  assert.equal(rows.length, 3);
+  assert.equal(rows.length, slots.length);
   slots.forEach((slot, index) => {
     const row = rows.find((item) => item.slot === slot);
     assert.equal(String(row.adId), String(ads[index]._id));
@@ -175,7 +175,7 @@ test('top-home billboard lifetime, daily and placement analytics stay separate f
     .set('Authorization', `Bearer ${token}`);
   assert.equal(res.status, 200);
   assert.equal(res.body.source, 'ads_manager');
-  assert.equal(res.body.placements.length, 3);
+  assert.equal(res.body.placements.length, slots.length);
   slots.forEach((slot, index) => {
     assert.deepEqual(res.body.placements.find((row) => row.slot === slot), {
       slot, impressions: index + 1, clicks: index + 1, ctr: 100, adsWithActivity: 1,
