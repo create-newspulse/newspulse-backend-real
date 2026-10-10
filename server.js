@@ -452,6 +452,8 @@ require('./lib/publicNewsPrewarm').startCanonicalLatestPrewarm({
 const breakingRouter = require('./routes/breaking.routes');
 const adminNewsTranslationsRouter = require('./routes/adminNewsTranslations.routes');
 const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');
+const publicEditorialTopicsRouter = require('./routes/publicEditorialTopics.routes');
+const adminEditorialTopicsRouter = require('./routes/adminEditorialTopics.routes');
 const publicTickersSettingsRouter = require('./routes/publicTickersSettings.routes');
 const adminTickersSettingsRouter = require('./routes/adminTickersSettings.routes');
 const adminViralVideosRouter = require('./routes/adminViralVideos.routes');
@@ -1719,6 +1721,10 @@ app.use('/api/admin/pulse-dialogue/series', adminPulseDialogueSeriesRouter);
 app.use('/admin-api/admin/pulse-dialogue/series', adminPulseDialogueSeriesRouter);
 app.use('/admin-api/api/admin/pulse-dialogue/series', adminPulseDialogueSeriesRouter);
 
+app.use('/api/admin/topics', adminEditorialTopicsRouter);
+app.use('/admin-api/admin/topics', adminEditorialTopicsRouter);
+app.use('/admin-api/api/admin/topics', adminEditorialTopicsRouter);
+
 // Admin panel compatibility: some builds call this translation glossary endpoint.
 // Keep it as a lightweight 200 stub so the Add News page doesn't break.
 const _translationGlossaryStub = (_req, res) => {
@@ -1746,6 +1752,7 @@ app.use('/api/site-settings', siteSettingsRoutes);
 // Public news feed (NO AUTH)
 // Mount early to avoid being shadowed by other /api routers.
 app.use('/api/public/trending-topics', publicTrendingTopicsRouter);
+app.use('/api/public/topics', publicEditorialTopicsRouter);
 app.use('/api/public/news', publicNewsRouter);
 app.use('/api/public/pulse-dialogue', publicPulseDialogueRouter);
 app.use('/api/breaking', breakingRouter);

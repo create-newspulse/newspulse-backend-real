@@ -23,6 +23,118 @@ Server listens on `PORT` (from `.env` in local dev).
 
 If your frontend dev proxy targets `http://localhost:5000`, make sure your backend `PORT` matches it in local dev. If you hit an `EADDRINUSE` error, free the conflicting process or update the proxy target to the actual backend port.
 
+## Editorial Trending Topics V1
+
+Editorial topics are independent of the legacy `/api/public/trending-topics`
+navigation chips. The legacy model, routes, defaults, and seeding are unchanged.
+Frontend integration must explicitly opt into the new `/api/public/topics` API.
+
+### Model and management
+
+[EditorialTopic](./models/EditorialTopic.js) stores one logical topic across
+GU/HI/EN, not one record per language:
+
+- `slug`: required canonical lowercase Unicode slug, maximum 140 characters;
+  unique and immutable after creation.
+- `name.gu/hi/en`: required trimmed strings, maximum 160 characters each.
+- `description.gu/hi/en`: optional trimmed strings, maximum 1000 characters each.
+- `active`: defaults to `false`; `order`: safe integer, defaults to `0`.
+- `startsAt`: required timestamp. `expiresAt`: nullable timestamp strictly later
+  than `startsAt`. API inputs use ISO 8601 timestamps with `Z` or an explicit offset.
+- `articleTags`: 1-20 exact string tags, each trimmed and at most 120 characters;
+  deduplicated case-sensitively. Empty tags, control characters, and `*` wildcards
+  are rejected. Membership matches any configured tag with binary collation.
+- `pinnedArticleId`: nullable CMS **News** ObjectId, never a compatibility Article
+  ID. No new article fields, article copies, or Faith & Culture taxonomy changes.
+- Server-controlled `createdBy` / `updatedBy` actor identifiers and timestamps.
+
+All management endpoints are **Founder-only**, including reads, using existing
+signed-token/cookie authentication, persisted-role checks, and account lifecycle
+protections. Admin, Editor, Manager, and Reporter roles cannot manage topics.
+
+| Method | Endpoint | Result |
+| --- | --- | --- |
+| GET | `/api/admin/topics?active=all&page=1&limit=20` | `{ok, items, total, count, page, limit, totalPages, hasNextPage}` |
+| POST | `/api/admin/topics` | `201 {ok: true, topic}` |
+| GET | `/api/admin/topics/:id` | `{ok: true, topic}` |
+| PATCH | `/api/admin/topics/:id` | `{ok: true, topic}` |
+
+The same protected router is mounted at `/admin-api/admin/topics` and
+`/admin-api/api/admin/topics`. List filters accept `active=all|true|false`.
+Management limits are 1-100 and pages 1-10000; invalid or unknown inputs return
+400 rather than silently changing the request.
+
+PATCH accepts only `name`, `description`, `active`, `order`, `startsAt`,
+`expiresAt`, `articleTags`, and `pinnedArticleId`. Partial language-map edits
+preserve the other languages. Use `expiresAt: null` or `pinnedArticleId: null`
+to clear those fields, and empty description strings to clear descriptions.
+There is no bulk replacement, reset, delete, seed, or slug-change operation.
+Optimistic concurrency rejects overlapping document saves with `409 EDIT_CONFLICT`.
+
+### Public contracts
+
+All public endpoints are anonymous, no-store reads with no seeding, writes,
+translation generation, polling, or Redis caching. `lang` defaults to `gu`;
+only `gu`, `hi`, and `en` are accepted. Unsupported locales and unknown query
+parameters return 400. Public limits default to 12 and accept 1-50.
+
+- `GET /api/public/topics?lang=gu&limit=12` returns
+  `{ok: true, lang, items}`. Each item contains
+  `{id, key, slug, label, href, colorKey, name, description, order, startsAt, expiresAt}`.
+  `key` is the slug, `label` is `name[lang]`, `href` is `/topic/<slug>`, and
+  `colorKey` is the existing frontend-compatible constant `blue`.
+  Items are ordered by `order ASC, _id ASC`. An empty selection returns `items: []`.
+- `GET /api/public/topics/:slug?lang=gu` returns
+  `{ok: true, lang, topic, pinnedArticle}`. `topic` uses the same metadata shape.
+  A missing/unavailable pin is `null`. Private management metadata and actor
+  identifiers are never returned.
+- `GET /api/public/topics/:slug/articles?lang=gu&page=1&limit=12` returns
+  `{ok: true, lang, items, total, count, page, limit, totalPages, hasNextPage}`.
+  Pages are fixed, start at 1, and are bounded at 10000. Empty results have
+  `totalPages: 0`. Compact article cards contain localized title/summary, IDs,
+  slugs, category, language/group identity, publication time, and cover-image
+  metadata, not article bodies, translation caches, or private CMS fields.
+
+The strip requires `active === true`, `startsAt <= now`, and an absent/null
+expiry or `now < expiresAt`. Detail and article pages require active/started
+topics but **ignore expiry**, preserving event archives. Manual deactivation
+hides all public surfaces. There is no TTL index or expiry-triggered write.
+
+Story membership uses existing `News.tags` across categories, never title
+search, substrings, category membership, or the Faith & Culture `topic` field.
+The full shared public visibility filter excludes drafts, scheduled/future,
+deleted, private, locked, and embargoed content. Only requested-language native
+content or complete, ready cached translations qualify; no base-language fallback
+is enabled. Logical stories are grouped before pagination/totals using the
+existing translation-key/group/slug identity convention.
+
+Ordering uses the eligible source record's `publishedAt` (the earliest source
+date for legacy unlinked editions), falling back to the earliest associated
+eligible edition's `publishedAt` if the source is absent;
+it never uses translation-generation or edit time. Equal dates are ordered by
+logical story key. That publication timestamp is returned on the compact card.
+Only the selected page is hydrated, with visibility and locale eligibility
+rechecked; a changed page fails safely instead of reporting misleading totals.
+
+Pins must reference a publicly eligible, exactly tag-associated CMS News record
+when created, replaced, retagged, or activated. Public reads revalidate the pin
+and resolve its eligible requested-language edition. Its logical story is
+returned only on detail, excluded from the ordinary list and its totals.
+Deactivation/clearing a stale pin remains possible. Topic operations never
+publish, approve, unlock, or otherwise change an article.
+
+Errors use `{ok: false, code, message}`: 400 invalid input, existing authentication
+401/403 responses, 404 missing/hidden topic, 409 duplicate slug/edit conflict,
+503 unavailable database/query deadline or changed hydration, and 500 unexpected
+failure. Responses do not expose Mongo errors, query details, or stack traces.
+
+No existing-data migration, new News index, or package is required. The new
+model declares only unique-slug and active/order indexes. Measure production-like
+tag queries separately before proposing any News tags index.
+
+Focused isolated regression coverage: `node --test tests/editorial_topics.test.js`.
+The tests use in-memory model stubs and must not connect to production services.
+
 ## First-party readership analytics
 
 Public ingestion remains `POST /api/analytics/article/view`,
