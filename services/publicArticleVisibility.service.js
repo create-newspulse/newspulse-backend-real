@@ -24,20 +24,18 @@ function buildPubliclyVisibleNewsArticleFilter({ now = new Date() } = {}) {
   };
 }
 
-function buildPubliclyVisiblePublicArticleFilter({ now = new Date() } = {}) {
-  const nowDt = now instanceof Date ? now : new Date(now);
-  return {
-    $and: [
-      { status: 'published' },
-      { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
-      // Defensive: avoid future-dated publish timestamps.
-      { $or: [{ publishedAt: null }, { publishedAt: { $exists: false } }, { publishedAt: { $lte: nowDt } }] },
-      { $or: [{ publishAt: null }, { publishAt: { $exists: false } }, { publishAt: { $lte: nowDt } }] },
-      { $or: [{ scheduledAt: null }, { scheduledAt: { $exists: false } }, { scheduledAt: { $lte: nowDt } }] },
-      { $or: [{ visibility: { $ne: 'private' } }, { visibility: { $exists: false } }] },
-      { $or: [{ isPrivate: { $ne: true } }, { isPrivate: { $exists: false } }] },
-    ],
-  };
+function buildPubliclyVisiblePublicArticleFilter(options = {}) {
+  return buildPubliclyVisibleNewsArticleFilter(options);
+}
+
+function isPubliclyVisibleNewsArticle(docLike, { now = new Date() } = {}) {
+  const doc = typeof docLike?.toObject === 'function' ? docLike.toObject() : docLike;
+  if (!doc || doc.status !== 'published' || doc.deletedAt != null
+    || doc.locked === true || doc.workflow?.locked === true
+    || doc.visibility === 'private' || doc.isPrivate === true) return false;
+  const deadline = new Date(now).getTime();
+  return [doc.publishedAt, doc.publishAt, doc.scheduledAt, doc.embargoUntil, doc.workflow?.embargoUntil]
+    .every(value => value == null || new Date(value).getTime() <= deadline);
 }
 
 function getArticleBaseLocale(articleLike) {
@@ -63,6 +61,32 @@ function getAvailableArticleLocales(articleLike) {
   return Array.from(out);
 }
 
+function buildEditorialEligibilityFilter() {
+  return {
+    $and: [
+      { isSponsored: { $ne: true } },
+      { isSponsoredArticle: { $ne: true } },
+      { sponsorFeatureLinkedId: null },
+      { category: { $not: /^sponsored(?:[\s_-]|$)/i } },
+    ],
+  };
+}
+
+function isEditorialRankingEligible(doc) {
+  return doc?.isSponsored !== true && doc?.isSponsoredArticle !== true
+    && !doc?.sponsorFeatureLinkedId && !/^sponsored(?:[\s_-]|$)/i.test(String(doc?.category || ''));
+}
+
+async function hasVisibleNewsSource(doc) {
+  const sourceId = doc?.sourceNewsId || doc?.sourceArticleId;
+  if (!sourceId) return true;
+  const News = require('../models/News');
+  const source = await News.findOne({
+    ...buildPubliclyVisibleNewsArticleFilter(), _id: sourceId,
+  }).select('_id').lean();
+  return Boolean(source);
+}
+
 module.exports = {
   SUPPORTED_LANGS,
   normalizeLang,
@@ -70,4 +94,8 @@ module.exports = {
   buildPubliclyVisiblePublicArticleFilter,
   getArticleBaseLocale,
   getAvailableArticleLocales,
+  buildEditorialEligibilityFilter,
+  isEditorialRankingEligible,
+  hasVisibleNewsSource,
+  isPubliclyVisibleNewsArticle,
 };

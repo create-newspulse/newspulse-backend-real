@@ -3,6 +3,8 @@ const { slugifyUnicode } = require('../lib/slug');
 const googleTranslate = require('./googleTranslate.service');
 const { syncPublicArticleFromNews } = require('./syncPublicArticleFromNews.service');
 const { syncTranslationGroupFromMaster } = require('./translationGroupSync.service');
+const { withActiveArticleSource, afterArticleCommit } = require('./articleLifecycle.service');
+const { invalidateArticleContent } = require('./publicContentInvalidation.service');
 const { isGoogleTranslateConfigured } = require('./translationEnabled');
 const TranslationJob = require('../models/TranslationJob');
 const os = require('os');
@@ -109,13 +111,24 @@ function _retryDelayMinutesForErrorMessage(msg) {
   return _isRateLimitErrorMessage(m) ? 15 : 5;
 }
 
-async function _syncSourceAndGroup(docUpdated, logger, reason) {
-  if (!docUpdated) return;
-  await syncPublicArticleFromNews(docUpdated, { logger });
-  await syncTranslationGroupFromMaster(docUpdated, {
-    logger,
-    reason: reason || 'publish_async_translation',
-    invalidate: String(docUpdated.status || '').toLowerCase() === 'published',
+async function persistTranslationUpdate(id, update, expectedSource, logger, reason) {
+  return withActiveArticleSource(id, async (current, session, transaction) => {
+    if (['title', 'description', 'content'].some(field =>
+      String(current[field] || '') !== String(expectedSource[field] || ''))) {
+      throw Object.assign(new Error('The source story changed. Translation was cancelled.'), {
+        statusCode: 409, code: 'TRANSLATION_SOURCE_CHANGED',
+      });
+    }
+    const updated = await News.findByIdAndUpdate(id, update, { new: true, runValidators: false, session });
+    if (!updated) throw Object.assign(new Error('The source story changed.'), { statusCode: 409, code: 'TRANSLATION_SOURCE_CHANGED' });
+    if (updated.translationGroupId || updated.translationKey) {
+      await syncTranslationGroupFromMaster(updated, { ...transaction, logger, reason, invalidate: updated.status === 'published' });
+    } else {
+      await syncPublicArticleFromNews(updated, { session, logger, throwOnError: true });
+      await afterArticleCommit(transaction, updated, () =>
+        invalidateArticleContent(updated, { reason, logger, publicVisibilityRemoved: true }));
+    }
+    return updated;
   });
 }
 
@@ -472,9 +485,11 @@ async function translateAndSave(newsId, options = {}) {
     }
 
     try {
-      const docUpdated = await News.findByIdAndUpdate(id, { $set: setFail }, { new: true, runValidators: false });
-      if (docUpdated) await _syncSourceAndGroup(docUpdated, logger, 'publish_async_translation_config_error');
-    } catch (_) {}
+      await persistTranslationUpdate(id, { $set: setFail }, doc0, logger, 'publish_async_translation_config_error');
+    } catch (error) {
+      logger.warn?.('[i18n][publish] failure state was not persisted', { id, code: error.code || 'TRANSLATION_PERSISTENCE_FAILED' });
+      throw error;
+    }
 
     try {
       logger.error?.('[i18n][publish] Missing GOOGLE_TRANSLATE_API_KEY; background translation skipped', {
@@ -486,7 +501,7 @@ async function translateAndSave(newsId, options = {}) {
     return { ok: false, error: 'Missing GOOGLE_TRANSLATE_API_KEY' };
   }
 
-  // Translate per language in the background; never throw.
+  // Persistence failures reach the existing queue retry handler.
   for (const dst of SUPPORTED_LANGS) {
     if (dst === baseLang) continue;
 
@@ -530,7 +545,7 @@ async function translateAndSave(newsId, options = {}) {
       if (ts && (now.getTime() - ts) > (10 * 60 * 1000)) {
         const nextRetryAt = _addMinutes(now, 5);
         try {
-          const docUpdated = await News.findByIdAndUpdate(
+          await persistTranslationUpdate(
             id,
             {
               $set: {
@@ -540,10 +555,12 @@ async function translateAndSave(newsId, options = {}) {
                 [`translationUpdatedAt.${dst}`]: now,
               },
             },
-            { new: true, runValidators: false }
+            current, logger, 'publish_async_translation_stuck_pending'
           );
-          if (docUpdated) await _syncSourceAndGroup(docUpdated, logger, 'publish_async_translation_stuck_pending');
-        } catch (_) {}
+        } catch (error) {
+          logger.warn?.('[i18n][publish] timeout state was not persisted', { id, code: error.code || 'TRANSLATION_PERSISTENCE_FAILED' });
+          throw error;
+        }
 
         try {
           logger.warn?.('[i18n][publish] stuck pending; marked failed', {
@@ -568,7 +585,7 @@ async function translateAndSave(newsId, options = {}) {
 
       if (status !== 'ready' || current?.translationError?.[dst] || retryAt || providerFixed !== bucket?.provider || needsGeneratedAt) {
         try {
-          const docUpdated = await News.findByIdAndUpdate(
+          await persistTranslationUpdate(
             id,
             {
               $set: {
@@ -580,10 +597,12 @@ async function translateAndSave(newsId, options = {}) {
                 [`translationUpdatedAt.${dst}`]: now,
               },
             },
-            { new: true, runValidators: false }
+            current, logger, 'publish_async_translation_cache_repair'
           );
-          if (docUpdated) await _syncSourceAndGroup(docUpdated, logger, 'publish_async_translation_cache_repair');
-        } catch (_) {}
+        } catch (error) {
+          logger.warn?.('[i18n][publish] cache repair was not persisted', { id, code: error.code || 'TRANSLATION_PERSISTENCE_FAILED' });
+          throw error;
+        }
       }
       continue;
     }
@@ -653,7 +672,7 @@ async function translateAndSave(newsId, options = {}) {
       // Ensure source language is persisted.
       setOk.originalLang = baseLang;
 
-      const docUpdated = await News.findByIdAndUpdate(id, { $set: setOk }, { new: true, runValidators: false });
+      const docUpdated = await persistTranslationUpdate(id, { $set: setOk }, current, logger, 'publish_async_translation_ready');
       if (docUpdated) {
         try {
           logger.info?.('[i18n][publish] saved translation', {
@@ -664,24 +683,14 @@ async function translateAndSave(newsId, options = {}) {
           });
         } catch (_) {}
 
-        try {
-          await _syncSourceAndGroup(docUpdated, logger, 'publish_async_translation_ready');
-        } catch (e) {
-          try {
-            logger.warn?.('[i18n][publish] sync after translation failed', {
-              id: String(doc0?._id || ''),
-              slug: String(doc0?.slug || ''),
-              message: e?.message || String(e),
-            });
-          } catch (_) {}
-        }
       }
     } catch (e) {
+      if (e.code === 'TRANSLATION_SOURCE_CHANGED') throw e;
       const msg = e?.message || String(e);
       const isRateLimit = _isRateLimitErrorMessage(msg);
       const delayMin = _retryDelayMinutesForErrorMessage(msg);
       try {
-        const docUpdated = await News.findByIdAndUpdate(
+        await persistTranslationUpdate(
           id,
           {
             $set: {
@@ -691,10 +700,12 @@ async function translateAndSave(newsId, options = {}) {
               [`translationUpdatedAt.${dst}`]: now,
             },
           },
-          { new: true, runValidators: false }
+          current, logger, 'publish_async_translation_failed'
         );
-        if (docUpdated) await _syncSourceAndGroup(docUpdated, logger, 'publish_async_translation_failed');
-      } catch (_) {}
+      } catch (error) {
+        logger.warn?.('[i18n][publish] retry state was not persisted', { id, code: error.code || 'TRANSLATION_PERSISTENCE_FAILED' });
+        throw error;
+      }
 
       try {
         logger.warn?.('[i18n][publish] translation failed', {

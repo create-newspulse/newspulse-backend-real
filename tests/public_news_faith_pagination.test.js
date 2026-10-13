@@ -483,7 +483,7 @@ test('Faith unavailable, timed-out, inconsistent and concurrently changed pages 
 for (const category of ordinaryCategories) {
   test(`Faith scope leaves ${category} grouping, fallback and response shape unchanged`, async context => {
     const state = setup(context, [story(1, 'en', { category })], { legacy: true });
-    const result = success(await state.get({ category, lang: 'hi', strictLocale: 'true' }));
+    const result = success(await state.get({ category, lang: 'hi' }));
     assert.equal(result.total, 1);
     assert.equal(result.items[0].resolvedLanguage, 'en');
     assert.equal(result.items[0].isFallback, true);
@@ -491,8 +491,14 @@ for (const category of ordinaryCategories) {
     assert.equal(state.aggregates.length, 0);
     assert.ok(state.finds.every(query => JSON.stringify(query.sort) === JSON.stringify({ publishedAt: -1, createdAt: -1 })));
     assert.ok(Number.isNaN(controller.resolvePublicNewsListRequest({ query: { category, page: 'abc' }, headers: {} }).page));
+    const strict = success(await state.get({ category, lang: 'hi', strictLocale: 'true', fallback: 'true' }));
+    assert.equal(strict.total, 0);
+    assert.deepEqual(strict.items, []);
     mongoose.connection.readyState = 0;
-    assert.deepEqual(success(await state.get({ category })), { items: [], page: 1, limit: 30, total: 0, totalPages: 1 });
+    const unavailable = await state.get({ category });
+    assert.equal(unavailable.status, 503);
+    assert.equal(Object.hasOwn(unavailable.body, 'items'), false);
+    assert.equal(Object.hasOwn(unavailable.body, 'total'), false);
   });
 }
 
@@ -528,5 +534,10 @@ test('Faith cache is versioned and page/limit/language-specific without changing
   options.onRebuildUnavailable(req({}), res);
   assert.deepEqual(Object.keys(body), ['message']);
   options.onRebuildUnavailable(req({ category: 'national' }), res);
-  assert.equal(body.total, 0); assert.equal(body.page, 1); assert.equal(body.limit, 30);
+  assert.deepEqual(Object.keys(body), ['ok', 'code', 'message']);
+  assert.equal(body.ok, false);
+  assert.notEqual(
+    options.buildKey(req({ category: 'national', strictLocale: 'true' })),
+    options.buildKey(req({ category: 'national', strictLocale: 'false' }))
+  );
 });

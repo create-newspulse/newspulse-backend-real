@@ -88,6 +88,24 @@ function restore(originals) {
 }
 
 function installPublishMocks(t, docs, options = {}) {
+  t.mock.method(mongoose, 'startSession', async () => ({
+    async withTransaction(work) {
+      const before = docs.map(doc => ({
+        doc, data: structuredClone(Object.fromEntries(Object.entries(doc).filter(([, value]) => typeof value !== 'function'))),
+      }));
+      try { return await work(); }
+      catch (error) {
+        docs.splice(0, docs.length, ...before.map(item => item.doc));
+        for (const { doc, data } of before) {
+          for (const [key, value] of Object.entries(doc)) if (typeof value !== 'function') delete doc[key];
+          Object.assign(doc, data);
+        }
+        throw error;
+      }
+    },
+    endSession: async () => {},
+  }));
+  t.mock.method(News, 'updateMany', async () => ({ acknowledged: true, matchedCount: docs.length, modifiedCount: docs.length }));
   const originals = [
     {
       target: News,
@@ -119,17 +137,17 @@ function installPublishMocks(t, docs, options = {}) {
   const publicCopies = [];
   let fetchCalls = 0;
 
-  News.findById = async (id) => docs.find((doc) => String(doc._id) === String(id)) || docs[0] || null;
-  News.find = async (query) => {
+  News.findById = (id) => queryDoc(docs.find((doc) => String(doc._id) === String(id)) || null);
+  News.find = (query) => {
     const raw = JSON.stringify(query || {});
     const groupMatch = raw.match(/grp-[a-z0-9-]+/i);
     const groupKey = groupMatch ? groupMatch[0] : null;
     const excludedId = query && query._id && query._id.$ne ? String(query._id.$ne) : null;
-    return docs.filter((doc) => {
+    return queryDoc(docs.filter((doc) => {
       if (excludedId && String(doc._id) === excludedId) return false;
       if (groupKey && doc.translationGroupId !== groupKey && doc.translationKey !== groupKey) return false;
       return true;
-    });
+    }));
   };
   News.findOne = (query) => {
     const raw = JSON.stringify(query || {});
@@ -137,8 +155,8 @@ function installPublishMocks(t, docs, options = {}) {
     const existing = lang ? docs.find((doc) => doc.language === lang || doc.lang === lang) : null;
     return queryDoc(existing || null);
   };
-  News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
-  News.create = async (payload) => {
+  News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
+  const createDoc = (payload) => {
     const ids = [
       '507f1f77bcf86cd799439911',
       '507f1f77bcf86cd799439912',
@@ -154,6 +172,7 @@ function installPublishMocks(t, docs, options = {}) {
     created.push(doc);
     return doc;
   };
+  News.create = async (payload) => Array.isArray(payload) ? payload.map(createDoc) : createDoc(payload);
 
   PublicArticle.findOneAndUpdate = (_filter, update) => {
     publicCopies.push(update.$set);
@@ -309,30 +328,29 @@ test('invalid author snapshot leaves publication drafts and snapshots unchanged'
   assert.deepEqual(docs[0].authorByline, byline);
 });
 
-test('scheduled translations reuse the source snapshot across separate scheduler batches', async (context) => {
+test('scheduled child publishes the full group with one frozen snapshot across scheduler batches', async (context) => {
   const { publishDueScheduledArticles } = require('../services/scheduledPublication.service');
   const byline = { enabled: true, snapshot: { name: 'Preview name', shortBio: 'Public bio' } };
   const source = makeLanguageDoc('en', { status: 'scheduled', authorByline: structuredClone(byline) });
+  const docs = [source, ...['hi', 'gu'].map(lang => makeLanguageDoc(lang, { status: 'scheduled', authorByline: structuredClone(byline) }))];
+  installPublishMocks(context, docs);
   context.mock.method(require('../models/User'), 'findOne', () => { throw new Error('Scheduled publication must not query Users'); });
-  const snapshots = [];
-  for (const language of ['hi', 'gu']) {
-    const child = makeLanguageDoc(language, { status: 'scheduled', authorByline: structuredClone(byline) });
+  for (const [index, child] of docs.slice(1).entries()) {
     const result = await publishDueScheduledArticles({
       allowDisconnected: true,
       News: {
-        find: () => ({ limit: () => [child] }),
-        findById: async () => source,
-        updateOne: async (_filter, update) => { Object.assign(source, update.$set); },
+        find: () => ({ limit: () => child.status === 'scheduled' ? [child] : [] }),
       },
       PushHistory: { create: async () => ({}) },
     });
-    assert.equal(result.published, 1);
-    snapshots.push(structuredClone(child.authorByline));
+    assert.equal(result.published, index === 0 ? 1 : 0);
   }
-  assert.equal(snapshots[0].snapshot.name, 'Preview name');
-  assert.equal(source.status, 'scheduled');
-  assert.deepEqual(snapshots[0], snapshots[1]);
-  assert.deepEqual(snapshots[0], source.authorByline);
+  assert.equal(source.authorByline.snapshot.name, 'Preview name');
+  assert.ok(source.authorByline.snapshotCapturedAt);
+  for (const doc of docs) {
+    assert.equal(doc.status, 'published');
+    assert.deepEqual(doc.authorByline, source.authorByline);
+  }
 });
 
 test('a failed scheduled article save does not persist a source publication snapshot', async (context) => {
@@ -340,6 +358,7 @@ test('a failed scheduled article save does not persist a source publication snap
   const byline = { enabled: true, snapshot: { name: 'Preview name' } };
   const source = makeLanguageDoc('en', { status: 'scheduled', authorByline: structuredClone(byline) });
   const child = makeLanguageDoc('hi', { status: 'scheduled', authorByline: structuredClone(byline) });
+  installPublishMocks(context, [source, child, makeLanguageDoc('gu', { status: 'scheduled' })]);
   child.save = async () => { throw new Error('Simulated persistence failure'); };
   let sourceWrites = 0;
   const result = await publishDueScheduledArticles({
@@ -355,12 +374,13 @@ test('a failed scheduled article save does not persist a source publication snap
   assert.equal(result.failed, 1);
   assert.equal(result.published, 0);
   assert.equal(sourceWrites, 0);
+  assert.deepEqual(source.authorByline, byline);
 });
 
 test('canonical publish publishes a draft with all EN HI GU translations', async (t) => {
   let refreshScheduled = false;
   t.after(require('../lib/cache').onArticleCachesInvalidated((event) => {
-    assert.equal(event.publicVisibilityRemoved, false);
+    assert.equal(event.publicVisibilityRemoved, true);
     refreshScheduled = true;
     return new Promise(() => {});
   }));
@@ -426,7 +446,7 @@ test('canonical publish reuses existing cached translations and retry does not d
 });
 
 for (const mode of ['throw', 'null']) {
-  test(`canonical publication exposes ${mode} public sync failure without rolling back saved News`, async (t) => {
+  test(`canonical publication rejects ${mode} public sync failure and preserves previous News visibility`, async (t) => {
     const publishedAt = new Date('2026-01-02T00:00:00.000Z');
     const docs = ['en', 'hi', 'gu'].map((lang) => makeLanguageDoc(lang, { status: 'published', publishedAt, views: 17 }));
     const ids = docs.map((doc) => doc._id);
@@ -438,10 +458,10 @@ for (const mode of ['throw', 'null']) {
         return null;
       },
     });
-    const result = await publishCanonicalArticle(docs[0], { logger: { warn: (...args) => warnings.push(args) } });
-    assert.equal(result.ok, true);
-    assert.deepEqual(result.publicSync, { ok: false, failedArticleIds: ids });
-    assert.equal(JSON.stringify(result).includes('private-sync-error'), false);
+    await assert.rejects(
+      publishCanonicalArticle(docs[0], { logger: { warn: (...args) => warnings.push(args) } }),
+      { statusCode: 503, code: 'PUBLIC_ARTICLE_SYNC_FAILED', message: 'Public article synchronization failed. Retry the operation.' }
+    );
     assert.equal(JSON.stringify(warnings).includes('private-sync-error'), false);
     assert.ok(warnings.length > 0);
     assert.equal(state.getFetchCalls(), 0);
@@ -454,15 +474,12 @@ for (const mode of ['throw', 'null']) {
   });
 }
 
-test('legacy publication fallback only fills missing publication dates and never upserts groups', async (t) => {
+test('publication hides stale legacy copies without rewriting their dates or upserting groups', async (t) => {
   const docs = ['en', 'hi', 'gu'].map((lang, index) => makeLanguageDoc(lang, {
     status: 'published',
     publishedAt: new Date(`2026-01-0${index + 2}T00:00:00.000Z`),
   }));
   const state = installPublishMocks(t, docs);
-  const previousDb = mongoose.connection.db;
-  mongoose.connection.db = {};
-  t.after(() => { mongoose.connection.db = previousDb; });
   const writes = [];
   PublicArticle.updateMany = async (filter, update, options) => {
     writes.push({ filter, update, options });
@@ -470,33 +487,30 @@ test('legacy publication fallback only fills missing publication dates and never
   };
   const result = await publishCanonicalArticle(docs[0]);
   assert.deepEqual(result.publicSync, { ok: true, failedArticleIds: [] });
-  assert.equal(writes.length, 6);
+  assert.equal(writes.length, 1);
   for (const write of writes) {
     assert.notEqual(write.options.upsert, true);
-    if (Object.hasOwn(write.update.$set, 'publishedAt')) {
-      assert.equal(write.filter.publishedAt, null);
-    }
+    assert.ok(write.options.session);
+    assert.deepEqual(write.update.$set, { status: 'draft' });
   }
   assert.deepEqual(state.publicCopies.map((copy) => copy.publishedAt), docs.map((doc) => doc.publishedAt));
 });
 
 for (const mode of ['throw', 'unacknowledged']) {
-  test(`legacy public sync ${mode} is visible even when the canonical upsert succeeds`, async (t) => {
+  test(`legacy public visibility ${mode} aborts publication before canonical upserts`, async (t) => {
     const docs = ['en', 'hi', 'gu'].map((lang) => makeLanguageDoc(lang));
     installPublishMocks(t, docs);
-    const previousDb = mongoose.connection.db;
-    mongoose.connection.db = {};
-    t.after(() => { mongoose.connection.db = previousDb; });
     const warnings = [];
     PublicArticle.updateMany = async () => {
       if (mode === 'throw') throw new Error('private-legacy-error-must-not-leak');
       return { acknowledged: false };
     };
-    const result = await publishCanonicalArticle(docs[0], { logger: { warn: (...args) => warnings.push(args) } });
-    assert.equal(result.ok, true);
-    assert.deepEqual(result.publicSync, { ok: false, failedArticleIds: docs.map((doc) => doc._id) });
-    assert.ok(docs.every((doc) => doc.status === 'published'));
-    assert.equal(warnings.length, 3);
+    await assert.rejects(
+      publishCanonicalArticle(docs[0], { logger: { warn: (...args) => warnings.push(args) } }),
+      { statusCode: 503, code: 'PUBLIC_ARTICLE_SYNC_FAILED' }
+    );
+    assert.ok(docs.every((doc) => doc.status === 'draft'));
+    assert.equal(warnings.length, 1);
     assert.equal(JSON.stringify(warnings).includes('private-legacy-error'), false);
   });
 }
@@ -518,9 +532,10 @@ test('publish API exposes an incomplete public sync without leaking the driver e
     .post(`/api/articles/${docs[0]._id}/publish`)
     .auth(token, { type: 'bearer' })
     .send();
-  assert.equal(res.status, 200);
-  assert.equal(res.body.article.status, 'published');
-  assert.deepEqual(res.body.publicSync, { ok: false, failedArticleIds: docs.map((doc) => doc._id) });
+  assert.equal(res.status, 503);
+  assert.equal(res.body.ok, false);
+  assert.equal(res.body.message, 'Public article synchronization failed. Retry the operation.');
+  assert.ok(docs.every(doc => doc.status === 'draft'));
 });
 
 test('canonical publish failure leaves article drafts unpublished', async (t) => {

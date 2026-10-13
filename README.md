@@ -23,6 +23,167 @@ Server listens on `PORT` (from `.env` in local dev).
 
 If your frontend dev proxy targets `http://localhost:5000`, make sure your backend `PORT` matches it in local dev. If you hit an `EADDRINUSE` error, free the conflicting process or update the proxy target to the actual backend port.
 
+## Editorial Lifecycle Consistency V1
+
+[News](./models/News.js) is the CMS authority. GU/HI/EN editions connected by
+translation group/key or source identity form one logical story;
+[Article](./models/Article.js) is a compatibility copy, not a second editorial
+story. Matching a slug alone never makes unrelated News records the same story.
+
+### Lifecycle and authorization
+
+- Publish uses the [canonical publisher](./services/articlePublishing.service.js).
+  Complete existing editions and cached translations are reused before generating
+  missing editions. All required EN/HI/GU editions must be ready. Final News and
+  public-copy visibility changes commit together; stale duplicate compatibility
+  copies remain hidden. A deleted edition must be restored before publishing.
+- PUT and PATCH use the same update handler. A normal edit preserves status,
+  identity, native-language content in other editions, and original publication
+  time. The edit and compatibility-copy synchronization share a transaction, so
+  a failed public-copy write can be retried without losing image propagation.
+  Edits recheck status and the workflow lifecycle timestamp inside that transaction;
+  an intervening lifecycle change returns 409 before applying the edit.
+  Existing shared metadata is synchronized across editions; independently
+  customized translated cover images are retained. Dedicated Pulse Dialogue
+  metadata is not newly propagated by ordinary editorial edits.
+  Combined edit + Publish/Unpublish/Archive/Schedule commits or rolls back
+  together. Workflow-stage metadata and events share the lifecycle transaction.
+- Creation, source metadata, compatibility copies, and any requested immediate
+  publication share one transaction. A failed creation leaves no new News record.
+  Translation enqueue runs after commit; failure returns a saved article with
+  an explicit follow-up warning, not a failed creation.
+- Unpublish, Archive, Schedule, and Soft Delete use the
+  [whole-story lifecycle](./services/articleLifecycle.service.js), including
+  compatibility copies. Deleting one edition soft-deletes the complete story.
+  Withdrawal never erases historical `publishedAt`.
+- Restore reinstates each edition's pre-delete status from `deletedFromStatus`,
+  or usable legacy workflow history. An unknown legacy status restores to Draft,
+  emits a warning, and returns `restoreFallbackIds`. A restore that republishes
+  any edition requires Founder authorization. It does not generate translations
+  or reset publication dates; incomplete previous publications return 409.
+- Permanent Delete requires Founder authorization and a completely soft-deleted
+  group (otherwise 409). All mounted deletion aliases and bulk actions enforce
+  this boundary. Existing numeric `status: 200` and successful messages/envelopes
+  are retained, with additive deletion metadata. Cleanup removes News editions, owned public copies and
+  article-specific TranslationJobs, clears matching topic pins, and retains
+  minimal audit identifiers. Shared media, shared translation cache/memory,
+  analytics, contributor records and historical records are not deleted.
+
+Existing authenticated edit permissions remain in force. Publishing and
+unpublishing live content retain Founder protections. Translation persistence
+rechecks the active source and takes a group write dependency so stale work
+cannot recreate deleted editions.
+
+The legacy `/api/news` create/update controllers retain their existing input,
+authentication, messages, errors and single-record contract; they are not
+forwarded to the canonical article router. News mutation responses retain the
+existing `body` and `id` virtuals, including transaction/lean-backed responses.
+Ordinary content edits still mark eligible machine siblings outdated and enqueue
+automatic translation generation; human-edited siblings remain protected.
+
+**MongoDB transaction support is required** (a replica set or transaction-capable
+Atlas deployment). Group lifecycle, publication, and guarded translation writes
+do not fall back to nontransactional writes. No migration or repair utility is
+required for the nullable pre-delete status field.
+
+Standalone generation retains per-language transactions and reports partial
+results if a later edition fails. Already-committed public editions still receive
+cache invalidation and revalidation on that failure path; failed editions are not
+included as committed targets. Standalone publication may prepare draft
+translations before its atomic visibility commit; those drafts can be reused
+on retry. Create-and-publish and combined edit/publish instead pass their outer
+transaction through translation persistence, so failure rolls back those writes.
+Provider calls and shared translation-cache writes are not rollbackable, and
+provider latency counts against the transaction lifetime in those combined flows.
+The existing async worker commits each source translation update and group/public
+copy synchronization together, rechecks source text, and uses its existing retry
+handler for storage failures. No new worker or scheduler is introduced.
+Existing Youth Pulse post-save submission/contributor hooks remain independent
+writes; the lifecycle transaction guarantee covers News, public copies and the
+explicit workflow writes, not those pre-existing integrations.
+
+### Slugs, chronology and public errors
+
+- Unchanged-slug edits and status transitions exclude the same logical story
+  from slug collision checks, including `slugs.en/hi/gu`. Unrelated collisions
+  still return 409. Normal edits do not regenerate slugs; generated editions use
+  localized slugs.
+- The backend sets the first `publishedAt`. Admin clients should send publication
+  intent (`status: "published"`), not a clock value. Client timestamps cannot
+  reset chronology. Republish, restore and later edits retain the original time.
+- Admin Published lists sort by `publishedAt DESC, _id DESC` **before**
+  pagination, even if a client requests `sort=-updatedAt`. Records and totals use
+  the same status/visibility filters; missing-status records are not Published.
+- Database unavailability, query deadlines and cache-admission failure return
+  explicit 503 responses, not successful empty lists or fabricated zero totals.
+  Unexpected query failures return 500; genuine empty selections remain 200.
+  Existing authentication failures remain 401/403.
+- `strictLocale=true` disables language fallback, even with `fallback=true`;
+  strict and fallback-capable category requests use separate cache variants.
+  Faith & Culture keeps its bounded logical-story pagination and strict locale
+  rules. An unavailable required backend is not equivalent to no eligible stories.
+- Public compatibility detail routes verify the linked News source, preventing
+  a stale Article copy from exposing a withdrawn story. Copies also carry source
+  lock/privacy/embargo gates. Only publicly eligible native editions populate
+  ready translation buckets; a hidden edition cannot escape through another
+  edition's cached text or a legacy shared-slug copy.
+- Time-gated native editions queue `publicVisibilityRefreshAt` on their logical
+  story. The existing one-minute scheduler refreshes due groups through the same
+  guarded synchronization, without translation generation, new jobs or duplicate
+  copies. Embargo/publication/schedule deadlines, including workflow embargoes,
+  are rechecked; private, locked or withdrawn editions remain unavailable.
+  Compatibility locales and affected caches converge on the first successful
+  existing scheduler tick after expiry, not a separate timer or cron. Publication
+  dates remain unchanged. The refresh marker is indexed and cleared or advanced
+  to the next pending deadline; a failed database sync remains eligible for retry.
+  Legacy published embargo/schedule records without a marker are discovered
+  lazily by the same scheduler and marked after synchronization; no migration
+  or production repair script is required.
+  Existing embargo, lock and unlock endpoints synchronize visibility and native
+  locale caches atomically, retaining their existing Founder/Legal permissions.
+  Changing an embargo or unlocking before its deadline updates the pending
+  refresh; unlocking after expiry restores only otherwise-eligible locales.
+
+### Topics, editorial ranking and invalidation
+
+Trending membership still uses exact `News.tags`; topic membership never changes
+the editorial category or creates another article. Public pins are revalidated
+on reads: a withdrawn or no-longer-tagged story is not a valid pin. Soft deletion
+retains the pin reference for restoration; permanent deletion clears it.
+
+Sponsored flags, sponsored categories and Combo-linked articles are excluded
+from normal editorial homepage/Top Story selection. Ordinary Business journalism
+remains eligible. The Sponsored center-slot DB-down `200` safe-default contract,
+paid placement and Ads Manager behavior are otherwise unchanged.
+
+| Operation | Detail | Home, category, Latest, search/lists | Topic archives and pins | Compatibility copies |
+| --- | --- | --- | --- | --- |
+| Publish | Revalidate all locale routes | Evict and revalidate | Eligible exact-tag story joins | Publish synchronized native copies atomically |
+| Unpublish | Hidden | Evict, including Latest last-known-good | Membership/pin becomes ineligible | Whole group hidden |
+| Edit Published | Revalidate old/new locale slugs | Evict; original chronology retained | Revalidate affected memberships/pins | Resync content and shared metadata |
+| Tag change | Revalidate | Evict and revalidate | Revalidate old/new tags and linked pins | Resync shared tags |
+| Image change | Revalidate | Evict and revalidate cards | Revalidate affected cards/pins | Resync shared image; retain custom translated images |
+| Soft Delete | Hidden | Evict, including Latest last-known-good | Membership/pin becomes ineligible | Whole group marked deleted |
+| Restore | Revalidate; visible only for restored Published status | Evict and revalidate | Eligibility restored under normal tag/locale rules | Resync without duplicate copies |
+| Permanent Delete | Removed; old paths revalidated | Evict, including Latest last-known-good | Revalidate archives and clear pins | Remove owned group copies |
+
+[Invalidation](./services/publicContentInvalidation.service.js) includes previous
+and current slugs, categories and tags, topic archive/pin targets, related-story
+tags, existing Redis content families and the public config version. A configured
+revalidation webhook has a five-second deadline. Post-commit cache, topic-lookup
+or revalidation failures are logged and retain the successful mutation envelope
+with `committed: true` and `revalidation.ok: false` or `postCommitWarnings`.
+Reload authoritative state; repeating a committed mutation is not a notification
+retry. There is no durable notification outbox or automatic delivery guarantee.
+Webhook response bodies and raw transport errors are not returned or logged.
+
+Focused coverage is in
+[editorial_lifecycle_consistency.test.js](./tests/editorial_lifecycle_consistency.test.js),
+[editorial_lifecycle_compatibility.test.js](./tests/editorial_lifecycle_compatibility.test.js)
+and [cache_stampede_protection.test.js](./tests/cache_stampede_protection.test.js).
+Lifecycle fixtures use isolated in-memory transactions and blocked external
+connections, not a production database or proof of real replica-set concurrency.
+
 ## Editorial Trending Topics V1
 
 Editorial topics are independent of the legacy `/api/public/trending-topics`

@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const mongoose = require('mongoose');
 
 process.env.NODE_ENV = 'test';
 process.env.GOOGLE_TRANSLATE_API_KEY = process.env.GOOGLE_TRANSLATE_API_KEY || 'test-key';
@@ -28,6 +29,14 @@ function makeLean(doc) {
     lean: async () => doc,
   };
 }
+
+test.beforeEach(context => {
+  context.mock.method(mongoose, 'startSession', async () => ({
+    withTransaction: async work => work(),
+    endSession: async () => {},
+  }));
+  context.mock.method(News, 'updateMany', async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 }));
+});
 
 test.afterEach(() => {
   News.findById = originalFindById;

@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { matches } = require('./helpers/pulseDialogueAggregate');
 
 const PublicArticle = require('../models/Article');
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
@@ -33,9 +34,7 @@ function installPublicCopyStore(t, initialCopies = []) {
   t.mock.method(PublicArticle, 'findOneAndUpdate', (filter, update, options) => ({
     lean: async () => {
       writes.push({ filter, update, options });
-      let copy = copies.find((item) => filter.$or.some((clause) =>
-        Object.entries(clause).every(([key, value]) => String(item[key]) === String(value))
-      ));
+      let copy = copies.find((item) => matches(item, filter));
       if (!copy) {
         assert.equal(options.upsert, true);
         copy = {
@@ -68,7 +67,10 @@ test('Regional synchronization creates a missing copy and reuses its source iden
   assert.equal(updated.slug, 'explicitly-edited-slug');
   assert.deepEqual(updated.publishedAt, source.publishedAt);
   assert.deepEqual(updated.createdAt, created.createdAt);
-  assert.deepEqual(store.writes[0].filter, { $or: [{ sourceNewsId: source._id }, { slug: source.slug }] });
+  const filter = store.writes[0].filter;
+  assert.ok(matches({ sourceNewsId: source._id, slug: 'previous-slug' }, filter));
+  assert.ok(matches({ slug: source.slug }, filter));
+  assert.equal(matches({ sourceNewsId: '507f1f77bcf86cd799439999', slug: source.slug }, filter), false);
   assert.equal(store.writes[0].options.runValidators, true);
 });
 

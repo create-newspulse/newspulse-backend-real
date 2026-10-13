@@ -211,7 +211,7 @@ test('POST /api/articles saves a faith-culture draft through the existing draft 
   }
 });
 
-test('publish workflow syncs tech-gadgets through the existing public article path', async () => {
+test('publish workflow syncs tech-gadgets through the existing public article path', async (t) => {
   const docs = [makePublishDoc('en'), makePublishDoc('hi'), makePublishDoc('gu')];
   const originals = {
     newsFind: News.find,
@@ -220,6 +220,16 @@ test('publish workflow syncs tech-gadgets through the existing public article pa
     pushCreate: PushHistory.create,
   };
   const publicUpdates = [];
+  t.mock.method(News, 'findOne', () => ({
+    select() { return this; },
+    lean: async () => null,
+  }));
+  t.mock.method(News, 'findById', (id) => ({ lean: async () => docs.find(doc => String(doc._id) === String(id)) }));
+  t.mock.method(News, 'updateMany', async () => ({ acknowledged: true, matchedCount: docs.length, modifiedCount: docs.length }));
+  t.mock.method(mongoose, 'startSession', async () => ({
+    withTransaction: async (work) => work(),
+    endSession: async () => {},
+  }));
 
   try {
     News.find = async () => docs;

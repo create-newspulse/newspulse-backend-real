@@ -1,39 +1,20 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const News = require('../models/News');
-const { logAudit } = require('../lib/audit');
-const { invalidateArticleCaches } = require('../lib/cache');
-const { assertArticleTranslationGroupLanguageUnique } = require('../services/articleLanguageUniqueness.service');
-let { requireAdminAuth } = (() => { try { return require('../middleware/adminAuth'); } catch (_) { return { requireAdminAuth: (_req,_res,next)=>next() }; } })();
+const { changeArticleGroupStatus, restoreArticleGroup, articleMutationMetadata } = require('../services/articleLifecycle.service');
+const { isContentDatabaseUnavailable } = require('../lib/contentErrors');
+const { requireAdminAuth } = require('../middleware/adminAuth');
 
 const router = express.Router();
-
-function isEditorialArticle(docLike) {
-  return String(docLike?.category || '').trim().toLowerCase() === 'editorial';
-}
-
-async function logEditorialDraftAudit(req, action, docLike, meta = {}) {
-  if (!isEditorialArticle(docLike)) return;
-  const articleId = docLike?._id ? String(docLike._id) : null;
-  await logAudit(req, action, articleId, {
-    module: 'articles',
-    targetType: 'article',
-    targetId: articleId,
-    targetName: docLike?.title || null,
-    oldValue: meta.oldValue ?? null,
-    newValue: meta.newValue ?? null,
-    reason: meta.reason || null,
-    articleId,
-    headline: docLike?.title || null,
-    editorialType: docLike?.editorialType || 'editorial',
-  });
-}
 
 // GET /api/admin/drafts
 // Supports filters: ?deleted=1 (only deleted), ?deleted=0 (exclude deleted), default exclude deleted
 // Optional: ?source=community|editor|pro|founder
 router.get('/drafts', requireAdminAuth, async (req, res) => {
   try {
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({ ok: false, success: false, code: 'ARTICLES_UNAVAILABLE', message: 'Database unavailable' });
+    }
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
     const skip = (page - 1) * limit;
@@ -80,7 +61,7 @@ router.get('/drafts', requireAdminAuth, async (req, res) => {
     return res.json({ ok: true, success: true, data, total, page, limit });
   } catch (err) {
     console.error('[ADMIN_DRAFTS][list-error]', err?.message || err);
-    return res.status(500).json({ ok: false, success: false, message: 'Failed to load drafts' });
+    return res.status(isContentDatabaseUnavailable(err) ? 503 : 500).json({ ok: false, success: false, message: 'Failed to load drafts' });
   }
 });
 
@@ -91,45 +72,32 @@ router.post('/drafts/:id/delete', requireAdminAuth, async (req, res) => {
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({ ok: false, success: false, message: 'Invalid id' });
     }
-    const doc = await News.findById(id);
-    if (!doc) {
-      return res.status(404).json({ ok: false, success: false, message: 'Draft not found' });
-    }
-    const wasPublished = String(doc.status || '').toLowerCase() === 'published';
-    doc.status = 'deleted';
-    if ('deletedAt' in doc) doc.deletedAt = new Date();
-    await doc.save();
-    if (wasPublished) await invalidateArticleCaches({ publicVisibilityRemoved: true });
-    await logEditorialDraftAudit(req, 'EDITORIAL_ARTICLE_DELETED', doc, { oldValue: 'draft', newValue: 'deleted', reason: req.body?.reason });
-    return res.json({ ok: true, success: true, data: doc });
+    const result = await changeArticleGroupStatus(id, 'deleted', { req });
+    const doc = result.doc;
+    return res.json({ ok: true, success: true, data: doc, deletedCount: result.changedCount, deletedIds: result.changedIds, ...articleMutationMetadata(result) });
   } catch (err) {
     console.error('[ADMIN_DRAFTS][delete-error]', err?.message || err);
-    return res.status(500).json({ ok: false, success: false, message: 'Failed to delete draft' });
+    return res.status(err.statusCode || err.status || 503).json({ ok: false, success: false, message: err.status ? err.message : 'Failed to delete story' });
   }
 });
 
-// POST /api/admin/drafts/:id/restore → restore draft (status: 'draft')
+// POST /api/admin/drafts/:id/restore restores the logical story's pre-delete statuses.
 router.post('/drafts/:id/restore', requireAdminAuth, async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({ ok: false, success: false, message: 'Invalid id' });
     }
-    const doc = await News.findById(id);
-    if (!doc) {
-      return res.status(404).json({ ok: false, success: false, message: 'Draft not found' });
-    }
-    await assertArticleTranslationGroupLanguageUnique(doc, id);
-    const wasPublished = String(doc.status || '').toLowerCase() === 'published';
-    doc.status = 'draft';
-    if ('deletedAt' in doc) doc.deletedAt = null;
-    await doc.save();
-    if (wasPublished) await invalidateArticleCaches({ publicVisibilityRemoved: true });
-    await logEditorialDraftAudit(req, 'EDITORIAL_ARTICLE_RESTORED', doc, { oldValue: 'deleted', newValue: 'draft', reason: req.body?.reason });
-    return res.json({ ok: true, success: true, data: doc });
+    const result = await restoreArticleGroup(id, { req });
+    const doc = result.doc;
+    return res.json({
+      ok: true, success: true, data: doc, changedCount: result.changedCount, changedIds: result.changedIds,
+      restoredStatuses: [...new Set(result.docs.map(member => member.status))], restoreFallbackIds: result.restoreFallbackIds,
+      ...articleMutationMetadata(result),
+    });
   } catch (err) {
     console.error('[ADMIN_DRAFTS][restore-error]', err?.message || err);
-    const status = Number(err?.status) || 500;
+    const status = Number(err?.statusCode || err?.status) || 503;
     return res.status(status).json({ ok: false, success: false, message: status === 500 ? 'Failed to restore draft' : err.message });
   }
 });

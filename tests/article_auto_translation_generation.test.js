@@ -12,13 +12,33 @@ const {
   generateArticleTranslations,
 } = require('../services/articleTranslationGeneration.service');
 const { getPulseDialogueStandardText } = require('../services/pulseDialogue.service');
+const mongoose = require('mongoose');
+const sources = new Map();
+
+function queryResult(value) {
+  return {
+    select() { return this; },
+    lean: async () => value,
+    then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); },
+  };
+}
+
+test.beforeEach((t) => {
+  sources.clear();
+  t.mock.method(News, 'findById', (id) => queryResult(sources.get(String(id)) || null));
+  t.mock.method(News, 'updateMany', async () => ({ acknowledged: true, matchedCount: sources.size, modifiedCount: sources.size }));
+  t.mock.method(mongoose, 'startSession', async () => ({
+    withTransaction: async (work) => work(),
+    endSession: async () => {},
+  }));
+});
 
 function restore(originals) {
   for (const [key, value] of Object.entries(originals)) News[key] = value;
 }
 
 function makeSource(overrides = {}) {
-  return {
+  const source = {
     _id: '507f1f77bcf86cd799439501',
     title: 'News Pulse launches AIRA',
     description: 'AIRA summary with https://newspulse.ai and #NewsPulse',
@@ -37,6 +57,8 @@ function makeSource(overrides = {}) {
     seo: { metaTitle: 'SEO title', metaDescription: 'SEO description' },
     ...overrides,
   };
+  sources.set(String(source._id), source);
+  return source;
 }
 
 function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
@@ -958,9 +980,9 @@ test('English article generates Hindi and Gujarati sibling drafts only', async (
   const created = [];
 
   try {
-    News.findOne = async () => null;
-    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
-    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994395${created.length}1`, ...payload }; };
+    News.findOne = () => queryResult(null);
+    News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
+    News.create = async ([payload]) => { created.push(payload); return [{ _id: `507f1f77bcf86cd7994395${created.length}1`, ...payload }]; };
     global.fetch = async (_url, opts) => {
       const body = JSON.parse(String(opts.body || '{}'));
       return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `T:${body.target}:${q}` })) } }) };
@@ -982,20 +1004,26 @@ test('English article generates Hindi and Gujarati sibling drafts only', async (
 });
 
 test('translation generation invalidates latest only when overwriting published content', async (t) => {
+  const { installEditorialFixture } = require('./helpers/editorialLifecycleFixture');
+  const state = installEditorialFixture(t);
+  const source = makeSource();
+  const childId = '507f1f77bcf86cd799439601';
+  state.rows.News.push(source, {
+    ...source, _id: childId, language: 'hi', lang: 'hi', originalLang: 'hi',
+    slug: 'hindi-story', slugs: { hi: 'hindi-story' }, sourceArticleId: source._id,
+  });
   const invalidations = [];
   t.after(require('../lib/cache').onArticleCachesInvalidated((event) => { invalidations.push(event); }));
-  let status = 'draft';
-  t.mock.method(News, 'findOne', async () => ({ _id: '507f1f77bcf86cd799439601', language: 'hi', status }));
-  t.mock.method(News, 'updateOne', async () => ({ acknowledged: true, modifiedCount: 1 }));
-  t.mock.method(News, 'findByIdAndUpdate', async (_id, update) => ({ _id, ...update.$set }));
-  t.mock.method(global, 'fetch', async (_url, opts) => {
+  const revalidate = global.fetch;
+  t.mock.method(global, 'fetch', async (url, opts) => {
     const body = JSON.parse(String(opts.body || '{}'));
+    if (!body.q) return revalidate(url, opts);
     return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((text) => ({ translatedText: `T:${body.target}:${text}` })) } }) };
   });
-  await generateArticleTranslations(makeSource(), { targetLanguages: ['hi'], overwrite: true });
+  await generateArticleTranslations(source, { targetLanguages: ['hi'], overwrite: true });
   assert.deepEqual(invalidations, []);
-  status = 'published';
-  await generateArticleTranslations(makeSource(), { targetLanguages: ['hi'], overwrite: true });
+  state.rows.News.find(doc => doc._id === childId).status = 'published';
+  await generateArticleTranslations(source, { targetLanguages: ['hi'], overwrite: true });
   assert.deepEqual(invalidations, [{ publicVisibilityRemoved: true }]);
 });
 
@@ -1007,9 +1035,9 @@ test('generated Hindi and Gujarati article translations preserve inline image me
   const sourceContent = `<p>Lead paragraph.</p>${imageBlock}<p>Closing paragraph.</p>`;
 
   try {
-    News.findOne = async () => null;
-    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
-    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994398${created.length}1`, ...payload }; };
+    News.findOne = () => queryResult(null);
+    News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
+    News.create = async ([payload]) => { created.push(payload); return [{ _id: `507f1f77bcf86cd7994398${created.length}1`, ...payload }]; };
     global.fetch = async (_url, opts) => {
       const body = JSON.parse(String(opts.body || '{}'));
       return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
@@ -1045,9 +1073,9 @@ test('generated Hindi and Gujarati article translations preserve controlled gall
   const sourceContent = `<p>Lead paragraph.</p>${galleryBlock}<p>Closing paragraph.</p>`;
 
   try {
-    News.findOne = async () => null;
-    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
-    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994303${created.length}1`, ...payload }; };
+    News.findOne = () => queryResult(null);
+    News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
+    News.create = async ([payload]) => { created.push(payload); return [{ _id: `507f1f77bcf86cd7994303${created.length}1`, ...payload }]; };
     global.fetch = async (_url, opts) => {
       const body = JSON.parse(String(opts.body || '{}'));
       return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
@@ -1081,9 +1109,9 @@ test('generated Hindi and Gujarati article translations preserve controlled YouT
   const sourceContent = `<p>Lead paragraph.</p>${youtubeBlock}<p>Closing paragraph.</p>`;
 
   try {
-    News.findOne = async () => null;
-    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
-    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994399${created.length}1`, ...payload }; };
+    News.findOne = () => queryResult(null);
+    News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
+    News.create = async ([payload]) => { created.push(payload); return [{ _id: `507f1f77bcf86cd7994399${created.length}1`, ...payload }]; };
     global.fetch = async (_url, opts) => {
       const body = JSON.parse(String(opts.body || '{}'));
       return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
@@ -1114,9 +1142,9 @@ test('generated Hindi and Gujarati article translations preserve controlled X po
   const sourceContent = `<p>Lead paragraph.</p>${xBlock}<p>Closing paragraph.</p>`;
 
   try {
-    News.findOne = async () => null;
-    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
-    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994300${created.length}1`, ...payload }; };
+    News.findOne = () => queryResult(null);
+    News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
+    News.create = async ([payload]) => { created.push(payload); return [{ _id: `507f1f77bcf86cd7994300${created.length}1`, ...payload }]; };
     global.fetch = async (_url, opts) => {
       const body = JSON.parse(String(opts.body || '{}'));
       return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
@@ -1150,9 +1178,9 @@ test('generated Hindi and Gujarati article translations preserve controlled Inst
   const sourceContent = `<p>Lead paragraph.</p>${instagramBlock}<p>Closing paragraph.</p>`;
 
   try {
-    News.findOne = async () => null;
-    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
-    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994301${created.length}1`, ...payload }; };
+    News.findOne = () => queryResult(null);
+    News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
+    News.create = async ([payload]) => { created.push(payload); return [{ _id: `507f1f77bcf86cd7994301${created.length}1`, ...payload }]; };
     global.fetch = async (_url, opts) => {
       const body = JSON.parse(String(opts.body || '{}'));
       return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
@@ -1187,9 +1215,9 @@ test('generated Hindi and Gujarati article translations preserve controlled Face
   const sourceContent = `<p>Lead paragraph.</p>${facebookBlock}<p>Closing paragraph.</p>`;
 
   try {
-    News.findOne = async () => null;
-    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
-    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994302${created.length}1`, ...payload }; };
+    News.findOne = () => queryResult(null);
+    News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
+    News.create = async ([payload]) => { created.push(payload); return [{ _id: `507f1f77bcf86cd7994302${created.length}1`, ...payload }]; };
     global.fetch = async (_url, opts) => {
       const body = JSON.parse(String(opts.body || '{}'));
       return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
@@ -1219,9 +1247,9 @@ test('Hindi and Gujarati source articles generate the other supported languages'
   const originals = { findOne: News.findOne, create: News.create, updateOne: News.updateOne };
   const prevFetch = global.fetch;
   try {
-    News.findOne = async () => null;
-    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
-    News.create = async (payload) => ({ _id: `507f1f77bcf86cd799439${payload.language}1`, ...payload });
+    News.findOne = () => queryResult(null);
+    News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
+    News.create = async ([payload]) => [{ _id: `507f1f77bcf86cd799439${payload.language}1`, ...payload }];
     global.fetch = async (_url, opts) => {
       const body = JSON.parse(String(opts.body || '{}'));
       return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
@@ -1261,8 +1289,8 @@ test('Pulse Dialogue translation generation uses fixed standard texts for every 
   });
 
   try {
-    News.findOne = async () => null;
-    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+    News.findOne = () => queryResult(null);
+    News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
     global.fetch = async (_url, opts) => {
       const body = JSON.parse(String(opts.body || '{}'));
       return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
@@ -1270,7 +1298,7 @@ test('Pulse Dialogue translation generation uses fixed standard texts for every 
 
     for (const sourceLang of ['en', 'hi', 'gu']) {
       const created = [];
-      News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd799439${payload.language}7`, ...payload }; };
+      News.create = async ([payload]) => { created.push(payload); return [{ _id: `507f1f77bcf86cd799439${payload.language}7`, ...payload }]; };
 
       const result = await generateArticleTranslations(makePulseSource(sourceLang), { targetLanguages: ['en', 'hi', 'gu'] });
       const expectedTargets = ['en', 'hi', 'gu'].filter((lang) => lang !== sourceLang);
@@ -1301,7 +1329,7 @@ test('Existing translation prevents duplicate language record and human-edited t
   const prevFetch = global.fetch;
 
   try {
-    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+    News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
     News.findOne = async (query) => {
       const raw = JSON.stringify(query);
       if (raw.includes('"language":"hi"')) return { _id: '507f1f77bcf86cd799439601', language: 'hi', humanEdited: false };
@@ -1331,8 +1359,8 @@ test('Failed translation returns failed status without losing source article', a
   const prevFetch = global.fetch;
   let createCalls = 0;
   try {
-    News.findOne = async () => null;
-    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+    News.findOne = () => queryResult(null);
+    News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
     News.create = async () => { createCalls += 1; return null; };
     global.fetch = async () => ({ ok: false, status: 500, json: async () => ({ error: { message: 'server error' } }) });
 
@@ -1354,9 +1382,9 @@ test('POST /api/articles/:id/translations/generate creates target sibling drafts
   const created = [];
   try {
     News.findById = async () => makeSource({ _id: id, language: 'en', lang: 'en', originalLang: 'en', translationGroupId: 'grp-route-1', translationKey: 'grp-route-1' });
-    News.findOne = async () => null;
-    News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
-    News.create = async (payload) => { created.push(payload); return { _id: `507f1f77bcf86cd7994397${created.length}2`, ...payload }; };
+    News.findOne = () => queryResult(null);
+    News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
+    News.create = async ([payload]) => { created.push(payload); return [{ _id: `507f1f77bcf86cd7994397${created.length}2`, ...payload }]; };
     global.fetch = async (_url, opts) => {
       const body = JSON.parse(String(opts.body || '{}'));
       return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };

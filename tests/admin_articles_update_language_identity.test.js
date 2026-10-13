@@ -167,17 +167,8 @@ function installDraftRestoreStubs(t, draftDoc, options = {}) {
 }
 
 test('editing a published Regional child syncs content and media without changing publication identity', async (t) => {
-  const mongoose = require('mongoose');
-  const user = { _id: '507f1f77bcf86cd799439712', email: 'founder@example.com', role: 'founder', status: 'active', noExpiry: true };
-  const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState');
-  Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, writable: true, value: 1 });
-  t.after(() => {
-    if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor);
-    else delete mongoose.connection.readyState;
-  });
-  t.mock.method(require('../models/User'), 'findById', () => ({ lean: async () => user }));
-  t.mock.method(require('../models/PublicSiteSettings'), 'getOrCreate', async () => ({ published: { languageTheme: { languages: ['en', 'hi', 'gu'] } } }));
-  const token = require('jsonwebtoken').sign({ sub: user._id, role: user.role, type: 'access' }, process.env.JWT_SECRET, { expiresIn: '5m' });
+  const { installEditorialFixture } = require('./helpers/editorialLifecycleFixture');
+  const state = installEditorialFixture(t);
   const before = makeArticle({
     category: 'regional',
     status: 'published',
@@ -188,18 +179,14 @@ test('editing a published Regional child syncs content and media without changin
     location: { state: 'Gujarat' },
     geo: { state: null, district: null, city: null },
   });
-  installUpdateStubs(t, before);
-  let current = { ...before };
-  News.findByIdAndUpdate = async (_id, op) => {
-    current = { ...current, ...op.$set };
-    return makeDoc(current);
-  };
+  state.rows.News.push(before);
   const copies = [];
-  PublicArticle.findOneAndUpdate = (filter, update) => {
+  const syncCopy = PublicArticle.findOneAndUpdate;
+  t.mock.method(PublicArticle, 'findOneAndUpdate', (filter, update, options) => {
     copies.push({ filter, update });
-    return { lean: async () => ({ _id: '507f1f77bcf86cd799439b11', ...update.$set }) };
-  };
-  const res = await request(app).put(`/api/articles/${before._id}`).auth(token, { type: 'bearer' }).send({
+    return syncCopy(filter, update, options);
+  });
+  const res = await state.request('put', `/api/articles/${before._id}`, {
     title: 'Edited Regional title',
     content: '<p>Edited Regional body</p>',
     coverImage: { url: 'https://images.example/child-edited.jpg', publicId: 'child-edited', alt: 'Child image' },

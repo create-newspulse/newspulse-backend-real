@@ -72,6 +72,8 @@ function matchesFieldCondition(value, condition) {
       if ((value !== undefined) !== Boolean(expected)) return false;
     } else if (op === '$lte') {
       if (!compareLte(value, expected)) return false;
+    } else if (op === '$not') {
+      if (matchesFieldCondition(value, expected)) return false;
     } else if (!compareValue(value && value[op], expected)) {
       return false;
     }
@@ -83,9 +85,10 @@ function matchesFilter(doc, filter) {
   const query = filter || {};
   if (Array.isArray(query.$and) && !query.$and.every((clause) => matchesFilter(doc, clause))) return false;
   if (Array.isArray(query.$or) && !query.$or.some((clause) => matchesFilter(doc, clause))) return false;
+  if (Array.isArray(query.$nor) && query.$nor.some((clause) => matchesFilter(doc, clause))) return false;
 
   for (const [key, condition] of Object.entries(query)) {
-    if (key === '$and' || key === '$or') continue;
+    if (key === '$and' || key === '$or' || key === '$nor') continue;
     if (!matchesFieldCondition(getPathValue(doc, key), condition)) return false;
   }
   return true;

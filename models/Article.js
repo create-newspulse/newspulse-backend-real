@@ -252,6 +252,10 @@ const articleSchema = new mongoose.Schema(
     scheduledAt: { type: Date, default: null, index: true },
     publishAt: { type: Date, default: null },
     publishedAt: { type: Date, default: null, index: true },
+    locked: { type: Boolean, default: false },
+    embargoUntil: { type: Date, default: null },
+    visibility: { type: String, default: null },
+    isPrivate: { type: Boolean, default: false },
     deletedAt: { type: Date, default: null, index: true },
 
     spotlightEnabled: { type: Boolean, default: false },
@@ -426,9 +430,6 @@ articleSchema.pre('save', function preSave(next) {
       const nextStatus = String(this.status || 'draft').toLowerCase();
       if (nextStatus === 'published' && !this.publishedAt) {
         this.publishedAt = new Date();
-      }
-      if (nextStatus !== 'published') {
-        this.publishedAt = null;
       }
     }
     return next();

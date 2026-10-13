@@ -1,63 +1,31 @@
 const test = require('node:test');
-const assert = require('node:assert');
-const request = require('supertest');
+const assert = require('node:assert/strict');
+const { installEditorialFixture, seedGroup } = require('./helpers/editorialLifecycleFixture');
 
-process.env.NODE_ENV = 'test';
-const app = require('../server');
-const News = require('../models/News');
+for (const [method, alias] of [['delete', 'hard-delete'], ['post', 'hard-delete'], ['post', 'hard']]) {
+  test(`${method.toUpperCase()} /api/articles/:id/${alias} permanently deletes when status=deleted`, async (t) => {
+    const state = installEditorialFixture(t);
+    const { ids } = seedGroup(state, { status: 'deleted' });
+    const path = `/api/articles/${ids[0]}/${alias}`;
+    for (const [role, status] of [[null, 401], ['editor', 403]]) {
+      const denied = await state.request(method, path, {}, role);
+      assert.equal(denied.status, status);
+      assert.equal(state.rows.News.length, 3);
+      assert.equal(state.rows.Article.length, 3);
+    }
+    const result = await state.request(method, path, {});
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    assert.equal(result.body.message, 'Article permanently deleted.');
+    assert.equal(state.rows.News.length, 0);
+    assert.equal(state.rows.Article.length, 0);
+  });
+}
 
-// Success: hard delete when status=deleted
-test('DELETE /api/articles/:id/hard-delete permanently deletes when status=deleted', async () => {
-  const id = '64b7f2f2f2f2f2f2f2f2f2f2';
-  const originals = { findById: News.findById, deleteOne: News.deleteOne };
-  News.findById = async (_id) => (_id === id ? { _id: id, status: 'deleted' } : null);
-  let called = false;
-  News.deleteOne = async (cond) => { if (String(cond._id) === id) called = true; return { acknowledged: true, deletedCount: 1 }; };
-
-  const res = await request(app).delete(`/api/articles/${id}/hard-delete`).send();
-  assert.strictEqual(res.statusCode, 200);
-  assert.strictEqual(res.body.message, 'Article permanently deleted.');
-  assert.ok(called);
-  News.findById = originals.findById; News.deleteOne = originals.deleteOne;
-});
-
-// Guard: not deleted -> 400
-test('DELETE /api/articles/:id/hard-delete returns 400 if not deleted', async () => {
-  const id = '64b7f2f2f2f2f2f2f2f2f2f3';
-  const originals = { findById: News.findById, deleteOne: News.deleteOne };
-  News.findById = async (_id) => (_id === id ? { _id: id, status: 'draft' } : null);
-  let called = false; News.deleteOne = async () => { called = true; return { acknowledged: true, deletedCount: 0 }; };
-
-  const res = await request(app).delete(`/api/articles/${id}/hard-delete`).send();
-  assert.strictEqual(res.statusCode, 400);
-  assert.ok(!called);
-  News.findById = originals.findById; News.deleteOne = originals.deleteOne;
-});
-
-// POST alias hard-delete
-test('POST /api/articles/:id/hard-delete permanently deletes when status=deleted', async () => {
-  const id = '74b7f2f2f2f2f2f2f2f2f2f4';
-  const originals = { findById: News.findById, deleteOne: News.deleteOne };
-  News.findById = async (_id) => (_id === id ? { _id: id, status: 'deleted' } : null);
-  let called = false;
-  News.deleteOne = async (cond) => { if (String(cond._id) === id) called = true; return { acknowledged: true, deletedCount: 1 }; };
-  const res = await request(app).post(`/api/articles/${id}/hard-delete`).send();
-  assert.strictEqual(res.statusCode, 200);
-  assert.strictEqual(res.body.message, 'Article permanently deleted.');
-  assert.ok(called);
-  News.findById = originals.findById; News.deleteOne = originals.deleteOne;
-});
-
-// POST alias /hard
-test('POST /api/articles/:id/hard permanently deletes when status=deleted', async () => {
-  const id = '74b7f2f2f2f2f2f2f2f2f2f5';
-  const originals = { findById: News.findById, deleteOne: News.deleteOne };
-  News.findById = async (_id) => (_id === id ? { _id: id, status: 'deleted' } : null);
-  let called = false;
-  News.deleteOne = async (cond) => { if (String(cond._id) === id) called = true; return { acknowledged: true, deletedCount: 1 }; };
-  const res = await request(app).post(`/api/articles/${id}/hard`).send();
-  assert.strictEqual(res.statusCode, 200);
-  assert.strictEqual(res.body.message, 'Article permanently deleted.');
-  assert.ok(called);
-  News.findById = originals.findById; News.deleteOne = originals.deleteOne;
+test('DELETE /api/articles/:id/hard-delete returns 409 if the story is not deleted', async (t) => {
+  const state = installEditorialFixture(t);
+  const { ids } = seedGroup(state, { status: 'draft' });
+  const result = await state.request('delete', `/api/articles/${ids[0]}/hard-delete`);
+  assert.equal(result.status, 409);
+  assert.equal(state.rows.News.length, 3);
+  assert.equal(state.rows.Article.length, 3);
 });

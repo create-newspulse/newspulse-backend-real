@@ -30,7 +30,7 @@ function isDbReady() {
 
 function buildPublicNewsCacheKey(req) {
   if (!isDbReady()) return null;
-  const { page, limit, category, track, topic, state, founderOnly, type, desired: lang, fallbackEnabled, q } = resolvePublicNewsListRequest(req);
+  const { page, limit, category, track, topic, state, founderOnly, type, desired: lang, fallbackEnabled, strictLocale, q } = resolvePublicNewsListRequest(req);
   if (!Number.isSafeInteger(page) || !Number.isFinite(limit) || (req.query.track !== undefined && !track)) return null;
   const variant = createHash('sha256').update(JSON.stringify({
     limit,
@@ -41,6 +41,7 @@ function buildPublicNewsCacheKey(req) {
     founderOnly,
     type: type === 'video' ? 'video' : '',
     fallback: category ? false : fallbackEnabled,
+    ...(category ? { strictLocale } : {}),
   })).digest('hex');
 
   if (category) {
@@ -83,11 +84,8 @@ const latestCache = createJsonCacheMiddleware({
     onRebuildUnavailable: (req, res) => normalizeCategorySlugForCache(req.query.category) === 'faith-culture'
       ? res.status(503).json({ message: FAITH_UNAVAILABLE_MESSAGE })
       : res.status(503).json({
-      items: [],
-      page: Math.max(parseInt(req.query.page || '1', 10) || 1, 1),
-      limit: Math.min(Math.max(parseInt(req.query.limit || '30', 10) || 30, 1), 100),
-      total: 0,
-      totalPages: 1,
+      ok: false,
+      code: 'NEWS_BUSY',
       message: 'News feed is busy. Please retry shortly.',
     }),
     buildKey: buildPublicNewsCacheKey,

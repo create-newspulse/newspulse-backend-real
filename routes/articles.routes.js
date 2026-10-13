@@ -7,7 +7,7 @@ const { buildAuthorBylinePatch, withPublicAuthorByline, publicAuthorByline } = r
 // Keep an alias named Article for routes that treat these as "Articles".
 const Article = News;
 const mongoose = require('mongoose');
-const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireAdminAuth, requireFounderOnly } = require('../middleware/adminAuth');
 const { optionalAdminAuth } = require('../middleware/optionalAdminAuth');
 const {
   ARTICLE_INLINE_IMAGE_ACCEPTED_MIME_TYPES,
@@ -38,6 +38,7 @@ const { mapArticleForLang, localizeArticleForLang } = require('../services/mapAr
 const {
   buildPubliclyVisibleNewsArticleFilter,
   buildPubliclyVisiblePublicArticleFilter,
+  hasVisibleNewsSource,
 } = require('../services/publicArticleVisibility.service');
 
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
@@ -47,7 +48,14 @@ const {
   normalizeTranslationGroupKey,
   prepareSourceSyncMetadata,
   syncTranslationGroupFromMaster,
+  syncTranslationGroupMetadata,
 } = require('../services/translationGroupSync.service');
+const { assertSlugUnique: assertStorySlugUnique } = require('../services/articleSlugUniqueness.service');
+const {
+  changeArticleGroupStatus, restoreArticleGroup, permanentlyDeleteArticleGroups, findArticleGroup, withActiveArticleSource,
+  inArticleTransaction, serializeNewsArticle, articleMutationMetadata,
+} = require('../services/articleLifecycle.service');
+const { invalidateArticleContent } = require('../services/publicContentInvalidation.service');
 const {
   PULSE_DIALOGUE_CATEGORY,
   assertContributorExists,
@@ -77,6 +85,7 @@ const { assertTranslationGroupLanguageUnique } = require('../services/articleLan
 const { resolveFacebookShareUrl } = require('../services/googleTranslationService');
 const { invalidateArticleCaches } = require('../lib/cache');
 const { logAudit } = require('../lib/audit');
+const { isContentDatabaseUnavailable } = require('../lib/contentErrors');
 
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
@@ -113,188 +122,12 @@ function pickArticleInlineImageFile(req) {
   return null;
 }
 
-async function markPublicCopiesDraftFromNewsDoc(newsDoc, options = {}) {
-  const logger = options.logger || console;
-  try {
-    if (!newsDoc) return;
-
-    const groupKey = getArticleTranslationGroupKey(newsDoc);
-    const slugSet = new Set();
-
-    if (newsDoc.slug) slugSet.add(String(newsDoc.slug).trim());
-    const slugsObj = newsDoc.slugs && typeof newsDoc.slugs === 'object' && !Array.isArray(newsDoc.slugs) ? newsDoc.slugs : null;
-    for (const k of ['en', 'hi', 'gu']) {
-      const v = slugsObj && slugsObj[k] ? String(slugsObj[k]).trim() : '';
-      if (v) slugSet.add(v);
-    }
-
-    const slugList = Array.from(slugSet).filter(Boolean);
-    const or = [];
-
-    if (newsDoc._id) or.push({ sourceNewsId: newsDoc._id });
-    if (slugList.length) {
-      or.push({ slug: { $in: slugList } });
-      or.push({ 'slugs.en': { $in: slugList } });
-      or.push({ 'slugs.hi': { $in: slugList } });
-      or.push({ 'slugs.gu': { $in: slugList } });
-    }
-    if (groupKey) {
-      or.push({ translationKey: groupKey });
-      or.push({ translationGroupId: groupKey });
-    }
-
-    if (!or.length) return;
-    await PublicArticle.updateMany(
-      { $or: or },
-      { $set: { status: 'draft', publishedAt: null } },
-      { runValidators: false }
-    );
-  } catch (e) {
-    try {
-      logger.warn?.('[publicCopies][markDraft] failed', { message: e?.message || String(e) });
-    } catch (_) {}
-  }
-}
-
-function getArticleTranslationGroupKey(docLike) {
-  return normalizeTranslationGroupKey(docLike?.translationGroupId)
-    || normalizeTranslationGroupKey(docLike?.translationKey);
-}
-
-function getArticleIdString(docLike) {
-  const raw = docLike?._id || docLike?.id || '';
-  return String(raw || '').trim();
-}
-
-async function findArticleDeleteTargets(seedDoc) {
-  if (!seedDoc) return [];
-  const seedId = getArticleIdString(seedDoc);
-  const groupKey = getArticleTranslationGroupKey(seedDoc);
-  if (!groupKey) return seedId ? [seedDoc] : [];
-
-  const groupDocs = await News.find({
-    $or: [{ translationGroupId: groupKey }, { translationKey: groupKey }],
-  })
-    .select('workflowStage slug slugs title coverImage coverImageUrl imageURL translationGroupId translationKey sourceArticleId status lang language originalLang')
-    .lean();
-
-  const byId = new Map();
-  for (const doc of Array.isArray(groupDocs) ? groupDocs : []) {
-    const id = getArticleIdString(doc);
-    if (id) byId.set(id, doc);
-  }
-  if (seedId && !byId.has(seedId)) byId.set(seedId, seedDoc);
-  return Array.from(byId.values());
-}
-
-const findArticleLifecycleTargets = findArticleDeleteTargets;
-
 async function applyArticleGroupLifecycleStatus(req, {
   id,
   toStatus,
-  historyAction,
-  historyNote = null,
-  auditAction,
-  pushAction,
-  pushSource,
   responseMessage,
 }) {
-  const before = await News.findById(id).select('workflowStage slug slugs title coverImage coverImageUrl imageURL translationGroupId translationKey sourceArticleId status lang language originalLang').lean();
-  if (!before) {
-    const error = new Error('Article not found');
-    error.status = 404;
-    throw error;
-  }
-
-  const now = new Date();
-  const actor = getActor(req);
-  const workflowStage = mapStatusToWorkflowStage(toStatus);
-  const targets = await findArticleLifecycleTargets(before);
-  const changedDocs = [];
-  const changedIds = [];
-
-  for (const target of targets) {
-    const targetId = getArticleIdString(target);
-    if (!targetId) continue;
-    const fromStage = String(target.workflowStage || 'DRAFT');
-    const doc = await News.findByIdAndUpdate(
-      targetId,
-      {
-        $set: {
-          status: toStatus,
-          publishedAt: null,
-          publishAt: null,
-          scheduledAt: null,
-          workflowStage,
-          workflowUpdatedAt: now,
-        },
-        $push: {
-          workflowHistory: {
-            at: now,
-            byUserId: actor.byUserId,
-            byRole: actor.byRole,
-            action: historyAction,
-            fromStage,
-            toStage: workflowStage,
-            note: historyNote,
-          },
-        },
-      },
-      { new: true, runValidators: false }
-    );
-
-    if (!doc) continue;
-    changedDocs.push(doc);
-    changedIds.push(String(doc._id || targetId));
-
-    if (_isSourceTranslationDoc(doc, targetId)) {
-      Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
-      if (typeof doc.save === 'function') await doc.save({ validateModifiedOnly: true });
-    }
-
-    await syncArticleFromNews(doc);
-    await logEditorialArticleAudit(req, auditAction, doc, {
-      oldValue: target.status || null,
-      newValue: toStatus,
-      reason: req.body?.reason,
-    });
-
-    try {
-      await PushHistory.create({
-        articleId: doc._id,
-        type: 'publish',
-        action: pushAction,
-        slug: doc.slug,
-        title: doc.title,
-        channel: 'SITE',
-        at: now,
-        byUserId: actor.byUserId,
-        status: 'SUCCESS',
-        meta: { source: pushSource, oldStatus: target.status || null, newStatus: toStatus, oldStage: fromStage, newStage: doc.workflowStage },
-      });
-    } catch (e) {
-      console.warn('[pushHistory] create failed', e?.message || e);
-    }
-  }
-
-  if (!changedDocs.length) {
-    const error = new Error('Article not found');
-    error.status = 404;
-    throw error;
-  }
-
-  const sourceDoc = changedDocs.find((doc) => _isSourceTranslationDoc(doc, doc?._id));
-  await markPublicCopiesDraftFromNewsDoc(sourceDoc || changedDocs[0]);
-  await invalidateArticleCaches({ publicVisibilityRemoved: true });
-
-  const clickedDoc = changedDocs.find((item) => String(item?._id || '') === String(id)) || changedDocs[0];
-  return {
-    doc: clickedDoc,
-    docs: changedDocs,
-    changedIds,
-    changedCount: changedDocs.length,
-    message: responseMessage,
-  };
+  return { ...await changeArticleGroupStatus(id, toStatus, { req }), message: responseMessage };
 }
 
 function isAutoTranslateOnReadEnabled() {
@@ -696,7 +529,7 @@ function ensureNewsSlugs(docLike) {
   const out = { ...(docLike.slugs || {}) };
   for (const lang of ['en', 'hi', 'gu']) {
     const t = getTitleForLangFromDocLike(docLike, lang);
-    if (t && t.trim()) out[lang] = slugifyUnicode(t);
+    if (!out[lang] && t && t.trim()) out[lang] = slugifyUnicode(t);
   }
 
   const baseLang = normalizeLanguage(docLike?.lang) || normalizeLanguage(docLike?.language) || 'en';
@@ -710,18 +543,8 @@ function ensureNewsSlugs(docLike) {
   }
 }
 
-async function assertSlugUnique(slug, excludeId) {
-  if (!slug) return;
-  const candidates = getSlugCandidates(slug);
-  const slugFilter = candidates.length === 1 ? candidates[0] : { $in: candidates };
-  const q = { slug: slugFilter };
-  if (excludeId) q._id = { $ne: excludeId };
-  const existing = await News.findOne(q).select('_id slug').lean();
-  if (existing) {
-    const err = new Error('Slug already exists');
-    err.status = 409;
-    throw err;
-  }
+async function assertSlugUnique(slug, excludeId, story) {
+  return assertStorySlugUnique(slug, excludeId, story);
 }
 
 function validatePublishable(doc) {
@@ -923,15 +746,7 @@ async function logEditorialArticleAudit(req, action, docLike, meta = {}) {
 }
 
 async function syncArticleFromNews(doc) {
-  let publicArticle = null;
-  try {
-    publicArticle = await syncPublicArticleFromNews(doc, { logger: console });
-  } catch (_) {
-    console.warn('[articles.syncArticleFromNews] failed', {
-      code: 'PUBLIC_ARTICLE_SYNC_FAILED',
-      sourceNewsId: doc?._id ? String(doc._id) : null,
-    });
-  }
+  const publicArticle = await syncPublicArticleFromNews(doc, { logger: console, throwOnError: true });
   const ok = Boolean(publicArticle?._id);
   return { ok, failedArticleIds: !ok && doc?._id ? [String(doc._id)] : [] };
 }
@@ -1140,9 +955,13 @@ function _buildPulseDialogueDotSet(value) {
 }
 
 async function syncMasterArticleGroup(doc, options = {}) {
-  if (!doc || !_isSourceTranslationDoc(doc)) return null;
+  if (!doc || (!options.patch && !_isSourceTranslationDoc(doc))) return null;
   try {
+    if (options.patch && !options.faithTopicOnly) {
+      return await syncTranslationGroupMetadata(doc, options);
+    }
     return await syncTranslationGroupFromMaster(doc, {
+      ...options,
       logger: console,
       reason: options.reason || 'article_sync',
       invalidate: options.invalidate,
@@ -1159,11 +978,19 @@ async function syncMasterArticleGroup(doc, options = {}) {
       await invalidateArticleCaches();
       throw failure;
     }
-    return null;
+    console.error('[articles.sync] group synchronization failed', { code: error?.code || null });
+    const failure = new Error('Article group synchronization failed. Retry the update.');
+    failure.statusCode = 503;
+    await invalidateArticleCaches({ publicVisibilityRemoved: true });
+    throw failure;
   }
 }
 
-function hasArticleContentEdit(update) {
+function hasArticleContentEdit(update, before) {
+  if (before) {
+    return ['title', 'description', 'content', 'seo'].some(key => Object.prototype.hasOwnProperty.call(update || {}, key)
+      && JSON.stringify(update[key]) !== JSON.stringify(before[key]));
+  }
   return Boolean(update && (
     Object.prototype.hasOwnProperty.call(update, 'title')
     || Object.prototype.hasOwnProperty.call(update, 'description')
@@ -1308,10 +1135,14 @@ router.post('/articles/:id/translations/generate', requireAdminAuth, async (req,
       failed: result.failed,
     });
 
-    return res.status(result.status === 'failed' ? 502 : 200).json({ ok: result.ok, success: result.ok, ...result });
+    return res.status(result.status === 'failed' ? 502 : 200).json({ ok: result.ok, success: result.ok, ...result, ...articleMutationMetadata(result) });
   } catch (err) {
     console.error('[articles.translations.generate] error:', err?.message || err);
-    return res.status(500).json({ ok: false, success: false, message: 'Failed to generate translations' });
+    return res.status(err.statusCode || 500).json({
+      ok: false, success: false,
+      message: err.statusCode ? err.message : 'Failed to generate translations',
+      ...(err.details || {}),
+    });
   }
 });
 
@@ -1616,31 +1447,41 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       }
     }
 
-    const doc = await News.create(createDoc);
-    if (initialStatus !== 'published') {
-      enqueueArticleTranslationGeneration(doc, { requestedBy: actor.byUserId ? String(actor.byUserId) : actor.byRole }).catch(() => null);
-    }
-    await logEditorialArticleAudit(req, 'EDITORIAL_DRAFT_CREATED', doc, {
-      newValue: { status: doc.status, editorialType: getEditorialTypeForAudit(doc) },
-    });
-
-    if (_isSourceTranslationDoc(doc)) {
-      Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
-      await doc.save({ validateModifiedOnly: true });
-      await syncMasterArticleGroup(doc, {
-        reason: 'article_create',
-        invalidate: String(doc.status || '').toLowerCase() === 'published',
-        requireFaithTopicSync: faithTopicPatch.value !== undefined,
-      });
-    }
-
-    if (initialStatus === 'published') {
-      try {
-        const publishResult = await publishCanonicalArticle(doc, {
+    const creation = await inArticleTransaction(async (session, transaction) => {
+      const [doc] = await News.create([createDoc], { session });
+      if (_isSourceTranslationDoc(doc)) {
+        Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
+        await doc.save({ validateModifiedOnly: true, session });
+        await syncMasterArticleGroup(doc, {
+          ...transaction,
+          reason: 'article_create',
+          invalidate: false,
+          requireFaithTopicSync: faithTopicPatch.value !== undefined,
+        });
+      }
+      const publishResult = initialStatus === 'published'
+        ? await publishCanonicalArticle(doc, {
+          ...transaction,
           req,
           reason: req.body?.reason || null,
           source: 'article_create_publish',
+        })
+        : null;
+      transaction.afterCommit.push(async () => {
+        await logEditorialArticleAudit(req, 'EDITORIAL_DRAFT_CREATED', doc, {
+          newValue: { status: doc.status, editorialType: getEditorialTypeForAudit(doc) },
         });
+        if (!publishResult) {
+          await enqueueArticleTranslationGeneration(doc, {
+            requestedBy: actor.byUserId ? String(actor.byUserId) : actor.byRole,
+          });
+        }
+      });
+      return { doc, publishResult };
+    });
+    const { doc, publishResult } = creation;
+
+    if (publishResult) {
         await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_PUBLISHED', publishResult.article, {
           oldValue: 'draft',
           newValue: 'published',
@@ -1649,7 +1490,6 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
         const publishedObj = publishResult.article && typeof publishResult.article.toObject === 'function'
           ? publishResult.article.toObject({ virtuals: true })
           : publishResult.article;
-        invalidateArticleCaches().catch(() => {});
         return res.status(201).json({
           ok: true,
           success: true,
@@ -1660,18 +1500,9 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
           translationGroupId: publishResult.translationGroupId,
           publishedLanguages: publishResult.publishedLanguages,
           publicSync: publishResult.publicSync,
+          ...articleMutationMetadata(publishResult),
+          ...articleMutationMetadata(creation),
         });
-      } catch (publishErr) {
-        return res.status(publishErr?.statusCode || publishErr?.status || 500).json({
-          ok: false,
-          success: false,
-          status: publishErr?.statusCode || publishErr?.status || 500,
-          message: publishErr?.message || 'Failed to publish article',
-          ...(publishErr?.details || {}),
-          data: { article: withCoverImageUrl(doc.toObject ? doc.toObject({ virtuals: true }) : doc) },
-          article: withCoverImageUrl(doc.toObject ? doc.toObject({ virtuals: true }) : doc),
-        });
-      }
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
@@ -1683,10 +1514,17 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       message: 'Article created',
       data: { article: withCoverImageUrl(obj) },
       article: withCoverImageUrl(obj),
+      ...articleMutationMetadata(creation),
     });
   } catch (err) {
     if (err?.status === 409) {
       return res.status(409).json({ ok: false, success: false, message: err.message || 'Slug already exists' });
+    }
+    if (err?.statusCode || err?.status) {
+      return res.status(err.statusCode || err.status).json({
+        ok: false, success: false, status: err.statusCode || err.status,
+        message: err.message || 'Failed to create article', ...(err.details || {}),
+      });
     }
     return next(err);
   }
@@ -1710,30 +1548,31 @@ router.get('/articles', requireAdminAuth, async (req, res, next) => {
 
     // Client may send page=0; clamp to >= 1
     const page = Math.max(_parseIntOrDefault(req.query.page, 1), 1);
-    const limit = _clampInt(_parseIntOrDefault(req.query.limit, 20), 1, 100);
+    const limit = _clampInt(_parseIntOrDefault(req.query.pageSize ?? req.query.limit, 20), 1, 100);
 
     // Only allow safe sort fields.
     // Support "-updatedAt" => { updatedAt: -1 }
     const allowedSortFields = new Set(['updatedAt', 'createdAt', 'publishedAt']);
-    const sortParam = _parseSafeSort(req.query.sort, allowedSortFields, 'updatedAt', -1);
-    const statusRaw = (req.query.status || '').toString();
+    let sortParam = _parseSafeSort(req.query.sort, allowedSortFields, 'updatedAt', -1);
+    const statusRaw = (req.query.status || '').toString().trim().toLowerCase();
     const langQueryRaw = (req.query.lang || req.query.language || '').toString().trim();
     const categoryRaw = (req.query.category || '').toString().trim();
     const qRaw = (req.query.q || '').toString().trim();
     const fromRaw = (req.query.from || '').toString().trim();
     const toRaw = (req.query.to || '').toString().trim();
     const query = {};
-    if (statusRaw) {
+    if (statusRaw && statusRaw !== 'all') {
       const statuses = statusRaw
         .split(',')
         .map(s => s.trim())
         .filter(Boolean);
       if (statuses.length > 0) {
-        // Include docs where status matches OR status is missing (legacy)
-        query.$or = [
-          { status: { $in: statuses } },
-          { status: { $exists: false } },
-        ];
+        if (statuses.some(value => !['draft', 'scheduled', 'published', 'archived', 'deleted'].includes(value))) {
+          return res.status(400).json({ ok: false, success: false, message: 'Invalid status filter' });
+        }
+        if (statuses.includes('draft')) query.$or = [{ status: { $in: statuses } }, { status: { $exists: false } }];
+        else query.status = statuses.length === 1 ? statuses[0] : { $in: statuses };
+        if (statuses.length === 1 && statuses[0] === 'published') sortParam = { publishedAt: -1, _id: -1 };
       }
     }
 
@@ -1810,6 +1649,7 @@ router.get('/articles', requireAdminAuth, async (req, res, next) => {
     });
   } catch (err) {
     const isProd = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+    const status = isContentDatabaseUnavailable(err) ? 503 : 500;
     console.error('[ADMIN_ARTICLES][list] failed', {
       method: req.method,
       url: req.originalUrl,
@@ -1819,10 +1659,11 @@ router.get('/articles', requireAdminAuth, async (req, res, next) => {
       stack: isProd ? undefined : err?.stack,
       query: req.query,
     });
-    return res.status(500).json({
+    return res.status(status).json({
       ok: false,
       success: false,
-      message: 'Internal error',
+      code: status === 503 ? 'ARTICLES_UNAVAILABLE' : 'ARTICLES_QUERY_FAILED',
+      message: status === 503 ? 'Articles are temporarily unavailable' : 'Internal error',
       path: req.originalUrl,
       ...(isProd ? {} : { error: err?.message || String(err) }),
     });
@@ -2557,15 +2398,15 @@ router.get('/articles/slug/:slug', optionalAdminAuth, async (req, res, next) => 
     const slugNorm = normalizeSlug(decoded) || normalizeSlug(raw) || String(decoded || '').trim();
     if (!slugNorm) return res.status(200).json({ exists: false });
 
-    // If DB is unavailable, don't 500 the admin UI.
     if (!mongoose.connection || mongoose.connection.readyState !== 1) {
-      return res.status(200).json({ exists: false });
+      return res.status(503).json({ ok: false, message: 'Database unavailable' });
     }
 
     const isAdminRequest = Boolean(req.admin);
     const query = _buildNewsSlugLookup(slugNorm, isAdminRequest);
-    const doc = await News.findOne(query).lean().catch(() => null);
-    const fallback = doc ? null : await PublicArticle.findOne(_buildPublicArticleSlugLookup(slugNorm, isAdminRequest)).lean().catch(() => null);
+    const doc = await News.findOne(query).lean();
+    let fallback = doc ? null : await PublicArticle.findOne(_buildPublicArticleSlugLookup(slugNorm, isAdminRequest)).lean();
+    if (fallback && !isAdminRequest && !await hasVisibleNewsSource(fallback)) fallback = null;
     const out = isAdminRequest ? (doc || fallback) : withPublicAuthorByline(doc || fallback);
     if (!out) return res.status(200).json({ exists: false });
 
@@ -2630,13 +2471,14 @@ router.get('/articles/by-slug/:slug', optionalAdminAuth, async (req, res, next) 
     if (!slugNorm) return res.status(200).json({ exists: false });
 
     if (!mongoose.connection || mongoose.connection.readyState !== 1) {
-      return res.status(200).json({ exists: false });
+      return res.status(503).json({ ok: false, message: 'Database unavailable' });
     }
 
     const isAdminRequest = Boolean(req.admin);
     const query = _buildNewsSlugLookup(slugNorm, isAdminRequest);
-    const doc = await News.findOne(query).lean().catch(() => null);
-    const fallback = doc ? null : await PublicArticle.findOne(_buildPublicArticleSlugLookup(slugNorm, isAdminRequest)).lean().catch(() => null);
+    const doc = await News.findOne(query).lean();
+    let fallback = doc ? null : await PublicArticle.findOne(_buildPublicArticleSlugLookup(slugNorm, isAdminRequest)).lean();
+    if (fallback && !isAdminRequest && !await hasVisibleNewsSource(fallback)) fallback = null;
     const out = isAdminRequest ? (doc || fallback) : withPublicAuthorByline(doc || fallback);
     if (!out) return res.status(200).json({ exists: false });
 
@@ -2706,14 +2548,15 @@ router.get('/articles/:id', optionalAdminAuth, async (req, res, next) => {
 
     // Primary: CMS/admin articles stored in News collection.
     let doc = isAdminRequest
-      ? await News.findById(rawId).catch(() => null)
-      : await News.findOne({ ...buildPubliclyVisibleNewsArticleFilter(), _id: rawId }).lean().catch(() => null);
+      ? await News.findById(rawId)
+      : await News.findOne({ ...buildPubliclyVisibleNewsArticleFilter(), _id: rawId }).lean();
 
     // Fallback: some deployments/edit flows reference the public Article model by id.
     if (!doc) {
       doc = isAdminRequest
-        ? await PublicArticle.findById(rawId).catch(() => null)
-        : await PublicArticle.findOne({ ...buildPubliclyVisiblePublicArticleFilter(), _id: rawId }).lean().catch(() => null);
+        ? await PublicArticle.findById(rawId)
+        : await PublicArticle.findOne({ ...buildPubliclyVisiblePublicArticleFilter(), _id: rawId }).lean();
+      if (doc && !isAdminRequest && !await hasVisibleNewsSource(doc)) doc = null;
     }
 
     if (!doc) {
@@ -2789,7 +2632,7 @@ router.get('/articles/:id', optionalAdminAuth, async (req, res, next) => {
 });
 
 // PUT /api/articles/:id → update existing article by id (CMS/admin)
-router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
+async function updateArticle(req, res, next) {
   try {
     let rawId = String(req.params.id || '').trim();
     if (!mongoose.Types.ObjectId.isValid(rawId)) {
@@ -2874,13 +2717,14 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       return softDeleteArticleGroup(req, res, rawId);
     }
 
-    let before = null;
-    try {
-      before = await News.findById(rawId)
-        .select('title description content translations translationStatus translationError translationNextRetryAt translationUpdatedAt category topic editorialType pulseDialogue authorByline status workflowStage translationGroupId translationKey sourceArticleId originalLang lang language slugs coverImage coverImageUrl imageURL syncVersion machineGenerated humanEdited translationReviewStatus sourceHash translationMeta')
-        .lean();
-    } catch (_) {
-      // ignore
+    let before = await News.findById(rawId).lean();
+    if (!before) {
+      const copy = await PublicArticle.findById(rawId).select('sourceNewsId').lean();
+      if (copy?.sourceNewsId) {
+        rawId = String(copy.sourceNewsId);
+        before = await News.findById(rawId).lean();
+        if (!before) return res.status(404).json({ ok: false, message: 'Source newsroom article not found' });
+      }
     }
 
     const topicProvided = Object.prototype.hasOwnProperty.call(requestBody, 'topic');
@@ -2935,8 +2779,18 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
 
     const beforeStatusForLifecycle = String(before?.status || '').toLowerCase();
     const isLifecycleTakedownStatus = requestedStatusNorm === 'draft' || requestedStatusNorm === 'archived';
-    const isStatusOnlyRequest = Object.keys(requestBody).every((key) => ['status', 'reason'].includes(key));
-    if (before && beforeStatusForLifecycle !== 'deleted' && isLifecycleTakedownStatus && isStatusOnlyRequest && beforeStatusForLifecycle !== requestedStatusNorm) {
+    const isStatusOnlyRequest = Object.keys(requestBody).every((key) => ['status', 'reason', 'publishedAt'].includes(key));
+    if (beforeStatusForLifecycle === 'deleted') {
+      if (requestedStatusNorm && isStatusOnlyRequest) return restoreArticle(req, res, rawId);
+      return res.status(409).json({ ok: false, message: 'Restore the deleted story before editing it.' });
+    }
+    if (before && requestedStatusNorm === 'draft' && !isFounderRequest(req)) {
+      const { docs } = await findArticleGroup(rawId);
+      if (docs.some(doc => doc.status === 'published')) {
+        return res.status(403).json({ ok: false, success: false, message: 'Founder permission is required.' });
+      }
+    }
+    if (before && isLifecycleTakedownStatus && isStatusOnlyRequest) {
       const lifecycleResult = await applyArticleGroupLifecycleStatus(req, {
         id: rawId,
         toStatus: requestedStatusNorm,
@@ -2952,6 +2806,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         success: true,
         status: 200,
         message: lifecycleResult.message || 'Article updated',
+        ...articleMutationMetadata(lifecycleResult),
         changedCount: lifecycleResult.changedCount,
         changedIds: lifecycleResult.changedIds,
         data: { article: withCoverImageUrl(obj0) },
@@ -2993,7 +2848,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       if (!resolvedSlug) {
         return res.status(400).json({ ok: false, success: false, message: 'Slug cannot be empty' });
       }
-      await assertSlugUnique(resolvedSlug, rawId);
+      await assertSlugUnique(resolvedSlug, rawId, before || {});
     }
 
     const resolvedCoverImageUrl = coverImageUrl ?? imageURL;
@@ -3118,15 +2973,21 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       });
     }
 
-    if (before?.machineGenerated && hasArticleContentEdit(update)) {
+    if (before?.machineGenerated && hasArticleContentEdit(update, before)) {
       update.humanEdited = true;
       update['translationMeta.humanEdited'] = true;
       update.translationReviewStatus = 'reviewed';
     }
 
     const beforeStatusNorm = String(before && before.status ? before.status : '').toLowerCase();
+    const assertCurrentLifecycle = current => {
+      if (String(current.status || '').toLowerCase() !== beforeStatusNorm
+        || new Date(current.workflowUpdatedAt || 0).getTime() !== new Date(before?.workflowUpdatedAt || 0).getTime()) {
+        throw Object.assign(new Error('Article lifecycle changed. Reload and retry the edit.'), { statusCode: 409 });
+      }
+    };
     const nextStatusNorm = update.status ? String(update.status).toLowerCase() : '';
-    const isPublishingNow = beforeStatusNorm !== 'published' && nextStatusNorm === 'published';
+    const isPublishingNow = nextStatusNorm === 'published' && (beforeStatusNorm !== 'published' || isStatusOnlyRequest);
     const isSchedulingNow = nextStatusNorm === 'scheduled';
     const isRestoringDeleted = beforeStatusNorm === 'deleted' && nextStatusNorm && nextStatusNorm !== 'deleted';
     const nextEffectiveStatus = nextStatusNorm || beforeStatusNorm;
@@ -3156,19 +3017,23 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       if (Object.keys(prePublishUpdate).length) prePublishUpdateOp.$set = prePublishUpdate;
       if (pulseDialogueFields.unset) prePublishUpdateOp.$unset = { pulseDialogue: '' };
 
-      const doc = Object.keys(prePublishUpdateOp).length
-        ? await News.findByIdAndUpdate(rawId, prePublishUpdateOp, { new: true, runValidators: true })
-        : await News.findById(rawId);
-      if (!doc) {
-        return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
-      }
-
       let publishResult;
       try {
-        publishResult = await publishCanonicalArticle(doc, {
-          req,
-          reason: requestBody.reason || null,
-          source: 'article_update_publish',
+        publishResult = await withActiveArticleSource(rawId, async (current, session, transaction) => {
+          assertCurrentLifecycle(current);
+          const doc = Object.keys(prePublishUpdateOp).length
+            ? await News.findByIdAndUpdate(rawId, prePublishUpdateOp, { new: true, runValidators: true, session })
+            : await News.findById(rawId, null, { session });
+          if (!doc) throw Object.assign(new Error('Article not found'), { statusCode: 404 });
+          const groupSync = await syncTranslationGroupMetadata(doc, {
+            previousDoc: current, patch: prePublishUpdate, invalidate: false, session,
+          });
+          return publishCanonicalArticle(doc, {
+            ...transaction, req,
+            previousDocs: [before, ...groupSync.previousDocs],
+            reason: requestBody.reason || null,
+            source: 'article_update_publish',
+          });
         });
       } catch (publishErr) {
         return res.status(publishErr?.statusCode || publishErr?.status || 500).json({
@@ -3180,18 +3045,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         });
       }
 
-      if (requireFaithTopicSync) {
-        await syncMasterArticleGroup(publishResult.article, {
-          reason: 'faith_topic_publish',
-          faithTopicOnly: true,
-          previousCategory: before.category,
-          requireFaithTopicSync: true,
-          invalidate: true,
-        });
-        await invalidateArticleCaches();
-      }
-
-      await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_UPDATED', doc, {
+      await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_UPDATED', publishResult.article, {
         before,
         after: publishResult.article,
         oldValue: { status: before.status, editorialType: getEditorialTypeForAudit(before) },
@@ -3199,7 +3053,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         reason: requestBody.reason,
       });
       if (getEditorialTypeForAudit(before) !== getEditorialTypeForAudit(publishResult.article)) {
-        await logEditorialArticleAudit(req, 'EDITORIAL_TYPE_CHANGED', doc, {
+        await logEditorialArticleAudit(req, 'EDITORIAL_TYPE_CHANGED', publishResult.article, {
           before,
           after: publishResult.article,
           previousValue: getEditorialTypeForAudit(before),
@@ -3220,7 +3074,6 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       const obj = publishResult.article && typeof publishResult.article.toObject === 'function'
         ? publishResult.article.toObject({ virtuals: true })
         : publishResult.article;
-      invalidateArticleCaches().catch(() => {});
       return res.json({
         ok: true,
         success: true,
@@ -3231,6 +3084,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
         translationGroupId: publishResult.translationGroupId,
         publishedLanguages: publishResult.publishedLanguages,
         publicSync: publishResult.publicSync,
+        ...articleMutationMetadata(publishResult),
       });
     }
 
@@ -3305,49 +3159,51 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
     const META_ONLY_KEYS = new Set(['topic', 'status', 'scheduledAt', 'publishAt', 'publishedAt', 'deletedAt', 'syncMode', 'sourceArticleId', 'sourceLanguage', 'lastSyncedAt', 'syncVersion', 'contentFingerprint']);
     const isMetaOnlyUpdate = updateKeys.length > 0 && updateKeys.every((k) => META_ONLY_KEYS.has(k));
 
-    let didMetaOnlyUpdate = false;
     let doc = null;
     let publicSync;
+    let mutationResult;
     try {
-      if (isMetaOnlyUpdate && nextStatusNorm !== 'published') {
-        // Meta-only status/schedule updates: avoid full schema validation.
-        const actor = getActor(req);
-        const now = new Date();
-        const stage = update.status ? mapStatusToWorkflowStage(update.status) : null;
-        const beforeStage = String(before?.workflowStage || 'DRAFT');
-        const updateOp = { $set: { ...update } };
-        if (editorialPatch.shouldUnset) updateOp.$unset = { editorialType: '' };
-        if (pulseDialogueFields.unset) updateOp.$unset = { ...(updateOp.$unset || {}), pulseDialogue: '' };
-
-        if (stage && beforeStage !== stage) {
-          updateOp.$set.workflowStage = stage;
-          updateOp.$set.workflowUpdatedAt = now;
-          updateOp.$push = {
-            workflowHistory: {
-              at: now,
-              byUserId: actor.byUserId,
-              byRole: actor.byRole,
-              action: 'MOVE_STAGE',
-              fromStage: beforeStage,
-              toStage: stage,
-              note: 'Status updated',
-            },
-          };
-        }
-
-        doc = await News.findByIdAndUpdate(rawId, updateOp, { new: true, runValidators: false });
-        didMetaOnlyUpdate = !!doc;
-      } else {
-        // Full edit update: apply only $set fields (never replace the document).
-        const updateOp = { $set: { ...update } };
-        if (editorialPatch.shouldUnset) updateOp.$unset = { editorialType: '' };
-        if (pulseDialogueFields.unset) updateOp.$unset = { ...(updateOp.$unset || {}), pulseDialogue: '' };
-        doc = await News.findByIdAndUpdate(rawId, updateOp, { new: true, runValidators: true });
-        if (doc) {
-          // Keep slugs aligned with current titles/translations.
-          ensureNewsSlugs(doc);
-          doc = await News.findByIdAndUpdate(rawId, { $set: { slug: doc.slug, slugs: doc.slugs } }, { new: true, runValidators: false });
-        }
+      if (before) {
+        mutationResult = await withActiveArticleSource(rawId, async (current, session, transaction) => {
+          assertCurrentLifecycle(current);
+          const updateOp = { $set: { ...update } };
+          if (['draft', 'scheduled', 'archived'].includes(nextStatusNorm)) {
+            for (const key of ['status', 'scheduledAt', 'publishAt', 'deletedAt']) delete updateOp.$set[key];
+          }
+          if (editorialPatch.shouldUnset) updateOp.$unset = { editorialType: '' };
+          if (pulseDialogueFields.unset) updateOp.$unset = { ...(updateOp.$unset || {}), pulseDialogue: '' };
+          const metaOnly = isMetaOnlyUpdate && nextStatusNorm !== 'published';
+          const edited = await News.findByIdAndUpdate(rawId, updateOp, { new: true, runValidators: !metaOnly, session });
+          if (!edited) throw Object.assign(new Error('Article changed. Reload and retry.'), { statusCode: 409 });
+          if (!metaOnly) {
+            ensureNewsSlugs(edited);
+            await edited.save({ validateModifiedOnly: true, session });
+          }
+          const groupSync = await syncTranslationGroupMetadata(edited, {
+            patch: update, previousDoc: current, session, invalidate: false,
+          });
+          const result = ['draft', 'scheduled', 'archived'].includes(nextStatusNorm)
+            ? await changeArticleGroupStatus(rawId, nextStatusNorm, {
+              ...transaction, req, scheduledAt: scheduled, previousDocs: [before, ...groupSync.previousDocs],
+            })
+            : groupSync;
+          result.doc = result.doc || groupSync.docs.find(member => String(member._id) === rawId);
+          result.publicSync = groupSync.publicSync;
+          if (result === groupSync) transaction.afterCommit.push(async () => {
+            result.revalidation = await invalidateArticleContent(result.docs, {
+              previousDocs: [before, ...result.previousDocs], reason: 'article_update', publicVisibilityRemoved: true,
+            });
+          });
+          if (hasArticleContentEdit(update)) {
+            await markSiblingTranslationsOutdated(edited, { reason: 'source_updated', session });
+            transaction.afterCommit.push(() => enqueueArticleTranslationGeneration(result.doc, {
+              requestedBy: getActor(req).byUserId ? String(getActor(req).byUserId) : getActor(req).byRole,
+            }));
+          }
+          return result;
+        });
+        doc = mutationResult.doc;
+        publicSync = mutationResult.publicSync;
       }
     } catch (err) {
       if (err && err.name === 'ValidationError') {
@@ -3356,15 +3212,6 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       throw err;
     }
 
-    // Keep the public Article copy in sync when editing already-published CMS News.
-    // (Draft/scheduled edits should not affect the public site.)
-    if (doc && [before?.status, doc.status].some((value) => String(value || '').toLowerCase() === 'published')) {
-      publicSync = await syncArticleFromNews(doc);
-    }
-    if (doc && hasArticleContentEdit(update)) {
-      await markSiblingTranslationsOutdated(doc, { reason: 'source_updated' }).catch(() => null);
-      enqueueArticleTranslationGeneration(doc, { requestedBy: getActor(req).byUserId ? String(getActor(req).byUserId) : getActor(req).byRole }).catch(() => null);
-    }
     if (!doc) {
       // Fallback: some admin builds operate on the public Article model instead of News.
       const allowedArticleStatuses = new Set(['draft', 'published']);
@@ -3471,86 +3318,6 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       });
     }
 
-    // Meta-only updates are intentionally returned early to avoid later full-document validation.
-    if (didMetaOnlyUpdate) {
-      if (doc && String(doc.status || '').toLowerCase() === 'published') {
-        publicSync = await syncArticleFromNews(doc);
-      }
-      await syncMasterArticleGroup(doc, {
-        reason: 'article_update_meta_only',
-        invalidate: ['published', 'scheduled', 'archived', 'deleted'].includes(String(doc?.status || '').toLowerCase()),
-        requireFaithTopicSync,
-      });
-      await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_UPDATED', doc, {
-        before,
-        after: doc,
-        oldValue: { status: before?.status, editorialType: getEditorialTypeForAudit(before) },
-        newValue: { status: doc?.status, editorialType: getEditorialTypeForAudit(doc) },
-        reason: requestBody.reason,
-      });
-      if (getEditorialTypeForAudit(before) !== getEditorialTypeForAudit(doc)) {
-        await logEditorialArticleAudit(req, 'EDITORIAL_TYPE_CHANGED', doc, {
-          before,
-          after: doc,
-          previousValue: getEditorialTypeForAudit(before),
-          newValueDetail: getEditorialTypeForAudit(doc),
-          oldValue: getEditorialTypeForAudit(before),
-          newValue: getEditorialTypeForAudit(doc),
-          reason: requestBody.reason,
-        });
-      }
-      const obj0 = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-      if ([before?.status, doc.status].some((value) => String(value || '').toLowerCase() === 'published')) {
-        if (String(doc.status || '').toLowerCase() !== 'published') await invalidateArticleCaches({ publicVisibilityRemoved: true });
-        else invalidateArticleCaches().catch(() => {});
-      }
-      return res.json({
-        ok: true,
-        success: true,
-        status: 200,
-        message: 'Article updated',
-        data: { article: withCoverImageUrl(obj0) },
-        article: withCoverImageUrl(obj0),
-        ...(publicSync ? { publicSync } : {}),
-      });
-    }
-
-    // Ensure other language slugs are kept in sync when translations exist.
-    ensureNewsSlugs(doc);
-    await doc.save({ validateModifiedOnly: true });
-    // If status changed, keep workflow stage aligned (non-breaking)
-    if (update.status) {
-      const stage = mapStatusToWorkflowStage(update.status);
-      if (doc.workflowStage !== stage) {
-        const actor = getActor(req);
-        const now = new Date();
-        const prevStage = String(doc.workflowStage || 'DRAFT');
-        doc.workflowStage = stage;
-        doc.workflowUpdatedAt = now;
-        doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
-        doc.workflowHistory.push({
-          at: now,
-          byUserId: actor.byUserId,
-          byRole: actor.byRole,
-          action: 'MOVE_STAGE',
-          fromStage: prevStage,
-          toStage: stage,
-          note: 'Status updated',
-        });
-        ensureNewsSlugs(doc);
-        await doc.save({ validateModifiedOnly: true });
-      }
-    }
-
-    await syncMasterArticleGroup(doc, {
-      reason: 'article_update',
-      invalidate: ['published', 'scheduled', 'archived', 'deleted'].includes(String(doc.status || '').toLowerCase()),
-      requireFaithTopicSync,
-    });
-
-    if (String(doc.status || '').toLowerCase() === 'published') {
-      publicSync = await syncArticleFromNews(doc);
-    }
     await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_UPDATED', doc, {
       before,
       after: doc,
@@ -3570,12 +3337,7 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       });
     }
 
-    const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-
-    if ([before?.status, doc.status].some((value) => String(value || '').toLowerCase() === 'published')) {
-      if (String(doc.status || '').toLowerCase() !== 'published') await invalidateArticleCaches({ publicVisibilityRemoved: true });
-      else invalidateArticleCaches().catch(() => {});
-    }
+    const obj = serializeNewsArticle(doc);
 
     return res.json({
       ok: true,
@@ -3585,15 +3347,20 @@ router.put('/articles/:id', requireAdminAuth, async (req, res, next) => {
       data: { article: withCoverImageUrl(obj) },
       article: withCoverImageUrl(obj),
       ...(publicSync ? { publicSync } : {}),
+      ...articleMutationMetadata(mutationResult),
     });
   } catch (err) {
-    try { console.error('ArticleUpdate error:', err); } catch (_) {}
+    console.error('[articles.update] failed', { code: err?.code || null, status: err?.statusCode || err?.status || 500 });
     if (err?.status === 409) {
       return res.status(409).json({ ok: false, success: false, message: err.message || 'Slug already exists' });
     }
+    if (err?.statusCode || err?.status) return lifecycleError(res, err);
     return next(err);
   }
-});
+}
+
+router.put('/articles/:id', requireAdminAuth, updateArticle);
+router.patch('/articles/:id', requireAdminAuth, updateArticle);
 
 async function publishArticleTranslationGroup(req, res) {
   try {
@@ -3622,6 +3389,7 @@ async function publishArticleTranslationGroup(req, res) {
       publishedLanguages: publishResult.publishedLanguages,
       articles: publishResult.articles.map((doc) => withCoverImageUrl(doc.toObject ? doc.toObject({ virtuals: true }) : doc)),
       publicSync: publishResult.publicSync,
+      ...articleMutationMetadata(publishResult),
     });
   } catch (e) {
     console.error('[articles.publishGroup] error:', e?.message || e);
@@ -3669,6 +3437,7 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
       translationGroupId: publishResult.translationGroupId,
       publishedLanguages: publishResult.publishedLanguages,
       publicSync: publishResult.publicSync,
+      ...articleMutationMetadata(publishResult),
     });
   } catch (e) {
     if ((e?.statusCode || e?.status) === 409) return res.status(409).json({ ok: false, success: false, status: 409, message: e.message || 'Slug already exists', ...(e?.details || {}) });
@@ -3783,9 +3552,6 @@ router.post('/articles/:id/unpublish', requireAdminAuth, async (req, res) => {
       return res.status(400).json({ ok: false, success: false, status: 400, message: 'Invalid toStatus (use draft or archived)' });
     }
 
-    const doc = await News.findById(id);
-    if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
-
     const lifecycleResult = await applyArticleGroupLifecycleStatus(req, {
       id,
       toStatus,
@@ -3797,11 +3563,9 @@ router.post('/articles/:id/unpublish', requireAdminAuth, async (req, res) => {
     });
 
     const obj = lifecycleResult.doc.toObject ? lifecycleResult.doc.toObject({ virtuals: true }) : lifecycleResult.doc;
-    return res.json({ ok: true, success: true, status: 200, message: 'Article unpublished', changedCount: lifecycleResult.changedCount, changedIds: lifecycleResult.changedIds, data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj) });
+    return res.json({ ok: true, success: true, status: 200, message: 'Article unpublished', changedCount: lifecycleResult.changedCount, changedIds: lifecycleResult.changedIds, data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj), ...articleMutationMetadata(lifecycleResult) });
   } catch (e) {
-    console.error('[articles.unpublish] error:', e?.message || e);
-    const status = Number(e?.status) || 500;
-    return res.status(status).json({ ok: false, success: false, status, message: status === 404 ? 'Article not found' : 'Failed to unpublish article' });
+    return lifecycleError(res, e);
   }
 });
 
@@ -3823,11 +3587,14 @@ router.post('/articles/:id/schedule', requireAdminAuth, async (req, res) => {
     const doc = await News.findById(id);
     if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
 
+    if (doc.status === 'deleted' || doc.deletedAt) {
+      return res.status(409).json({ ok: false, success: false, message: 'Restore the deleted story before scheduling.' });
+    }
     const missing = validatePublishable(doc);
     if (missing.length) {
       return res.status(400).json({ ok: false, success: false, status: 400, message: `Missing required fields: ${missing.join(', ')}` });
     }
-    await assertSlugUnique(normalizeSlug(doc.slug), id);
+    await assertSlugUnique(normalizeSlug(doc.slug), id, doc);
     try {
       await preparePulseDialogueForPublication(doc);
     } catch (validationError) {
@@ -3841,64 +3608,18 @@ router.post('/articles/:id/schedule', requireAdminAuth, async (req, res) => {
     }
 
     const now = new Date();
-    const fromStage = String(doc.workflowStage || 'DRAFT');
-    const wasPublished = String(doc.status || '').toLowerCase() === 'published';
-    doc.status = 'scheduled';
-    doc.scheduledAt = scheduledAt;
-    doc.publishAt = scheduledAt;
-    doc.publishedAt = null;
-    doc.workflowStage = 'SCHEDULED';
-    doc.workflowUpdatedAt = now;
     if (_isSourceTranslationDoc(doc)) {
       Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
     }
 
-    const actor = getActor(req);
-    doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
-    doc.workflowHistory.push({
-      at: now,
-      byUserId: actor.byUserId,
-      byRole: actor.byRole,
-      action: 'MOVE_STAGE',
-      fromStage,
-      toStage: 'SCHEDULED',
-      note: `Scheduled for ${scheduledAt.toISOString()}`,
+    const result = await inArticleTransaction(async (session, transaction) => {
+      await doc.save({ validateModifiedOnly: true, session });
+      return changeArticleGroupStatus(id, 'scheduled', { ...transaction, req, scheduledAt });
     });
-
-    await doc.save();
-    await syncArticleFromNews(doc);
-    await syncMasterArticleGroup(doc, { reason: 'article_schedule', invalidate: true });
-    await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_SCHEDULED', doc, {
-      oldValue: 'draft',
-      newValue: 'scheduled',
-      reason: req.body?.reason,
-    });
-
-    try {
-      await PushHistory.create({
-        articleId: doc._id,
-        type: 'publish',
-        action: 'schedule',
-        slug: doc.slug,
-        title: doc.title,
-        channel: 'SITE',
-        at: now,
-        byUserId: actor.byUserId,
-        status: 'SUCCESS',
-        meta: { source: 'schedule', oldStatus: 'draft', newStatus: 'scheduled', oldStage: fromStage, newStage: doc.workflowStage, publishAt: scheduledAt.toISOString() },
-      });
-    } catch (e) {
-      console.warn('[pushHistory] create failed', e?.message || e);
-    }
-
-    const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    if (wasPublished) await invalidateArticleCaches({ publicVisibilityRemoved: true });
-    else invalidateArticleCaches().catch(() => {});
-    return res.json({ ok: true, success: true, status: 200, message: 'Article scheduled', data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj) });
+    const obj = result.doc;
+    return res.json({ ok: true, success: true, status: 200, message: 'Article scheduled', data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj), ...articleMutationMetadata(result) });
   } catch (e) {
-    if (e?.status === 409) return res.status(409).json({ ok: false, success: false, status: 409, message: e.message || 'Slug already exists' });
-    console.error('[articles.schedule] error:', e?.message || e);
-    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to schedule article' });
+    return lifecycleError(res, e);
   }
 });
 
@@ -3922,7 +3643,7 @@ router.post('/articles/:id/archive', requireAdminAuth, async (req, res) => {
     });
 
     const obj = lifecycleResult.doc.toObject ? lifecycleResult.doc.toObject({ virtuals: true }) : lifecycleResult.doc;
-    return res.json({ ok: true, success: true, status: 200, message: 'Article archived', changedCount: lifecycleResult.changedCount, changedIds: lifecycleResult.changedIds, data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj) });
+    return res.json({ ok: true, success: true, status: 200, message: 'Article archived', changedCount: lifecycleResult.changedCount, changedIds: lifecycleResult.changedIds, data: { article: withCoverImageUrl(obj) }, article: withCoverImageUrl(obj), ...articleMutationMetadata(lifecycleResult) });
   } catch (e) {
     console.error('[articles.archive] error:', e?.message || e);
     const status = Number(e?.status) || 500;
@@ -3932,268 +3653,76 @@ router.post('/articles/:id/archive', requireAdminAuth, async (req, res) => {
 
 async function softDeleteArticleGroup(req, res, id) {
   try {
-    const before = await News.findById(id).select('workflowStage slug slugs title coverImage coverImageUrl imageURL translationGroupId translationKey sourceArticleId status lang language originalLang').lean();
-    if (!before) {
-      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
-    }
-
-    const now = new Date();
-    const actor = getActor(req);
-    const targets = await findArticleDeleteTargets(before);
-    const deletedDocs = [];
-    const deletedIds = [];
-
-    for (const target of targets) {
-      const targetId = getArticleIdString(target);
-      if (!targetId) continue;
-      const fromStage = String(target.workflowStage || 'DRAFT');
-      const doc = await News.findByIdAndUpdate(
-        targetId,
-        {
-          $set: {
-            status: 'deleted',
-            deletedAt: now,
-            workflowStage: 'REJECTED',
-            workflowUpdatedAt: now,
-          },
-          $push: {
-            workflowHistory: {
-              at: now,
-              byUserId: actor.byUserId,
-              byRole: actor.byRole,
-              action: 'REJECT',
-              fromStage,
-              toStage: 'REJECTED',
-              note: 'Deleted',
-            },
-          },
-        },
-        { new: true, runValidators: false }
-      );
-
-      if (!doc) continue;
-      deletedDocs.push(doc);
-      deletedIds.push(String(doc._id || targetId));
-
-      if (_isSourceTranslationDoc(doc, targetId)) {
-        Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
-        if (typeof doc.save === 'function') await doc.save({ validateModifiedOnly: true });
-      }
-
-      await syncArticleFromNews(doc);
-      await logEditorialArticleAudit(req, 'EDITORIAL_ARTICLE_DELETED', doc, {
-        oldValue: 'draft',
-        newValue: 'deleted',
-        reason: req.body?.reason,
-      });
-
-      try {
-        await PushHistory.create({
-          articleId: doc._id,
-          type: 'publish',
-          action: 'delete',
-          slug: doc.slug,
-          title: doc.title,
-          channel: 'SITE',
-          at: now,
-          byUserId: actor.byUserId,
-          status: 'SUCCESS',
-          meta: { source: 'delete', oldStatus: 'draft', newStatus: 'deleted', oldStage: fromStage, newStage: doc.workflowStage },
-        });
-      } catch (e) {
-        console.warn('[pushHistory] create failed', e?.message || e);
-      }
-    }
-
-    if (!deletedDocs.length) {
-      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
-    }
-
-    const sourceDoc = deletedDocs.find((doc) => _isSourceTranslationDoc(doc, doc?._id));
-    if (sourceDoc) await syncMasterArticleGroup(sourceDoc, { reason: 'article_delete', invalidate: true });
-    await markPublicCopiesDraftFromNewsDoc(sourceDoc || deletedDocs[0]);
-
-    const doc = deletedDocs.find((item) => String(item?._id || '') === String(id)) || deletedDocs[0];
-    const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    await invalidateArticleCaches({ publicVisibilityRemoved: true });
+    const result = await changeArticleGroupStatus(id, 'deleted', { req });
+    const obj = result.doc;
     return res.status(200).json({
       ok: true,
       success: true,
       status: 200,
       message: 'Article deleted',
-      deletedCount: deletedDocs.length,
-      deletedIds,
+      deletedCount: result.changedCount,
+      deletedIds: result.changedIds,
       data: { article: withCoverImageUrl(obj) },
       article: withCoverImageUrl(obj),
+      ...articleMutationMetadata(result),
     });
   } catch (err) {
-    console.error('[articles.delete] error:', err?.message || err);
-    return res
-      .status(500)
-      .json({ ok: false, success: false, status: 500, message: 'Internal server error' });
+    return lifecycleError(res, err);
   }
 }
 
 // DELETE /api/articles/:id → soft delete (CMS/admin)
 router.delete('/articles/:id', requireAdminAuth, async (req, res) => {
+  if (['true', '1'].includes(String(req.query.hard || '').toLowerCase())) return permanentDeleteArticle(req, res);
   return softDeleteArticleGroup(req, res, req.params.id);
 });
 
-// DELETE /api/articles/:id/permanent → permanent delete (CMS/admin)
-// No schema validation (physical delete).
-router.delete('/articles/:id/permanent', requireAdminAuth, async (req, res) => {
+function lifecycleError(res, error) {
+  const status = error.statusCode || error.status || 503;
+  console.error('[articles.lifecycle] operation failed', { code: error.code || null, status });
+  return res.status(status).json({
+    ok: false, success: false, status, code: error.code || 'ARTICLE_LIFECYCLE_FAILED',
+    message: error.statusCode || error.status ? error.message : 'Article operation unavailable. Retry shortly.',
+  });
+}
+
+async function restoreArticle(req, res, id = req.params.id) {
   try {
-    const { id } = req.params;
-    let doc = null;
-    try {
-      doc = await News.findByIdAndDelete(id);
-    } catch (_) {
-      // invalid ObjectId
-    }
-    if (!doc) {
-      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
-    }
-    await invalidateArticleCaches({ publicVisibilityRemoved: true });
-    return res.status(200).json({ ok: true, success: true, status: 200, message: 'Article permanently deleted.' });
-  } catch (err) {
-    console.error('[articles.permanent-delete] error:', err?.message || err);
-    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal server error' });
-  }
-});
-
-// DELETE /api/articles/:id/hard-delete → permanent delete (only if already deleted)
-router.delete('/articles/:id/hard-delete', async (req, res) => {
-  try {
-    const { id } = req.params;
-    let doc = null;
-    try {
-      doc = await News.findById(id);
-    } catch (_) {
-      // invalid ObjectId
-    }
-    if (!doc) {
-      return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
-    }
-    const isDeleted = String(doc.status || '').toLowerCase() === 'deleted' || doc.isDeleted === true;
-    if (!isDeleted) {
-      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Only deleted articles can be permanently removed.' });
-    }
-    await News.deleteOne({ _id: id });
-    return res.status(200).json({ ok: true, success: true, status: 200, message: 'Article permanently deleted.' });
-  } catch (err) {
-    console.error('[articles.hard-delete] error:', err?.message || err);
-    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal server error' });
-  }
-});
-
-// DELETE /api/admin/articles/:id/forever → permanent delete (admin only; only if already deleted)
-// NOTE: This router is mounted at multiple base paths; we enforce admin auth at the route level.
-router.delete('/articles/:id/forever', requireAdminAuth, async (req, res) => {
-  try {
-    const { id } = req.params;
-    let doc = null;
-    try {
-      doc = await Article.findById(id);
-    } catch (_) {
-      // invalid ObjectId
-    }
-
-    if (!doc) return res.status(404).json({ success: false, message: 'Article not found' });
-    if (String(doc.status || '') !== 'deleted') {
-      return res.status(400).json({ success: false, message: 'Only deleted articles can be permanently removed.' });
-    }
-
-    await Article.deleteOne({ _id: id });
-    return res.status(200).json({ success: true });
-  } catch (err) {
-    console.error('[articles.forever-delete] error:', err?.message || err);
-    return res.status(500).json({ success: false, message: 'Internal server error' });
-  }
-});
-
-// POST /api/admin/articles/forever/bulk → bulk permanent delete (admin only; deletes only status='deleted')
-router.post('/articles/forever/bulk', requireAdminAuth, async (req, res) => {
-  try {
-    const rawIds = req.body && req.body.ids;
-    if (!Array.isArray(rawIds) || rawIds.length === 0) {
-      return res.status(400).json({ success: false, message: 'ids is required' });
-    }
-
-    const ids = rawIds
-      .map((v) => String(v || '').trim())
-      .filter(Boolean);
-
-    if (!ids.length) {
-      return res.status(400).json({ success: false, message: 'ids is required' });
-    }
-
-    for (const id of ids) {
-      if (!mongoose.isValidObjectId(id)) {
-        return res.status(400).json({ success: false, message: 'Invalid id in ids' });
-      }
-    }
-
-    const result = await Article.deleteMany({
-      _id: { $in: ids },
-      status: 'deleted',
+    const result = await restoreArticleGroup(id, { req });
+    const article = withCoverImageUrl(result.doc);
+    return res.json({
+      ok: true, success: true, message: 'Article restored', article, data: { article },
+      ...articleMutationMetadata(result),
+      changedCount: result.changedCount, changedIds: result.changedIds,
+      restoredStatuses: [...new Set(result.docs.map(doc => doc.status))],
+      restoreFallbackIds: result.restoreFallbackIds,
     });
-
-    const deletedCount = Number(result && typeof result.deletedCount === 'number' ? result.deletedCount : 0);
-    return res.status(200).json({ success: true, deletedCount });
-  } catch (err) {
-    console.error('[articles.forever-delete.bulk] error:', err?.message || err);
-    return res.status(500).json({ success: false, message: 'Internal server error' });
+  } catch (error) {
+    return lifecycleError(res, error);
   }
-});
+}
 
-// DELETE /api/admin/articles/forever/all-deleted → delete ALL soft-deleted articles (admin only)
-router.delete('/articles/forever/all-deleted', requireAdminAuth, async (req, res) => {
+async function permanentDeleteArticle(req, res, options = {}) {
   try {
-    const result = await Article.deleteMany({ status: 'deleted' });
-    const deletedCount = Number(result && typeof result.deletedCount === 'number' ? result.deletedCount : 0);
-    return res.status(200).json({ success: true, deletedCount });
-  } catch (err) {
-    console.error('[articles.forever-delete.all-deleted] error:', err?.message || err);
-    return res.status(500).json({ success: false, message: 'Internal server error' });
+    const result = await permanentlyDeleteArticleGroups(options.ids || req.params.id, { ...options, req });
+    return res.json({ ok: true, success: true, status: 200, message: 'Article permanently deleted.', ...result, ...articleMutationMetadata(result) });
+  } catch (error) {
+    return lifecycleError(res, error);
   }
-});
+}
 
-// POST alias: /api/articles/:id/hard-delete (admin panel fallback)
-router.post('/articles/:id/hard-delete', async (req, res) => {
-  try {
-    const { id } = req.params;
-    let doc = null;
-    try { doc = await News.findById(id); } catch (_) {}
-    if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
-    const isDeleted = String(doc.status || '').toLowerCase() === 'deleted' || doc.isDeleted === true;
-    if (!isDeleted) {
-      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Only deleted articles can be permanently removed.' });
-    }
-    await News.deleteOne({ _id: id });
-    return res.status(200).json({ ok: true, success: true, status: 200, message: 'Article permanently deleted.' });
-  } catch (err) {
-    console.error('[articles.hard-delete.post] error:', err?.message || err);
-    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal server error' });
+router.post('/articles/:id/restore', requireAdminAuth, (req, res) => restoreArticle(req, res));
+router.delete([
+  '/articles/:id/permanent', '/articles/:id/hard-delete', '/articles/:id/hard', '/articles/:id/forever',
+], requireFounderOnly, (req, res) => permanentDeleteArticle(req, res));
+router.post(['/articles/:id/hard-delete', '/articles/:id/hard'], requireFounderOnly, (req, res) => permanentDeleteArticle(req, res));
+router.post('/articles/forever/bulk', requireFounderOnly, (req, res) => {
+  const ids = req.body?.ids;
+  if (!Array.isArray(ids) || !ids.length || ids.some(id => !mongoose.isValidObjectId(String(id)))) {
+    return res.status(400).json({ ok: false, success: false, message: 'A non-empty array of valid ids is required' });
   }
+  return permanentDeleteArticle(req, res, { ids });
 });
-
-// POST alias: /api/articles/:id/hard (shorter legacy path)
-router.post('/articles/:id/hard', async (req, res) => {
-  try {
-    const { id } = req.params;
-    let doc = null;
-    try { doc = await News.findById(id); } catch (_) {}
-    if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
-    const isDeleted = String(doc.status || '').toLowerCase() === 'deleted' || doc.isDeleted === true;
-    if (!isDeleted) {
-      return res.status(400).json({ ok: false, success: false, status: 400, message: 'Only deleted articles can be permanently removed.' });
-    }
-    await News.deleteOne({ _id: id });
-    return res.status(200).json({ ok: true, success: true, status: 200, message: 'Article permanently deleted.' });
-  } catch (err) {
-    console.error('[articles.hard.post] error:', err?.message || err);
-    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Internal server error' });
-  }
-});
+router.delete('/articles/forever/all-deleted', requireFounderOnly, (req, res) => permanentDeleteArticle(req, res, { allDeleted: true }));
 
 module.exports = router;

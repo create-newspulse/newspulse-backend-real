@@ -14,6 +14,7 @@ const {
   buildPubliclyVisiblePublicArticleFilter,
   getArticleBaseLocale,
   getAvailableArticleLocales,
+  hasVisibleNewsSource,
 } = require('../services/publicArticleVisibility.service');
 const {
   getPublicContentGroupKey,
@@ -169,7 +170,7 @@ router.get('/stories', async (req, res) => {
     const negotiatedLangRaw = explicitLangRaw || (req.lang || '');
 
     if (!isDbConnected()) {
-      return res.json({ success: true, data: [], message: 'Database unavailable' });
+      return res.status(503).json({ success: false, message: 'Database unavailable' });
     }
 
     const q = buildPubliclyVisiblePublicArticleFilter();
@@ -322,7 +323,7 @@ router.get('/stories/:slug', async (req, res) => {
     res.set('Cache-Control', 'no-store');
 
     if (!isDbConnected()) {
-      return res.status(200).json({ success: false, message: 'Database unavailable' });
+      return res.status(503).json({ success: false, message: 'Database unavailable' });
     }
 
     const candidates = getSlugCandidates(req.params.slug);
@@ -341,7 +342,7 @@ router.get('/stories/:slug', async (req, res) => {
       ],
     };
     const story = await Article.findOne(storyFilter).lean();
-    if (!story) {
+    if (!story || !await hasVisibleNewsSource(story)) {
       return res.status(404).json({ success: false, message: 'Story not found' });
     }
 

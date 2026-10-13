@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
+const mongoose = require('mongoose');
 
 process.env.NODE_ENV = 'test';
 process.env.GOOGLE_TRANSLATE_API_KEY = process.env.GOOGLE_TRANSLATE_API_KEY || 'test-key';
@@ -131,6 +132,13 @@ function installRouteMocks(t, beforeDoc, contributor) {
 }
 
 function installPublishMocks(t, docs) {
+  t.mock.method(mongoose, 'startSession', async () => ({
+    withTransaction: async work => work(),
+    endSession: async () => {},
+  }));
+  t.mock.method(News, 'updateMany', async () => ({
+    acknowledged: true, matchedCount: docs.length, modifiedCount: docs.length,
+  }));
   const originals = [
     { target: News, values: { find: News.find, findById: News.findById, findOne: News.findOne, create: News.create, updateOne: News.updateOne } },
     { target: Contributor, values: { findById: Contributor.findById } },
@@ -140,12 +148,12 @@ function installPublishMocks(t, docs) {
   const publicUpdates = [];
   const pushHistory = [];
 
-  News.findById = async (id) => docs.find((doc) => String(doc._id) === String(id)) || null;
+  News.findById = (id) => queryDoc(docs.find((doc) => String(doc._id) === String(id)) || null);
   News.find = (query = {}) => {
     if (query.status === 'scheduled') {
       return { limit: async () => docs.filter((doc) => doc.status === 'scheduled') };
     }
-    return docs.filter((doc) => doc.translationGroupId === 'pulse-schedule-publish-group' || doc.translationKey === 'pulse-schedule-publish-group');
+    return queryDoc(docs.filter((doc) => doc.translationGroupId === 'pulse-schedule-publish-group' || doc.translationKey === 'pulse-schedule-publish-group'));
   };
   News.findOne = () => queryDoc(null);
   News.create = async (payload) => {
@@ -153,7 +161,7 @@ function installPublishMocks(t, docs) {
     docs.push(doc);
     return doc;
   };
-  News.updateOne = async () => ({ acknowledged: true, modifiedCount: 1 });
+  News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
   Contributor.findById = () => ({
     lean: async () => ({
       _id: '507f1f77bcf86cd79943a001',
@@ -308,7 +316,7 @@ test('due Pulse scheduled article publishes through canonical pipeline and syncs
   assert.equal(pushHistory[0].meta.source, 'scheduler');
 });
 
-test('non-Pulse due scheduling keeps legacy scheduler publish behavior', async (t) => {
+test('non-Pulse due scheduling delegates to the canonical publisher without single-edition writes', async () => {
   const doc = makeRouteDoc({
     _id: '507f1f77bcf86cd79943a115',
     category: 'national',
@@ -318,27 +326,27 @@ test('non-Pulse due scheduling keeps legacy scheduler publish behavior', async (
     workflowStage: 'SCHEDULED',
     pulseDialogue: undefined,
   });
-  const pushHistory = [];
   const NewsStub = { find: () => ({ limit: async () => [doc] }) };
-  const PushHistoryStub = { create: async (payload) => { pushHistory.push(payload); return payload; } };
   let canonicalCalls = 0;
 
   const stats = await publishDueScheduledArticles({
     allowDisconnected: true,
     now: new Date('2026-09-23T10:00:00.000Z'),
     News: NewsStub,
-    PushHistory: PushHistoryStub,
-    publishCanonicalArticle: async () => { canonicalCalls += 1; },
+    publishCanonicalArticle: async (candidate, options) => {
+      canonicalCalls += 1;
+      assert.equal(candidate, doc);
+      assert.equal(options.source, 'scheduler');
+      assert.equal(options.actor.byRole, 'SYSTEM');
+      return { ok: true };
+    },
   });
 
   assert.equal(stats.processed, 1);
   assert.equal(stats.published, 1);
-  assert.equal(canonicalCalls, 0);
-  assert.equal(doc.status, 'published');
-  assert.equal(doc.publishAt, null);
-  assert.equal(doc.workflowStage, 'PUBLISHED');
-  assert.equal(pushHistory.length, 1);
-  assert.equal(pushHistory[0].meta.source, 'scheduler');
+  assert.equal(canonicalCalls, 1);
+  assert.equal(doc.status, 'scheduled');
+  assert.equal(doc.workflowStage, 'SCHEDULED');
 });
 
 test('manual Pulse publish still prepares byline snapshot and public sync', async (t) => {

@@ -1,11 +1,14 @@
 const crypto = require('crypto');
 
 const News = require('../models/News');
-const { syncPublicArticleFromNews } = require('./syncPublicArticleFromNews.service');
+const { syncPublicArticleFromNews, sponsoredArticleFields, syncNewsTranslationBuckets } = require('./syncPublicArticleFromNews.service');
+const { isPubliclyVisibleNewsArticle } = require('./publicArticleVisibility.service');
+const { buildStoryIdentityFilter } = require('./articleSlugUniqueness.service');
+const { withActiveArticleSource } = require('./articleLifecycle.service');
 const { applyPulseDialogueStandardText } = require('./pulseDialogue.service');
 const {
   buildArticleRevalidationTargets,
-  notifyPublicContentInvalidation,
+  invalidateArticleContent,
 } = require('./publicContentInvalidation.service');
 const { slugifyUnicode } = require('../lib/slug');
 const { FAITH_TOPIC_CODES, isFaithCultureCategory } = require('../lib/faithCultureTopics');
@@ -230,7 +233,12 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
   const metadata = options.metadata || prepareSourceSyncMetadata(master, { now, bumpVersion: false });
   const baseLang = getBaseLanguage(master);
   const childLang = normalizeLang(child.lang || child.language || child.originalLang) || baseLang;
-  const localized = getLocalizedTopLevelContent(master, childLang);
+  let localized = getLocalizedTopLevelContent(master, childLang);
+  if ((!localized.localizedReady || child.humanEdited) && hasFullBucket({
+    title: child.title, summary: child.description, content: child.content,
+  })) {
+    localized = { title: child.title, description: child.description, content: child.content, localizedReady: true };
+  }
   const sourceStatus = String(master.status || 'draft').trim().toLowerCase() || 'draft';
 
   let nextStatus = sourceStatus;
@@ -238,9 +246,10 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
     nextStatus = 'draft';
   }
 
-  const nextPublishedAt = nextStatus === 'published' ? (master.publishedAt || now) : null;
+  const nextPublishedAt = child.publishedAt || master.publishedAt || (nextStatus === 'published' ? now : null);
   const nextDeletedAt = sourceStatus === 'deleted' ? (master.deletedAt || now) : null;
-  const localizedSlug = normalizeNullableString(master?.slugs?.[childLang])
+  const localizedSlug = normalizeNullableString(child.slug)
+    || normalizeNullableString(master?.slugs?.[childLang])
     || (localized.title ? slugifyUnicode(localized.title) : null)
     || normalizeNullableString(child.slug)
     || normalizeNullableString(master.slug);
@@ -280,6 +289,7 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
     embeds: normalizeStringArray(master.embeds),
     gallery: normalizeStringArray(master.gallery),
     seo: buildSeoObject(master.seo),
+    ...sponsoredArticleFields(master),
     pulseDialogue: master.pulseDialogue ? applyPulseDialogueStandardText(cloneSimple(master.pulseDialogue), childLang) : null,
     ...(master.authorByline !== undefined ? { authorByline: cloneSimple(master.authorByline) } : {}),
     translationKey: getGroupKey(master),
@@ -327,7 +337,7 @@ function collectTranslationGroupInvalidationTargets(masterDoc, childDocs = []) {
 
 async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
   const logger = options.logger || console;
-  const master = isPlainObject(masterDoc) ? masterDoc : null;
+  let master = isPlainObject(masterDoc) ? masterDoc : null;
   const faithTopicOnly = options.faithTopicOnly === true;
   const leavingFaith = isFaithCultureCategory(options.previousCategory) && !isFaithCultureCategory(master?.category);
   if (faithTopicOnly && (!master?._id
@@ -347,83 +357,86 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const metadata = options.metadata || prepareSourceSyncMetadata(master, { now, bumpVersion: false });
 
-  const childDocs = await News.find({
-    _id: { $ne: master._id },
-    $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }],
-  });
-
-  const updatedChildren = [];
-  for (const child of childDocs) {
-    if (!isChildLinkedToMaster(master, child)) {
-      try {
-        logger.warn?.('[translationGroupSync] skipped unrelated child in translation group', {
-          masterId: String(master._id || ''),
-          childId: String(child._id || ''),
-          translationGroupId: groupKey,
-          childSourceArticleId: normalizeObjectIdString(child.sourceArticleId),
-        });
-      } catch (_) {}
-      continue;
+  const updatedChildren = await withActiveArticleSource(master._id, async (current, session) => {
+    if (getGroupKey(current) !== groupKey) {
+      throw Object.assign(new Error('Translation group changed. Reload and retry.'), { statusCode: 409 });
     }
+    master = current;
+    const childDocs = await News.find({
+      _id: { $ne: master._id },
+      $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }],
+    }, null, { session });
 
-    const childObject = child.toObject ? child.toObject({ virtuals: true }) : child;
-    if (faithTopicOnly) {
-      if (!normalizeLanguage(child.lang) && !normalizeLanguage(child.language) && !normalizeLanguage(child.originalLang)) continue;
-      if (!isFaithCultureCategory(child.category) && !(leavingFaith && FAITH_TOPIC_CODES.includes(child.topic))) continue;
-      if (Number(child.syncVersion || 0) > metadata.syncVersion) {
-        throw new Error('Faith topic synchronization was superseded by a newer update');
+    const changed = [];
+    for (const child of childDocs) {
+      if (child.status === 'deleted' || child.deletedAt) {
+        throw Object.assign(new Error('Restore the complete story before synchronizing translations.'), { statusCode: 409 });
       }
-      const patch = {
-        topic: leavingFaith ? null : (master.topic ?? null),
-        lastSyncedAt: metadata.lastSyncedAt || now,
-        syncVersion: metadata.syncVersion,
-        contentFingerprint: metadata.contentFingerprint,
-      };
-      // Query updates avoid document hooks that normalize translation content and readiness.
-      const result = await News.updateOne({
-        _id: child._id,
-        category: child.category,
-        sourceArticleId: child.sourceArticleId ?? null,
-        lang: child.lang ?? null,
-        language: child.language ?? null,
-        originalLang: child.originalLang ?? null,
-        syncVersion: child.syncVersion ?? null,
-        $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }],
-      }, { $set: patch }, { runValidators: true });
-      if (!result.acknowledged || result.matchedCount !== 1) {
-        throw new Error('Faith topic sibling changed during synchronization; retry the update');
+      if (!isChildLinkedToMaster(master, child)) {
+        try {
+          logger.warn?.('[translationGroupSync] skipped unrelated child in translation group', {
+            masterId: String(master._id || ''),
+            childId: String(child._id || ''),
+            translationGroupId: groupKey,
+            childSourceArticleId: normalizeObjectIdString(child.sourceArticleId),
+          });
+        } catch (_) {}
+        continue;
       }
-      updatedChildren.push({ ...childObject, ...patch });
-      continue;
+
+      const childObject = child.toObject ? child.toObject({ virtuals: true }) : child;
+      if (faithTopicOnly) {
+        if (!normalizeLanguage(child.lang) && !normalizeLanguage(child.language) && !normalizeLanguage(child.originalLang)) continue;
+        if (!isFaithCultureCategory(child.category) && !(leavingFaith && FAITH_TOPIC_CODES.includes(child.topic))) continue;
+        if (Number(child.syncVersion || 0) > metadata.syncVersion) {
+          throw new Error('Faith topic synchronization was superseded by a newer update');
+        }
+        const patch = {
+          topic: leavingFaith ? null : (master.topic ?? null),
+          lastSyncedAt: metadata.lastSyncedAt || now,
+          syncVersion: metadata.syncVersion,
+          contentFingerprint: metadata.contentFingerprint,
+        };
+        // Query updates avoid document hooks that normalize translation content and readiness.
+        const result = await News.updateOne({
+          _id: child._id,
+          category: child.category,
+          sourceArticleId: child.sourceArticleId ?? null,
+          lang: child.lang ?? null,
+          language: child.language ?? null,
+          originalLang: child.originalLang ?? null,
+          syncVersion: child.syncVersion ?? null,
+          $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }],
+        }, { $set: patch }, { runValidators: true, session });
+        if (!result.acknowledged || result.matchedCount !== 1) {
+          throw new Error('Faith topic sibling changed during synchronization; retry the update');
+        }
+        changed.push({ ...childObject, ...patch });
+        continue;
+      }
+
+      const patch = buildChildNewsSyncPatch(master, childObject, { now, metadata });
+
+      Object.assign(child, patch);
+      await child.save({ validateModifiedOnly: true, session });
+      changed.push(child);
     }
-
-    const patch = buildChildNewsSyncPatch(master, childObject, { now, metadata });
-
-    Object.assign(child, patch);
-    await child.save({ validateModifiedOnly: true });
-    updatedChildren.push(child);
-
-    try {
-      await syncPublicArticleFromNews(child, { logger });
-    } catch (error) {
-      try {
-        logger.warn?.('[translationGroupSync] child public sync failed', {
-          childId: String(child._id || ''),
-          message: error?.message || String(error),
-        });
-      } catch (_) {}
-    }
-  }
+    const groupDocs = [master, ...changed];
+    await syncNewsTranslationBuckets(groupDocs, { session, now });
+    const ordered = [...groupDocs].sort((a, b) =>
+      Number(isPubliclyVisibleNewsArticle(a, { now })) - Number(isPubliclyVisibleNewsArticle(b, { now })));
+    for (const doc of ordered) await syncPublicArticleFromNews(doc, {
+      logger, groupDocs, session, now, throwOnError: true,
+    });
+    return changed;
+  }, options);
 
   if (options.invalidate !== false) {
-    const targets = collectTranslationGroupInvalidationTargets(master, updatedChildren.map((doc) => (doc.toObject ? doc.toObject({ virtuals: true }) : doc)));
-    await notifyPublicContentInvalidation({
-      reason: String(options.reason || 'translation_group_sync'),
-      articleId: String(master._id),
-      translationGroupId: groupKey,
-      paths: targets.paths,
-      tags: targets.tags,
-    }, { logger });
+    const invalidate = () => invalidateArticleContent([master, ...updatedChildren], {
+      reason: options.reason || 'translation_group_sync', publicVisibilityRemoved: true, logger,
+    });
+    if (options.session) options.afterCommit.push(invalidate);
+    else await invalidate();
   }
 
   return {
@@ -431,6 +444,76 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
     childrenUpdated: updatedChildren.length,
     childIds: updatedChildren.map((doc) => String(doc._id)),
   };
+}
+
+async function syncTranslationGroupMetadataInSession(doc, options) {
+  const before = options.previousDoc || {};
+  const now = options.now || new Date();
+  const input = options.patch || {};
+  const sharedFields = new Set([
+    'category', 'editorialType', 'topic', 'track', 'tags', 'geo', 'location',
+    'stateTags', 'stateNames', 'externalUrls', 'embeds', 'gallery', 'seo', 'authorByline',
+    'spotlightEnabled', 'spotlightPinned', 'spotlightPriority', 'spotlightExpiresAt',
+    ...Object.keys(sponsoredArticleFields(input)),
+  ]);
+  const previousValue = key => key.split('.').reduce((value, field) => value?.[field], before);
+  const supplied = key => Object.prototype.hasOwnProperty.call(input, key);
+  const changed = key => supplied(key)
+    && JSON.stringify(input[key]) !== JSON.stringify(previousValue(key));
+  const shared = Object.fromEntries(Object.entries(input)
+    .filter(([key]) => sharedFields.has(key) || key.startsWith('location.')));
+  const language = normalizeLang(doc.language || doc.lang);
+  if (language && supplied('slug')) shared[`slugs.${language}`] = doc.slug;
+  const imageChanged = ['coverImage', 'coverImageUrl', 'imageURL'].some(changed);
+  const beforeImage = before.coverImage?.url || before.coverImageUrl || before.imageURL || null;
+  const members = await News.find(buildStoryIdentityFilter(doc), null, { session: options.session }).lean();
+  const updated = [];
+  for (const member of members) {
+    const patch = { ...shared };
+    const memberImage = member.coverImage?.url || member.coverImageUrl || member.imageURL || null;
+    if (imageChanged && (!memberImage || memberImage === beforeImage || String(member._id) === String(doc._id))) {
+      patch.coverImage = doc.coverImage;
+      patch.coverImageUrl = doc.coverImageUrl || doc.coverImage?.url || null;
+      patch.imageURL = doc.imageURL || patch.coverImageUrl;
+    }
+    const next = Object.keys(patch).length
+      ? await News.findByIdAndUpdate(member._id, { $set: patch }, { new: true, runValidators: false, session: options.session }).lean()
+      : member;
+    if (!next) throw new Error('Article group changed during metadata synchronization');
+    updated.push(next);
+  }
+  if (!updated.some(member => String(member._id) === String(doc._id))) {
+    throw new Error('Article group changed during metadata synchronization');
+  }
+  await syncNewsTranslationBuckets(updated, { session: options.session, now });
+  if (updated.some(member => member.status === 'published') || before.status === 'published') {
+    const ordered = [...updated].sort((a, b) =>
+      Number(isPubliclyVisibleNewsArticle(a, { now })) - Number(isPubliclyVisibleNewsArticle(b, { now })));
+    for (const member of ordered) {
+      await syncPublicArticleFromNews(member, {
+        groupDocs: updated, throwOnError: true, session: options.session, now,
+        previousDoc: String(member._id) === String(doc._id) ? before : undefined,
+      });
+    }
+  }
+  return {
+    ok: true, childrenUpdated: Math.max(0, updated.length - 1),
+    childIds: updated.filter(member => String(member._id) !== String(doc._id)).map(member => String(member._id)),
+    publicSync: { ok: true, failedArticleIds: [] },
+    docs: updated, previousDocs: [before, ...members],
+  };
+}
+
+async function syncTranslationGroupMetadata(doc, options = {}) {
+  const result = options.session
+    ? await syncTranslationGroupMetadataInSession(doc, options)
+    : await withActiveArticleSource(doc._id, (current, session) =>
+      syncTranslationGroupMetadataInSession(current, { ...options, session }));
+  if (options.invalidate !== false) await invalidateArticleContent(result.docs, {
+    previousDocs: result.previousDocs,
+    reason: options.reason || 'article_update', publicVisibilityRemoved: true,
+  });
+  return result;
 }
 
 module.exports = {
@@ -441,4 +524,5 @@ module.exports = {
   buildChildNewsSyncPatch,
   collectTranslationGroupInvalidationTargets,
   syncTranslationGroupFromMaster,
+  syncTranslationGroupMetadata,
 };

@@ -4,8 +4,73 @@ const { INDIA_STATES_UTS, isValidStateSlug } = require('../src/utils/locationTag
 const { ensureTrackTag, normalizeTrackValue } = require('./communitySubmissionWorkflow');
 const { normalizeSpotlightPriority } = require('./spotlightPriority.service');
 const { buildPublicPulseDialogueFromArticle } = require('./pulseDialogue.service');
+const { getStoryKeys, UNOWNED_PUBLIC_COPY_FILTER } = require('./articleSlugUniqueness.service');
+const News = require('../models/News');
+const { isPubliclyVisibleNewsArticle } = require('./publicArticleVisibility.service');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
+const SPONSORED_ARTICLE_FIELDS = [
+  'isSponsored', 'isSponsoredArticle', 'sponsorName', 'sponsorLabel', 'sponsorDisclosure',
+  'sponsorCtaText', 'sponsorCtaUrl', 'sponsorFeatureEligible', 'sponsorFeatureLinkedId',
+];
+
+function sponsoredArticleFields(doc) {
+  return Object.fromEntries(SPONSORED_ARTICLE_FIELDS
+    .filter(field => doc?.[field] !== undefined).map(field => [field, doc[field]]));
+}
+
+function withGroupTranslations(doc, groupDocs, options = {}) {
+  const out = doc.toObject ? doc.toObject() : { ...doc };
+  if (!Array.isArray(groupDocs)) return out;
+  out.translations = { ...out.translations };
+  out.translationStatus = { ...out.translationStatus };
+  for (const member of groupDocs) {
+    const lang = normalizeLang(member.language || member.lang);
+    if (!lang) continue;
+    const bucket = { title: member.title, summary: member.description || member.summary, content: member.content };
+    const ready = isPubliclyVisibleNewsArticle(member, options) && _hasFullTranslationBucket(bucket);
+    out.translationStatus[lang] = ready ? 'ready' : 'pending';
+    if (ready) out.translations[lang] = {
+      ...bucket, provider: member.translatedByProvider === 'openai' ? 'openai' : 'manual',
+      generatedAt: member.updatedAt || member.publishedAt,
+    };
+    else delete out.translations[lang];
+  }
+  return out;
+}
+
+async function syncNewsTranslationBuckets(groupDocs, options = {}) {
+  const now = options.now || new Date();
+  const futureVisibilityDates = groupDocs.map(doc => {
+    const bucket = { title: doc.title, summary: doc.description || doc.summary, content: doc.content };
+    if (!normalizeLang(doc.language || doc.lang) || !_hasFullTranslationBucket(bucket)) return null;
+    const visibleAt = new Date(Math.max(...[
+      doc.publishedAt, doc.publishAt, doc.scheduledAt, doc.embargoUntil, doc.workflow?.embargoUntil,
+    ].map(value => value == null ? 0 : new Date(value).getTime())));
+    return visibleAt > now && isPubliclyVisibleNewsArticle(doc, { now: visibleAt }) ? visibleAt : null;
+  }).filter(Boolean);
+  const refreshAt = futureVisibilityDates.length
+    ? new Date(Math.min(...futureVisibilityDates.map(value => value.getTime()))) : null;
+  for (const doc of groupDocs) {
+    const next = withGroupTranslations(doc, groupDocs, { ...options, now });
+    doc.translations = next.translations;
+    doc.translationStatus = next.translationStatus;
+    doc.publicVisibilityRefreshAt = refreshAt;
+    if (typeof doc.save === 'function') {
+      await doc.save({ validateModifiedOnly: true, session: options.session });
+    } else {
+      const result = await News.updateOne({ _id: doc._id }, {
+        $set: {
+          translations: next.translations, translationStatus: next.translationStatus,
+          publicVisibilityRefreshAt: refreshAt,
+        },
+      }, { session: options.session });
+      if (!result.acknowledged || result.matchedCount !== 1) {
+        throw Object.assign(new Error('Article group changed. Reload and retry.'), { statusCode: 409 });
+      }
+    }
+  }
+}
 
 const STATE_SLUG_TO_DISPLAY = (() => {
   const m = new Map();
@@ -193,8 +258,9 @@ function _buildTranslationBucket(src, options = {}) {
   return out;
 }
 
-async function _syncPublicArticleFromNews(newsDoc) {
+async function _syncPublicArticleFromNews(newsDoc, options = {}) {
   if (!newsDoc) return null;
+  newsDoc = withGroupTranslations(newsDoc, options.groupDocs, options);
 
   const categoryNorm = String(newsDoc.category || '').trim().toLowerCase();
 
@@ -305,7 +371,12 @@ async function _syncPublicArticleFromNews(newsDoc) {
     status: normalizedStatus || (isPublished ? 'published' : 'draft'),
     scheduledAt: newsDoc.scheduledAt || null,
     publishAt: newsDoc.publishAt || null,
-    publishedAt: isPublished ? newsDoc.publishedAt : null,
+    publishedAt: newsDoc.publishedAt || null,
+    locked: newsDoc.locked === true || newsDoc.workflow?.locked === true,
+    embargoUntil: [newsDoc.embargoUntil, newsDoc.workflow?.embargoUntil]
+      .map(_normalizeNullableDate).filter(Boolean).sort((a, b) => b - a)[0] || null,
+    visibility: newsDoc.visibility || null,
+    isPrivate: newsDoc.isPrivate === true,
     deletedAt: normalizedStatus === 'deleted' ? (newsDoc.deletedAt || new Date()) : null,
     spotlightEnabled: Boolean(newsDoc.spotlightEnabled),
     spotlightPinned: Boolean(newsDoc.spotlightPinned),
@@ -355,8 +426,18 @@ async function _syncPublicArticleFromNews(newsDoc) {
     stateNames: Array.isArray(newsDoc.stateNames) ? newsDoc.stateNames : [],
   };
 
-  const or = [{ slug }];
+  const keys = getStoryKeys(newsDoc);
+  const ownership = [UNOWNED_PUBLIC_COPY_FILTER];
+  if (keys.length) ownership.push(
+    { translationGroupId: { $in: keys } },
+    { translationKey: { $in: keys } }
+  );
+  const or = [{ slug, $or: ownership }];
   if (newsDoc._id) or.unshift({ sourceNewsId: newsDoc._id });
+  const previousSlug = normalizeSlug(options.previousDoc?.slug);
+  if (previousSlug && previousSlug !== slug) or.push({
+    slug: previousSlug, ...UNOWNED_PUBLIC_COPY_FILTER,
+  });
 
   const updateOp = { $set: update };
   if (!pulseDialogue) updateOp.$unset = { pulseDialogue: '' };
@@ -369,25 +450,34 @@ async function _syncPublicArticleFromNews(newsDoc) {
   return PublicArticle.findOneAndUpdate(
     { $or: or },
     updateOp,
-    { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
+    { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true, session: options.session }
   ).lean();
 }
 
 async function syncPublicArticleFromNews(newsDoc, options = {}) {
   const logger = options.logger || console;
   try {
-    const saved = await _syncPublicArticleFromNews(newsDoc);
+    const saved = await _syncPublicArticleFromNews(newsDoc, options);
     if (!saved?._id) throw new Error('Public article synchronization produced no record');
     return saved;
-  } catch (_) {
+  } catch (error) {
+    const conflict = error?.code === 11000 || error?.code === 11001;
     logger.warn?.('[articles.syncPublicArticleFromNews] failed', {
-      code: 'PUBLIC_ARTICLE_SYNC_FAILED',
+      code: conflict ? 'SLUG_CONFLICT' : 'PUBLIC_ARTICLE_SYNC_FAILED',
       sourceNewsId: newsDoc?._id ? String(newsDoc._id) : null,
     });
+    if (options.throwOnError) {
+      throw Object.assign(new Error(conflict ? 'Slug already exists' : 'Public article synchronization failed. Retry the operation.'), {
+        status: conflict ? 409 : 503, statusCode: conflict ? 409 : 503,
+        code: conflict ? 'SLUG_CONFLICT' : 'PUBLIC_ARTICLE_SYNC_FAILED', cause: error,
+      });
+    }
     return null;
   }
 }
 
 module.exports = {
   syncPublicArticleFromNews,
+  syncNewsTranslationBuckets,
+  sponsoredArticleFields,
 };

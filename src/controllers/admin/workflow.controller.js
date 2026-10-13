@@ -4,7 +4,8 @@ const Article = require('../../../models/News');
 const WorkflowEvent = require('../../../models/WorkflowEvent');
 const PushHistory = require('../../../models/PushHistory');
 const AuditLog = require('../../../models/AuditLog');
-const { invalidateArticleCaches } = require('../../../lib/cache');
+const { publishCanonicalArticle } = require('../../../services/articlePublishing.service');
+const { changeArticleGroupStatus, inArticleTransaction, articleMutationMetadata } = require('../../../services/articleLifecycle.service');
 
 const STAGE_ORDER = [
   'DRAFT',
@@ -422,7 +423,7 @@ async function patchWorkflowStage(req, res) {
       return bad(res, 'action must be next|back|set', 400);
     }
 
-    const doc = await Article.findById(id);
+    let doc = await Article.findById(id);
     if (!doc) return bad(res, 'Article not found', 404);
 
     // enforce locks/embargo for non-founder
@@ -435,7 +436,8 @@ async function patchWorkflowStage(req, res) {
 
     const fromLower = getCurrentStageLower(doc);
     const fromUpper = fromLower.toUpperCase();
-    const wasPublished = String(doc.status || '').toLowerCase() === 'published';
+    const beforeStatus = String(doc.status || '').toLowerCase();
+    const wasPublished = beforeStatus === 'published';
 
     let toLower = '';
     if (action === 'set') {
@@ -460,64 +462,77 @@ async function patchWorkflowStage(req, res) {
 
     // Enforce adjacent moves for next/back (already) and default set to any stage.
     const toUpper = toLower.toUpperCase();
-
-    // prepare legacy workflowHistory role hook
-    doc.__byRoleForHistory = byRole;
-
-    const now = new Date();
-
-    // canonical stage update
-    doc.workflow = doc.workflow || {};
-    // workflow.stage is legacy and uses UPPER enums
-    doc.workflow.stage = toUpper;
-    doc.workflow.lastMovedAt = now;
-    doc.workflow.lastMovedBy = actorId;
-    doc.workflow.notes = Array.isArray(doc.workflow.notes) ? doc.workflow.notes : [];
-    if (note) {
-      doc.workflow.notes.push({ at: now, by: actorId, text: String(note).slice(0, 2000) });
+    if (doc.status === 'deleted') return bad(res, 'Restore the deleted story before moving its stage', 409);
+    if ((toUpper === 'PUBLISHED' || wasPublished) && roleRaw !== 'founder') {
+      return bad(res, 'Founder permission is required.', 403);
     }
+    const transition = await inArticleTransaction(async (session, transaction) => {
+      doc = await Article.findById(id, null, { session });
+      if (!doc || doc.deletedAt || getCurrentStageLower(doc) !== fromLower || String(doc.status || '').toLowerCase() !== beforeStatus) {
+        throw Object.assign(new Error('Article changed. Reload and retry the stage transition.'), { statusCode: 409 });
+      }
+      if (roleRaw !== 'founder') {
+        if (doc.workflow?.locked ?? doc.locked) {
+          throw Object.assign(new Error('Article is locked'), { statusCode: 409 });
+        }
+        const currentEmbargo = doc.workflow?.embargoUntil ?? doc.embargoUntil;
+        if (currentEmbargo && new Date(currentEmbargo) > new Date()) {
+          throw Object.assign(new Error(`Article is embargoed until ${new Date(currentEmbargo).toISOString()}`), { statusCode: 409 });
+        }
+      }
+      let lifecycleResult;
+      if (toUpper === 'PUBLISHED') {
+        lifecycleResult = await publishCanonicalArticle(doc, { ...transaction, req, source: 'workflow-stage', reason: note || null });
+        doc = lifecycleResult.article;
+      } else if (toUpper === 'SCHEDULED') {
+        const scheduledAt = new Date(req.body?.scheduledAt || req.body?.publishAt || doc.scheduledAt || doc.publishAt || NaN);
+        lifecycleResult = await changeArticleGroupStatus(id, 'scheduled', { ...transaction, req, scheduledAt });
+        doc = await Article.findById(id, null, { session });
+      } else if (wasPublished || doc.status === 'scheduled') {
+        lifecycleResult = await changeArticleGroupStatus(id, 'draft', { ...transaction, req });
+        doc = await Article.findById(id, null, { session });
+      }
 
-    // keep legacy fields aligned
-    // canonical storage for admin panel
-    doc.workflowStage = toLower;
-    doc.workflowUpdatedAt = now;
-    doc.workflowStageEnteredAt = now;
-    doc.locked = doc.workflow.locked ?? doc.locked;
-    doc.embargoUntil = doc.workflow.embargoUntil ?? doc.embargoUntil;
+      doc.__byRoleForHistory = byRole;
+      const now = new Date();
+      doc.workflow = doc.workflow || {};
+      doc.workflow.stage = toUpper;
+      doc.workflow.lastMovedAt = now;
+      doc.workflow.lastMovedBy = actorId;
+      doc.workflow.notes = Array.isArray(doc.workflow.notes) ? doc.workflow.notes : [];
+      if (note) {
+        doc.workflow.notes.push({ at: now, by: actorId, text: String(note).slice(0, 2000) });
+      }
 
-    // status sync
-    if (toUpper === 'PUBLISHED') {
-      doc.status = 'published';
-      doc.publishedAt = now;
-      doc.publishAt = null;
-      doc.scheduledAt = null;
-    } else if (toUpper === 'SCHEDULED') {
-      doc.status = 'scheduled';
-    } else {
-      if (doc.status !== 'archived' && doc.status !== 'deleted') {
+      doc.workflowStage = toLower;
+      doc.workflowUpdatedAt = now;
+      doc.workflowStageEnteredAt = now;
+      doc.locked = doc.workflow.locked ?? doc.locked;
+      doc.embargoUntil = doc.workflow.embargoUntil ?? doc.embargoUntil;
+
+      if (toUpper === 'PUBLISHED') {
+        doc.publishAt = null;
+        doc.scheduledAt = null;
+      } else if (toUpper === 'SCHEDULED') {
+        doc.status = 'scheduled';
+      } else if (doc.status !== 'archived' && doc.status !== 'deleted') {
         doc.status = 'draft';
       }
-    }
 
-    // legacy workflowHistory
-    doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
-    doc.workflowHistory.push({
-      at: now,
-      byUserId: actorId,
-      byRole,
-      action: 'MOVE_STAGE',
-      fromStage: fromLower,
-      toStage: toLower,
-      note: note ? String(note).slice(0, 2000) : null,
-    });
+      doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
+      doc.workflowHistory.push({
+        at: now,
+        byUserId: actorId,
+        byRole,
+        action: 'MOVE_STAGE',
+        fromStage: fromLower,
+        toStage: toLower,
+        note: note ? String(note).slice(0, 2000) : null,
+      });
 
-    // save article + audit event
-    await doc.save();
-    if (wasPublished && doc.status !== 'published') await invalidateArticleCaches({ publicVisibilityRemoved: true });
-    else if (doc.status === 'published') invalidateArticleCaches().catch(() => {});
+      await doc.save({ session });
 
-    try {
-      await WorkflowEvent.create({
+      await WorkflowEvent.create([{
         articleId: doc._id,
         fromStage: fromUpper,
         toStage: toUpper,
@@ -525,13 +540,9 @@ async function patchWorkflowStage(req, res) {
         by: actorId,
         at: now,
         meta: { action, toStage: toLower, note: note ? String(note).slice(0, 2000) : null },
-      });
-    } catch (e) {
-      console.warn('[workflow.event] create failed', e?.message || e);
-    }
+      }], { session });
 
-    try {
-      await AuditLog.create({
+      await AuditLog.create([{
         action: 'workflow_stage',
         key: String(doc._id),
         before: { workflowStage: fromLower, status: String(doc.status || '') },
@@ -540,14 +551,9 @@ async function patchWorkflowStage(req, res) {
         ip: req.ip || null,
         userAgent: String(req.headers['user-agent'] || '') || null,
         meta: { note: note ? String(note).slice(0, 2000) : null },
-      });
-    } catch (e) {
-      console.warn('[auditLog.workflow_stage] create failed', e?.message || e);
-    }
+      }], { session });
 
-    // Always log a push history record for stage transitions
-    try {
-      await PushHistory.create({
+      await PushHistory.create([{
         articleId: doc._id,
         type: 'workflow',
         action: 'edit',
@@ -572,22 +578,22 @@ async function patchWorkflowStage(req, res) {
           newStatus: null,
           source: 'workflow-stage',
         },
-      });
-    } catch (e) {
-      console.warn('[pushHistory.workflow] create failed', e?.message || e);
-    }
+      }], { session });
+      return { doc, lifecycleResult };
+    });
 
-    const out = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    delete out.__byRoleForHistory;
+    doc = transition.doc;
     return ok(res, 'Workflow stage updated', {
       articleId: String(doc._id),
       workflowStage: doc.workflowStage,
       workflowStageEnteredAt: doc.workflowStageEnteredAt,
       workflowUpdatedAt: doc.workflowUpdatedAt,
+      ...articleMutationMetadata(transition.lifecycleResult),
+      ...articleMutationMetadata(transition),
     });
   } catch (e) {
     console.error('[workflow.stage] error', e?.message || e);
-    return bad(res, 'Failed to update stage', 500);
+    return bad(res, e.statusCode || e.status ? e.message : 'Failed to update stage', e.statusCode || e.status || 500);
   }
 }
 

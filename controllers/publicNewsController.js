@@ -1,5 +1,6 @@
 const { withPublicAuthorByline } = require('../services/authorByline.service');
 const mongoose = require('mongoose');
+const { isContentDatabaseUnavailable } = require('../lib/contentErrors');
 
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
@@ -10,6 +11,7 @@ const { isGoogleTranslateConfigured } = require('../services/translationEnabled'
 const {
   buildPubliclyVisibleNewsArticleFilter,
   buildPubliclyVisiblePublicArticleFilter,
+  hasVisibleNewsSource,
 } = require('../services/publicArticleVisibility.service');
 const { getLinkedSponsoredFeatureForArticle } = require('../services/sponsoredFeatures.service');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey, getPublicCategoryMatchValues } = require('../lib/categories');
@@ -34,6 +36,15 @@ const {
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
+}
+
+function publicNewsReadError(res, error) {
+  const status = isContentDatabaseUnavailable(error) ? 503 : 500;
+  console.error('[public-news] Read failed', { status, code: error?.code || null });
+  return res.status(status).json({
+    ok: false, code: status === 503 ? 'NEWS_UNAVAILABLE' : 'NEWS_QUERY_FAILED',
+    message: status === 503 ? FAITH_UNAVAILABLE_MESSAGE : 'Unable to load news.',
+  });
 }
 
 function isDbReadyOrTest() {
@@ -72,6 +83,7 @@ function parseTruthy(v) {
 }
 
 function isFallbackModeEnabled(req) {
+  if (parseTruthy(req?.query?.strictLocale)) return false;
   return Boolean(
     parseTruthy(req?.query?.fallback)
     || parseTruthy(req?.query?.fallbackToBase)
@@ -622,6 +634,7 @@ const PUBLIC_ARTICLE_DETAIL_SELECT = [
   'translationKey',
   'translationGroupId',
   'sourceNewsId',
+  'sourceArticleId',
   'spotlightEnabled',
   'spotlightPinned',
   'spotlightPriority',
@@ -974,14 +987,14 @@ function _countResultMetadata(result) {
   return { countResult: Number.isFinite(countResult) && countResult >= 0 ? countResult : 0 };
 }
 
-function _pickBestLocalizedGroupedNewsDoc(groupDocs, requestedLang) {
+function _pickBestLocalizedGroupedNewsDoc(groupDocs, requestedLang, { strictLocale = false } = {}) {
   if (!Array.isArray(groupDocs) || !groupDocs.length) return null;
 
   const desired = normalizeLanguage(requestedLang) || normalizeLang(requestedLang);
   let best = null;
   for (const rawDoc of groupDocs) {
     const doc = { ...rawDoc };
-    const localized = _localizePublicNewsDocInPlace(doc, desired || requestedLang, { fallbackToBase: true });
+    const localized = _localizePublicNewsDocInPlace(doc, desired || requestedLang, { fallbackToBase: !strictLocale });
     if (!localized.ok) continue;
 
     const storedLang = normalizeLanguage(doc.language) || normalizeLanguage(doc.lang) || normalizeLanguage(doc.originalLang);
@@ -1031,6 +1044,7 @@ async function _resolveGroupedCategoryNewsItems({
   categorySlug,
   normalizedCategoryKey,
   timingContext,
+  strictLocale = false,
 }) {
   const matchedDocs = await timeAsync('mongo.publicNews.category.matched.find', {
     ...timingContext,
@@ -1075,7 +1089,7 @@ async function _resolveGroupedCategoryNewsItems({
   const includedKeys = Array.from(new Set((matchedDocs || []).map((doc) => getPublicContentGroupKey(doc))));
   const resolvedItems = includedKeys
     .map((key) => {
-      const picked = _pickBestLocalizedGroupedNewsDoc(groupedDocs.get(key) || [], requestedLang);
+      const picked = _pickBestLocalizedGroupedNewsDoc(groupedDocs.get(key) || [], requestedLang, { strictLocale });
       if (!picked) return null;
 
       const out = withCoverImageUrl(picked.doc);
@@ -1426,6 +1440,7 @@ function resolvePublicNewsListRequest(req) {
     type: String(req.query.type || '').trim().toLowerCase(),
     desired: normalizeLang(getRequestedLang(req) || 'gu') || 'gu',
     fallbackEnabled: isFallbackModeEnabled(req),
+    strictLocale: parseTruthy(req.query.strictLocale),
     q: String(req.query.q || '').trim().slice(0, 80),
   };
 }
@@ -1439,7 +1454,7 @@ async function listPublicNews(req, res) {
 
     if (!isDbReady()) {
       if (isFaithCulture) return res.status(503).json({ message: FAITH_UNAVAILABLE_MESSAGE });
-      return res.status(200).json({ items: [], page, limit, total: 0, totalPages: 1 });
+      return res.status(503).json({ ok: false, code: 'NEWS_UNAVAILABLE', message: FAITH_UNAVAILABLE_MESSAGE });
     }
 
     if (req.query.track !== undefined && !track) {
@@ -1519,6 +1534,7 @@ async function listPublicNews(req, res) {
         categorySlug: req.query.category,
         normalizedCategoryKey: category,
         timingContext: { req, res },
+        strictLocale: parseTruthy(req.query.strictLocale),
       });
       items = resolved.items;
       total = resolved.total;
@@ -1562,7 +1578,7 @@ async function listPublicNews(req, res) {
       console.error('[public-news][faith-culture] Feed query failed');
       return res.status(503).json({ message: FAITH_UNAVAILABLE_MESSAGE });
     }
-    return res.status(500).json({ items: [], page: 1, limit: 30, total: 0, totalPages: 1, message: e?.message || String(e) });
+    return publicNewsReadError(res, e);
   }
 }
 
@@ -1584,7 +1600,7 @@ async function getPublicNewsByTranslationKey(req, res) {
     if (!translationKey) return res.status(400).json({ message: 'Missing translationKey' });
 
     if (!isDbReady()) {
-      return res.status(404).json({ message: 'Not found' });
+      return res.status(503).json({ ok: false, code: 'NEWS_UNAVAILABLE', message: FAITH_UNAVAILABLE_MESSAGE });
     }
 
     const requestedLang = getRequestedLang(req);
@@ -1607,7 +1623,7 @@ async function getPublicNewsByTranslationKey(req, res) {
     const out = withCoverImageUrl(doc);
     return res.status(200).json(attachMobileResponseFields(out));
   } catch (e) {
-    return res.status(500).json({ message: e?.message || String(e) });
+    return publicNewsReadError(res, e);
   }
 }
 
@@ -1617,10 +1633,10 @@ async function listPublicNewsTranslations(req, res) {
     res.set('Cache-Control', 'no-store');
 
     const translationGroupId = String(req.params.translationGroupId || '').trim();
-    if (!translationGroupId) return res.status(200).json([]);
+    if (!translationGroupId) return res.status(400).json({ ok: false, message: 'Missing translationGroupId' });
 
     if (!isDbReady()) {
-      return res.status(200).json([]);
+      return res.status(503).json({ ok: false, code: 'NEWS_UNAVAILABLE', message: FAITH_UNAVAILABLE_MESSAGE });
     }
 
     const filter = buildPublicPublishedFilter({});
@@ -1634,7 +1650,7 @@ async function listPublicNewsTranslations(req, res) {
     const items = (itemsRaw || []).map((doc) => attachMobileResponseFields(withCoverImageUrl(doc)));
     return res.status(200).json(items);
   } catch (e) {
-    return res.status(500).json({ message: e?.message || String(e) });
+    return publicNewsReadError(res, e);
   }
 }
 
@@ -1652,7 +1668,7 @@ async function getPublicNewsBySlugOrId(req, res) {
     }
 
     if (!isDbReady()) {
-      return res.status(404).json({ message: 'Not found' });
+      return res.status(503).json({ ok: false, code: 'NEWS_UNAVAILABLE', message: FAITH_UNAVAILABLE_MESSAGE });
     }
 
     const base = buildPublicPublishedFilter({});
@@ -1731,11 +1747,8 @@ async function getPublicNewsBySlugOrId(req, res) {
           if (newsBySource) {
             doc = newsBySource;
             docSource = 'news';
-          } else {
-            doc = _mapPublicArticleToNewsLikeShape(paDoc);
-            docSource = 'publicArticle';
           }
-        } else {
+        } else if (await hasVisibleNewsSource(paDoc)) {
           doc = _mapPublicArticleToNewsLikeShape(paDoc);
           docSource = 'publicArticle';
         }
@@ -1880,7 +1893,7 @@ async function getPublicNewsBySlugOrId(req, res) {
     _attachPublicRouteData(out, desired, { fallbackEnabled, realTranslations });
     return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
   } catch (e) {
-    return res.status(500).json({ message: e?.message || String(e) });
+    return publicNewsReadError(res, e);
   }
 }
 
@@ -1894,7 +1907,7 @@ async function getPublicNewsBySlug(req, res) {
     if (!decodedParam) return res.status(400).json({ message: 'Missing slug' });
 
     if (!isDbReady()) {
-      return res.status(404).json({ message: 'Not found' });
+      return res.status(503).json({ ok: false, code: 'NEWS_UNAVAILABLE', message: FAITH_UNAVAILABLE_MESSAGE });
     }
 
     // Express usually decodes route params. To also try the raw percent-encoded
@@ -2033,7 +2046,7 @@ async function getPublicNewsBySlug(req, res) {
     _attachPublicRouteData(out, desired, { fallbackEnabled, realTranslations });
     return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
   } catch (e) {
-    return res.status(500).json({ message: e?.message || String(e) });
+    return publicNewsReadError(res, e);
   }
 }
 

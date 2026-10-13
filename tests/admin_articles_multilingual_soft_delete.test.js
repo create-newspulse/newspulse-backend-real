@@ -531,23 +531,19 @@ for (const path of ['drafts/:id/delete', 'drafts/:id/restore', 'workflow/:id/loc
 }
 
 test('workflow stage moving published News to draft invalidates LKG', async (t) => {
-  const mongoose = require('mongoose');
-  const previousState = mongoose.connection.readyState;
+  const { installEditorialFixture } = require('./helpers/editorialLifecycleFixture');
+  const state = installEditorialFixture(t);
   const id = '507f1f77bcf86cd79943d705';
-  const doc = toDocument(makeNewsDoc(id, 'en'));
-  const stubs = installRouteStubs(t, [doc]);
-  t.mock.method(News, 'findById', async () => doc);
-  t.mock.method(require('../models/WorkflowEvent'), 'create', async () => ({}));
-  t.mock.method(require('../models/AuditLog'), 'create', async () => ({}));
-  mongoose.connection.readyState = 1;
-  t.after(() => { mongoose.connection.readyState = previousState; });
+  state.rows.News.push(makeNewsDoc(id, 'en'));
+  const invalidations = [];
+  t.after(require('../lib/cache').onArticleCachesInvalidated(event => { invalidations.push(event); }));
   const res = { status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
   await require('../src/controllers/admin/workflow.controller').patchWorkflowStage({
     params: { id }, body: { action: 'set', toStage: 'draft' }, admin: { role: 'founder' }, headers: {},
   }, res);
   assert.equal(res.statusCode, 200);
-  assert.equal(doc.status, 'draft');
-  assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
+  assert.equal(state.rows.News[0].status, 'draft');
+  assert.deepEqual(invalidations, [{ publicVisibilityRemoved: true }]);
 });
 
 test('POST unpublish on legacy single-language article only changes that record', async (t) => {

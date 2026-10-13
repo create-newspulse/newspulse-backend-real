@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const News = require('../models/News');
 const { createJsonCacheMiddleware, buildHomeCacheKey, normalizeCacheLang } = require('../lib/cache');
-const { buildPubliclyVisibleNewsArticleFilter } = require('../services/publicArticleVisibility.service');
+const { buildPubliclyVisibleNewsArticleFilter, buildEditorialEligibilityFilter } = require('../services/publicArticleVisibility.service');
 
 // GET /api/feed/for-you
 router.get('/for-you', createJsonCacheMiddleware({
@@ -26,18 +26,19 @@ router.get('/for-you', createJsonCacheMiddleware({
     const region = String(req.query.region || '').toLowerCase();
 
     const filter = buildPubliclyVisibleNewsArticleFilter();
+    filter.$and.push(buildEditorialEligibilityFilter());
     // Only add filters if fields exist in schema
     if (News.schema.paths.language && language) filter.$and = (filter.$and || []).concat([{ $or: [{ language }, { lang: language }] }]);
     // Region not present in schema currently; ignore for now
 
-    const items = await News.find(filter).sort({ createdAt: -1, date: -1 }).limit(limit).lean();
+    const items = await News.find(filter).sort({ publishedAt: -1, _id: -1 }).limit(limit).lean();
     const mapped = items.map(doc => ({
       _id: String(doc._id),
       title: doc.title,
       description: doc.description,
       imageUrl: doc.imageURL || doc.imageUrl || null,
       category: doc.category || null,
-      publishedAt: doc.date || doc.createdAt || null,
+      publishedAt: doc.publishedAt || null,
     }));
 
     return res.json({ ok: true, items: mapped, total: mapped.length });

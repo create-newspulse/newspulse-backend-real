@@ -2,7 +2,9 @@ const express = require('express');
 const mongoose = require('mongoose');
 const News = require('../../models/News');
 const PushHistory = require('../../models/PushHistory');
-const { invalidateArticleCaches } = require('../../lib/cache');
+const { withActiveArticleSource, serializeNewsArticle, articleMutationMetadata } = require('../../services/articleLifecycle.service');
+const { syncTranslationGroupMetadata } = require('../../services/translationGroupSync.service');
+const { invalidateArticleContent } = require('../../services/publicContentInvalidation.service');
 const { requireAdminAuth, requireFounderAuth } = require('../../middleware/adminAuth');
 
 const router = express.Router();
@@ -44,6 +46,28 @@ function getActor(req) {
     if (req.admin && req.admin.id && mongoose.isValidObjectId(req.admin.id)) byUserId = new mongoose.Types.ObjectId(req.admin.id);
   } catch (_) {}
   return { byRole, byUserId };
+}
+
+async function updatePublicVisibility(doc, req, patch, action, note = null) {
+  const now = new Date();
+  const actor = getActor(req);
+  const result = await withActiveArticleSource(doc._id, async (current, session) => {
+    const stage = String(current.workflowStage || 'DRAFT');
+    const edited = await News.findByIdAndUpdate(current._id, {
+      $set: { ...patch, workflowUpdatedAt: now },
+      $push: { workflowHistory: {
+        at: now, byUserId: actor.byUserId, byRole: actor.byRole,
+        action, fromStage: stage, toStage: stage, note: note ? String(note) : null,
+      } },
+    }, { new: true, runValidators: true, session });
+    if (!edited) throw Object.assign(new Error('Article changed. Reload and retry.'), { statusCode: 409 });
+    return syncTranslationGroupMetadata(edited, { previousDoc: current, now, session, invalidate: false });
+  });
+  result.revalidation = await invalidateArticleContent(result.docs, {
+    previousDocs: result.previousDocs, reason: `workflow_${action.toLowerCase()}`, publicVisibilityRemoved: true,
+  });
+  result.doc = serializeNewsArticle(result.docs.find(member => String(member._id) === String(doc._id)));
+  return result;
 }
 
 function canOverrideLocks(req) {
@@ -295,29 +319,11 @@ router.post('/:articleId([0-9a-fA-F]{24})/lock', requireFounderAuth, async (req,
     const doc = await News.findById(articleId);
     if (!doc) return bad(res, 'Article not found', 404);
 
-    const now = new Date();
-    doc.locked = true;
-    doc.workflowUpdatedAt = now;
-
-    const actor = getActor(req);
-    doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
-    doc.workflowHistory.push({
-      at: now,
-      byUserId: actor.byUserId,
-      byRole: actor.byRole,
-      action: 'LOCK',
-      fromStage: String(doc.workflowStage || 'DRAFT'),
-      toStage: String(doc.workflowStage || 'DRAFT'),
-      note: null,
-    });
-
-    await doc.save();
-    if (String(doc.status || '').toLowerCase() === 'published') await invalidateArticleCaches({ publicVisibilityRemoved: true });
-    const out = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    return ok(res, 'Locked', { article: withCover(out) });
+    const result = await updatePublicVisibility(doc, req, { locked: true }, 'LOCK');
+    return ok(res, 'Locked', { article: withCover(result.doc), ...articleMutationMetadata(result) });
   } catch (e) {
-    console.error('[workflow.lock] error', e?.message || e);
-    return bad(res, 'Failed to lock article', 500);
+    console.error('[workflow.lock] error', { code: e?.code || null });
+    return bad(res, e.statusCode || e.status ? e.message : 'Failed to lock article', e.statusCode || e.status || 500);
   }
 });
 
@@ -329,29 +335,11 @@ router.post('/:articleId([0-9a-fA-F]{24})/unlock', requireFounderAuth, async (re
     const doc = await News.findById(articleId);
     if (!doc) return bad(res, 'Article not found', 404);
 
-    const now = new Date();
-    doc.locked = false;
-    doc.workflowUpdatedAt = now;
-
-    const actor = getActor(req);
-    doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
-    doc.workflowHistory.push({
-      at: now,
-      byUserId: actor.byUserId,
-      byRole: actor.byRole,
-      action: 'UNLOCK',
-      fromStage: String(doc.workflowStage || 'DRAFT'),
-      toStage: String(doc.workflowStage || 'DRAFT'),
-      note: null,
-    });
-
-    await doc.save();
-    if (String(doc.status || '').toLowerCase() === 'published') invalidateArticleCaches().catch(() => {});
-    const out = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    return ok(res, 'Unlocked', { article: withCover(out) });
+    const result = await updatePublicVisibility(doc, req, { locked: false }, 'UNLOCK');
+    return ok(res, 'Unlocked', { article: withCover(result.doc), ...articleMutationMetadata(result) });
   } catch (e) {
-    console.error('[workflow.unlock] error', e?.message || e);
-    return bad(res, 'Failed to unlock article', 500);
+    console.error('[workflow.unlock] error', { code: e?.code || null });
+    return bad(res, e.statusCode || e.status ? e.message : 'Failed to unlock article', e.statusCode || e.status || 500);
   }
 });
 
@@ -374,32 +362,11 @@ router.post('/:articleId([0-9a-fA-F]{24})/embargo', requireAdminAuth, async (req
     const doc = await News.findById(articleId);
     if (!doc) return bad(res, 'Article not found', 404);
 
-    const now = new Date();
-    doc.embargoUntil = embargoUntil;
-    doc.workflowUpdatedAt = now;
-
-    const actor = getActor(req);
-    doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
-    doc.workflowHistory.push({
-      at: now,
-      byUserId: actor.byUserId,
-      byRole: actor.byRole,
-      action: 'EMBARGO_SET',
-      fromStage: String(doc.workflowStage || 'DRAFT'),
-      toStage: String(doc.workflowStage || 'DRAFT'),
-      note: note ? String(note) : null,
-    });
-
-    await doc.save();
-    if (String(doc.status || '').toLowerCase() === 'published') {
-      if (embargoUntil > now) await invalidateArticleCaches({ publicVisibilityRemoved: true });
-      else invalidateArticleCaches().catch(() => {});
-    }
-    const out = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    return ok(res, 'Embargo updated', { article: withCover(out) });
+    const result = await updatePublicVisibility(doc, req, { embargoUntil }, 'EMBARGO_SET', note);
+    return ok(res, 'Embargo updated', { article: withCover(result.doc), ...articleMutationMetadata(result) });
   } catch (e) {
-    console.error('[workflow.embargo] error', e?.message || e);
-    return bad(res, 'Failed to set embargo', 500);
+    console.error('[workflow.embargo] error', { code: e?.code || null });
+    return bad(res, e.statusCode || e.status ? e.message : 'Failed to set embargo', e.statusCode || e.status || 500);
   }
 });
 

@@ -1,8 +1,57 @@
 const mongoose = require('mongoose');
-const { prepareAuthorBylineForPublication } = require('./authorByline.service');
-
 const { publishCanonicalArticle } = require('./articlePublishing.service');
-const { isPulseDialogueArticle } = require('./pulseDialogue.service');
+const { withActiveArticleSource } = require('./articleLifecycle.service');
+const { syncTranslationGroupMetadata } = require('./translationGroupSync.service');
+const { invalidateArticleContent } = require('./publicContentInvalidation.service');
+
+async function refreshDuePublicArticleVisibility(options = {}) {
+  const logger = options.logger || console;
+  const now = options.now instanceof Date ? options.now : new Date();
+  const stats = { processed: 0, refreshed: 0, failed: 0, skipped: 0 };
+  if (mongoose.connection.readyState !== 1) return { ...stats, unavailable: true };
+  const News = require('../models/News');
+  const candidates = await News.find({
+    status: 'published',
+    $or: [
+      { publicVisibilityRefreshAt: { $ne: null, $lte: now } },
+      {
+        publicVisibilityRefreshAt: { $exists: false },
+        $or: ['embargoUntil', 'workflow.embargoUntil', 'publishAt', 'scheduledAt']
+          .map(field => ({ [field]: { $ne: null, $lte: now } })),
+      },
+    ],
+  }).sort({ publicVisibilityRefreshAt: 1, _id: 1 }).limit(50)
+    .select('_id translationGroupId translationKey sourceArticleId').lean();
+  const seen = new Set();
+  for (const candidate of candidates) {
+    stats.processed += 1;
+    const key = String(candidate.translationGroupId || candidate.translationKey || candidate.sourceArticleId || candidate._id);
+    if (seen.has(key)) { stats.skipped += 1; continue; }
+    seen.add(key);
+    try {
+      const result = await withActiveArticleSource(candidate._id, async (current, session) => {
+        if (current.status !== 'published') return null;
+        if (Object.hasOwn(current, 'publicVisibilityRefreshAt')) {
+          if (!current.publicVisibilityRefreshAt || new Date(current.publicVisibilityRefreshAt) > now) return null;
+        } else if (![current.embargoUntil, current.workflow?.embargoUntil, current.publishAt, current.scheduledAt]
+          .some(value => value != null && new Date(value) <= now)) return null;
+        return syncTranslationGroupMetadata(current, { session, now, invalidate: false });
+      });
+      if (!result) { stats.skipped += 1; continue; }
+      await invalidateArticleContent(result.docs, {
+        previousDocs: result.previousDocs, reason: 'article_visibility_refresh',
+        publicVisibilityRemoved: true, logger,
+      });
+      stats.refreshed += 1;
+    } catch (error) {
+      stats.failed += 1;
+      logger.warn?.('[scheduler] visibility refresh failed', {
+        articleId: String(candidate._id), code: error?.code || null,
+      });
+    }
+  }
+  return stats;
+}
 
 async function publishDueScheduledArticles(options = {}) {
   const logger = options.logger || console;
@@ -14,7 +63,6 @@ async function publishDueScheduledArticles(options = {}) {
   }
 
   const News = options.News || require('../models/News');
-  const PushHistory = options.PushHistory || require('../models/PushHistory');
   const publishArticle = options.publishCanonicalArticle || publishCanonicalArticle;
 
   const candidatesQuery = News.find({
@@ -29,80 +77,21 @@ async function publishDueScheduledArticles(options = {}) {
 
   const candidates = typeof candidatesQuery.then === 'function' ? await candidatesQuery : candidatesQuery;
   const stats = { processed: 0, published: 0, failed: 0, skipped: 0 };
-  const publishedPulseGroups = new Set();
-  const authorSnapshots = new Map();
+  const publishedGroups = new Set();
 
   for (const doc of candidates || []) {
     stats.processed += 1;
     try {
-      if (isPulseDialogueArticle(doc)) {
-        const groupKey = String(doc.translationGroupId || doc.translationKey || doc._id || '').trim();
-        if (groupKey && publishedPulseGroups.has(groupKey)) {
-          stats.skipped += 1;
-          continue;
-        }
-        await publishArticle(doc, {
-          actor: { byUserId: null, byRole: 'SYSTEM' },
-          reason: 'Auto-published by scheduler',
-          source: 'scheduler',
-          now,
-          logger,
-        });
-        if (groupKey) publishedPulseGroups.add(groupKey);
-        stats.published += 1;
+      const groupKey = String(doc.translationGroupId || doc.translationKey || doc.sourceArticleId || doc._id || '').trim();
+      if (publishedGroups.has(groupKey)) {
+        stats.skipped += 1;
         continue;
       }
-
-      const bylineGroup = String(doc.translationGroupId || doc.translationKey || doc._id);
-      let bylineSource = doc;
-      if (authorSnapshots.has(bylineGroup)) {
-        doc.authorByline = authorSnapshots.get(bylineGroup);
-      } else {
-        if (doc.authorByline?.enabled && doc.sourceArticleId && String(doc.sourceArticleId) !== String(doc._id)) {
-          bylineSource = await News.findById(doc.sourceArticleId);
-          if (!bylineSource) throw new Error('Author byline source article not found');
-        }
-        await prepareAuthorBylineForPublication(bylineSource, now);
-        if (bylineSource !== doc) {
-          doc.authorByline = bylineSource.authorByline || { enabled: false };
-        }
-      }
-      const fromStage = String(doc.workflowStage || 'SCHEDULED');
-      doc.status = 'published';
-      doc.publishedAt = now;
-      doc.publishAt = null;
-      doc.workflowStage = 'PUBLISHED';
-      doc.workflowUpdatedAt = now;
-      doc.workflowHistory = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
-      doc.workflowHistory.push({
-        at: now,
-        byUserId: null,
-        byRole: 'SYSTEM',
-        action: 'PUBLISH',
-        fromStage,
-        toStage: 'PUBLISHED',
-        note: 'Auto-published by scheduler',
+      await publishArticle(doc, {
+        actor: { byUserId: null, byRole: 'SYSTEM' },
+        reason: 'Auto-published by scheduler', source: 'scheduler', now, logger,
       });
-      await doc.save();
-      if (bylineSource !== doc) {
-        await News.updateOne({ _id: bylineSource._id }, { $set: { authorByline: doc.authorByline } });
-      }
-      if (doc.authorByline !== undefined) authorSnapshots.set(bylineGroup, doc.authorByline);
-
-      try {
-        await PushHistory.create({
-          articleId: doc._id,
-          slug: doc.slug,
-          title: doc.title,
-          channel: 'SITE',
-          at: now,
-          byUserId: null,
-          status: 'SUCCESS',
-          meta: { source: 'scheduler' },
-        });
-      } catch (e) {
-        logger.warn?.('[scheduler][pushHistory] create failed', e?.message || e);
-      }
+      publishedGroups.add(groupKey);
       stats.published += 1;
     } catch (e) {
       stats.failed += 1;
@@ -115,4 +104,5 @@ async function publishDueScheduledArticles(options = {}) {
 
 module.exports = {
   publishDueScheduledArticles,
+  refreshDuePublicArticleVisibility,
 };

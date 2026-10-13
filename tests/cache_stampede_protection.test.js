@@ -109,11 +109,13 @@ function capturePublicNewsCacheKey(t) {
   const originalFactory = loaded.cache.createJsonCacheMiddleware;
   let buildKey;
   let buildLastKnownGoodKey;
+  let onRebuildUnavailable;
   let router;
   loaded.cache.createJsonCacheMiddleware = (options) => {
     assert.equal(options.publicNewsDiagnostics, true);
     buildKey = options.buildKey;
     buildLastKnownGoodKey = options.buildLastKnownGoodKey;
+    onRebuildUnavailable = options.onRebuildUnavailable;
     return originalFactory(options);
   };
   try {
@@ -134,6 +136,7 @@ function capturePublicNewsCacheKey(t) {
   const key = (query, headers = {}, requestState = {}) => buildKey({ ...requestState, query, headers });
   key.lastKnownGood = (query) => buildLastKnownGoodKey({ query, headers: {} }, key(query));
   key.router = router;
+  key.onRebuildUnavailable = onRebuildUnavailable;
   return key;
 }
 
@@ -388,16 +391,32 @@ test('equivalent effective list requests produce identical keys', (t) => {
   assert.equal(key({ category: 'national', q: 'a'.repeat(90) }), key({ category: 'national', q: 'a'.repeat(80) }));
 });
 
-test('keys exclude ignored options but separate active latest fallback aliases', (t) => {
+test('keys exclude ignored options but separate strict locale and active fallback aliases', (t) => {
   const key = capturePublicNewsCacheKey(t);
   const category = { category: 'pulse-dialogue', lang: 'en' };
-  assert.equal(key(category), key({ ...category, strictLocale: '1', search: 'ignored', spotlight: '1', fallback: 'true', type: 'article' }));
+  assert.equal(key(category), key({ ...category, search: 'ignored', spotlight: '1', fallback: 'true', type: 'article' }));
+  assert.notEqual(key(category), key({ ...category, strictLocale: '1' }));
+  assert.equal(key({ ...category, strictLocale: 'true' }), key({ ...category, strictLocale: '1', fallback: 'true' }));
   assert.equal(key({ lang: 'en' }), key({ lang: 'en', fallback: 'false', founderOnly: 'no' }));
   assert.notEqual(key({ lang: 'en' }), key({ lang: 'en', fallback: 'true' }));
   assert.equal(key({ lang: 'en', fallback: 'yes' }), key({ language: 'English', allowFallback: '1' }));
   assert.equal(key({ lang: 'en', fallback: '0', fallbackToBase: 'y' }), key({ lang: 'en', fallback: '1' }));
 });
 
+test('busy public feed responses are explicit 503 failures without fabricated empty counts', (t) => {
+  const key = capturePublicNewsCacheKey(t);
+  for (const category of ['national', 'faith-culture']) {
+    const response = {
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; return this; },
+    };
+    key.onRebuildUnavailable({ query: { category } }, response);
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.body.items, undefined);
+    assert.equal(response.body.total, undefined);
+    assert.ok(response.body.message);
+  }
+});
 test('invalid inputs cannot reuse successful cached responses and filtered latest stays uncached', (t) => {
   const key = capturePublicNewsCacheKey(t);
   for (const query of [

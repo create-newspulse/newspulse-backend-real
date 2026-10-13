@@ -4,9 +4,12 @@ const { prepareAuthorBylineForPublication } = require('./authorByline.service');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
 const PushHistory = require('../models/PushHistory');
-const { canonicalizeSlug, getSlugCandidates, slugifyUnicode } = require('../lib/slug');
-const { invalidateArticleCaches } = require('../lib/cache');
-const { syncPublicArticleFromNews } = require('./syncPublicArticleFromNews.service');
+const { slugifyUnicode } = require('../lib/slug');
+const { syncPublicArticleFromNews, sponsoredArticleFields, syncNewsTranslationBuckets } = require('./syncPublicArticleFromNews.service');
+const { isPubliclyVisibleNewsArticle } = require('./publicArticleVisibility.service');
+const { assertArticleSlugsUnique, buildStoryIdentityFilter } = require('./articleSlugUniqueness.service');
+const { withActiveArticleSource, buildPublicCopyFilter, afterArticleCommit } = require('./articleLifecycle.service');
+const { invalidateArticleContent } = require('./publicContentInvalidation.service');
 const { generateArticleTranslations } = require('./articleTranslationGeneration.service');
 const {
   normalizeTranslationGroupKey,
@@ -81,7 +84,7 @@ function isSourceTranslationDoc(docLike, fallbackId) {
 
 function isActiveTranslationArticle(docLike) {
   const status = String(docLike?.status || '').trim().toLowerCase();
-  if (status === 'archived' || status === 'deleted') return false;
+  if (status === 'deleted') return false;
   return !docLike?.deletedAt;
 }
 
@@ -119,7 +122,7 @@ function ensureNewsSlugs(docLike) {
   const slugs = { ...(docLike.slugs || {}) };
   for (const lang of REQUIRED_LANGUAGES) {
     const title = getTitleForLangFromDocLike(docLike, lang);
-    if (title && title.trim()) slugs[lang] = slugifyUnicode(title);
+    if (!slugs[lang] && title && title.trim()) slugs[lang] = slugifyUnicode(title);
   }
 
   const baseLang = normalizeLanguage(docLike?.lang) || normalizeLanguage(docLike?.language) || 'en';
@@ -137,25 +140,6 @@ function ensureTranslationGroupIdForDoc(doc) {
   return groupKey;
 }
 
-async function assertSlugUnique(slug, excludeId) {
-  const normalized = canonicalizeSlug(slug);
-  if (!normalized) return;
-  if (String(process.env.NODE_ENV || '').toLowerCase() === 'test'
-    && (!mongoose.connection || mongoose.connection.readyState !== 1)) {
-    return;
-  }
-  const candidates = getSlugCandidates(normalized);
-  const slugFilter = candidates.length === 1 ? candidates[0] : { $in: candidates };
-  const query = { slug: slugFilter };
-  if (excludeId) query._id = { $ne: excludeId };
-  const existing = await News.findOne(query).select('_id slug').lean();
-  if (existing) {
-    const error = new Error('Slug already exists');
-    error.statusCode = 409;
-    throw error;
-  }
-}
-
 function snapshotPublishState(doc) {
   return {
     status: doc.status,
@@ -168,19 +152,6 @@ function snapshotPublishState(doc) {
     workflowHistory: Array.isArray(doc.workflowHistory) ? [...doc.workflowHistory] : doc.workflowHistory,
     authorByline: doc.authorByline,
   };
-}
-
-function restorePublishState(doc, state) {
-  if (!doc || !state) return;
-  doc.status = state.status;
-  doc.deletedAt = state.deletedAt;
-  doc.publishedAt = state.publishedAt;
-  doc.publishAt = state.publishAt;
-  doc.scheduledAt = state.scheduledAt;
-  doc.workflowStage = state.workflowStage;
-  doc.workflowUpdatedAt = state.workflowUpdatedAt;
-  doc.workflowHistory = state.workflowHistory;
-  doc.authorByline = state.authorByline;
 }
 
 function buildTranslationGroupPublishReadiness(groupDocs) {
@@ -224,9 +195,8 @@ function buildTranslationGroupPublishReadiness(groupDocs) {
   };
 }
 
-async function findTranslationGroupDocs(groupKey) {
-  if (!groupKey) return [];
-  return News.find({ $or: [{ translationGroupId: groupKey }, { translationKey: groupKey }] });
+async function findTranslationGroupDocs(sourceDoc, session) {
+  return News.find(buildStoryIdentityFilter(sourceDoc), null, { session });
 }
 
 function buildManualTranslationSibling(sourceDoc, targetLang, groupKey, actor) {
@@ -264,6 +234,7 @@ function buildManualTranslationSibling(sourceDoc, targetLang, groupKey, actor) {
     embeds: Array.isArray(sourceObject.embeds) ? sourceObject.embeds : [],
     gallery: Array.isArray(sourceObject.gallery) ? sourceObject.gallery : [],
     seo: sourceObject.seo,
+    ...sponsoredArticleFields(sourceObject),
     pulseDialogue,
     ...(sourceObject.authorByline !== undefined ? { authorByline: sourceObject.authorByline } : {}),
     slug: slugs[targetLang],
@@ -301,40 +272,52 @@ function buildManualTranslationSibling(sourceDoc, targetLang, groupKey, actor) {
   };
 }
 
-async function createSiblingsFromCachedTranslations(sourceDoc, missingLanguages, groupKey, actor) {
+async function createSiblingsFromCachedTranslations(sourceDoc, missingLanguages, groupKey, actor, options) {
   const created = [];
   for (const lang of missingLanguages) {
-    const payload = buildManualTranslationSibling(sourceDoc, lang, groupKey, actor);
-    if (!payload) continue;
-    const existing = await News.findOne({
-      $and: [
-        { $or: [{ translationGroupId: groupKey }, { translationKey: groupKey }] },
-        { $or: [{ language: lang }, { lang }] },
-        { status: { $ne: 'deleted' } },
-        { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
-      ],
-    }).select('_id').lean();
-    if (existing) continue;
-    const doc = await News.create(payload);
-    created.push(doc);
+    if (!buildManualTranslationSibling(sourceDoc, lang, groupKey, actor)) continue;
+    const doc = await withActiveArticleSource(sourceDoc._id, async (current, session) => {
+      if (String(current.translationGroupId || current.translationKey) !== groupKey) {
+        throw Object.assign(new Error('Translation group changed. Reload and retry.'), { statusCode: 409 });
+      }
+      const payload = buildManualTranslationSibling(current, lang, groupKey, actor);
+      if (!payload) return null;
+      const existing = await News.findOne({
+        $and: [
+          { $or: [{ translationGroupId: groupKey }, { translationKey: groupKey }] },
+          { $or: [{ language: lang }, { lang }] },
+        ],
+      }, null, { session }).select('_id status deletedAt').lean();
+      if (existing?.status === 'deleted' || existing?.deletedAt) {
+        throw Object.assign(new Error('Restore the translation group before publishing.'), { statusCode: 409 });
+      }
+      if (existing) return null;
+      await assertArticleSlugsUnique(payload, { session });
+      return (await News.create([payload], { session }))[0];
+    }, options);
+    if (doc) created.push(doc);
   }
   return created;
 }
 
 async function ensureRequiredTranslations(sourceDoc, groupKey, actor, options = {}) {
-  let groupDocs = await findTranslationGroupDocs(groupKey);
+  let groupDocs = await findTranslationGroupDocs(sourceDoc, options.session);
+  if (groupDocs.some(doc => doc.status === 'deleted' || doc.deletedAt)) {
+    throw Object.assign(new Error('Restore the complete translation group before publishing.'), { statusCode: 409 });
+  }
   let readiness = buildTranslationGroupPublishReadiness(groupDocs);
   const generated = { created: {}, updated: {}, skipped: {}, failed: {} };
 
   if (readiness.missingLanguages.length) {
-    await createSiblingsFromCachedTranslations(sourceDoc, readiness.missingLanguages, groupKey, actor);
-    groupDocs = await findTranslationGroupDocs(groupKey);
+    await createSiblingsFromCachedTranslations(sourceDoc, readiness.missingLanguages, groupKey, actor, options);
+    groupDocs = await findTranslationGroupDocs(sourceDoc, options.session);
     readiness = buildTranslationGroupPublishReadiness(groupDocs);
   }
 
   if (readiness.missingLanguages.length) {
-    await saveDoc(sourceDoc, { validateModifiedOnly: true });
+    await saveDoc(sourceDoc, { validateModifiedOnly: true, session: options.session });
     const translationResult = await generateArticleTranslations(sourceDoc, {
+      ...options,
       req: options.req,
       targetLanguages: REQUIRED_LANGUAGES,
       overwrite: false,
@@ -352,7 +335,7 @@ async function ensureRequiredTranslations(sourceDoc, groupKey, actor, options = 
       error.details = { translationResult };
       throw error;
     }
-    groupDocs = await findTranslationGroupDocs(groupKey);
+    groupDocs = await findTranslationGroupDocs(sourceDoc, options.session);
     readiness = buildTranslationGroupPublishReadiness(groupDocs);
   }
 
@@ -372,82 +355,9 @@ async function ensureRequiredTranslations(sourceDoc, groupKey, actor, options = 
   return { readiness, generated };
 }
 
-async function syncPublicFallbacks(doc, now, logger = console) {
-  try {
-    if (String(process.env.NODE_ENV || '').toLowerCase() === 'test'
-      && (!mongoose.connection || !mongoose.connection.db)) {
-      return true;
-    }
-    const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
-    const slugs = new Set();
-    if (doc.slug) slugs.add(String(doc.slug).trim());
-    const slugsObj = doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
-    for (const lang of REQUIRED_LANGUAGES) {
-      const value = slugsObj && slugsObj[lang] ? String(slugsObj[lang]).trim() : '';
-      if (value) slugs.add(value);
-    }
-    const slugList = Array.from(slugs).filter(Boolean);
-    const or = [];
-    if (slugList.length) {
-      or.push({ slug: { $in: slugList } });
-      or.push({ 'slugs.en': { $in: slugList } });
-      or.push({ 'slugs.hi': { $in: slugList } });
-      or.push({ 'slugs.gu': { $in: slugList } });
-    }
-    if (groupKey) {
-      or.push({ translationKey: groupKey });
-      or.push({ translationGroupId: groupKey });
-    }
-    if (!or.length) return true;
-
-    const geoState = doc?.geo?.state ?? doc?.location?.stateSlug;
-    const geoDistrict = doc?.geo?.district ?? doc?.location?.districtSlug;
-    const geoCity = doc?.geo?.city ?? doc?.location?.citySlug;
-    const metadataResult = await PublicArticle.updateMany(
-      { $or: or },
-      {
-        $set: {
-          status: 'published',
-          deletedAt: null,
-          category: doc.category,
-          ...(geoState ? { 'geo.state': geoState } : {}),
-          ...(geoDistrict ? { 'geo.district': geoDistrict } : {}),
-          ...(geoCity ? { 'geo.city': geoCity } : {}),
-        },
-      },
-      { runValidators: false }
-    );
-    const timestampResult = await PublicArticle.updateMany(
-      { $or: or, publishedAt: null },
-      { $set: { publishedAt: doc.publishedAt || now } },
-      { runValidators: false }
-    );
-    if (metadataResult?.acknowledged === false || timestampResult?.acknowledged === false) {
-      throw new Error('Public article fallback synchronization was not acknowledged');
-    }
-    return true;
-  } catch (_) {
-    logger.warn?.('[articles.publish] public legacy publish fallback failed', {
-      code: 'PUBLIC_ARTICLE_SYNC_FAILED',
-      sourceNewsId: doc?._id ? String(doc._id) : null,
-    });
-    return false;
-  }
-}
-
 async function saveDoc(doc, options) {
   if (typeof doc.save === 'function') return doc.save(options);
   return doc;
-}
-
-async function rollbackPublishedDocs(previous) {
-  for (const item of previous) restorePublishState(item.doc, item.state);
-  for (const item of previous) {
-    try {
-      await saveDoc(item.doc);
-      await syncPublicArticleFromNews(item.doc).catch(() => null);
-    } catch (_) {}
-  }
 }
 
 async function publishCanonicalArticle(articleIdOrDoc, options = {}) {
@@ -455,9 +365,9 @@ async function publishCanonicalArticle(articleIdOrDoc, options = {}) {
   const actor = options.actor || getActor(req);
   const logger = options.logger || console;
   const requestedId = typeof articleIdOrDoc === 'object' && articleIdOrDoc !== null ? articleIdOrDoc._id : articleIdOrDoc;
-  const sourceDoc = typeof articleIdOrDoc === 'object' && articleIdOrDoc !== null
-    ? articleIdOrDoc
-    : await News.findById(articleIdOrDoc);
+  const sourceDoc = options.session || typeof articleIdOrDoc !== 'object'
+    ? await News.findById(requestedId, null, { session: options.session })
+    : articleIdOrDoc;
 
   if (!sourceDoc) {
     const error = new Error('Article not found');
@@ -479,7 +389,9 @@ async function publishCanonicalArticle(articleIdOrDoc, options = {}) {
     error.details = { missingFields: missing };
     throw error;
   }
-  await assertSlugUnique(sourceDoc.slug, sourceDoc._id);
+  if (sourceDoc.status === 'deleted' || sourceDoc.deletedAt) {
+    throw Object.assign(new Error('Restore the deleted story before publishing.'), { statusCode: 409 });
+  }
 
   const groupKey = ensureTranslationGroupIdForDoc(sourceDoc);
   const currentBase = normalizeLanguage(sourceDoc.originalLang) || normalizeLanguage(sourceDoc.lang) || normalizeLanguage(sourceDoc.language) || 'en';
@@ -490,18 +402,31 @@ async function publishCanonicalArticle(articleIdOrDoc, options = {}) {
   sourceDoc.language = resolvedBase;
   ensureNewsSlugs(sourceDoc);
   if (isSourceTranslationDoc(sourceDoc)) Object.assign(sourceDoc, prepareSourceSyncMetadata(sourceDoc, { now: new Date() }));
+  await assertArticleSlugsUnique(sourceDoc, { session: options.session });
+  await saveDoc(sourceDoc, { validateModifiedOnly: true, session: options.session });
 
-  const { readiness, generated } = await ensureRequiredTranslations(sourceDoc, groupKey, actor, { req });
+  const { generated } = await ensureRequiredTranslations(sourceDoc, groupKey, actor, options);
   const now = options.now instanceof Date ? options.now : new Date();
-  const previous = readiness.readyDocs.map((doc) => ({ doc, state: snapshotPublishState(doc) }));
-  const changedDocs = [];
-  const failedPublicArticleIds = [];
 
-  try {
+  const { readiness, previous, changedDocs } = await withActiveArticleSource(sourceDoc._id, async (current, session) => {
+    if (String(current.translationGroupId || current.translationKey) !== groupKey) {
+      throw Object.assign(new Error('Translation group changed. Reload and retry.'), { statusCode: 409 });
+    }
+    const groupDocs = await findTranslationGroupDocs(current, session);
+    const readiness = buildTranslationGroupPublishReadiness(groupDocs);
+    if (groupDocs.some(doc => doc.status === 'deleted' || doc.deletedAt) || !readiness.ok) {
+      throw Object.assign(new Error('The translation group changed. Review every edition before publishing.'), { statusCode: 409 });
+    }
+    const previous = readiness.readyDocs.map(doc => ({ doc, state: snapshotPublishState(doc) }));
+    const changedDocs = [];
     const bylineSource = readiness.readyDocs.find((doc) => isSourceTranslationDoc(doc)) || sourceDoc;
+    const publicationDate = bylineSource.publishedAt
+      || readiness.readyDocs.map(doc => doc.publishedAt).filter(Boolean).sort((a, b) => new Date(a) - new Date(b))[0]
+      || now;
     await prepareAuthorBylineForPublication(bylineSource, now);
     for (const doc of readiness.readyDocs) {
       if (bylineSource.authorByline !== undefined) doc.authorByline = bylineSource.authorByline;
+      Object.assign(doc, sponsoredArticleFields(bylineSource));
       const lang = getStoredLanguageForArticle(doc);
       const wasPublished = String(doc.status || '').toLowerCase() === 'published' && doc.publishedAt;
       if (lang) {
@@ -511,7 +436,7 @@ async function publishCanonicalArticle(articleIdOrDoc, options = {}) {
       }
       doc.status = 'published';
       doc.deletedAt = null;
-      doc.publishedAt = wasPublished ? doc.publishedAt : now;
+      doc.publishedAt = doc.publishedAt || publicationDate;
       doc.publishAt = null;
       doc.scheduledAt = null;
       doc.workflowStage = 'PUBLISHED';
@@ -530,31 +455,51 @@ async function publishCanonicalArticle(articleIdOrDoc, options = {}) {
         });
       }
       ensureNewsSlugs(doc);
+      await assertArticleSlugsUnique(doc, { session });
       await preparePulseDialogueForPublication(doc);
       if (isSourceTranslationDoc(doc)) Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
-      await saveDoc(doc);
+      await saveDoc(doc, { session });
     }
 
-    for (const doc of readiness.readyDocs) {
-      let publicArticle = null;
-      try {
-        publicArticle = await syncPublicArticleFromNews(doc, { logger });
-      } catch (_) {
-        logger.warn?.('[articles.publish] public synchronization failed', {
-          code: 'PUBLIC_ARTICLE_SYNC_FAILED',
-          sourceNewsId: String(doc._id),
-        });
-      }
-      const legacySynced = await syncPublicFallbacks(doc, now, logger);
-      if (!publicArticle?._id || !legacySynced) failedPublicArticleIds.push(String(doc._id));
+    await syncNewsTranslationBuckets(readiness.readyDocs, { session, now });
+    // Only synchronized native copies become public; stale legacy duplicates stay hidden.
+    try {
+      const hidden = await PublicArticle.updateMany(
+        buildPublicCopyFilter(groupDocs), { $set: { status: 'draft' } }, { session }
+      );
+      if (!hidden?.acknowledged) throw new Error('Public copy update was not acknowledged');
+    } catch (error) {
+      logger.warn?.('[articles.publish] public copy visibility update failed', { articleId: String(sourceDoc._id) });
+      throw Object.assign(new Error('Public article synchronization failed. Retry the operation.'), {
+        status: 503, statusCode: 503, code: 'PUBLIC_ARTICLE_SYNC_FAILED', cause: error,
+      });
     }
-  } catch (error) {
-    await rollbackPublishedDocs(previous);
-    throw error;
+    const ordered = [...readiness.readyDocs].sort((a, b) =>
+      Number(isPubliclyVisibleNewsArticle(a, { now })) - Number(isPubliclyVisibleNewsArticle(b, { now })));
+    for (const doc of ordered) {
+      await syncPublicArticleFromNews(doc, { logger, groupDocs: readiness.readyDocs, throwOnError: true, session, now });
+    }
+    return { readiness, previous, changedDocs };
+  }, options);
+  for (const doc of readiness.readyDocs) {
+    if (typeof doc.$session === 'function') doc.$session(null);
   }
 
   const sourcePublishedDoc = readiness.readyDocs.find((doc) => String(doc._id || '') === String(sourceDoc._id || '')) || sourceDoc;
-  if (changedDocs.length) {
+  const result = {
+    ok: true,
+    statusCode: 200,
+    message: options.groupPublish ? 'Translation group published' : 'Article published',
+    translationGroupId: groupKey,
+    publishedLanguages: readiness.readyDocs.map((doc) => getStoredLanguageForArticle(doc)).filter(Boolean),
+    articles: readiness.readyDocs,
+    article: sourcePublishedDoc,
+    generated,
+    changed: changedDocs.length > 0,
+    publicSync: { ok: true, failedArticleIds: [] },
+  };
+  await afterArticleCommit(options, result, async () => {
+    if (changedDocs.length) {
     try {
       await PushHistory.create({
         articleId: sourcePublishedDoc._id,
@@ -578,22 +523,12 @@ async function publishCanonicalArticle(articleIdOrDoc, options = {}) {
     } catch (error) {
       logger.warn?.('[pushHistory] create failed', error?.message || error);
     }
-  }
-
-  invalidateArticleCaches().catch(() => {});
-
-  return {
-    ok: true,
-    statusCode: 200,
-    message: options.groupPublish ? 'Translation group published' : 'Article published',
-    translationGroupId: groupKey,
-    publishedLanguages: readiness.readyDocs.map((doc) => getStoredLanguageForArticle(doc)).filter(Boolean),
-    articles: readiness.readyDocs,
-    article: sourcePublishedDoc,
-    generated,
-    changed: changedDocs.length > 0,
-    publicSync: { ok: failedPublicArticleIds.length === 0, failedArticleIds: failedPublicArticleIds },
-  };
+    }
+    result.revalidation = await invalidateArticleContent(readiness.readyDocs, {
+      previousDocs: options.previousDocs, reason: 'article_publish', publicVisibilityRemoved: true, logger,
+    });
+  });
+  return result;
 }
 
 module.exports = {

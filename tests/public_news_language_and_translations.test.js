@@ -28,6 +28,17 @@ function makeChainableQuery(items) {
   };
 }
 
+function installEmptyDatabase(context) {
+  const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState');
+  Object.defineProperty(mongoose.connection, 'readyState', { configurable: true, writable: true, value: 1 });
+  context.after(() => {
+    if (descriptor) Object.defineProperty(mongoose.connection, 'readyState', descriptor);
+    else delete mongoose.connection.readyState;
+  });
+  context.mock.method(News, 'find', () => makeChainableQuery([]));
+  context.mock.method(News, 'countDocuments', async () => 0);
+}
+
 function extractLangFilter(filter) {
   const ands = filter?.$and || [];
   for (const c of ands) {
@@ -155,7 +166,8 @@ test('Model default lang is en when omitted', () => {
   assert.equal(doc.language, 'en');
 });
 
-test('GET /api/public/news supports lang=en and returns feed shape', async () => {
+test('GET /api/public/news supports lang=en and returns feed shape', async (t) => {
+  installEmptyDatabase(t);
   const res = await request(app).get('/api/public/news?category=national&lang=en&limit=5');
   assert.equal(res.status, 200);
   assert.ok(res.body);
@@ -425,21 +437,24 @@ test('GET /api/public/news plain latest request returns empty only when no eligi
   }
 });
 
-test('GET /api/public/news supports lang=hi and returns feed shape', async () => {
+test('GET /api/public/news supports lang=hi and returns feed shape', async (t) => {
+  installEmptyDatabase(t);
   const res = await request(app).get('/api/public/news?category=national&lang=hi&limit=5');
   assert.equal(res.status, 200);
   assert.ok(res.body);
   assert.ok(Array.isArray(res.body.items));
 });
 
-test('GET /api/public/news supports q + lang and returns feed shape', async () => {
+test('GET /api/public/news supports q + lang and returns feed shape', async (t) => {
+  installEmptyDatabase(t);
   const res = await request(app).get('/api/public/news?q=budget&lang=en&limit=5');
   assert.equal(res.status, 200);
   assert.ok(res.body);
   assert.ok(Array.isArray(res.body.items));
 });
 
-test('GET /api/public/news/translations/:translationGroupId returns 200 and an array', async () => {
+test('GET /api/public/news/translations/:translationGroupId returns 200 and an array', async (t) => {
+  installEmptyDatabase(t);
   const res = await request(app).get('/api/public/news/translations/test-group');
   assert.equal(res.status, 200);
   assert.ok(Array.isArray(res.body));

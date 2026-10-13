@@ -3,9 +3,14 @@ const News = require('../models/News');
 const PublicSiteSettings = require('../models/PublicSiteSettings');
 const TranslationJob = require('../models/TranslationJob');
 const { slugifyUnicode } = require('../lib/slug');
-const { invalidateArticleCaches, invalidateArticleLanguageCaches } = require('../lib/cache');
+const { invalidateArticleLanguageCaches } = require('../lib/cache');
 const googleTranslation = require('./googleTranslationService');
 const { applyPulseDialogueStandardText } = require('./pulseDialogue.service');
+const { sponsoredArticleFields } = require('./syncPublicArticleFromNews.service');
+const { withActiveArticleSource, afterArticleCommit } = require('./articleLifecycle.service');
+const { assertArticleSlugsUnique } = require('./articleSlugUniqueness.service');
+const { syncTranslationGroupMetadata } = require('./translationGroupSync.service');
+const { invalidateArticleContent } = require('./publicContentInvalidation.service');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 const JOB_TYPE = 'article-translation-generate';
@@ -84,8 +89,6 @@ function buildExistingQuery(groupKey, lang, excludeId) {
     $and: [
       { $or: [{ translationGroupId: groupKey }, { translationKey: groupKey }] },
       { $or: [{ language: lang }, { lang }] },
-      { status: { $ne: 'deleted' } },
-      { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
     ],
   };
   if (excludeId) q._id = { $ne: excludeId };
@@ -126,7 +129,9 @@ async function translateArticleFields(source, sourceLang, targetLang) {
 
 function buildTranslatedPayload(source, translated, { targetLang, sourceLang, groupKey, sourceHash, jobId, requestedBy }) {
   const slugs = source.slugs && typeof source.slugs === 'object' && !Array.isArray(source.slugs) ? { ...source.slugs } : {};
-  const targetSlug = slugs[targetLang] || source.slug || slugifyUnicode(translated.title || source.title || 'article');
+  const localizedSlug = slugifyUnicode(translated.title || source.title || 'article');
+  const targetSlug = slugs[targetLang]
+    || (localizedSlug === source.slug ? `${localizedSlug}-${targetLang}` : localizedSlug);
   slugs[targetLang] = targetSlug;
 
   const coverImage = source.coverImage && typeof source.coverImage === 'object' ? { ...source.coverImage } : undefined;
@@ -161,6 +166,7 @@ function buildTranslatedPayload(source, translated, { targetLang, sourceLang, gr
     embeds: Array.isArray(source.embeds) ? source.embeds : [],
     gallery: Array.isArray(source.gallery) ? source.gallery : [],
     seo,
+    ...sponsoredArticleFields(source),
     pulseDialogue,
     ...(source.authorByline !== undefined ? { authorByline: source.authorByline } : {}),
     slug: targetSlug,
@@ -202,63 +208,69 @@ function buildTranslatedPayload(source, translated, { targetLang, sourceLang, gr
   };
 }
 
-async function upsertJob(sourceDoc, { sourceLanguage, targetLanguages, sourceHash, requestedBy }) {
-  try {
-    const id = sourceDoc?._id;
-    if (!id || !mongoose.isValidObjectId(String(id))) return null;
-    if (!canWriteTranslationJob()) return null;
-    return await TranslationJob.findOneAndUpdate(
-      { type: JOB_TYPE, newsId: id },
-      {
-        $set: {
-          status: 'translating',
-          provider: 'google_translate',
-          sourceLanguage,
-          targetLanguages,
-          sourceHash,
-          startedAt: new Date(),
-          completedAt: null,
-          failureReason: null,
-          lastError: null,
-          requestedBy: requestedBy || null,
-        },
-        $inc: { attempts: 1, retryCount: 1 },
-        $setOnInsert: { runAt: new Date() },
+async function upsertJob(sourceDoc, { sourceLanguage, targetLanguages, sourceHash, requestedBy }, session) {
+  const id = sourceDoc?._id;
+  if (!id || !mongoose.isValidObjectId(String(id))) return null;
+  if (!canWriteTranslationJob()) return null;
+  return await TranslationJob.findOneAndUpdate(
+    { type: JOB_TYPE, newsId: id },
+    {
+      $set: {
+        status: 'translating',
+        provider: 'google_translate',
+        sourceLanguage,
+        targetLanguages,
+        sourceHash,
+        startedAt: new Date(),
+        completedAt: null,
+        failureReason: null,
+        lastError: null,
+        requestedBy: requestedBy || null,
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-  } catch (_) {
-    return null;
+      $inc: { attempts: 1, retryCount: 1 },
+      $setOnInsert: { runAt: new Date() },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true, session }
+  );
+}
+
+async function finishJob(job, status, result, failureReason, session) {
+  if (!job?._id) return;
+  await TranslationJob.findByIdAndUpdate(job._id, {
+    $set: {
+      status,
+      result,
+      failureReason: failureReason || null,
+      lastError: failureReason || null,
+      completedAt: new Date(),
+      finishedAt: new Date(),
+    },
+  }, { session });
+}
+
+async function ensureSourceGroup(sourceDoc, groupKey, session) {
+  if (String(sourceDoc.translationGroupId || '') === groupKey && String(sourceDoc.translationKey || '') === groupKey) return;
+  await News.updateOne({ _id: sourceDoc._id }, {
+    $set: { translationGroupId: groupKey, translationKey: groupKey },
+  }, { session });
+}
+
+function assertCurrentSource(source, groupKey, sourceHash) {
+  const currentGroup = source.translationGroupId || source.translationKey;
+  if ((currentGroup && String(currentGroup) !== groupKey) || sourceHashForDoc(source) !== sourceHash) {
+    throw Object.assign(new Error('The source story changed. Translation was cancelled; retry with the current edition.'), {
+      statusCode: 409, code: 'TRANSLATION_SOURCE_CHANGED',
+    });
   }
 }
 
-async function finishJob(job, status, result, failureReason) {
-  if (!job?._id) return;
-  try {
-    await TranslationJob.findByIdAndUpdate(job._id, {
-      $set: {
-        status,
-        result,
-        failureReason: failureReason || null,
-        lastError: failureReason || null,
-        completedAt: new Date(),
-        finishedAt: new Date(),
-      },
-    });
-  } catch (_) {}
-}
-
-async function ensureSourceGroup(sourceDoc, groupKey) {
-  if (!sourceDoc || !groupKey) return;
-  if (String(sourceDoc.translationGroupId || '') === groupKey && String(sourceDoc.translationKey || '') === groupKey) return;
-  try {
-    if (typeof sourceDoc.set === 'function' && typeof sourceDoc.save === 'function') {
-      sourceDoc.set({ translationGroupId: groupKey, translationKey: groupKey });
-      await sourceDoc.save({ validateModifiedOnly: true });
-    } else if (sourceDoc._id) {
-      await News.updateOne({ _id: sourceDoc._id }, { $set: { translationGroupId: groupKey, translationKey: groupKey } });
-    }
-  } catch (_) {}
+function skippedTranslation(existing, overwrite, allowHumanOverwrite) {
+  if (!existing) return null;
+  if (existing.status === 'deleted' || existing.deletedAt) {
+    throw Object.assign(new Error('Restore the translation group before generating translations.'), { statusCode: 409 });
+  }
+  if (existing.humanEdited && !(overwrite && allowHumanOverwrite)) return 'human_edited';
+  return overwrite ? null : 'exists';
 }
 
 function actorLabel(req) {
@@ -271,6 +283,9 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
   if (!sourceDoc) return { ok: false, status: 'failed', message: 'Article not found' };
 
   const source = pickSourceObject(sourceDoc);
+  if (source.status === 'deleted' || source.deletedAt) {
+    return { ok: false, status: 'failed', message: 'Deleted stories cannot generate translations' };
+  }
   const sourceLanguage = (await resolveSourceLanguage(source, options)).lang;
   const enabledLanguages = normalizeLanguageList(options.targetLanguages).length
     ? normalizeLanguageList(options.targetLanguages)
@@ -282,71 +297,119 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
   const overwrite = Boolean(options.overwrite);
   const allowHumanOverwrite = Boolean(options.confirmOverwriteHumanEdited || options.founderConfirmed);
 
-  await ensureSourceGroup(sourceDoc, groupKey);
-  const job = await upsertJob(source, { sourceLanguage, targetLanguages, sourceHash, requestedBy });
+  const job = await withActiveArticleSource(source._id, async (current, session) => {
+    assertCurrentSource(current, groupKey, sourceHash);
+    await ensureSourceGroup(current, groupKey, session);
+    return upsertJob(current, { sourceLanguage, targetLanguages, sourceHash, requestedBy }, session);
+  }, options);
 
   const created = {};
   const updated = {};
   const skipped = {};
   const failed = {};
-  let changedPublicContent = false;
+  const changedPublicDocs = [];
+  const changedSlugs = [];
 
-  for (const targetLang of targetLanguages) {
-    const existing = await News.findOne(buildExistingQuery(groupKey, targetLang, source._id));
-    if (existing && existing.humanEdited && !(overwrite && allowHumanOverwrite)) {
-      skipped[targetLang] = { reason: 'human_edited', id: String(existing._id) };
-      continue;
-    }
-    if (existing && !overwrite) {
-      skipped[targetLang] = { reason: 'exists', id: String(existing._id) };
-      continue;
-    }
-
-    const translated = await translateArticleFields(source, sourceLanguage, targetLang);
-    if (!translated.ok) {
-      failed[targetLang] = translated.failures;
-      continue;
-    }
-
-    const payload = buildTranslatedPayload(source, translated.fields, {
-      targetLang,
-      sourceLang: sourceLanguage,
-      groupKey,
-      sourceHash,
-      jobId: job?._id || null,
-      requestedBy,
+  async function invalidateCommittedTranslations(result) {
+    for (const slug of changedSlugs) await afterArticleCommit(options, result, () => invalidateArticleLanguageCaches(slug));
+    if (changedPublicDocs.length) await afterArticleCommit(options, result, async () => {
+      result.revalidation = await invalidateArticleContent(changedPublicDocs, {
+        reason: 'translation_updated', publicVisibilityRemoved: true,
+      });
     });
+  }
 
-    if (existing) {
-      const doc = await News.findByIdAndUpdate(existing._id, { $set: payload }, { new: true, runValidators: true });
-      updated[targetLang] = String(doc?._id || existing._id);
-      if (doc && String(existing.status || '').toLowerCase() === 'published') changedPublicContent = true;
-    } else {
-      const doc = await News.create(payload);
-      created[targetLang] = String(doc?._id || '');
+  try {
+    for (const targetLang of targetLanguages) {
+      const existing = await News.findOne(buildExistingQuery(groupKey, targetLang, source._id), null, { session: options.session });
+      const skipReason = skippedTranslation(existing, overwrite, allowHumanOverwrite);
+      if (skipReason) {
+        skipped[targetLang] = { reason: skipReason, id: String(existing._id) };
+        continue;
+      }
+
+      const translated = await translateArticleFields(source, sourceLanguage, targetLang);
+      if (!translated.ok) {
+        failed[targetLang] = translated.failures;
+        continue;
+      }
+
+      const result = await withActiveArticleSource(source._id, async (currentSource, session) => {
+        assertCurrentSource(currentSource, groupKey, sourceHash);
+        const current = await News.findOne(buildExistingQuery(groupKey, targetLang, source._id), null, { session });
+        const reason = skippedTranslation(current, overwrite, allowHumanOverwrite);
+        if (reason) return { skipped: { reason, id: String(current._id) } };
+        const payload = buildTranslatedPayload(currentSource, translated.fields, {
+          targetLang, sourceLang: sourceLanguage, groupKey, sourceHash,
+          jobId: job?._id || null, requestedBy,
+        });
+        if (current) {
+          for (const field of ['status', 'publishedAt', 'publishAt', 'scheduledAt', 'deletedAt', 'workflowStage']) delete payload[field];
+          payload.slug = current.slug || payload.slug;
+          payload.slugs = { ...payload.slugs, ...current.slugs, [targetLang]: payload.slug };
+        }
+        await assertArticleSlugsUnique({ ...payload, _id: current?._id }, { session });
+        const doc = current
+          ? await News.findOneAndUpdate(
+            { _id: current._id, status: { $ne: 'deleted' }, deletedAt: null },
+            { $set: payload }, { new: true, runValidators: true, session }
+          )
+          : (await News.create([payload], { session }))[0];
+        if (!doc) throw Object.assign(new Error('Translation changed during generation. Retry the operation.'), { statusCode: 409 });
+        if (doc.status === 'published') await syncTranslationGroupMetadata(doc, {
+          previousDoc: current.toObject(),
+          patch: { title: doc.title, description: doc.description, content: doc.content, slug: doc.slug },
+          invalidate: false, session,
+        });
+        return { doc, wasExisting: Boolean(current) };
+      }, options);
+      if (result.skipped) {
+        skipped[targetLang] = result.skipped;
+        continue;
+      }
+      (result.wasExisting ? updated : created)[targetLang] = String(result.doc._id);
+      if (result.doc.status === 'published') changedPublicDocs.push(result.doc);
+      changedSlugs.push(result.doc.slug);
     }
-
-    await invalidateArticleLanguageCaches(payload.slug).catch(() => null);
+  } catch (error) {
+    console.error('[articleTranslations] transaction failed', { code: error.code || 'TRANSLATION_PERSISTENCE_FAILED' });
+    if (!options.session) {
+      const partial = { created, updated, skipped, failed };
+      await afterArticleCommit(options, partial, () =>
+        finishJob(job, 'failed', partial, error.code || 'Translation could not be persisted'));
+      await invalidateCommittedTranslations(partial);
+      error.details = {
+        ...error.details, translationResult: partial,
+        ...(Object.keys(created).length || Object.keys(updated).length ? { committed: true } : {}),
+      };
+    }
+    throw error;
   }
 
   const completedCount = Object.keys(created).length + Object.keys(updated).length;
   const failedCount = Object.keys(failed).length;
   const status = failedCount && completedCount ? 'partially_completed' : (failedCount ? 'failed' : 'review_required');
   const result = { sourceLanguage, targetLanguages, translationGroupId: groupKey, created, updated, skipped, failed };
-  await finishJob(job, status, result, failedCount ? 'One or more translations failed' : null);
-  if (changedPublicContent) await invalidateArticleCaches({ publicVisibilityRemoved: true });
-
-  return { ok: failedCount === 0, status, provider: 'google_translate', sourceLanguage, targetLanguages, sourceHash, translationGroupId: groupKey, created, updated, skipped, failed, jobId: job?._id ? String(job._id) : null };
+  const response = { ok: failedCount === 0, status, provider: 'google_translate', sourceLanguage, targetLanguages, sourceHash, translationGroupId: groupKey, created, updated, skipped, failed, jobId: job?._id ? String(job._id) : null };
+  const finish = () => finishJob(job, status, result, failedCount ? 'One or more translations failed' : null, options.session);
+  if (options.session) await finish();
+  else await afterArticleCommit(options, response, finish);
+  await invalidateCommittedTranslations(response);
+  return response;
 }
 
 async function enqueueArticleTranslationGeneration(sourceDocInput, options = {}) {
   const source = pickSourceObject(sourceDocInput);
   if (!source?._id) return null;
+  if (!canWriteTranslationJob()) return null;
   const sourceLanguage = (await resolveSourceLanguage(source, options)).lang;
   const enabledLanguages = await getEnabledPublicLanguages();
   const targetLanguages = enabledLanguages.filter((lang) => lang !== sourceLanguage);
   const sourceHash = sourceHashForDoc(source);
-  return upsertJob(source, { sourceLanguage, targetLanguages, sourceHash, requestedBy: options.requestedBy || null });
+  return withActiveArticleSource(source._id, async (current, session) => {
+    assertCurrentSource(current, String(source.translationGroupId || source.translationKey || ''), sourceHash);
+    return upsertJob(current, { sourceLanguage, targetLanguages, sourceHash, requestedBy: options.requestedBy || null }, session);
+  }, options);
 }
 
 async function markSiblingTranslationsOutdated(sourceDocInput, options = {}) {
@@ -370,7 +433,7 @@ async function markSiblingTranslationsOutdated(sourceDocInput, options = {}) {
       'translationMeta.outdatedAt': new Date(),
       'translationMeta.outdatedReason': options.reason || 'source_updated',
     },
-  });
+  }, { session: options.session });
 }
 
 async function estimateBackfill(options = {}) {

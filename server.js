@@ -1419,16 +1419,17 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
   _connectMongoOnce();
 }
 
-// Minimal scheduler: auto-publish scheduled articles (every minute)
+// Auto-publish scheduled articles and refresh expired visibility gates every minute.
 let _publishTickInFlight = false;
 async function _publishScheduledTick() {
   if (_publishTickInFlight) return;
   _publishTickInFlight = true;
   try {
-    const { publishDueScheduledArticles } = require('./services/scheduledPublication.service');
+    const { publishDueScheduledArticles, refreshDuePublicArticleVisibility } = require('./services/scheduledPublication.service');
     await publishDueScheduledArticles({ logger: console });
+    await refreshDuePublicArticleVisibility({ logger: console });
   } catch (e) {
-    console.warn('[scheduler] tick failed', e?.message || e);
+    console.warn('[scheduler] tick failed', { name: e?.name || 'Error', code: e?.code || null });
   } finally {
     _publishTickInFlight = false;
   }
@@ -1838,6 +1839,7 @@ app.use('/admin-api/api/admin', articlesRoutes);
 app.use('/admin-api/admin', adminDraftsRoutes);
 app.use('/admin-api/api/admin', adminDraftsRoutes);
 // Compatibility: some admin builds call /admin-api/articles directly
+app.use('/admin-api/api', articlesRoutes);
 app.use('/admin-api', articlesRoutes);
 
 // Extra safety: some admin edit pages call /admin-api/articles/:id (or /admin-api/api/articles/:id)

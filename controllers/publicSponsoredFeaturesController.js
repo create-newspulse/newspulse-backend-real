@@ -6,7 +6,9 @@ const {
   normalizePlacementKey,
   placementKeyToPlacement,
 } = require('../lib/sponsoredFeatures');
-const { buildPubliclyVisiblePublicArticleFilter } = require('../services/publicArticleVisibility.service');
+const {
+  buildPubliclyVisiblePublicArticleFilter, buildEditorialEligibilityFilter, isEditorialRankingEligible,
+} = require('../services/publicArticleVisibility.service');
 const { getSpotlightPriorityRank } = require('../services/spotlightPriority.service');
 const {
   getActiveSponsoredFeatureByPlacement,
@@ -100,6 +102,7 @@ function buildFreshSpotlightFilter(now, hours) {
   const since = new Date(nowDt.getTime() - (Number(hours) * 60 * 60 * 1000));
   const filter = buildPubliclyVisiblePublicArticleFilter({ now: nowDt });
   filter.$and = (filter.$and || []).concat([
+    buildEditorialEligibilityFilter(),
     { publishedAt: { $gte: since, $lte: nowDt } },
     { $or: [{ spotlightExpiresAt: null }, { spotlightExpiresAt: { $exists: false } }, { spotlightExpiresAt: { $gte: nowDt } }] },
   ]);
@@ -139,7 +142,7 @@ function uniqueFreshCandidates(items) {
 }
 
 function selectCategoryBalancedSpotlight(items, limit = SPOTLIGHT_STORY_LIMIT) {
-  const sorted = sortSpotlightCandidates(uniqueFreshCandidates(items));
+  const sorted = sortSpotlightCandidates(uniqueFreshCandidates(items).filter(isEditorialRankingEligible));
   const selected = [];
   const selectedIds = new Set();
   const categoryCounts = new Map();
