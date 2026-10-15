@@ -55,6 +55,7 @@ const {
   changeArticleGroupStatus, restoreArticleGroup, permanentlyDeleteArticleGroups, findArticleGroup, withActiveArticleSource,
   inArticleTransaction, serializeNewsArticle, articleMutationMetadata,
 } = require('../services/articleLifecycle.service');
+const { countLogicalArticles } = require('../services/articleLogicalCounts.service');
 const { invalidateArticleContent } = require('../services/publicContentInvalidation.service');
 const {
   PULSE_DIALOGUE_CATEGORY,
@@ -1530,6 +1531,81 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
   }
 });
 
+function buildAdminArticleListSelection(req) {
+  const statusRaw = (req.query.status || '').toString().trim().toLowerCase();
+  const langQueryRaw = (req.query.lang || req.query.language || '').toString().trim();
+  const categoryRaw = (req.query.category || '').toString().trim();
+  const qRaw = (req.query.q || '').toString().trim();
+  const fromRaw = (req.query.from || '').toString().trim();
+  const toRaw = (req.query.to || '').toString().trim();
+  const query = {};
+  let publishedOnly = false;
+  if (statusRaw && statusRaw !== 'all') {
+    const statuses = statusRaw
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (statuses.length > 0) {
+      if (statuses.some(value => !['draft', 'scheduled', 'published', 'archived', 'deleted'].includes(value))) {
+        return { error: 'Invalid status filter' };
+      }
+      if (statuses.includes('draft')) query.$or = [{ status: { $in: statuses } }, { status: { $exists: false } }];
+      else query.status = statuses.length === 1 ? statuses[0] : { $in: statuses };
+      publishedOnly = statuses.length === 1 && statuses[0] === 'published';
+    }
+  }
+
+  const locationAnd = _buildLocationQueryFromRequest(req);
+  if (locationAnd.length) {
+    query.$and = (query.$and || []).concat(locationAnd);
+
+    // For regional feeds, callers usually want published-only.
+    // Keep explicit status=... overriding this default.
+    if (!statusRaw) {
+      query.status = 'published';
+    }
+  }
+
+  const langNorm = normalizeLanguage(langQueryRaw);
+  if (langNorm) {
+    query.$and = (query.$and || []).concat([{ $or: [{ language: langNorm }, { lang: langNorm }] }]);
+  }
+
+  if (categoryRaw) {
+    const categoryNorm = getCanonicalPublicCategoryKey(categoryRaw);
+    if (categoryNorm === 'regional') {
+      // Regional listing should include breaking stories too.
+      query.category = { $in: ['regional', 'breaking'] };
+    } else {
+      query.category = buildPublicCategoryFilter(categoryNorm || categoryRaw);
+    }
+  }
+  if (qRaw) {
+    const rx = new RegExp(qRaw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    query.$and = (query.$and || []).concat([
+      {
+        $or: [
+          { title: rx },
+          { description: rx },
+          { content: rx },
+        ],
+      },
+    ]);
+  }
+
+  const fromDate = fromRaw ? new Date(fromRaw) : null;
+  const toDate = toRaw ? new Date(toRaw) : null;
+  if (fromDate && !isNaN(fromDate)) {
+    query.createdAt = query.createdAt || {};
+    query.createdAt.$gte = fromDate;
+  }
+  if (toDate && !isNaN(toDate)) {
+    query.createdAt = query.createdAt || {};
+    query.createdAt.$lte = toDate;
+  }
+  return { query, publishedOnly };
+}
+
 // GET /api/articles → list articles (CMS/admin Manage News)
 router.get('/articles', requireAdminAuth, async (req, res, next) => {
   try {
@@ -1554,76 +1630,12 @@ router.get('/articles', requireAdminAuth, async (req, res, next) => {
     // Support "-updatedAt" => { updatedAt: -1 }
     const allowedSortFields = new Set(['updatedAt', 'createdAt', 'publishedAt']);
     let sortParam = _parseSafeSort(req.query.sort, allowedSortFields, 'updatedAt', -1);
-    const statusRaw = (req.query.status || '').toString().trim().toLowerCase();
-    const langQueryRaw = (req.query.lang || req.query.language || '').toString().trim();
-    const categoryRaw = (req.query.category || '').toString().trim();
-    const qRaw = (req.query.q || '').toString().trim();
-    const fromRaw = (req.query.from || '').toString().trim();
-    const toRaw = (req.query.to || '').toString().trim();
-    const query = {};
-    if (statusRaw && statusRaw !== 'all') {
-      const statuses = statusRaw
-        .split(',')
-        .map(s => s.trim())
-        .filter(Boolean);
-      if (statuses.length > 0) {
-        if (statuses.some(value => !['draft', 'scheduled', 'published', 'archived', 'deleted'].includes(value))) {
-          return res.status(400).json({ ok: false, success: false, message: 'Invalid status filter' });
-        }
-        if (statuses.includes('draft')) query.$or = [{ status: { $in: statuses } }, { status: { $exists: false } }];
-        else query.status = statuses.length === 1 ? statuses[0] : { $in: statuses };
-        if (statuses.length === 1 && statuses[0] === 'published') sortParam = { publishedAt: -1, _id: -1 };
-      }
+    const selection = buildAdminArticleListSelection(req);
+    if (selection.error) {
+      return res.status(400).json({ ok: false, success: false, message: selection.error });
     }
-
-    const locationAnd = _buildLocationQueryFromRequest(req);
-    if (locationAnd.length) {
-      query.$and = (query.$and || []).concat(locationAnd);
-
-      // For regional feeds, callers usually want published-only.
-      // Keep explicit status=... overriding this default.
-      if (!statusRaw) {
-        query.status = 'published';
-      }
-    }
-
-    const langNorm = normalizeLanguage(langQueryRaw);
-    if (langNorm) {
-      query.$and = (query.$and || []).concat([{ $or: [{ language: langNorm }, { lang: langNorm }] }]);
-    }
-
-    if (categoryRaw) {
-      const categoryNorm = getCanonicalPublicCategoryKey(categoryRaw);
-      if (categoryNorm === 'regional') {
-        // Regional listing should include breaking stories too.
-        query.category = { $in: ['regional', 'breaking'] };
-      } else {
-        query.category = buildPublicCategoryFilter(categoryNorm || categoryRaw);
-      }
-    }
-    if (qRaw) {
-      const rx = new RegExp(qRaw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-      query.$and = (query.$and || []).concat([
-        {
-          $or: [
-            { title: rx },
-            { description: rx },
-            { content: rx },
-          ],
-        },
-      ]);
-    }
-
-    const fromDate = fromRaw ? new Date(fromRaw) : null;
-    const toDate = toRaw ? new Date(toRaw) : null;
-    if (fromDate && !isNaN(fromDate)) {
-      query.createdAt = query.createdAt || {};
-      query.createdAt.$gte = fromDate;
-    }
-    if (toDate && !isNaN(toDate)) {
-      query.createdAt = query.createdAt || {};
-      query.createdAt.$lte = toDate;
-    }
+    const { query, publishedOnly } = selection;
+    if (publishedOnly) sortParam = { publishedAt: -1, _id: -1 };
     const skip = (page - 1) * limit;
 
     const [itemsRaw, total] = await Promise.all([
@@ -1666,6 +1678,35 @@ router.get('/articles', requireAdminAuth, async (req, res, next) => {
       message: status === 503 ? 'Articles are temporarily unavailable' : 'Internal error',
       path: req.originalUrl,
       ...(isProd ? {} : { error: err?.message || String(err) }),
+    });
+  }
+});
+
+// GET /api/articles/counts -> exclusive logical-story counts for the Admin list selection.
+router.get('/articles/counts', requireAdminAuth, async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  try {
+    if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+      return res.status(503).json({
+        ok: false, success: false, code: 'ARTICLES_UNAVAILABLE',
+        message: 'Articles are temporarily unavailable',
+      });
+    }
+    const selection = buildAdminArticleListSelection(req);
+    if (selection.error) {
+      return res.status(400).json({ ok: false, success: false, message: selection.error });
+    }
+    const data = await countLogicalArticles(selection.query);
+    return res.json({ ok: true, success: true, data });
+  } catch (error) {
+    const identityConflict = error?.code === 'ARTICLE_LOGICAL_IDENTITY_CONFLICT';
+    const status = identityConflict ? 409 : (isContentDatabaseUnavailable(error) ? 503 : 500);
+    console.error('[ADMIN_ARTICLES][counts] failed', { code: error?.code || null, name: error?.name });
+    return res.status(status).json({
+      ok: false,
+      success: false,
+      code: identityConflict ? error.code : (status === 503 ? 'ARTICLES_UNAVAILABLE' : 'ARTICLES_QUERY_FAILED'),
+      message: identityConflict ? error.message : (status === 503 ? 'Articles are temporarily unavailable' : 'Internal error'),
     });
   }
 });
