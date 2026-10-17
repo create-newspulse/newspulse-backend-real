@@ -17,6 +17,7 @@ const Article = require('../models/Article');
 const User = require('../models/User');
 const topics = require('../services/editorialTopics.service');
 const publicRouter = require('../routes/publicEditorialTopics.routes');
+const publicNewsRouter = require('../routes/publicNews.routes');
 const adminRouter = require('../routes/adminEditorialTopics.routes');
 const { matches: sharedMatches, runPipeline } = require('./helpers/pulseDialogueAggregate');
 const onDemandTranslation = require('../services/newsOnDemandTranslation.service');
@@ -138,6 +139,7 @@ function setup(context, { topicDocs = [topic()], newsDocs = [], users: userOverr
     newsReads.push(filter);
     return query(newsDocs.filter(doc => matches(doc, filter)));
   });
+  context.mock.method(Article, 'findOne', () => query([], { single: true }));
   context.mock.method(News, 'aggregate', pipeline => {
     pipelines.push(pipeline);
     return {
@@ -179,6 +181,7 @@ function setup(context, { topicDocs = [topic()], newsDocs = [], users: userOverr
   const app = express();
   app.use(express.json());
   app.use(publicBase, publicRouter);
+  app.use('/api/public/news', publicNewsRouter);
   for (const base of adminBases) app.use(base, adminRouter);
   context.after(() => {
     assert.equal(writes.news, 0, 'No News writes, including article publication');
@@ -187,6 +190,51 @@ function setup(context, { topicDocs = [topic()], newsDocs = [], users: userOverr
     assert.equal(writes.connection, 0, 'No database connections');
   });
   return { app, writes, store, pipelines, newsReads, logged, token, users };
+}
+
+async function assertTopicArticleResolves(app, card, edition, lang) {
+  assert.equal(card.id, String(edition._id));
+  assert.equal(card._id, card.id);
+  assert.equal(card.articleId, card.id);
+  assert.equal(card.requestedLang, lang);
+  assert.equal(card.resolvedLang, lang);
+  assert.equal(card.lang, lang);
+  assert.equal(card.language, lang);
+  assert.equal(card.isFallback, false);
+  assert.equal(card.category, edition.category);
+  assert.equal(card.translationKey, edition.translationKey);
+  assert.equal(card.translationGroupId, edition.translationGroupId);
+  const storedSlugs = [edition.slug, ...Object.values(edition.slugs || {})];
+  assert.ok(storedSlugs.includes(card.slug), 'Card slug must be persisted, not derived from its title');
+  assert.ok(storedSlugs.includes(card.canonicalSlug), 'Canonical slug must be persisted');
+
+  const lookups = [
+    `/api/public/news/${encodeURIComponent(card.slug)}`,
+    `/api/public/news/${encodeURIComponent(card.canonicalSlug)}`,
+    `/api/public/news/${card.id}`,
+    `/api/public/news/slug/${encodeURIComponent(card.slug)}`,
+    `/api/public/news/slug/${encodeURIComponent(card.canonicalSlug)}`,
+  ];
+  for (const path of lookups) {
+    const response = await request(app).get(`${path}?lang=${lang}`);
+    assert.equal(response.status, 200, `${path}: ${JSON.stringify(response.body)}`);
+    const article = response.body;
+    assert.equal(article.id, card.id, 'Topic and detail must resolve the same edition');
+    assert.equal(article.articleId, card.articleId);
+    assert.equal(article.slug, card.slug, 'Use the same persisted slug as normal public News serialization');
+    assert.equal(article.canonicalSlug, card.canonicalSlug);
+    assert.equal(article.resolvedLang, lang);
+    assert.equal(article.language, lang);
+    assert.equal(article.title, card.title);
+    assert.equal(article.summary, card.summary);
+    assert.equal(article.translationKey, card.translationKey);
+    assert.equal(article.translationGroupId, card.translationGroupId);
+    assert.equal(article.category, card.category);
+    assert.equal(article.status, 'published');
+    assert.equal(article.isFallback, false);
+    assert.equal(article.isTranslated, card.isTranslated);
+    assert.equal(article.publishedAt, new Date(edition.publishedAt).toISOString());
+  }
 }
 
 function founderRequest(state, method, path, body) {
@@ -378,6 +426,164 @@ for (const lang of ['gu', 'hi', 'en']) {
         assert.equal(item[field], undefined);
       }
     }
+    assert.equal(state.writes.topics, 0);
+  });
+}
+
+for (const lang of ['en', 'hi', 'gu']) {
+  test(`topic article identity: ${lang} native editions round-trip with canonical aliases and fixed pages`, async context => {
+    const examples = [
+      ['IAS Wives Association Gandhinagar Navratri', 'regional'],
+      ['Garba business Rs 400 crore', 'business'],
+      ['Faith Power and Worship', 'faith-culture'],
+      ['Science and Technology', 'tech'],
+      ['Tech and Gadgets', 'tech-gadgets'],
+    ];
+    const newsDocs = examples.flatMap(([title, category], groupIndex) => ['gu', 'hi', 'en'].map((locale, index) => (
+      story(100 + groupIndex * 10 + index, {
+        title: `${locale} ${title}`, category, originalLang: locale, language: locale, lang: locale,
+        translationKey: `navratri-${groupIndex}`, translationGroupId: `navratri-${groupIndex}`,
+        slug: `persisted-${groupIndex}-${locale}-edition`,
+        slugs: Object.fromEntries(['en', 'hi', 'gu'].map(target => [target, `canonical-${groupIndex}-${target}`])),
+        sourceArticleId: index ? id(100 + groupIndex * 10) : null,
+        publishedAt: new Date(Date.UTC(index ? 2021 : 2020, 0, groupIndex + 1)),
+        translations: Object.fromEntries(['en', 'hi', 'gu'].filter(target => target !== locale)
+          .map(target => [target, { title: `${target} cached ${title}`, summary: 'Cached summary', content: 'Cached body' }])),
+        translationStatus: { en: 'ready', hi: 'ready', gu: 'ready' },
+      })
+    )));
+    const topicDocs = [topic(1, { slug: 'navratri-2026' })];
+    const before = JSON.stringify({ newsDocs, topicDocs });
+    const state = setup(context, { newsDocs, topicDocs });
+    const cards = [];
+    for (let page = 1; page <= 3; page += 1) {
+      const response = await request(state.app).get(`${publicBase}/navratri-2026/articles?lang=${lang}&page=${page}&limit=2`);
+      assert.equal(response.status, 200);
+      assert.equal(response.body.total, 5);
+      assert.equal(response.body.count, page === 3 ? 1 : 2);
+      assert.equal(response.body.totalPages, 3);
+      assert.equal(response.body.page, page);
+      assert.equal(response.body.limit, 2);
+      assert.equal(response.body.hasNextPage, page < 3);
+      cards.push(...response.body.items);
+    }
+    assert.deepEqual(cards.map(card => card.translationKey), ['navratri-4', 'navratri-3', 'navratri-2', 'navratri-1', 'navratri-0']);
+    for (const card of cards) {
+      const edition = newsDocs.find(doc => doc.translationKey === card.translationKey && doc.lang === lang);
+      const source = newsDocs.find(doc => doc.translationKey === card.translationKey && !doc.sourceArticleId);
+      assert.equal(card.title, edition.title, 'A native edition takes priority over another edition\'s cache');
+      assert.equal(card.isTranslated, false);
+      assert.equal(card.publishedAt, source.publishedAt.toISOString());
+      await assertTopicArticleResolves(state.app, card, edition, lang);
+    }
+    assert.equal(JSON.stringify({ newsDocs, topicDocs }), before, 'Public reads must not change editions or membership');
+    assert.equal(state.writes.topics, 0);
+  });
+
+  test(`topic article identity: absent or ineligible ${lang} editions never use fallback titles or slugs`, async context => {
+    const sourceLang = lang === 'gu' ? 'hi' : 'gu';
+    const unavailable = [
+      null, { status: 'draft' }, { status: 'unpublished' }, { status: 'deleted' },
+      { deletedAt: new Date('2020-02-01') }, { locked: true }, { visibility: 'private' },
+      { publishedAt: new Date('2999-01-01') }, { status: 'scheduled' },
+    ];
+    const newsDocs = unavailable.flatMap((hidden, index) => {
+      const source = story(100 + index * 10, {
+        originalLang: sourceLang, lang: sourceLang, language: sourceLang,
+        translationKey: `unavailable-${index}`, translationGroupId: `unavailable-${index}`,
+        slugs: { [lang]: `english-looking-or-localized-alias-${index}` },
+        translations: { [lang]: { title: 'Fallback IAS Wives Navratri headline', summary: 'Summary', content: 'Body' } },
+        translationStatus: { [lang]: index % 2 ? 'pending' : 'failed' },
+      });
+      return [source, ...(hidden ? [story(101 + index * 10, {
+        ...source, _id: id(101 + index * 10), originalLang: lang, lang, language: lang,
+        slug: `hidden-edition-${index}`, sourceArticleId: source._id, ...hidden,
+      })] : [])];
+    });
+    const state = setup(context, { newsDocs });
+    const response = await request(state.app).get(`${publicBase}/topic-1/articles?lang=${lang}&page=1&limit=12`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.items, []);
+    assert.equal(response.body.total, 0);
+    assert.equal(response.body.totalPages, 0);
+    assert.equal(response.body.count, 0);
+    assert.equal(response.body.hasNextPage, false);
+    for (let index = 0; index < unavailable.length; index += 1) {
+      const detail = await request(state.app).get(`/api/public/news/english-looking-or-localized-alias-${index}?lang=${lang}`);
+      assert.equal(detail.status, 404);
+    }
+    assert.equal(state.writes.topics, 0);
+  });
+
+  test(`topic article identity: established ready ${lang} cached translations resolve at persisted identities`, async context => {
+    const sourceLang = lang === 'gu' ? 'en' : 'gu';
+    const edition = story(100, {
+      originalLang: sourceLang, language: sourceLang, lang: sourceLang, slug: 'persisted-source-slug',
+      slugs: { [lang]: 'persisted-localized-alias' },
+      translations: { [lang]: { title: 'Translated Navratri title is not the slug', summary: 'Summary', content: 'Body' } },
+      translationStatus: { [lang]: 'ready' },
+    });
+    const state = setup(context, { newsDocs: [edition] });
+    const response = await request(state.app).get(`${publicBase}/topic-1/articles?lang=${lang}`);
+    assert.equal(response.status, 200);
+    assert.equal(response.body.total, 1);
+    assert.equal(response.body.items[0].title, edition.translations[lang].title);
+    assert.equal(response.body.items[0].isTranslated, true);
+    await assertTopicArticleResolves(state.app, response.body.items[0], edition, lang);
+    assert.equal(state.writes.topics, 0);
+  });
+
+  test(`topic article identity: ${lang} pins resolve the native edition without changing pin membership`, async context => {
+    const editions = ['gu', 'hi', 'en'].map((locale, index) => story(100 + index, {
+      originalLang: locale, lang: locale, language: locale, slug: `pinned-${locale}`,
+      translationKey: 'pinned-story', translationGroupId: 'pinned-story',
+      sourceArticleId: index ? id(100) : null,
+    }));
+    const state = setup(context, { topicDocs: [topic(1, { pinnedArticleId: id(100) })],
+      newsDocs: [...editions, story(110, { originalLang: lang, lang, language: lang })] });
+    const detail = await request(state.app).get(`${publicBase}/topic-1?lang=${lang}`);
+    assert.equal(detail.status, 200);
+    await assertTopicArticleResolves(state.app, detail.body.pinnedArticle, editions.find(doc => doc.lang === lang), lang);
+    const page = await request(state.app).get(`${publicBase}/topic-1/articles?lang=${lang}&limit=1`);
+    assert.equal(page.status, 200);
+    assert.equal(page.body.total, 1);
+    assert.deepEqual(page.body.items.map(card => card.id), [String(id(110))]);
+    assert.equal(String(state.store.get(String(id(1))).pinnedArticleId), String(id(100)));
+    assert.equal(state.writes.topics, 0);
+  });
+}
+
+for (const [sourceLang, letter] of [['gu', '\u0A95'], ['hi', '\u0915']]) {
+  test(`topic article identity: legacy ${sourceLang} content cannot create an unavailable English card or pin`, async context => {
+    const edition = story(100, {
+      originalLang: null, lang: 'en', language: 'en', title: 'IAS Wives Association Navratri headline',
+      slug: `persisted-${sourceLang}-story`, slugs: { en: 'ias-wives-association-navratri-english-looking-alias' },
+      content: `<p>${letter.repeat(12)}</p>`,
+    });
+    const state = setup(context, { newsDocs: [edition], topicDocs: [
+      topic(1), topic(2, { pinnedArticleId: edition._id }),
+    ] });
+    const unavailableEnglish = await request(state.app).get(`/api/public/news/${edition.slugs.en}?lang=en`);
+    assert.equal(unavailableEnglish.status, 404, 'The actual public resolver rejects an unpublished English locale');
+    const source = await request(state.app).get(`/api/public/news/${edition.slug}?lang=${sourceLang}`);
+    assert.equal(source.status, 200);
+    assert.equal(source.body.resolvedLang, sourceLang);
+
+    const englishPage = await request(state.app).get(`${publicBase}/topic-1/articles?lang=en`);
+    assert.equal(englishPage.status, 200);
+    assert.deepEqual(englishPage.body.items, [], 'Do not advertise a locale the article resolver cannot open');
+    assert.equal(englishPage.body.total, 0);
+    const englishPin = await request(state.app).get(`${publicBase}/topic-2?lang=en`);
+    assert.equal(englishPin.status, 200);
+    assert.equal(englishPin.body.pinnedArticle, null);
+
+    const sourcePage = await request(state.app).get(`${publicBase}/topic-1/articles?lang=${sourceLang}`);
+    assert.equal(sourcePage.status, 200);
+    assert.equal(sourcePage.body.total, 1);
+    await assertTopicArticleResolves(state.app, sourcePage.body.items[0], edition, sourceLang);
+    const sourcePin = await request(state.app).get(`${publicBase}/topic-2?lang=${sourceLang}`);
+    assert.equal(sourcePin.status, 200);
+    await assertTopicArticleResolves(state.app, sourcePin.body.pinnedArticle, edition, sourceLang);
     assert.equal(state.writes.topics, 0);
   });
 }

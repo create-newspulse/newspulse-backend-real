@@ -4,13 +4,15 @@ const EditorialTopic = require('../models/EditorialTopic');
 const News = require('../models/News');
 const { buildPubliclyVisibleNewsArticleFilter } = require('./publicArticleVisibility.service');
 const { buildPublicContentGroupExpression, getPublicContentGroupKey } = require('./publicCategoryListing.service');
-const { localizeArticleForLang, SUPPORTED_LANGS } = require('./mapArticleForLang');
+const { SUPPORTED_LANGS } = require('./mapArticleForLang');
+const { buildPublicNewsBaseLanguageExpression } = require('./faithCultureNews.service');
+const { serializePublicNewsGroup } = require('../controllers/publicNewsController');
 
 const { LIMITS, isCanonicalTopicSlug, isExactTopicTag } = EditorialTopic;
 const QUERY_MS = 2500;
 const COLLATION = { locale: 'simple' };
 const TOPIC_PUBLIC_SELECT = '_id slug name description order startsAt expiresAt';
-const STORY_SELECT = '_id title summary description content slug slugs category lang language originalLang '
+const STORY_SELECT = '_id status title summary description content slug slugs category lang language originalLang '
   + 'translationKey translationGroupId sourceArticleId translations translationStatus publishedAt '
   + 'coverImage.url coverImage.alt coverImageUrl imageURL imageUrl';
 
@@ -154,29 +156,12 @@ const string = value => ({ $cond: [{ $eq: [{ $type: value }, 'string'] }, value,
 const trimmed = value => ({ $trim: { input: string(value) } });
 const present = value => ({ $ne: [trimmed(value), ''] });
 
-// Match the shared mapper's locale normalization before database pagination.
-function languageExpression(value) {
-  return { $let: { vars: { raw: { $toLower: trimmed(value) } }, in: {
-    $let: { vars: { letters: { $reduce: {
-      input: { $regexFindAll: { input: '$$raw', regex: /[a-z]/ } }, initialValue: '',
-      in: { $concat: ['$$value', '$$this.match'] },
-    } } }, in: { $switch: { branches: [
-      { case: { $in: ['$$letters', ['english', 'eng']] }, then: 'en' },
-      { case: { $in: ['$$letters', ['hindi', 'hin']] }, then: 'hi' },
-      { case: { $in: ['$$letters', ['gujarati', 'gujrati', 'guj', 'gj']] }, then: 'gu' },
-      ...SUPPORTED_LANGS.map(lang => ({ case: { $regexMatch: { input: '$$raw', regex: new RegExp(`^${lang}(?:[-_]|$)`) } }, then: lang })),
-    ], default: null } } },
-  } } };
-}
-
 function storyPagePipeline(filter, { lang, page, limit }) {
-  const base = { $ifNull: [languageExpression('$originalLang'),
-    languageExpression({ $cond: [{ $ne: [string('$lang'), ''] }, '$lang', '$language'] }), 'en'] };
   return [
     { $match: filter },
     { $project: {
       _id: 1, publishedAt: 1, storyKey: buildPublicContentGroupExpression(),
-      native: { $eq: [base, lang] },
+      native: { $eq: [buildPublicNewsBaseLanguageExpression(), lang] },
       ready: { $and: [{ $eq: [{ $toLower: trimmed(`$translationStatus.${lang}`) }, 'ready'] },
         ...['title', 'summary', 'content'].map(field => present(`$translations.${lang}.${field}`))] },
       sourcePublication: { $cond: [
@@ -198,7 +183,7 @@ function storyPagePipeline(filter, { lang, page, limit }) {
 }
 
 function storyCard(doc, lang, publication) {
-  const localized = localizeArticleForLang(doc, lang, { fallbackToBase: false, allowMissingStatus: false });
+  const localized = serializePublicNewsGroup([doc], lang, { strictLocale: true });
   if (!localized || localized.resolvedLang !== lang) throw unavailable();
   const imageUrl = doc.coverImage?.url || doc.coverImageUrl || doc.imageURL || doc.imageUrl || null;
   return {

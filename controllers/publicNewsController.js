@@ -2050,12 +2050,12 @@ async function getPublicNewsBySlug(req, res) {
   }
 }
 
-function serializePublicNewsGroup(groupDocs, requestedLang) {
-  const picked = _pickBestLocalizedGroupedNewsDoc(groupDocs, requestedLang);
+function serializePublicNewsGroup(groupDocs, requestedLang, { strictLocale = false } = {}) {
+  const picked = _pickBestLocalizedGroupedNewsDoc(groupDocs, requestedLang, { strictLocale });
   if (!picked) return null;
   const out = withCoverImageUrl(picked.doc);
   attachLocalizationFields(out, requestedLang);
-  _attachPublicRouteData(out, requestedLang, { fallbackEnabled: true });
+  _attachPublicRouteData(out, requestedLang, { fallbackEnabled: !strictLocale });
   for (const field of ['translations', 'translationStatus', 'translationError', 'translationNextRetryAt']) delete out[field];
   return attachMobileResponseFields(out);
 }

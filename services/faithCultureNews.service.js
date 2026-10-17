@@ -157,6 +157,7 @@ module.exports = {
   UNAVAILABLE_MESSAGE,
   FaithPaginationError,
   parseFaithCulturePagination,
+  buildPublicNewsBaseLanguageExpression: baseLanguage,
   buildFaithCulturePagePipeline,
   listFaithCultureNews,
 };

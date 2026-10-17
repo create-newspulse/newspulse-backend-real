@@ -271,6 +271,22 @@ content or complete, ready cached translations qualify; no base-language fallbac
 is enabled. Logical stories are grouped before pagination/totals using the
 existing translation-key/group/slug identity convention.
 
+Topic selection and hydration use the public News resolver's locale rules,
+including its script-based correction for legacy records without `originalLang`.
+A stored locale alias or fallback title alone does not make that locale eligible.
+An eligible native edition is preferred; complete, ready cached translations
+remain supported where the existing strict public News lookup can serve them.
+No missing translation is generated and no cross-language fallback is enabled.
+
+Cards reuse public News serialization: `id`, `_id`, and `articleId` identify the
+selected News record; `slug` preserves its persisted primary slug (or a persisted
+alias when the primary slug is absent), while `canonicalSlug` is its persisted
+locale-aware alias when available. These fields are not derived from title text.
+Open them through `GET /api/public/news/:slugOrId?lang=<lang>` or the
+`GET /api/public/news/slug/:slug?lang=<lang>` alias. A separate locale row is not
+required for an already supported ready cached translation; it retains the
+source News ID and reports `isTranslated: true`, not `isFallback: true`.
+
 Ordering uses the eligible source record's `publishedAt` (the earliest source
 date for legacy unlinked editions), falling back to the earliest associated
 eligible edition's `publishedAt` if the source is absent;
