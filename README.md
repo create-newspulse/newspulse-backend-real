@@ -209,9 +209,11 @@ GU/HI/EN, not one record per language:
   ID. No new article fields, article copies, or Faith & Culture taxonomy changes.
 - Server-controlled `createdBy` / `updatedBy` actor identifiers and timestamps.
 
-All management endpoints are **Founder-only**, including reads, using existing
+All topic-configuration endpoints below are **Founder-only**, including reads, using existing
 signed-token/cookie authentication, persisted-role checks, and account lifecycle
-protections. Admin, Editor, Manager, and Reporter roles cannot manage topics.
+protections. Admin, Editor, Manager, and Reporter roles cannot change topic
+configuration or pins. The V2 story-assignment endpoints below have separate,
+existing editorial permission checks.
 
 | Method | Endpoint | Result |
 | --- | --- | --- |
@@ -295,6 +297,139 @@ tag queries separately before proposing any News tags index.
 
 Focused isolated regression coverage: `node --test tests/editorial_topics.test.js`.
 The tests use in-memory model stubs and must not connect to production services.
+
+### Trending Topic Story Management V2
+
+[Story membership](./services/editorialTopicStories.service.js) extends the same
+EditorialTopic/News tag relationship; it does not use the legacy navigation-chip
+model, the Faith & Culture `topic` field, SEO keywords, or article categories.
+No schema change, topic recreation, new index, package, or data migration is
+required. Existing slugs and exact values such as `topic:navratri-2026` keep
+their meaning.
+
+#### Admin integration
+
+All paths below also work under `/admin-api/admin/topics` and
+`/admin-api/api/admin/topics`. Responses are no-store. Reads require existing
+Admin authentication plus Founder-controlled `manage_news` module access.
+Attach/detach additionally require the existing `news_edit` special right.
+Founder retains access; a staff role name alone does not grant access. Existing
+global/individual module restrictions, account status, token version and
+cookie-request protections still apply. No new permission or authentication
+system is introduced. Topic CRUD, activation, tag configuration and pin changes
+remain Founder-only.
+
+| Method | Endpoint under `/api/admin/topics` | Contract |
+| --- | --- | --- |
+| GET | `/available?lang=gu&active=all&page=1&limit=20&storyId=<NewsId>` | `{ok, lang, logicalStoryId?, items, total, count, page, limit, totalPages, hasNextPage}`; `storyId` is optional |
+| GET | `/:id/stories?lang=gu&page=1&limit=20` | Attached logical stories, including drafts, withdrawn and soft-deleted stories |
+| POST | `/:id/stories/attach` | Body `{ "storyIds": ["<NewsId>", "..."] }` |
+| POST | `/:id/stories/detach` | Same body; removes only the selected topic's safe membership tags |
+| GET | `/:id/stories/search?q=navratri&lang=gu&page=1&limit=20` | Bounded literal metadata search; includes attached and unattached stories |
+| GET | `/:id/candidates?lang=gu&page=1&limit=20&q=navratri` | Suggestions only; `q` is optional and overrides topic-derived discovery terms |
+
+`:id` is the EditorialTopic ID. `storyIds` accepts 1-50 CMS **News** IDs,
+including any edition ID or the returned `logicalStoryId`; compatibility
+Article IDs, slugs and free-form translation keys are not accepted. Repeated
+IDs and different editions of the same story resolve to one operation.
+
+Available-topic items contain
+`{id, title, slug, name, active, promotionState, startsAt, expiresAt, articleTags,
+membershipTag, assignmentSupported}`. `title` uses the requested language.
+`promotionState` is `active`, `archived`, `upcoming`, or `inactive`; archived
+and inactive topics remain selectable. Supplying `storyId` also returns
+`attached` and `membershipConsistent` on each item, and the story's logical ID.
+Selection limits are 1-100; `active=all|true|false` defaults to `all`.
+
+Story lists return
+`{ok, unit:"logical-story", lang, topicId, items, total, count, page, limit,
+totalPages, hasNextPage}`. Each story row contains
+`{logicalStoryId, articleId, variantIds, translationGroupId, translationKey,
+title, slug, category, status, publishedAt, availableLanguages, pinned,
+attached, membershipConsistent}`. `articleId` selects the requested native
+edition where available, otherwise the source; it is not a generated
+translation. The category is that edition's real category. Mixed edition
+statuses are reported as `mixed`. `pinned` reports the stored relationship,
+not a promise of public eligibility. Attached lists include the pinned story.
+Pages start at 1 (maximum 10000); story limits default to 20 and accept 1-50.
+
+Mutation results are
+`{ok, topicId, action, unit:"logical-story", committed:true, count,
+changedVariants, items, revalidation?}`. `count` counts unique selected
+logical stories, not editions; `changedVariants` counts changed News tag arrays.
+Returned mutation rows use Gujarati preference. A duplicate attach or absent
+detach succeeds without adding duplicate memberships. A missing selected News
+ID aborts the entire batch with 404.
+
+#### Membership safety and lifecycle
+
+Logical resolution reuses the lifecycle/counting source-link and translation
+key/group rules, including legacy cross-field identities. Slug similarity is
+not identity. Overlapping inconsistent identities return
+`409 ARTICLE_LOGICAL_IDENTITY_CONFLICT`, not an invented merged story.
+
+Assignments add one **unique configured `topic:` tag**, preferring
+`topic:<slug>` when available. Detach removes all of that topic's unique
+configured `topic:` aliases. Existing public reads still match **any exact
+configured tag**, including legacy ordinary/shared tags. If safe assignment is
+impossible, or detaching would remove a shared tag or ordinary metadata, the
+whole operation returns `409 UNSAFE_TOPIC_TAGS` without writes. Founder review
+of that topic's configuration is required; the API does not silently rewrite
+tags, create a competing relationship, or migrate legacy records.
+
+All existing editions, including soft-deleted editions, receive the same
+selected-topic operation. News tags, existing owned compatibility-copy tags and
+the topic configuration/version guard share the existing article transaction.
+There is no nontransactional fallback. Concurrent edition/lifecycle writers
+share the News `syncVersion` write dependency. Membership changes do not create
+copies, generate translations, publish content, change categories, overwrite
+SEO/media/translation metadata, or reset article timestamps.
+
+Zero, one or multiple memberships remain normal article tags through draft
+saves, publication, ordinary edits, translation updates, withdrawal, soft
+deletion, restore and republication. Intentional legacy full-tag edits retain
+their existing behavior; clients should use these endpoints, not stale full
+tag-array replacements, when changing only topic membership. Normal and other
+topic tags are preserved by these endpoints.
+
+After commit, existing content invalidation covers previous/current tags,
+topic archives and pins. Delivery failures retain `committed:true` with
+`revalidation.ok:false` or `postCommitWarnings`. Reload authoritative state;
+do not interpret a notification failure as a rolled-back mutation.
+
+#### Search, suggestions and public integration
+
+Search requires `q` of 2-120 characters, matched literally rather than as a
+regular expression. It uses existing title, slug, category, tags, SEO metadata,
+localized titles and legacy keyword fields where present. Candidate discovery
+also examines summaries and bounded content, using at most 12 terms from topic
+names/slug/configured tags, or the supplied `q`. It excludes already-attached
+logical stories and adds `suggestionOnly:true`, `terms` and up to five
+`matchReasons: [{field, term}]` per row. Neither operation writes membership.
+
+Each database read has a 2500ms deadline. Matching examines the first 2000
+Unicode code points per metadata field and 8000 per content field; array
+metadata is bounded to 100 entries of 200 code points each. Admin logical
+expansion has a 10000-edition safety budget; exceeding it returns
+`503 ARTICLE_LOGICAL_QUERY_TOO_LARGE`, never partial success or false totals.
+No search engine, Atlas Search index or package installation is required.
+
+The existing anonymous public contracts above are unchanged:
+`GET /api/public/topics`, `GET /api/public/topics/:slug`, and
+`GET /api/public/topics/:slug/articles`. The frontend must render the detail
+response's eligible `pinnedArticle` separately and paginate the articles
+response; its totals exclude that pin. The archive is not capped at 8 or 12
+stories. Publication ordering, native/ready locale selection, canonical IDs,
+slugs, real categories and all public lifecycle/privacy gates remain in force.
+Expiry removes strip promotion only; Active OFF still hides every public
+surface without removing stored membership.
+
+Validation uses isolated in-memory transactions, blocked external connections
+and real route/auth middleware in
+[editorial_topic_stories.test.js](./tests/editorial_topic_stories.test.js),
+alongside the existing topic, lifecycle, translation and logical-count suites.
+These fixtures verify rollback behavior but are not a real replica-set
+concurrency or production-load test.
 
 ## First-party readership analytics
 

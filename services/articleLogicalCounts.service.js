@@ -35,22 +35,31 @@ function effectiveStatus(doc) {
   return status;
 }
 
-function readArticles(filter, session) {
-  return News.find(filter, null, { session }).select(SELECT).maxTimeMS(QUERY_MS).lean();
+function readArticles(filter, session, options) {
+  const query = News.find(filter, null, { session })
+    .select(options.select ? `${SELECT} ${options.select}` : SELECT).maxTimeMS(QUERY_MS);
+  if (options.maxDocuments) query.limit(options.maxDocuments + 1);
+  if (options.collation) query.collation(options.collation);
+  return query.lean();
 }
 
-async function readLogicalCounts(filter, session) {
+async function readLogicalArticleGroups(filter, session, options = {}) {
   const docs = new Map();
   const identities = new Map();
   const pending = [];
   const add = doc => {
     const id = valueKey(doc._id);
     if (docs.has(id)) return;
+    if (options.maxDocuments && docs.size >= options.maxDocuments) {
+      throw Object.assign(new Error('Too many story editions matched. Narrow the story selection.'), {
+        statusCode: 503, code: 'ARTICLE_LOGICAL_QUERY_TOO_LARGE',
+      });
+    }
     docs.set(id, doc);
     identities.set(id, identityTerms(doc));
     pending.push(id);
   };
-  for (const doc of await readArticles(filter, session)) add(doc);
+  for (const doc of await readArticles(filter, session, options)) add(doc);
 
   // Expand only selected stories, batching and deduplicating the existing helper's predicates.
   const queried = new Set();
@@ -70,7 +79,7 @@ async function readLogicalCounts(filter, session) {
     }
     if (!fields.size) continue;
     const clauses = [...fields].map(([field, values]) => ({ [field]: { $in: values } }));
-    for (const doc of await readArticles({ $or: clauses }, session)) add(doc);
+    for (const doc of await readArticles({ $or: clauses }, session, options)) add(doc);
   }
 
   const indexes = new Map(IDENTITY_FIELDS.map(field => [field, new Map()]));
@@ -88,8 +97,7 @@ async function readLogicalCounts(filter, session) {
   }
 
   const owners = new Map();
-  const groups = new Set();
-  const counts = { published: 0, draft: 0, scheduled: 0, deleted: 0, archived: 0, mixed: 0 };
+  const groups = new Map();
   for (const id of docs.keys()) {
     const members = new Set();
     for (const { field, key } of identities.get(id)) {
@@ -103,11 +111,19 @@ async function readLogicalCounts(filter, session) {
       owners.set(member, signature);
     }
     if (groups.has(signature)) continue;
-    groups.add(signature);
-    const statuses = new Set([...members].map(member => effectiveStatus(docs.get(member))));
+    groups.set(signature, [...members].map(member => docs.get(member)));
+  }
+  return [...groups.values()];
+}
+
+async function readLogicalCounts(filter, session) {
+  const groups = await readLogicalArticleGroups(filter, session);
+  const counts = { published: 0, draft: 0, scheduled: 0, deleted: 0, archived: 0, mixed: 0 };
+  for (const members of groups) {
+    const statuses = new Set(members.map(effectiveStatus));
     counts[statuses.size === 1 ? [...statuses][0] : 'mixed'] += 1;
   }
-  return { unit: 'logical-story', total: groups.size, counts };
+  return { unit: 'logical-story', total: groups.length, counts };
 }
 
 async function countLogicalArticles(filter) {
@@ -124,4 +140,4 @@ async function countLogicalArticles(filter) {
   }
 }
 
-module.exports = { countLogicalArticles };
+module.exports = { countLogicalArticles, readLogicalArticleGroups };

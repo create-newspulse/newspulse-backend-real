@@ -109,7 +109,7 @@ function installEditorialFixture(context) {
     if (error.once) delete state.failures[key];
     throw Object.assign(new Error('Synthetic storage failure'), { name: 'MongoNetworkError' }, error);
   };
-  const apply = (doc, update, inserted) => {
+  const apply = (doc, update, inserted, options = {}) => {
     if (inserted) for (const [key, value] of Object.entries(update.$setOnInsert || {})) put(doc, key, value);
     for (const [key, value] of Object.entries(update.$set || {})) if (value !== undefined) put(doc, key, value);
     for (const key of Object.keys(update.$unset || {})) {
@@ -120,7 +120,15 @@ function installEditorialFixture(context) {
     }
     for (const [key, value] of Object.entries(update.$inc || {})) put(doc, key, (get(doc, key) || 0) + value);
     for (const [key, value] of Object.entries(update.$push || {})) put(doc, key, [...(get(doc, key) || []), value]);
-    doc.updatedAt = new Date();
+    for (const [key, value] of Object.entries(update.$addToSet || {})) {
+      const values = [...(get(doc, key) || [])];
+      for (const item of value?.$each || [value]) if (!values.some(existing => equal(existing, item))) values.push(item);
+      put(doc, key, values);
+    }
+    for (const [key, value] of Object.entries(update.$pull || {})) {
+      put(doc, key, (get(doc, key) || []).filter(item => !matches({ item }, { item: value })));
+    }
+    if (options.timestamps !== false) doc.updatedAt = new Date();
     return doc;
   };
   const hydrate = (name, row) => {
@@ -223,7 +231,7 @@ function installEditorialFixture(context) {
           }
         }
       }
-      const next = apply(clone(row), update, inserted);
+      const next = apply(clone(row), update, inserted, options);
       if (name === 'Article' && state.rows[name].some(doc => doc.slug === next.slug && !equal(doc._id, row._id))) {
         throw Object.assign(new Error('Synthetic duplicate slug'), { code: 11000 });
       }
@@ -236,13 +244,13 @@ function installEditorialFixture(context) {
     context.mock.method(Model, 'updateMany', async (filter, update, options) => {
       invoke('updateMany', filter, options);
       const rows = state.rows[name].filter(doc => matches(doc, filter));
-      for (const row of rows) apply(row, update);
+      for (const row of rows) apply(row, update, false, options);
       return { acknowledged: true, matchedCount: rows.length, modifiedCount: rows.length };
     });
     context.mock.method(Model, 'updateOne', async (filter, update, options) => {
       invoke('updateOne', filter, options);
       const row = state.rows[name].find(doc => matches(doc, filter));
-      if (row) apply(row, update);
+      if (row) apply(row, update, false, options);
       return { acknowledged: true, matchedCount: row ? 1 : 0, modifiedCount: row ? 1 : 0 };
     });
     context.mock.method(Model, 'deleteMany', async (filter, options) => {

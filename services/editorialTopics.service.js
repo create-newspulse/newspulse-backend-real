@@ -68,6 +68,10 @@ function handleTopicRequest(handler) {
       if (error instanceof z.ZodError || ['ValidationError', 'CastError'].includes(error?.name)) failure = invalid();
       else if (error?.code === 11000) failure = new TopicError(409, 'SLUG_CONFLICT', 'Topic slug already exists');
       else if (error?.name === 'VersionError') failure = new TopicError(409, 'EDIT_CONFLICT', 'Topic changed; reload before editing');
+      else if (['ARTICLE_LOGICAL_IDENTITY_CONFLICT', 'ARTICLE_LOGICAL_QUERY_TOO_LARGE'].includes(error?.code)) {
+        failure = new TopicError(error.statusCode, error.code, error.message);
+      }
+      else if ([20, 263].includes(error?.code)) failure = unavailable();
       else if (mongoose.connection.readyState !== 1 || error?.code === 50
         || ['MongoNetworkError', 'MongoNetworkTimeoutError', 'MongoServerSelectionError',
           'MongooseServerSelectionError', 'MongoNotConnectedError'].includes(error?.name)) failure = unavailable();
@@ -286,8 +290,8 @@ async function createTopic(body, actor, now = new Date()) {
   return adminTopic(topic);
 }
 
-async function findAdminTopic(id) {
-  const topic = await EditorialTopic.findById(parseId(id)).maxTimeMS(QUERY_MS);
+async function findAdminTopic(id, session) {
+  const topic = await EditorialTopic.findById(parseId(id), null, { session }).maxTimeMS(QUERY_MS);
   if (!topic) throw new TopicError(404, 'TOPIC_NOT_FOUND', 'Topic not found');
   return topic;
 }
@@ -321,4 +325,5 @@ async function listAdminTopics(query) {
 module.exports = {
   QUERY_MS, handleTopicRequest, parseQuery, storyPagePipeline, listPublicTopics, getPublicTopic, listTopicStories,
   listAdminTopics, getAdminTopic, createTopic, updateTopic,
+  TopicError, invalid, parseId, pagination, findAdminTopic,
 };

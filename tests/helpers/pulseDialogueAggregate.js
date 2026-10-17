@@ -26,6 +26,18 @@ function expression(value, doc, variables = {}) {
   const args = () => evaluate(operand);
   if (!operator?.startsWith('$')) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, evaluate(item)]));
   switch (operator) {
+    case '$literal': return operand;
+    case '$isArray': return Array.isArray(evaluate(operand));
+    case '$slice': { const [values, length] = args(); return values.slice(0, length); }
+    case '$substrCP': { const [text, start, length] = args(); return [...text].slice(start, start + length).join(''); }
+    case '$indexOfCP': {
+      const [text, term] = args();
+      const index = text.indexOf(term);
+      return index < 0 ? -1 : [...text.slice(0, index)].length;
+    }
+    case '$filter': return evaluate(operand.input).filter(item => expression(operand.cond, doc, {
+      ...variables, [operand.as || 'this']: item,
+    }));
     case '$ifNull': {
       for (const item of operand) {
         const result = evaluate(item);

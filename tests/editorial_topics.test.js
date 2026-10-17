@@ -1,3 +1,4 @@
+require('./helpers/publicNewsIsolation');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { randomBytes } = require('node:crypto');
