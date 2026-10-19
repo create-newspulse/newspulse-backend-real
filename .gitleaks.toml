@@ -1,13 +1,13 @@
-[rules]
+title = "News Pulse Gitleaks configuration"
 
-[[rules.allowlist.regexes]]
-description = "Allow placeholder Mongo URIs in .env.example"
-regex = '''mongodb\+srv:\/\/<user>:<pass>@<cluster>\/[^\s]+'''
+[extend]
+useDefault = true
 
-[[rules.allowlist.files]]
-description = "Ignore sample env"
-path = '\.env\.example$'
-
-[rules.config]
-# Enable default gitleaks rules
-enableDefaultRules = true
+[[allowlists]]
+description = "Allow the placeholder MongoDB URI in .env.example"
+condition = "AND"
+paths = ['''^\.env\.example$''']
+regexTarget = "line"
+regexes = [
+  '''^\s*#\s*MONGODB_URI=mongodb\+srv://(?i:user):(?i:pass)@(?i:cluster)/newspulse_dev\?retryWrites=true&w=majority\s*$''',
+]
