@@ -1861,9 +1861,27 @@ function _buildOriginalLangMatch(desiredLang) {
   };
 }
 
-function _buildReadyTranslationMatch(desiredLang) {
+function _buildReadyTranslationMatch(desiredLang, { requireNonBlankStrings = false } = {}) {
   const desired = _normalizeOriginalLang(desiredLang);
   if (!desired) return null;
+  if (requireNonBlankStrings) {
+    // Match JavaScript trim() whitespace explicitly; MongoDB's regex \s differs.
+    const nonBlank = '[^\\x09-\\x0D \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]';
+    return {
+      $and: [
+        { [`translationStatus.${desired}`]: 'ready' },
+        { $expr: { $and: ['title', 'summary', 'content'].map(field => {
+          const value = `$translations.${desired}.${field}`;
+          return {
+            $regexMatch: {
+              input: { $cond: [{ $eq: [{ $type: value }, 'string'] }, value, ''] },
+              regex: nonBlank,
+            },
+          };
+        }) } },
+      ],
+    };
+  }
   // Clean UX: include ONLY fully-ready translations.
   return {
     $and: [
@@ -2163,7 +2181,7 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
     // - Else => show ONLY fully-ready cached translations for that language
     if (desired === 'hi' || desired === 'en') {
       const originalMatch = _buildOriginalLangMatch(desired);
-      const readyMatch = _buildReadyTranslationMatch(desired);
+      const readyMatch = _buildReadyTranslationMatch(desired, { requireNonBlankStrings: true });
       filter.$and = (filter.$and || []).concat([{ $or: [originalMatch, readyMatch].filter(Boolean) }]);
     }
 

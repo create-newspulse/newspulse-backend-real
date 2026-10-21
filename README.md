@@ -824,6 +824,7 @@ Query params:
 - `q` (existing search)
 - `topic` (optional existing topic metadata filter)
 - `page` (default 1), `limit` (default 30)
+- `sponsoredOnly` (optional literal `true` or `false`; absent/`false` preserves the ordinary feed)
 
 Examples:
 ```bash
@@ -842,9 +843,109 @@ Response shape (unchanged):
 { "items": [], "page": 1, "limit": 30, "total": 0, "totalPages": 1 }
 ```
 
+#### Sponsored-only public article listing
+
+```text
+GET /api/public/news?sponsoredOnly=true&lang=gu&page=1&limit=12
+```
+
+- Membership requires persisted `isSponsoredArticle === true` or `isSponsored === true`.
+  Titles, tags, sponsor names, label defaults, category and campaign activity do not
+  establish membership. Original categories are retained; without an explicit
+  category filter, eligible sponsored articles from all categories are included.
+  Existing optional category/topic/search/location filters further narrow the set.
+- Campaign pause, expiry, unlinking or removal does not change article membership.
+  The listing neither queries nor changes campaigns, publishing or payment state.
+- Shared public visibility rules exclude drafts, scheduled/future, archived,
+  withdrawn/retracted literals, soft-deleted, private, locked and embargoed records.
+  Restored articles must already be in an eligible publication state; no lifecycle
+  transition happens on reads.
+- `lang=gu|hi|en` defaults to Gujarati. Existing recognized language aliases and
+  language headers are supported. Invalid supplied languages, invalid
+  `sponsoredOnly` values and malformed/nonpositive/unsafe pagination return HTTP
+  400. Defaults are page 1 and limit 30; valid limits above 100 are capped at 100.
+- Selection requires nonblank title, summary and content in the requested native
+  representation or a complete `ready` translation bucket. No translations are
+  generated. Fallback flags and `strictLocale=false` cannot enable another language.
+- Eligibility, including availability of a persisted slug, precedes logical-story
+  deduplication, counting and pagination. Existing translation key/group and
+  canonical-slug identity rules are reused. An eligible native edition is preferred
+  to a cached translation. Never post-filter ordinary News pages on the client.
+- Ordering uses `publishedAt`, then only if absent `publishAt`, then `createdAt`,
+  then epoch zero. The selected persisted `_id` descending breaks ties; `updatedAt`
+  does not promote an article. The returned publication date uses those stored
+  date fallbacks, or `null` when no date is stored.
+- Success always retains `{ items, page, limit, total, totalPages }`, including with
+  an explicit Faith category. `total` counts eligible logical sponsored stories;
+  `totalPages = max(1, ceil(total / limit))`. Empty results have `total=0` and
+  `totalPages=1`; an out-of-range page is empty without changing its page number.
+
+Representative response (items also include public ID, image and language aliases):
+
+```json
+{
+  "items": [{
+    "id": "507f1f77bcf86cd799439011",
+    "slug": "persisted-story-slug",
+    "canonicalSlug": "persisted-gujarati-slug",
+    "language": "gu",
+    "requestedLanguage": "gu",
+    "resolvedLanguage": "gu",
+    "isFallback": false,
+    "title": "Public title in the requested language",
+    "summary": "Public summary in the requested language",
+    "imageUrl": "https://example.invalid/public-cover.jpg",
+    "category": "business",
+    "publishedAt": "2026-01-01T00:00:00.000Z",
+    "isSponsored": true,
+    "isSponsoredArticle": true,
+    "sponsorName": "Example sponsor",
+    "sponsorLabel": "Sponsored",
+    "sponsorDisclosure": "Paid partnership disclosure",
+    "canonicalDetailUrl": "/gu/news/persisted-gujarati-slug",
+    "detailApiUrl": "/api/public/news/persisted-gujarati-slug?lang=gu"
+  }],
+  "page": 1,
+  "limit": 12,
+  "total": 1,
+  "totalPages": 1
+}
+```
+
+- Items use an explicit public allowlist: persisted identity/slug and URL aliases,
+  language metadata, title/summary, public image URL/alt, original category,
+  publication date, sponsorship flags, sponsor name/label/disclosure and article
+  CTA text/URL. Optional sponsor metadata remains nullable. Raw translation buckets,
+  article bodies, private contacts/accounts/payments, campaign links/administration,
+  Spotlight configuration and media storage IDs are not returned.
+- `id`, `_id` and `articleId` identify the selected persisted News edition, not a
+  newly generated record or a language-independent ID. `slug` remains the stored
+  article slug (or a stored language slug for legacy records). `canonicalSlug`,
+  `localizedSlug`, `canonicalDetailUrl` and `detailApiUrl` preserve existing
+  language-specific URL conventions; detail links do not enable fallback.
+- Sponsored-only reads use `Cache-Control: no-store` and bypass ordinary latest,
+  category and last-known-good caches. Ordinary and Faith cache behavior is unchanged.
+- Genuine empty reads return HTTP 200. Unavailable databases and query deadlines
+  return HTTP 503 with `NEWS_UNAVAILABLE`; other query/consistency failures return
+  HTTP 500 with `NEWS_QUERY_FAILED`. Changed/ineligible hydration results never
+  become a false successful empty feed. Error responses do not expose DB details.
+- The shared strict paging primitive aggregates compact IDs/counts and hydrates at
+  most the requested page limit. Each query has a 2.5-second deadline; aggregation
+  can spill to disk. Exact totals still require work over matching candidates and
+  deep offsets are not constant-time. No indexes or data are modified. Deployed
+  plans/latency are unverified; offset pages are not snapshots across concurrent edits.
+- The existing `/api/public/news/breaking` endpoint does not opt into this mode.
+
+Isolated focused checks:
+
+```powershell
+node --require .\tests\helpers\publicNewsIsolation.js --test .\tests\public_news_sponsored_pagination.test.js .\tests\public_news_faith_pagination.test.js
+```
+
 #### Faith & Culture strict pagination
 
-Only canonical `category=faith-culture` uses the strict pagination contract:
+With `sponsoredOnly` absent or `false`, canonical `category=faith-culture` retains
+its existing strict pagination contract:
 
 ```text
 GET /api/public/news?category=faith-culture&lang=hi&page=1&limit=30

@@ -20,10 +20,13 @@ const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnic
 const { timeAsync } = require('../lib/timingDiagnostics');
 const {
   UNAVAILABLE_MESSAGE: FAITH_UNAVAILABLE_MESSAGE,
-  FaithPaginationError,
-  parseFaithCulturePagination,
   listFaithCultureNews,
 } = require('../services/faithCultureNews.service');
+const {
+  PublicNewsQueryError,
+  parsePublicNewsPagination,
+  listPublicNewsPage,
+} = require('../services/publicNewsPagination.service');
 const {
   getPublicContentGroupKey,
   getPublicContentLookup,
@@ -1422,16 +1425,62 @@ async function tryAcquireNewsTranslationLock({ id, lang, now = new Date() }) {
   }
 }
 
+function toPublicSponsoredNewsItem(item) {
+  if (typeof item.slug !== 'string' || !item.slug.trim()
+      || typeof item.canonicalSlug !== 'string' || !item.canonicalSlug.trim()) {
+    throw new Error('Sponsored article is missing a persisted slug');
+  }
+  return {
+    _id: item.id,
+    id: item.id,
+    articleId: item.articleId,
+    slug: item.slug,
+    canonicalSlug: item.canonicalSlug,
+    localizedSlug: item.localizedSlug,
+    canonicalDetailUrl: item.canonicalDetailUrl,
+    detailApiUrl: item.detailApiUrl,
+    language: item.language,
+    lang: item.lang,
+    requestedLanguage: item.requestedLanguage,
+    resolvedLanguage: item.resolvedLanguage,
+    isFallback: false,
+    isTranslated: item.isTranslated,
+    title: item.title,
+    summary: item.summary,
+    imageUrl: item.imageUrl,
+    coverImageUrl: item.coverImageUrl,
+    coverImage: item.coverImageUrl ? { url: item.coverImageUrl, alt: item.imageAlt || null } : null,
+    category: item.category,
+    publishedAt: item.publishedAt ?? item.publishAt ?? item.createdAt ?? null,
+    isSponsored: true,
+    isSponsoredArticle: true,
+    sponsorName: item.sponsorName || null,
+    sponsorLabel: item.sponsorLabel || 'Sponsored',
+    sponsorDisclosure: item.sponsorDisclosure || null,
+    sponsorCtaText: item.sponsorCtaText || null,
+    sponsorCtaUrl: item.sponsorCtaUrl || null,
+  };
+}
+
 function resolvePublicNewsListRequest(req) {
   const category = normalizeCategorySlug(req.query.category);
-  const pagination = category === 'faith-culture'
-    ? parseFaithCulturePagination(req.query)
+  if (req.query.sponsoredOnly !== undefined && !['true', 'false'].includes(req.query.sponsoredOnly)) {
+    throw new PublicNewsQueryError('sponsoredOnly');
+  }
+  const sponsoredOnly = req.query.sponsoredOnly === 'true';
+  const rawLang = req.query.lang ?? req.query.language ?? req.headers['x-lang'] ?? req.headers['x-language'] ?? req.lang;
+  if (sponsoredOnly && rawLang != null && (typeof rawLang !== 'string' || !normalizeLanguage(rawLang))) {
+    throw new PublicNewsQueryError('lang');
+  }
+  const pagination = sponsoredOnly || category === 'faith-culture'
+    ? parsePublicNewsPagination(req.query)
     : {
       page: Math.max(parseInt(req.query.page || '1', 10), 1),
       limit: Math.min(Math.max(parseInt(req.query.limit || '30', 10), 1), 100),
     };
   return {
     ...pagination,
+    sponsoredOnly,
     category,
     track: normalizeTrackValue(req.query.track),
     topic: normalizeTopicSlug(req.query.topic),
@@ -1439,18 +1488,19 @@ function resolvePublicNewsListRequest(req) {
     founderOnly: parseTruthy(req.query.founderOnly),
     type: String(req.query.type || '').trim().toLowerCase(),
     desired: normalizeLang(getRequestedLang(req) || 'gu') || 'gu',
-    fallbackEnabled: isFallbackModeEnabled(req),
-    strictLocale: parseTruthy(req.query.strictLocale),
+    fallbackEnabled: !sponsoredOnly && isFallbackModeEnabled(req),
+    strictLocale: sponsoredOnly || parseTruthy(req.query.strictLocale),
     q: String(req.query.q || '').trim().slice(0, 80),
   };
 }
 
 // GET /api/public/news?category=&type=video&founderOnly=true&limit=30&page=1
 async function listPublicNews(req, res) {
-  const isFaithCulture = normalizeCategorySlug(req.query.category) === 'faith-culture';
+  let isFaithCulture = normalizeCategorySlug(req.query.category) === 'faith-culture';
   try {
     res.set('Cache-Control', 'no-store');
-    const { page, limit, category, track, topic, state, founderOnly, type, desired, fallbackEnabled, q } = resolvePublicNewsListRequest(req);
+    const { page, limit, category, track, topic, state, founderOnly, type, desired, fallbackEnabled, q, sponsoredOnly } = resolvePublicNewsListRequest(req);
+    if (sponsoredOnly) isFaithCulture = false;
 
     if (!isDbReady()) {
       if (isFaithCulture) return res.status(503).json({ message: FAITH_UNAVAILABLE_MESSAGE });
@@ -1470,6 +1520,27 @@ async function listPublicNews(req, res) {
     });
     if (topic) filter.$and.push({ topic: new RegExp(`^${escapeRegExp(topic)}$`, 'i') });
     if (state) filter.$and.push({ 'location.state': new RegExp(`^${escapeRegExp(state)}$`, 'i') });
+
+    if (sponsoredOnly) {
+      if (category || track) filter.category = buildPublicCategoryFilter(category || 'youth-pulse');
+      filter.$and.push(
+        { $or: [{ isSponsoredArticle: true }, { isSponsored: true }] },
+        { visibility: { $not: /^private$/i } },
+        { $or: ['slug', 'slugs.en', 'slugs.hi', 'slugs.gu'].map(field => ({ [field]: /\S/ })) }
+      );
+      const { docs, total, totalPages } = await listPublicNewsPage({
+        filter, lang: desired, page, limit, select: PUBLIC_FEED_SELECT, timingContext: { req, res }, scope: 'sponsored',
+      });
+      const items = _preparePublicNewsFeedItems(docs.map(doc => ({
+        ...doc, description: doc.description || doc.summary || '',
+      })), desired, { fallbackToBase: false });
+      if (items.length !== docs.length || items.some(item => item.resolvedLanguage !== desired
+          || (item.isSponsoredArticle !== true && item.isSponsored !== true)
+          || !hasFullTranslation({ title: item.title, summary: item.summary, content: item.content }))) {
+        throw new Error('Sponsored page eligibility changed during hydration');
+      }
+      return res.status(200).json({ items: items.map(toPublicSponsoredNewsItem), page, limit, total, totalPages });
+    }
 
     if (isFaithCulture) {
       const { docs, total, totalPages, hasMore } = await listFaithCultureNews({
@@ -1573,8 +1644,8 @@ async function listPublicNews(req, res) {
 
     return res.status(200).json({ items, page, limit, total, totalPages });
   } catch (e) {
+    if (e instanceof PublicNewsQueryError) return res.status(400).json({ message: e.message });
     if (isFaithCulture) {
-      if (e instanceof FaithPaginationError) return res.status(400).json({ message: e.message });
       console.error('[public-news][faith-culture] Feed query failed');
       return res.status(503).json({ message: FAITH_UNAVAILABLE_MESSAGE });
     }
@@ -1586,6 +1657,7 @@ async function listPublicBreakingNews(req, res) {
   req.query = {
     ...(req.query || {}),
     category: 'breaking',
+    sponsoredOnly: undefined,
   };
 
   return listPublicNews(req, res);

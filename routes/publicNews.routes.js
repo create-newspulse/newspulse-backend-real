@@ -30,7 +30,8 @@ function isDbReady() {
 
 function buildPublicNewsCacheKey(req) {
   if (!isDbReady()) return null;
-  const { page, limit, category, track, topic, state, founderOnly, type, desired: lang, fallbackEnabled, strictLocale, q } = resolvePublicNewsListRequest(req);
+  const { page, limit, category, track, topic, state, founderOnly, type, desired: lang, fallbackEnabled, strictLocale, q, sponsoredOnly } = resolvePublicNewsListRequest(req);
+  if (sponsoredOnly) return null;
   if (!Number.isSafeInteger(page) || !Number.isFinite(limit) || (req.query.track !== undefined && !track)) return null;
   const variant = createHash('sha256').update(JSON.stringify({
     limit,
@@ -90,8 +91,8 @@ const latestCache = createJsonCacheMiddleware({
     }),
     buildKey: buildPublicNewsCacheKey,
     buildLastKnownGoodKey: (req, key) => {
-      const { limit, fallbackEnabled } = resolvePublicNewsListRequest(req);
-      return key && key.startsWith('np:v1:latest:') && limit === 40 && !fallbackEnabled
+      const { limit, fallbackEnabled, sponsoredOnly } = resolvePublicNewsListRequest(req);
+      return !sponsoredOnly && key && key.startsWith('np:v1:latest:') && limit === 40 && !fallbackEnabled
         ? key.replace('np:v1:latest:', 'np:v1:latest-lkg:') : null;
     },
     shouldCache: ({ statusCode, body }) => statusCode === 200 && body && Array.isArray(body.items),

@@ -66,7 +66,11 @@ function expression(value, doc, variables = {}) {
     case '$indexOfArray': { const [values, item] = args(); return values.findIndex(entry => equal(item, entry)); }
     case '$arrayElemAt': { const [values, index] = args(); return values.at(index); }
     case '$size': return evaluate(operand).length;
-    case '$regexMatch': return operand.regex.test(evaluate(operand.input));
+    case '$regexMatch': {
+      const regex = operand.regex instanceof RegExp
+        ? operand.regex : new RegExp(evaluate(operand.regex), operand.options || '');
+      return regex.test(evaluate(operand.input));
+    }
     case '$regexFindAll': {
       const pattern = new RegExp(operand.regex.source, operand.regex.flags.replace('g', '') + 'g');
       return Array.from(evaluate(operand.input).matchAll(pattern), match => ({

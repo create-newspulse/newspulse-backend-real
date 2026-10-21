@@ -157,9 +157,12 @@ The Regional endpoint still requires both the Regional category and supported
 state metadata. Its state clause accepts canonical geo, supported state tags,
 and legacy state aliases. Optional district/city clauses remain independent.
 The sort is `publishedAt` descending, then `createdAt` descending. English/Hindi
-requests select originals or ready cached translations; Gujarati reads retain
-the endpoint's existing base-language fallback. Language-variant deduplication
-is a separate part of response handling.
+requests select originals or ready cached translations. For translated Regional
+records, title, summary, and content must each be scalar strings containing
+non-whitespace text, matching the locale serializer's JavaScript `trim()` rule.
+This eligibility check runs before selection, counting, and pagination.
+The native-language branch and Gujarati base-language fallback are unchanged.
+Language-variant deduplication remains a separate part of response handling.
 
 Changing the mapper does not retroactively rewrite stored public records.
 [resyncPublishedRegionalArticles.js](./scripts/resyncPublishedRegionalArticles.js)
