@@ -25,6 +25,7 @@ const { listArticles, getArticleBySlug } = require('../controllers/publicArticle
 const PRIVATE = 'CONFIDENTIAL-SYNTHETIC-EDITORIAL-METADATA';
 const ARTICLE_ID = '507f1f77bcf86cd799439011';
 const CHILD_ID = '507f1f77bcf86cd799439012';
+const GU_CHILD_ID = '507f1f77bcf86cd799439013';
 const PREFIXES = ['', '/api', '/api/admin', '/admin-api', '/admin-api/api', '/admin-api/admin', '/admin-api/api/admin'];
 const ADMIN_PREFIXES = ['/api/admin', '/admin-api/admin', '/admin-api/api/admin'];
 const TRANSLATE_PREFIXES = ['/api/public/news', '/admin-api/public/news', '/admin-api/api/public/news'];
@@ -109,6 +110,28 @@ function setup(context, { news = fixture(), article = null, siblings } = {}) {
   context.mock.method(Contributor, 'find', () => query([]));
   context.mock.method(Contributor, 'findById', () => query(null));
   context.mock.method(SponsoredFeature, 'findById', () => query(null));
+}
+
+async function setupNewsManagementAuth(context) {
+  const auth = accountAuthFixture();
+  auth.install(context);
+  const founderToken = auth.token('founder');
+  const adminToken = auth.token('admin');
+  const admin = await User.findById(jwt.decode(adminToken).sub).lean();
+  admin.moduleAccessStates = { manageNews: 'enabled' };
+  const previousDb = mongoose.connection.db;
+  mongoose.connection.db = {};
+  context.after(() => { mongoose.connection.db = previousDb; });
+  const policy = { modulePolicies: { manageNews: 'available' }, version: 1 };
+  context.mock.method(SiteSettings, 'findOne', async () => ({ adminModulePolicy: policy }));
+  return { auth, founderToken, adminToken, admin, policy };
+}
+
+function contentReadCounts() {
+  return [
+    News.find, News.findOne, News.findById, News.countDocuments,
+    Article.find, Article.findOne, Article.findById, Article.countDocuments,
+  ].map(method => method.mock.callCount());
 }
 
 function assertPrivateExcluded(body) {
@@ -475,17 +498,7 @@ test('all detail aliases enforce module permissions and preserve authorized CMS 
   const source = fixture({ status: 'draft' });
   const child = fixture({ _id: CHILD_ID, title: 'Hidden sibling', status: 'draft', lang: 'hi', slug: 'hidden-sibling' });
   setup(context, { news: source, siblings: [source, child] });
-  const auth = accountAuthFixture();
-  auth.install(context);
-  const founderToken = auth.token('founder');
-  const adminToken = auth.token('admin');
-  const admin = await User.findById(jwt.decode(adminToken).sub).lean();
-  admin.moduleAccessStates = { manageNews: 'enabled' };
-  const previousDb = mongoose.connection.db;
-  mongoose.connection.db = {};
-  context.after(() => { mongoose.connection.db = previousDb; });
-  const policy = { modulePolicies: { manageNews: 'available' }, version: 1 };
-  context.mock.method(SiteSettings, 'findOne', async () => ({ adminModulePolicy: policy }));
+  const { auth, founderToken, adminToken, admin, policy } = await setupNewsManagementAuth(context);
   const detailPaths = [`/articles/${ARTICLE_ID}`, '/articles/slug/public-story', '/articles/by-slug/public-story'];
   for (const token of [founderToken, adminToken]) {
     for (const prefix of PREFIXES) {
@@ -510,9 +523,6 @@ test('all detail aliases enforce module permissions and preserve authorized CMS 
       }
     }
   }
-  const contentReadCounts = () => [
-    News.find, News.findOne, News.findById, Article.find, Article.findOne, Article.findById,
-  ].map(method => method.mock.callCount());
   const beforeDenials = contentReadCounts();
   async function assertDeniedAliases(token) {
     for (const prefix of PREFIXES) {
@@ -537,3 +547,136 @@ test('all detail aliases enforce module permissions and preserve authorized CMS 
   await assertDeniedAliases(spoofedFounder);
   assert.deepEqual(contentReadCounts(), beforeDenials, 'Denied requests must not read CMS or public-copy records');
 });
+
+for (const endpoint of [
+  {
+    name: 'article list',
+    path: '/articles?page=0&limit=10&sort=-updatedAt',
+    assertResponse(body, source, siblings) {
+      assert.deepEqual(Object.keys(body).sort(), ['ok', 'success', 'status', 'data', 'items', 'articles', 'total', 'page', 'limit', 'sort'].sort());
+      assert.equal(body.ok, true);
+      assert.equal(body.success, true);
+      assert.equal(body.status, 200);
+      assert.equal(body.page, 1);
+      assert.equal(body.limit, 10);
+      assert.equal(body.total, siblings.length);
+      assert.deepEqual(body.sort, { updatedAt: -1 });
+      assert.deepEqual(body.data, { items: body.items, page: 1, limit: 10, total: siblings.length });
+      assert.deepEqual(body.articles, body.items);
+      assert.deepEqual(body.items.map(item => item._id), siblings.map(item => item._id));
+      const article = body.items[0];
+      assert.equal(article.status, 'draft');
+      assert.equal(article.workflow.notes[0].text, PRIVATE);
+      assert.equal(article.workflowHistory[0].note, PRIVATE);
+      assert.equal(article.internalComments[0].message, PRIVATE);
+      assert.equal(article.translationMeta.sourceFields.evidence, PRIVATE);
+      assert.equal(article.authorByline.snapshot.name, BYLINE.name);
+      assert.equal(article.sourceUrl, source.sourceUrl);
+      assert.equal(article.seo.canonicalUrl, source.seo.canonicalUrl);
+      assert.equal(article.sponsorDisclosure, source.sponsorDisclosure);
+      for (const lang of LANGUAGES) {
+        assert.equal(article.slugs[lang], SLUGS[lang]);
+        assert.equal(article.translations[lang].title, TITLES[lang]);
+      }
+    },
+  },
+  {
+    name: 'translation status',
+    path: `/articles/${ARTICLE_ID}/translation-status`,
+    assertResponse(body, source, siblings) {
+      assert.deepEqual(Object.keys(body).sort(), ['ok', 'success', 'data'].sort());
+      assert.equal(body.ok, true);
+      assert.equal(body.success, true);
+      assert.deepEqual(Object.keys(body.data).sort(), ['id', 'slug', 'title', 'baseLang', 'translationGroupKey', 'languageStates', 'perLang'].sort());
+      assert.equal(body.data.id, ARTICLE_ID);
+      assert.equal(body.data.slug, source.slug);
+      assert.equal(body.data.title, source.title);
+      assert.equal(body.data.baseLang, 'en');
+      assert.equal(body.data.translationGroupKey, source.translationKey);
+      const states = body.data.languageStates;
+      assert.deepEqual(states.presentLanguages, LANGUAGES);
+      assert.deepEqual(states.missingLanguages, []);
+      assert.equal(states.sourceArticle.id, ARTICLE_ID);
+      assert.deepEqual(states.siblingArticles.map(item => item.id), [CHILD_ID, GU_CHILD_ID]);
+      assert.deepEqual(states.siblingArticles.map(item => item.slug), siblings.slice(1).map(item => item.slug));
+      assert.deepEqual(states.siblingArticles.map(item => item.status), ['draft', 'draft']);
+      assert.deepEqual(Object.keys(body.data.perLang), LANGUAGES);
+      for (const lang of LANGUAGES) {
+        const isSource = lang === 'en';
+        const article = siblings.find(item => item.lang === lang);
+        assert.deepEqual(body.data.perLang[lang], {
+          status: source.translationStatus[lang],
+          error: source.translationError[lang] || null,
+          updatedAt: source.translationUpdatedAt[lang].toISOString(),
+          nextRetryAt: source.translationNextRetryAt[lang]?.toISOString() || null,
+          present: true,
+          presence: isSource ? 'source' : 'translated',
+          isSource,
+          isTranslatedChild: !isSource,
+          sourceArticleId: isSource ? ARTICLE_ID : null,
+          childArticleId: isSource ? null : article._id,
+          articleId: article._id,
+        });
+      }
+    },
+  },
+]) {
+  test(`private CMS ${endpoint.name} aliases enforce authentication and manageNews permissions`, async context => {
+    const source = fixture({
+      status: 'draft',
+      translationUpdatedAt: Object.fromEntries(LANGUAGES.map(lang => [lang, new Date('2026-01-02')])),
+    });
+    const siblings = [source, ...[['hi', CHILD_ID], ['gu', GU_CHILD_ID]].map(([lang, id]) => fixture({
+      _id: id, id, lang, language: lang, status: 'draft',
+      title: `Hidden ${lang} sibling`, slug: `hidden-${lang}-sibling`,
+    }))];
+    setup(context, { news: source, siblings });
+    context.mock.method(News, 'findById', () => query(source));
+    context.mock.method(News, 'countDocuments', async () => siblings.length);
+    const { auth, founderToken, adminToken, admin, policy } = await setupNewsManagementAuth(context);
+
+    for (const token of [adminToken, founderToken]) {
+      policy.modulePolicies.manageNews = token === founderToken ? 'founder_only' : 'available';
+      for (const prefix of PREFIXES) {
+        const url = prefix + endpoint.path;
+        const response = await request(app).get(url).set('Authorization', `Bearer ${token}`);
+        assert.equal(response.status, 200, url);
+        endpoint.assertResponse(response.body, source, siblings);
+      }
+    }
+
+    const beforeDenials = contentReadCounts();
+    async function assertDeniedAliases(token, expectedStatus) {
+      for (const prefix of PREFIXES) {
+        const url = prefix + endpoint.path;
+        const req = request(app).get(url);
+        if (token) req.set('Authorization', `Bearer ${token}`);
+        const response = await req;
+        assert.equal(response.status, expectedStatus, url);
+        assertPrivateExcluded(response.body);
+        assert.equal(response.body.data?.items, undefined);
+        assert.equal(response.body.data?.languageStates, undefined);
+        for (const id of [ARTICLE_ID, CHILD_ID, GU_CHILD_ID]) {
+          assert.equal(JSON.stringify(response.body).includes(id), false, 'Denied responses must not expose article identities');
+        }
+        assert.deepEqual(contentReadCounts(), beforeDenials, 'Denied requests must not read or count article records');
+      }
+    }
+
+    const revokedToken = auth.token('reporter', { tokenVersion: 1 });
+    for (const token of [null, 'invalid-synthetic-token', revokedToken]) {
+      await assertDeniedAliases(token, 401);
+    }
+    for (const status of ['draft', 'published']) {
+      source.status = status;
+      admin.moduleAccessStates.manageNews = 'disabled';
+      policy.modulePolicies.manageNews = 'available';
+      await assertDeniedAliases(adminToken, 403);
+      admin.moduleAccessStates.manageNews = 'enabled';
+      policy.modulePolicies.manageNews = 'founder_only';
+      await assertDeniedAliases(adminToken, 403);
+    }
+    const spoofedFounder = auth.token('editor', { role: 'founder', isFounder: true });
+    await assertDeniedAliases(spoofedFounder, 403);
+  });
+}

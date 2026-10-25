@@ -23,6 +23,21 @@ function makeOpaqueAdminToken(email = 'admin@example.invalid') {
   return `np.${Buffer.from(`${email}:0`, 'utf8').toString('base64')}`;
 }
 
+async function makeAuthorizedNewsAdminToken(t) {
+  const auth = accountAuthFixture();
+  auth.install(t);
+  const adminToken = auth.token('admin');
+  const admin = await User.findById(jwt.decode(adminToken).sub).lean();
+  admin.moduleAccessStates = { manageNews: 'enabled' };
+  const previousDb = mongoose.connection.db;
+  mongoose.connection.db = {};
+  t.after(() => { mongoose.connection.db = previousDb; });
+  t.mock.method(SiteSettings, 'findOne', async () => ({
+    adminModulePolicy: { modulePolicies: { manageNews: 'available' }, version: 1 },
+  }));
+  return adminToken;
+}
+
 function withDbReady(fn) {
   return async () => {
     const descriptor = Object.getOwnPropertyDescriptor(mongoose.connection, 'readyState');
@@ -509,17 +524,7 @@ test('public Article category and story feeds exclude draft public copies at que
 }));
 
 test('anonymous compatibility article-by-slug and id routes hide drafts, but authorized admin detail can retrieve a draft', { concurrency: false }, async (t) => {
-  const auth = accountAuthFixture();
-  auth.install(t);
-  const adminToken = auth.token('admin');
-  const admin = await User.findById(jwt.decode(adminToken).sub).lean();
-  admin.moduleAccessStates = { manageNews: 'enabled' };
-  const previousDb = mongoose.connection.db;
-  mongoose.connection.db = {};
-  t.after(() => { mongoose.connection.db = previousDb; });
-  t.mock.method(SiteSettings, 'findOne', async () => ({
-    adminModulePolicy: { modulePolicies: { manageNews: 'available' }, version: 1 },
-  }));
+  const adminToken = await makeAuthorizedNewsAdminToken(t);
   const draftId = '507f1f77bcf86cd799439321';
   const draft = publishedNews({ _id: draftId, title: 'Admin draft', slug: 'admin-draft', status: 'draft' });
   const stubs = stubModels({ news: [draft] });
@@ -548,10 +553,8 @@ test('anonymous compatibility article-by-slug and id routes hide drafts, but aut
   }
 });
 
-test('authenticated admin article list can still retrieve drafts by status', { concurrency: false }, async (t) => {
-  const auth = accountAuthFixture();
-  auth.install(t);
-  const adminToken = auth.token('admin');
+test('authorized admin article list can still retrieve drafts by status', { concurrency: false }, async (t) => {
+  const adminToken = await makeAuthorizedNewsAdminToken(t);
   const draft = publishedNews({ _id: '507f1f77bcf86cd799439331', title: 'Listed draft', slug: 'listed-draft', status: 'draft' });
   const stubs = stubModels({ news: [draft] });
 

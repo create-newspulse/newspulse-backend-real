@@ -8,7 +8,7 @@ const { serializePublicArticle } = require('../services/publicArticleSerializer.
 // Keep an alias named Article for routes that treat these as "Articles".
 const Article = News;
 const mongoose = require('mongoose');
-const { requireAdminAuth, requireFounderOnly } = require('../middleware/adminAuth');
+const { requireAdminAuth, requireAdminModule, requireFounderOnly } = require('../middleware/adminAuth');
 const { optionalAdminAuth } = require('../middleware/optionalAdminAuth');
 const { requireModuleAccess } = require('../middleware/requireAuth');
 const {
@@ -1624,7 +1624,7 @@ function buildAdminArticleListSelection(req) {
 }
 
 // GET /api/articles → list articles (CMS/admin Manage News)
-router.get('/articles', requireAdminAuth, async (req, res, next) => {
+router.get('/articles', requireAdminModule('manageNews'), async (req, res, next) => {
   try {
     if (!mongoose.connection || mongoose.connection.readyState !== 1) {
       const readyState = (mongoose.connection && typeof mongoose.connection.readyState === 'number')
@@ -2288,7 +2288,7 @@ router.get('/public/regional/:state', async (req, res, next) => {
 });
 
 // GET /api/admin/articles/:id/translation-status
-router.get('/articles/:id/translation-status', requireAdminAuth, async (req, res) => {
+router.get('/articles/:id/translation-status', requireAdminModule('manageNews'), async (req, res) => {
   try {
     const rawId = String(req.params.id || '').trim();
     if (!mongoose.Types.ObjectId.isValid(rawId)) {

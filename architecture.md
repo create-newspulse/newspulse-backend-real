@@ -175,6 +175,12 @@ requires verified authentication and the existing `manageNews` module permission
 on every ID/slug/by-slug alias, regardless of URL prefix. Authorized admin-named
 ID aliases also retain their administrative translation-group metadata.
 
+CMS article lists and translation-status reads use `requireAdminModule('manageNews')`
+from [adminAuth.js](./middleware/adminAuth.js) on every mounted alias. Anonymous
+requests remain unauthorized (401); authenticated accounts denied that module
+receive 403 before article lookups or counts. Authorized Founder/Admin responses
+retain their existing CMS fields and envelopes.
+
 The public News translation POST uses the same complete News visibility rules
 before serving a cached bucket or generating a translation. A conditional
 Mongoose document save also enforces that predicate, so an article hidden while
