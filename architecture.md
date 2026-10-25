@@ -164,6 +164,23 @@ This eligibility check runs before selection, counting, and pagination.
 The native-language branch and Gujarati base-language fallback are unchanged.
 Language-variant deduplication remains a separate part of response handling.
 
+Public article responses use
+[publicArticleSerializer.service.js](./services/publicArticleSerializer.service.js)
+after eligibility and localization. Its response-only allowlist preserves each
+route's envelope, public rendering/SEO fields, EN/HI/GU representations, source
+links, bylines, Pulse Dialogue public editor notes, and sponsored disclosures.
+CMS workflow notes/history/comments, private submission links, intake/review metadata
+and translation diagnostics are not public fields. Full-document CMS detail
+requires verified authentication and the existing `manageNews` module permission
+on every ID/slug/by-slug alias, regardless of URL prefix. Authorized admin-named
+ID aliases also retain their administrative translation-group metadata.
+
+The public News translation POST uses the same complete News visibility rules
+before serving a cached bucket or generating a translation. A conditional
+Mongoose document save also enforces that predicate, so an article hidden while
+translation is in flight cannot receive the translation write or response.
+This does not change publication stages or introduce a translation-approval gate.
+
 Changing the mapper does not retroactively rewrite stored public records.
 [resyncPublishedRegionalArticles.js](./scripts/resyncPublishedRegionalArticles.js)
 is a separate manual utility that calls the same canonical sync. Operational

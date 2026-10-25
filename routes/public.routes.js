@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 // "Stories" in this backend map to the public Article model.
 // If your frontend uses a different shape/model, tell me and I’ll swap it.
 const Article = require('../models/Article');
+const { serializePublicArticle } = require('../services/publicArticleSerializer.service');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
 const { getSlugCandidates } = require('../lib/slug');
 const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
@@ -311,7 +312,7 @@ router.get('/stories', async (req, res) => {
       stories = (stories || []).map(withNormalizedImageUrl);
     }
 
-    return res.json({ success: true, data: stories });
+    return res.json({ success: true, data: stories.map(serializePublicArticle) });
   } catch (err) {
     return res.status(500).json({ success: false, message: err?.message || String(err) });
   }
@@ -357,7 +358,7 @@ router.get('/stories/:slug', async (req, res) => {
     if (!langQueryRaw || !desired) {
       return res.json({
         success: true,
-        data: storyWithImageUrl,
+        data: serializePublicArticle(storyWithImageUrl),
         resolvedLang: source,
         availableLocales,
       });
@@ -387,7 +388,7 @@ router.get('/stories/:slug', async (req, res) => {
 
       return res.json({
         success: true,
-        data: localized && localized.out ? withNormalizedImageUrl(localized.out) : storyWithImageUrl,
+        data: serializePublicArticle(localized && localized.out ? withNormalizedImageUrl(localized.out) : storyWithImageUrl),
         requestedLang: desired,
         resolvedLang: source,
         isTranslated: false,
@@ -403,7 +404,7 @@ router.get('/stories/:slug', async (req, res) => {
         const localized = applyCachedTranslationToStory(storyWithImageUrl, desired);
         return res.json({
           success: true,
-          data: withNormalizedImageUrl(localized),
+          data: serializePublicArticle(withNormalizedImageUrl(localized)),
           requestedLang: desired,
           resolvedLang: desired,
           isTranslated: true,
@@ -553,7 +554,7 @@ router.get('/stories/:slug', async (req, res) => {
 
     return res.json({
       success: true,
-      data: localized && localized.out ? withNormalizedImageUrl(localized.out) : storyWithImageUrl,
+      data: serializePublicArticle(localized && localized.out ? withNormalizedImageUrl(localized.out) : storyWithImageUrl),
       requestedLang: desired,
       resolvedLang: desired,
       isTranslated: true,

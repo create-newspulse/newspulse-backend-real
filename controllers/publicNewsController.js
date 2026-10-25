@@ -1,4 +1,5 @@
 const { withPublicAuthorByline } = require('../services/authorByline.service');
+const { serializePublicArticle } = require('../services/publicArticleSerializer.service');
 const mongoose = require('mongoose');
 const { isContentDatabaseUnavailable } = require('../lib/contentErrors');
 
@@ -12,6 +13,7 @@ const {
   buildPubliclyVisibleNewsArticleFilter,
   buildPubliclyVisiblePublicArticleFilter,
   hasVisibleNewsSource,
+  isPubliclyVisibleNewsArticle,
 } = require('../services/publicArticleVisibility.service');
 const { getLinkedSponsoredFeatureForArticle } = require('../services/sponsoredFeatures.service');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey, getPublicCategoryMatchValues } = require('../lib/categories');
@@ -410,13 +412,13 @@ async function translatePublicNews(req, res) {
     if (!mongoose.isValidObjectId(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
 
     const doc = await News.findById(id);
-    if (!doc || String(doc.status || '').toLowerCase() !== 'published') {
+    if (!isPubliclyVisibleNewsArticle(doc)) {
       return res.status(404).json({ success: false });
     }
 
     if (doc.translations && doc.translations[target] && String(doc.translations[target].content || '').trim()) {
       const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-      return res.status(200).json({ success: true, data: { ...obj, activeLang: target } });
+      return res.status(200).json({ success: true, data: { ...serializePublicArticle(obj), activeLang: target } });
     }
 
     const title = String(doc.title || '');
@@ -484,11 +486,14 @@ async function translatePublicNews(req, res) {
     }
 
     try {
+      // Mongoose applies this predicate to save's update, so a concurrent visibility change wins.
+      doc.$where = buildPubliclyVisibleNewsArticleFilter();
       await doc.save();
       try {
         console.info('[i18n][news] saved translation via public translate endpoint', { id, slug: String(doc.slug || ''), target });
       } catch (_) {}
     } catch (e) {
+      if (e?.name === 'DocumentNotFoundError') return res.status(404).json({ success: false });
       try {
         console.warn('[i18n][news] failed saving translation via public translate endpoint', {
           id,
@@ -501,7 +506,7 @@ async function translatePublicNews(req, res) {
     }
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
-    return res.status(200).json({ success: true, data: { ...obj, activeLang: target } });
+    return res.status(200).json({ success: true, data: { ...serializePublicArticle(obj), activeLang: target } });
   } catch (e) {
     return res.status(500).json({ success: false, message: 'translate failed' });
   }
@@ -817,7 +822,7 @@ function attachMobileResponseFields(obj, { includeBody = false } = {}) {
     out.body = typeof out.body === 'string' && out.body.trim() ? out.body : (out.content || '');
   }
 
-  return out;
+  return serializePublicArticle(out);
 }
 
 function pickCanonicalSlug(doc, lang) {

@@ -3,12 +3,14 @@ const multer = require('multer');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
 const { buildAuthorBylinePatch, withPublicAuthorByline, publicAuthorByline } = require('../services/authorByline.service');
+const { serializePublicArticle } = require('../services/publicArticleSerializer.service');
 // CMS/admin "articles" are stored in the News collection in this codebase.
 // Keep an alias named Article for routes that treat these as "Articles".
 const Article = News;
 const mongoose = require('mongoose');
 const { requireAdminAuth, requireFounderOnly } = require('../middleware/adminAuth');
 const { optionalAdminAuth } = require('../middleware/optionalAdminAuth');
+const { requireModuleAccess } = require('../middleware/requireAuth');
 const {
   ARTICLE_INLINE_IMAGE_ACCEPTED_MIME_TYPES,
   assertAllowedArticleInlineImageUpload,
@@ -91,6 +93,21 @@ const { isContentDatabaseUnavailable } = require('../lib/contentErrors');
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
 const router = express.Router();
+
+const requireNewsManagement = requireModuleAccess('manageNews');
+
+function isAdminArticleDetailRequest(req) {
+  const path = String(req.originalUrl || req.path || '');
+  return path.startsWith('/api/admin/')
+    || path.startsWith('/admin-api/admin/')
+    || path.startsWith('/admin-api/api/admin/');
+}
+
+function authorizeAdminArticleDetail(req, res, next) {
+  if (!req.admin) return next();
+  req.user = req.admin;
+  return requireNewsManagement(req, res, next);
+}
 
 const articleInlineImageUpload = multer({
   storage: multer.memoryStorage(),
@@ -1830,7 +1847,7 @@ router.get('/public/articles', async (req, res, next) => {
       items = await attachPublicPulseDialogueContributorsBatch(items || [], desired);
     }
 
-    items = items.map(withPublicAuthorByline);
+    items = items.map(serializePublicArticle);
     return res.status(200).json({ ok: true, success: true, status: 200, data: { items, page, limit, total } });
   } catch (err) {
     return next(err);
@@ -2251,7 +2268,7 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
 
     const items = Array.from(bestByKey.values()).map((it) => {
       try { delete it.__isTranslated; } catch (_) {}
-      return it;
+      return serializePublicArticle(it);
     });
 
     return res.status(200).json({ ok: true, success: true, status: 200, data: { items, page, limit, total, stateSlug, lang: desired } });
@@ -2426,7 +2443,7 @@ router.get('/articles/national/state/:stateSlug', async (req, res, next) => {
       ok: true,
       success: true,
       status: 200,
-      data: { items, page, limit, total, stateSlug, ...(desired ? { lang: desired } : {}) },
+      data: { items: items.map(serializePublicArticle), page, limit, total, stateSlug, ...(desired ? { lang: desired } : {}) },
     });
   } catch (err) {
     return next(err);
@@ -2448,7 +2465,7 @@ router.get('/news/all', (req, res, next) => {
 });
 
 // GET /api/articles/slug/:slug → lookup by slug (admin UI compatibility)
-router.get('/articles/slug/:slug', optionalAdminAuth, async (req, res, next) => {
+router.get('/articles/slug/:slug', optionalAdminAuth, authorizeAdminArticleDetail, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-store');
     const raw = String(req.params.slug || '');
@@ -2462,6 +2479,7 @@ router.get('/articles/slug/:slug', optionalAdminAuth, async (req, res, next) => 
     }
 
     const isAdminRequest = Boolean(req.admin);
+    const sendArticle = article => res.status(200).json(isAdminRequest ? article : serializePublicArticle(article));
     const query = _buildNewsSlugLookup(slugNorm, isAdminRequest);
     const doc = await News.findOne(query).lean();
     let fallback = doc ? null : await PublicArticle.findOne(_buildPublicArticleSlugLookup(slugNorm, isAdminRequest)).lean();
@@ -2471,14 +2489,14 @@ router.get('/articles/slug/:slug', optionalAdminAuth, async (req, res, next) => 
 
     const langRaw = (req.query.lang || req.query.language || req.lang || '').toString().trim();
     const desired = normalizeLanguage(langRaw) || detectSlugLocale(out, raw);
-    if (!desired) return res.status(200).json(withCoverImageUrl(out));
+    if (!desired) return sendArticle(withCoverImageUrl(out));
 
     const out0 = withCoverImageUrl(out);
 
     if (out0 && out0.translations && typeof out0.translations === 'object') {
       const localized = await localizeNewsDocWithOptionalTranslate({ docLike: out0, desiredLang: desired, logger: console });
       const canonicalSlug = _pickLocaleAwareSlug(out0, desired);
-      return res.status(200).json({
+      return sendArticle({
         ...withCoverImageUrl(localized.out),
         slug: canonicalSlug || localized.out?.slug || out0.slug || null,
         canonicalSlug,
@@ -2493,7 +2511,7 @@ router.get('/articles/slug/:slug', optionalAdminAuth, async (req, res, next) => 
     if (out0 && out0.i18n && typeof out0.i18n === 'object') {
       const localized = localizeFromArticleI18n(out0, desired);
       const canonicalSlug = _pickLocaleAwareSlug(out0, desired);
-      return res.status(200).json({
+      return sendArticle({
         ...withCoverImageUrl(localized.out),
         slug: canonicalSlug || localized.out?.slug || out0.slug || null,
         canonicalSlug,
@@ -2505,7 +2523,7 @@ router.get('/articles/slug/:slug', optionalAdminAuth, async (req, res, next) => 
       });
     }
 
-    return res.status(200).json({
+    return sendArticle({
       ...out0,
       canonicalSlug: _pickLocaleAwareSlug(out0, desired),
       localizedSlug: _pickLocaleAwareSlug(out0, desired),
@@ -2520,7 +2538,7 @@ router.get('/articles/slug/:slug', optionalAdminAuth, async (req, res, next) => 
 });
 
 // GET /api/articles/by-slug/:slug → alias (some admin builds use this path)
-router.get('/articles/by-slug/:slug', optionalAdminAuth, async (req, res, next) => {
+router.get('/articles/by-slug/:slug', optionalAdminAuth, authorizeAdminArticleDetail, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-store');
     const raw = String(req.params.slug || '');
@@ -2534,6 +2552,7 @@ router.get('/articles/by-slug/:slug', optionalAdminAuth, async (req, res, next) 
     }
 
     const isAdminRequest = Boolean(req.admin);
+    const sendArticle = article => res.status(200).json(isAdminRequest ? article : serializePublicArticle(article));
     const query = _buildNewsSlugLookup(slugNorm, isAdminRequest);
     const doc = await News.findOne(query).lean();
     let fallback = doc ? null : await PublicArticle.findOne(_buildPublicArticleSlugLookup(slugNorm, isAdminRequest)).lean();
@@ -2543,14 +2562,14 @@ router.get('/articles/by-slug/:slug', optionalAdminAuth, async (req, res, next) 
 
     const langRaw = (req.query.lang || req.query.language || req.lang || '').toString().trim();
     const desired = normalizeLanguage(langRaw) || detectSlugLocale(out, raw);
-    if (!desired) return res.status(200).json(withCoverImageUrl(out));
+    if (!desired) return sendArticle(withCoverImageUrl(out));
 
     const out0 = withCoverImageUrl(out);
 
     if (out0 && out0.translations && typeof out0.translations === 'object') {
       const localized = await localizeNewsDocWithOptionalTranslate({ docLike: out0, desiredLang: desired, logger: console });
       const canonicalSlug = _pickLocaleAwareSlug(out0, desired);
-      return res.status(200).json({
+      return sendArticle({
         ...withCoverImageUrl(localized.out),
         slug: canonicalSlug || localized.out?.slug || out0.slug || null,
         canonicalSlug,
@@ -2565,7 +2584,7 @@ router.get('/articles/by-slug/:slug', optionalAdminAuth, async (req, res, next) 
     if (out0 && out0.i18n && typeof out0.i18n === 'object') {
       const localized = localizeFromArticleI18n(out0, desired);
       const canonicalSlug = _pickLocaleAwareSlug(out0, desired);
-      return res.status(200).json({
+      return sendArticle({
         ...withCoverImageUrl(localized.out),
         slug: canonicalSlug || localized.out?.slug || out0.slug || null,
         canonicalSlug,
@@ -2577,7 +2596,7 @@ router.get('/articles/by-slug/:slug', optionalAdminAuth, async (req, res, next) 
       });
     }
 
-    return res.status(200).json({
+    return sendArticle({
       ...out0,
       canonicalSlug: _pickLocaleAwareSlug(out0, desired),
       localizedSlug: _pickLocaleAwareSlug(out0, desired),
@@ -2592,7 +2611,7 @@ router.get('/articles/by-slug/:slug', optionalAdminAuth, async (req, res, next) 
 });
 
 // GET /api/articles/:id → get single article by id
-router.get('/articles/:id', optionalAdminAuth, async (req, res, next) => {
+router.get('/articles/:id', optionalAdminAuth, authorizeAdminArticleDetail, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-store');
     const rawId = String(req.params.id || '').trim();
@@ -2648,13 +2667,10 @@ router.get('/articles/:id', optionalAdminAuth, async (req, res, next) => {
       return { out: out0, resolvedLang: langNorm, translationPending: false, isTranslated: false };
     })();
 
-    const out = localized.out;
+    const out = isAdminRequest ? localized.out : serializePublicArticle(localized.out);
 
     let translationGroupStatus;
-    const isAdminArticleDetail = String(req.originalUrl || req.path || '').startsWith('/api/admin/')
-      || String(req.originalUrl || req.path || '').startsWith('/admin-api/admin/')
-      || String(req.originalUrl || req.path || '').startsWith('/admin-api/api/admin/');
-    if (isAdminArticleDetail) {
+    if (isAdminRequest && isAdminArticleDetailRequest(req)) {
       const groupKey = String(out0?.translationKey || out0?.translationGroupId || '').trim();
       const groupDocs = groupKey
         ? await News.find({ $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }] })

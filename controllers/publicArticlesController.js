@@ -1,5 +1,6 @@
 const Article = require('../models/Article');
 const { withPublicAuthorByline } = require('../services/authorByline.service');
+const { serializePublicArticle } = require('../services/publicArticleSerializer.service');
 const { CATEGORY_VALUES, LANGUAGE_VALUES } = require('../models/Article');
 const mongoose = require('mongoose');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey, isSupportedPublicCategory } = require('../lib/categories');
@@ -215,7 +216,7 @@ async function listArticles(req, res, next) {
 
     const totalPages = Math.max(Math.ceil(total / limit), 1);
 
-    return res.json({ items, page, limit, total, totalPages });
+    return res.json({ items: items.map(serializePublicArticle), page, limit, total, totalPages });
   } catch (e) {
     return next(e);
   }
@@ -266,7 +267,7 @@ async function getArticleBySlug(req, res, next) {
         });
       }
 
-      return res.json({
+      return res.json(serializePublicArticle({
         ...doc,
         title: mapped.title,
         summary: mapped.summary,
@@ -278,15 +279,15 @@ async function getArticleBySlug(req, res, next) {
         isTranslated: mapped.isTranslated,
         canonicalSlug: mapped.canonicalSlug,
         availableLocales: getAvailableArticleLocales(doc),
-      });
+      }));
     }
 
     const canonicalSlug = (doc.slug || null);
-    return res.json({
+    return res.json(serializePublicArticle({
       ...doc,
       canonicalSlug,
       availableLocales: getAvailableArticleLocales(doc),
-    });
+    }));
   } catch (e) {
     return next(e);
   }

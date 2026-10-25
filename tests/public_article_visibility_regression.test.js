@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const express = require('express');
 const request = require('supertest');
 const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
 
 process.env.NODE_ENV = 'test';
 
@@ -11,6 +12,8 @@ const app = require('../server');
 const feedRouter = require('../routes/feed');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
+const User = require('../models/User');
+const SiteSettings = require('../models/SiteSettings');
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
 const { accountAuthFixture } = require('./helpers/accountAuthFixture');
 const { matches: matchesAggregateFilter } = require('./helpers/pulseDialogueAggregate');
@@ -505,10 +508,18 @@ test('public Article category and story feeds exclude draft public copies at que
   }
 }));
 
-test('anonymous compatibility article-by-slug and id routes hide drafts, but authenticated admin detail can retrieve a draft', { concurrency: false }, async (t) => {
+test('anonymous compatibility article-by-slug and id routes hide drafts, but authorized admin detail can retrieve a draft', { concurrency: false }, async (t) => {
   const auth = accountAuthFixture();
   auth.install(t);
   const adminToken = auth.token('admin');
+  const admin = await User.findById(jwt.decode(adminToken).sub).lean();
+  admin.moduleAccessStates = { manageNews: 'enabled' };
+  const previousDb = mongoose.connection.db;
+  mongoose.connection.db = {};
+  t.after(() => { mongoose.connection.db = previousDb; });
+  t.mock.method(SiteSettings, 'findOne', async () => ({
+    adminModulePolicy: { modulePolicies: { manageNews: 'available' }, version: 1 },
+  }));
   const draftId = '507f1f77bcf86cd799439321';
   const draft = publishedNews({ _id: draftId, title: 'Admin draft', slug: 'admin-draft', status: 'draft' });
   const stubs = stubModels({ news: [draft] });

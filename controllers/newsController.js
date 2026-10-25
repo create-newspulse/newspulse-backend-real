@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 const News = require('../models/News');
-const { withPublicAuthorByline } = require('../services/authorByline.service');
+const { serializePublicArticle } = require('../services/publicArticleSerializer.service');
 const { safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 const { buildPubliclyVisibleNewsArticleFilter } = require('../services/publicArticleVisibility.service');
@@ -125,7 +125,7 @@ exports.getNews = async (req, res) => {
       obj.coverImageUrl = obj.coverImageUrl || obj.imageURL || null;
       obj.lang = obj.lang || obj.language || 'gu';
       obj.language = obj.language || obj.lang || 'gu';
-      return withPublicAuthorByline(obj);
+      return serializePublicArticle(obj);
     });
     res.json(items);
   } catch (error) {
@@ -218,7 +218,7 @@ exports.getPublishedNewsBySlug = async (req, res) => {
       (await News.findOne(lookup(raw)).lean());
 
     if (!article) return res.status(404).json({ success: false });
-    return res.json({ success: true, data: withPublicAuthorByline(article) });
+    return res.json({ success: true, data: serializePublicArticle(article) });
   } catch (error) {
     return res.status(500).json({ success: false, message: error?.message || String(error) });
   }
