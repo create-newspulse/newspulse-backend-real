@@ -502,7 +502,7 @@ for (const category of ordinaryCategories) {
   });
 }
 
-test('Faith cache is versioned and page/limit/language-specific without changing ordinary category keys', context => {
+test('Faith cache is page/limit/language-specific with separate public-safe category versions', context => {
   setup(context);
   const file = path.resolve(__dirname, '..', 'routes', 'publicNews.routes.js');
   const realRequire = createRequire(file);
@@ -522,12 +522,12 @@ test('Faith cache is versioned and page/limit/language-specific without changing
   const req = query => ({ query: { category: 'faith-culture', lang: 'en', page: '1', limit: '30', ...query }, headers: {} });
   const keys = languages.flatMap(lang => [1, 2, 3].map(page => options.buildKey(req({ lang, page: String(page) }))));
   assert.equal(new Set(keys).size, 9);
-  assert.ok(keys.every(key => key.includes(':faith-v1:')));
+  assert.ok(keys.every(key => key.includes(':faith-v2:')));
   assert.notEqual(keys[0], options.buildKey(req({ limit: '31' })));
   assert.notEqual(keys[0], options.buildKey(req({ topic: 'living-heritage' })));
   assert.notEqual(options.buildKey(req({ topic: 'living-heritage' })), options.buildKey(req({ topic: 'food-agricultural-heritage' })));
   assert.equal(keys[0], options.buildKey(req({ strictLocale: 'false', fallback: 'true' })));
-  for (const category of ordinaryCategories) assert.ok(options.buildKey(req({ category })).includes(':v2:'));
+  for (const category of ordinaryCategories) assert.ok(options.buildKey(req({ category })).includes(':v3:'));
   assert.throws(() => options.buildKey(req({ page: 'abc' })), /Invalid page/);
   let body;
   const res = { status(code) { assert.equal(code, 503); return this; }, json(value) { body = value; } };

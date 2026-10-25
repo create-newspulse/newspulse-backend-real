@@ -46,7 +46,7 @@ function buildPublicNewsCacheKey(req) {
   })).digest('hex');
 
   if (category) {
-    const version = category === 'faith-culture' ? 'faith-v1' : 'v2';
+    const version = category === 'faith-culture' ? 'faith-v2' : 'v3';
     const cacheKey = `${buildCategoryCacheKey(category, lang, page)}:${version}:${variant}`;
     setRequestTimingCacheContext(req, {
       cacheFamily: 'category',
@@ -62,7 +62,7 @@ function buildPublicNewsCacheKey(req) {
     return null;
   }
 
-  const cacheKey = `${buildLatestCacheKey(lang)}:v2:${variant}`;
+  const cacheKey = `${buildLatestCacheKey(lang)}:v3:${variant}`;
   setRequestTimingCacheContext(req, {
     cacheFamily: 'latest',
     cacheKey,

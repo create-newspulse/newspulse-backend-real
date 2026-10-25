@@ -1,9 +1,14 @@
+require('./helpers/publicNewsIsolation');
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { EventEmitter } = require('node:events');
 const express = require('express');
 const request = require('supertest');
 const { getRequestTimingState, setRequestTimingCacheContext } = require('../lib/timingDiagnostics');
+const { matches, runPipeline } = require('./helpers/pulseDialogueAggregate');
+
+const PUBLIC_NEWS_ALIASES = ['/api/public/news', '/admin-api/public/news', '/admin-api/api/public/news'];
+const PRIVATE_CACHE_MARKER = 'PRIVATE-PRE-SERIALIZER-CACHE-FIXTURE';
 
 class FakeRedis {
   constructor() {
@@ -102,8 +107,8 @@ function makeApp(cache, handler, options = {}) {
   return app;
 }
 
-function capturePublicNewsCacheKey(t) {
-  const loaded = loadCache(new FakeRedis());
+function capturePublicNewsCacheKey(t, redis = new FakeRedis()) {
+  const loaded = loadCache(redis);
   const routePath = require.resolve('../routes/publicNews.routes');
   const originalRoute = require.cache[routePath];
   const originalFactory = loaded.cache.createJsonCacheMiddleware;
@@ -140,6 +145,217 @@ function capturePublicNewsCacheKey(t) {
   return key;
 }
 
+function publicNewsFixture(language, category = 'national') {
+  const titles = {
+    en: 'Verified public article',
+    hi: '\u0938\u093e\u0930\u094d\u0935\u091c\u0928\u093f\u0915 \u0916\u092c\u0930',
+    gu: '\u0a9c\u0abe\u0ab9\u0ac7\u0ab0 \u0ab8\u0aae\u0abe\u0a9a\u0abe\u0ab0',
+  };
+  const id = String(['en', 'hi', 'gu'].indexOf(language) + 1).padStart(24, '0');
+  return {
+    _id: id, translationKey: `fixture-${language}`, slug: `verified-${language}`,
+    category, status: 'published', lang: language, language, originalLang: language,
+    title: titles[language], description: titles[language], summary: titles[language],
+    content: `<p>${titles[language]}</p>`, publishedAt: new Date('2026-01-01'),
+    coverImage: { url: 'https://example.invalid/cover.jpg', internalNotes: PRIVATE_CACHE_MARKER },
+    authorByline: { enabled: true, snapshot: { name: 'Fixture Author', privateContact: PRIVATE_CACHE_MARKER } },
+    isSponsored: true, isSponsoredArticle: true, sponsorName: 'Fixture Sponsor',
+    sponsorDisclosure: 'Public sponsorship disclosure', sponsorCtaText: 'Learn more',
+    sponsorCtaUrl: 'https://example.invalid/sponsor',
+    workflow: { notes: [{ text: PRIVATE_CACHE_MARKER }] },
+    translationMeta: { sourceFields: { evidence: PRIVATE_CACHE_MARKER } },
+  };
+}
+
+function stubPublicNews(t, docs) {
+  const News = require('../models/News');
+  const state = { reads: 0, unavailable: false };
+  const read = fn => {
+    state.reads += 1;
+    if (state.unavailable) {
+      throw Object.assign(new Error('Synthetic content database unavailable'), { name: 'MongoNetworkError' });
+    }
+    return fn();
+  };
+  t.mock.method(News, 'find', filter => {
+    let rows = read(() => docs.filter(doc => matches(doc, filter)));
+    return {
+      // Overcomplete hydration also tests the serializer independently of database projections.
+      select() { return this; }, collation() { return this; }, maxTimeMS() { return this; },
+      sort(value) { rows = runPipeline(rows, [{ $sort: value }]); return this; },
+      skip(value) { rows = rows.slice(value); return this; },
+      limit(value) { rows = rows.slice(0, value); return this; },
+      lean: async () => rows,
+    };
+  });
+  t.mock.method(News, 'countDocuments', async filter => read(() => docs.filter(doc => matches(doc, filter)).length));
+  t.mock.method(News, 'aggregate', pipeline => ({
+    option() { return this; },
+    exec: async () => read(() => runPipeline(docs, pipeline)),
+  }));
+  for (const method of ['create', 'updateOne', 'updateMany', 'deleteMany', 'findOneAndUpdate']) {
+    t.mock.method(News, method, () => assert.fail('Public cache rebuilds must not write article data'));
+  }
+  return state;
+}
+
+async function seedRetiredPublicNewsCache(redis, cache, key, query) {
+  const parts = key(query).split(':');
+  parts[parts.length - 2] = query.category === 'faith-culture' ? 'faith-v1' : 'v2';
+  const retiredKey = parts.join(':');
+  const payload = JSON.stringify({ status: 200, body: {
+    items: [{ id: 'retired-article', workflow: { notes: PRIVATE_CACHE_MARKER } }],
+    page: 1, limit: 40, total: 1, totalPages: 1,
+  } });
+  const entries = [
+    [retiredKey, payload, 45],
+    [cache.buildStaleCacheKey(retiredKey), payload, 90],
+    [cache.buildCacheLockKey(retiredKey), 'retired-rebuild-lock', 60],
+  ];
+  if (!query.category) entries.push([retiredKey.replace(':latest:', ':latest-lkg:'), payload, 86400]);
+  for (const [name, value, ttl] of entries) await redis.set(name, value, 'EX', ttl);
+  return new Map(entries.map(([name]) => [name, { ...redis.entries.get(name) }]));
+}
+
+function assertRetiredCacheUntouched(redis, retired, reads, writes) {
+  for (const [name, entry] of retired) {
+    assert.equal(reads.mock.calls.some(call => call.arguments[0] === name), false, `Retired key read: ${name}`);
+    assert.equal(writes.mock.calls.some(call => call.arguments[0] === name), false, `Retired key written: ${name}`);
+    assert.deepEqual(redis.entries.get(name), entry, `Retired entry changed: ${name}`);
+  }
+}
+
+function assertSecurePublicNews(body, doc) {
+  assert.equal(JSON.stringify(body).includes(PRIVATE_CACHE_MARKER), false);
+  assert.equal(body.items.length, 1);
+  const article = body.items[0];
+  assert.equal(article._id, doc._id);
+  assert.equal(article.title, doc.title);
+  assert.equal(article.language, doc.language);
+  assert.equal(article.workflow, undefined);
+  assert.equal(article.translationMeta, undefined);
+  assert.equal(article.coverImage.internalNotes, undefined);
+  assert.equal(article.authorByline.snapshot.name, 'Fixture Author');
+  assert.equal(article.sponsorDisclosure, doc.sponsorDisclosure);
+  assert.equal(article.resolvedSponsorDestinationUrl, doc.sponsorCtaUrl);
+}
+
+for (const language of ['en', 'hi', 'gu']) {
+  for (const category of [null, 'national', 'faith-culture']) {
+    test(`public-news version isolation rebuilds secure ${category || 'latest'} responses for ${language} on every alias`, async t => {
+      const redis = new FakeRedis();
+      const key = capturePublicNewsCacheKey(t, redis);
+      const cache = require('../lib/cache');
+      const doc = publicNewsFixture(language, category || 'national');
+      const state = stubPublicNews(t, [doc]);
+      const query = { lang: language, language, limit: '40', ...(category ? { category } : {}) };
+      const retired = await seedRetiredPublicNewsCache(redis, cache, key, query);
+      const adsKey = cache.buildAdsCacheKey('HOME_BILLBOARD_970x250');
+      const adsPayload = JSON.stringify({ status: 200, body: { fixture: 'unchanged advertisement' } });
+      await redis.set(adsKey, adsPayload, 'EX', 60);
+      const reads = t.mock.method(redis, 'get');
+      const writes = t.mock.method(redis, 'set');
+      const app = express();
+      for (const alias of PUBLIC_NEWS_ALIASES) app.use(alias, key.router);
+      let firstBody;
+      let coldReads;
+      for (const alias of PUBLIC_NEWS_ALIASES) {
+        const response = await request(app).get(alias).query(query);
+        assert.equal(response.status, 200);
+        assertSecurePublicNews(response.body, doc);
+        if (!firstBody) {
+          firstBody = response.body;
+          coldReads = state.reads;
+          assert.ok(coldReads > 0, 'Cold caches must rebuild through the real public-news controller');
+        }
+        assert.deepEqual(response.body, firstBody);
+        assert.equal(state.reads, coldReads, 'Aliases must share the newly populated cache');
+      }
+      assert.deepEqual(Object.keys(firstBody).sort(), [
+        'items', 'page', 'limit', 'total', 'totalPages', ...(category === 'faith-culture' ? ['hasMore'] : []),
+      ].sort());
+      assert.equal(firstBody.page, 1);
+      assert.equal(firstBody.limit, 40);
+      assert.equal(firstBody.total, 1);
+      assert.equal(firstBody.totalPages, 1);
+      const freshKey = key(query);
+      const prefix = category ? cache.buildCategoryCacheKey(category, language, 1) : cache.buildLatestCacheKey(language);
+      const version = category === 'faith-culture' ? 'faith-v2' : 'v3';
+      const variant = category ? '1052afea75a53c0f69eb971f6121e89df8842b2346ec02d6a0118282155e5dab'
+        : 'ee2450384fc7c547774c0e16dd90fbb20b1648e155856157ebd274df26231b08';
+      assert.equal(freshKey, `${prefix}:${version}:${variant}`);
+      const fresh = redis.entries.get(freshKey);
+      const stale = redis.entries.get(cache.buildStaleCacheKey(freshKey));
+      assert.deepEqual(JSON.parse(fresh.value).body, firstBody);
+      assert.deepEqual(JSON.parse(stale.value).body, firstBody);
+      assert.ok(fresh.expiresAt >= 45000 && fresh.expiresAt <= 60000);
+      assert.equal(stale.expiresAt, fresh.expiresAt + 45000);
+      const lockWrite = writes.mock.calls.find(call => call.arguments[0] === cache.buildCacheLockKey(freshKey));
+      assert.ok(lockWrite, 'The rebuild lock must use the current namespace');
+      assert.deepEqual(lockWrite.arguments.slice(2), ['EX', 60, 'NX']);
+      const lastKey = key.lastKnownGood(query);
+      if (category) assert.equal(lastKey, null);
+      else {
+        assert.ok(lastKey.includes(':v3:'));
+        assert.deepEqual(JSON.parse(redis.entries.get(lastKey).value).body, firstBody);
+        assert.equal(redis.entries.get(lastKey).expiresAt, 86400000);
+      }
+      assertRetiredCacheUntouched(redis, retired, reads, writes);
+      assert.equal(redis.entries.get(adsKey).value, adsPayload);
+    });
+  }
+
+  test(`public-news version isolation never falls back to retired entries when ${language} rebuilds fail`, async t => {
+    const redis = new FakeRedis();
+    const key = capturePublicNewsCacheKey(t, redis);
+    const cache = require('../lib/cache');
+    const state = stubPublicNews(t, [publicNewsFixture(language)]);
+    state.unavailable = true;
+    const query = { lang: language, language, limit: '40' };
+    const retired = await seedRetiredPublicNewsCache(redis, cache, key, query);
+    const reads = t.mock.method(redis, 'get');
+    const writes = t.mock.method(redis, 'set');
+    const app = express();
+    for (const alias of PUBLIC_NEWS_ALIASES) app.use(alias, key.router);
+    for (const alias of PUBLIC_NEWS_ALIASES) {
+      const response = await request(app).get(alias).query(query);
+      assert.equal(response.status, 503);
+      assert.equal(response.body.code, 'NEWS_UNAVAILABLE');
+      assert.equal(response.body.items, undefined);
+      assert.equal(JSON.stringify(response.body).includes(PRIVATE_CACHE_MARKER), false);
+    }
+    assert.equal(await key.router.refreshCanonicalLatest({ query, headers: {} }), false);
+    assert.ok(state.reads > 0);
+    for (const name of [key(query), cache.buildStaleCacheKey(key(query)), key.lastKnownGood(query)]) {
+      assert.equal(redis.entries.has(name), false, 'Failed rebuilds must not promote retired cache data');
+    }
+    assertRetiredCacheUntouched(redis, retired, reads, writes);
+  });
+}
+
+test('public-news version isolation prewarms all languages without reading or migrating retired entries', async t => {
+  const redis = new FakeRedis();
+  const key = capturePublicNewsCacheKey(t, redis);
+  const cache = require('../lib/cache');
+  const docs = ['en', 'hi', 'gu'].map(language => publicNewsFixture(language));
+  const state = stubPublicNews(t, docs);
+  const queries = docs.map(doc => ({ lang: doc.language, language: doc.language, limit: '40' }));
+  const retired = new Map();
+  for (const query of queries) {
+    for (const entry of await seedRetiredPublicNewsCache(redis, cache, key, query)) retired.set(...entry);
+  }
+  const reads = t.mock.method(redis, 'get');
+  const writes = t.mock.method(redis, 'set');
+  for (const [index, query] of queries.entries()) {
+    assert.equal(await key.router.refreshCanonicalLatest({ query, headers: {} }), true);
+    for (const name of [key(query), cache.buildStaleCacheKey(key(query)), key.lastKnownGood(query)]) {
+      assertSecurePublicNews(JSON.parse(redis.entries.get(name).value).body, docs[index]);
+    }
+  }
+  assert.ok(state.reads > 0);
+  assertRetiredCacheUntouched(redis, retired, reads, writes);
+});
+
 test('category-top and home billboard cache keys and invalidation stay independent', async (t) => {
   const redis = new FakeRedis();
   const loaded = loadCache(redis);
@@ -169,13 +385,13 @@ test('canonical latest keys are stable, language-isolated and alone eligible for
   const variant = 'ee2450384fc7c547774c0e16dd90fbb20b1648e155856157ebd274df26231b08';
   for (const lang of ['en', 'hi', 'gu']) {
     const query = { lang, language: lang, limit: '40' };
-    const expected = `np:v1:latest:${lang}:v2:${variant}`;
+    const expected = `np:v1:latest:${lang}:v3:${variant}`;
     for (let iteration = 0; iteration < 100; iteration += 1) {
       assert.equal(key(query, { 'x-request-id': String(iteration), 'x-lang': 'en', authorization: 'ignored' }), expected);
       assert.equal(key({ limit: '40', language: lang, lang, page: '1', timestamp: String(iteration) }), expected);
       assert.equal(key(query, {}, { aborted: iteration % 2 === 0, requestId: String(iteration), timestamp: Date.now() }), expected);
     }
-    assert.equal(key.lastKnownGood(query), `np:v1:latest-lkg:${lang}:v2:${variant}`);
+    assert.equal(key.lastKnownGood(query), `np:v1:latest-lkg:${lang}:v3:${variant}`);
     for (const extra of [{ limit: '30' }, { fallback: 'true' }, { page: '2' }, { category: 'national' }, { q: 'test' }, { track: 'campus-buzz' }]) {
       assert.equal(key.lastKnownGood({ ...query, ...extra }), null);
     }
@@ -431,7 +647,7 @@ test('invalid inputs cannot reuse successful cached responses and filtered lates
 test('variant keys hide free text and avoid unsafe Unicode case-fold collisions', (t) => {
   const key = capturePublicNewsCacheKey(t);
   const value = key({ category: 'national', q: 'person@example.test secret-token', state: 'private-location' }, { authorization: 'Bearer secret-token' });
-  assert.match(value, /^np:v1:category:national:gu:page:1:v2:[a-f0-9]{64}$/);
+  assert.match(value, /^np:v1:category:national:gu:page:1:v3:[a-f0-9]{64}$/);
   assert.equal(/person|secret|private|Bearer/.test(value), false);
   assert.notEqual(key({ category: 'national', q: '\u0130' }), key({ category: 'national', q: 'i\u0307' }));
   assert.notEqual(key({ category: 'national', state: '\u0130' }), key({ category: 'national', state: 'i\u0307' }));
@@ -743,11 +959,11 @@ test('withdrawal between ownership check and cache write cannot resurrect LKG, e
     if (attempts > 1) return res.status(503).json({ items: [] });
     return res.json({ items: [{ id: 'withdrawn', language: 'hi' }] });
   }, {
-    buildKey: (req) => `np:v1:latest:${req.params.key}:v2:test`,
+    buildKey: (req) => `np:v1:latest:${req.params.key}:v3:test`,
     buildLastKnownGoodKey: (_req, key) => key.replace(':latest:', ':latest-lkg:'),
   });
-  const key = 'np:v1:latest:hi:v2:test';
-  const lastKey = 'np:v1:latest-lkg:hi:v2:test';
+  const key = 'np:v1:latest:hi:v3:test';
+  const lastKey = 'np:v1:latest-lkg:hi:v3:test';
   await harness.cache.safeSetCache(lastKey, { status: 200, body: { items: [{ id: 'withdrawn', language: 'hi' }] } }, 86400);
   const originalGet = harness.redis.get.bind(harness.redis);
   let invalidated = false;

@@ -232,6 +232,15 @@ handles public-content invalidation/revalidation. Redis is configuration-driven
 and disabled by default in tests. Cache eligibility and HTTP cache headers are
 route-specific.
 
+Public-news feed keys in [publicNews.routes.js](./routes/publicNews.routes.js)
+use `v3` for latest/general-category responses and `faith-v2` for Faith & Culture.
+Stale, rebuild-lock and canonical last-known-good keys inherit the feed version.
+Cache misses and prewarming populate the current namespace through the public
+controller and serializer; retired `v2`/`faith-v1` responses are not read or copied.
+The version change does not purge retired entries. The shared `np:v1` prefix,
+hash inputs, TTLs and article-invalidation prefixes remain unchanged, as do the
+separate advertising, broadcast and settings cache namespaces.
+
 External adapters include [mailer.js](./lib/mailer.js) for scoped mail delivery,
 [cloudinary.js](./lib/cloudinary.js) for media,
 [googleTranslate.service.js](./services/googleTranslate.service.js) for

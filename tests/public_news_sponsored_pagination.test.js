@@ -515,7 +515,7 @@ test('sponsored requests bypass real cache middleware, including ordinary and la
   const state = setup(context, [story(1), story(2, 'en', { isSponsoredArticle: false })], { router: cache.router });
   const req = query => ({ query: { lang: 'en', page: '1', limit: '40', ...query }, headers: {} });
   const ordinaryKey = cache.options.buildKey(req({}));
-  assert.ok(ordinaryKey.startsWith('np:v1:latest:en:v2:'));
+  assert.ok(ordinaryKey.startsWith('np:v1:latest:en:v3:'));
   assert.equal(cache.options.buildKey(req({ sponsoredOnly: 'false' })), ordinaryKey);
   assert.equal(cache.options.buildKey(req({ sponsoredOnly: 'true' })), null);
   assert.equal(cache.options.buildKey(req({ sponsoredOnly: 'true', category: 'faith-culture' })), null);
@@ -531,5 +531,5 @@ test('sponsored requests bypass real cache middleware, including ordinary and la
   assert.equal(cache.reads.length, 1);
   const invalid = await state.get({ sponsoredOnly: 'invalid', limit: '40' });
   assert.equal(invalid.status, 400); assert.equal(cache.reads.length, 1);
-  assert.ok(cache.options.buildKey(req({ category: 'faith-culture' })).includes(':faith-v1:'));
+  assert.ok(cache.options.buildKey(req({ category: 'faith-culture' })).includes(':faith-v2:'));
 });
