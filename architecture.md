@@ -72,6 +72,27 @@ workflow/publication state, language relationships, geography, and media.
 imported as `PublicArticle`. These are separate models, not aliases for one
 collection.
 
+News has an optional, immutable `createdByUserId` reference to the existing User
+model. [articleCreator.js](./lib/articleCreator.js) derives it only from
+`req._authUserDoc._id`, the persisted account loaded by the existing authentication
+middleware. It is CMS-record provenance, not a public byline, contributor,
+reviewer, task assignment or permission grant.
+
+Canonical/manual article creation and authenticated Community Reporter/Youth
+Pulse handoffs stamp the creating account only on new records. Generated or
+cached language records use the authenticated request that creates them, when
+present; source-article ownership, translation-group membership and `requestedBy`
+labels do not establish a creator. Background work and legacy creation without
+verified authentication context leave it absent. Existing records are not
+backfilled, and repeated handoffs or ordinary updates do not set or replace it.
+
+The field has no default or new index and is excluded from queries by default.
+Canonical write allowlists do not accept client creator claims; legacy raw-body
+writers reject direct/dotted creator fields. Mongoose immutability also protects
+ordinary document/query updates. Public serialization does not expose it.
+No draft read, edit, publication, deletion or assignment permission uses this
+field; those authorization boundaries remain separate.
+
 Public reads are not all served from the same model:
 
 - The main public News controller queries News for feeds and includes Public

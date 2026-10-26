@@ -3,6 +3,7 @@ const News = require('../models/News');
 const PublicSiteSettings = require('../models/PublicSiteSettings');
 const TranslationJob = require('../models/TranslationJob');
 const { slugifyUnicode } = require('../lib/slug');
+const { buildArticleCreatorFields } = require('../lib/articleCreator');
 const { invalidateArticleLanguageCaches } = require('../lib/cache');
 const googleTranslation = require('./googleTranslationService');
 const { applyPulseDialogueStandardText } = require('./pulseDialogue.service');
@@ -354,7 +355,7 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
             { _id: current._id, status: { $ne: 'deleted' }, deletedAt: null },
             { $set: payload }, { new: true, runValidators: true, session }
           )
-          : (await News.create([payload], { session }))[0];
+          : (await News.create([{ ...payload, ...buildArticleCreatorFields(options.req) }], { session }))[0];
         if (!doc) throw Object.assign(new Error('Translation changed during generation. Retry the operation.'), { statusCode: 409 });
         if (doc.status === 'published') await syncTranslationGroupMetadata(doc, {
           previousDoc: current.toObject(),

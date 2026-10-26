@@ -26,6 +26,7 @@ const PRIVATE = 'CONFIDENTIAL-SYNTHETIC-EDITORIAL-METADATA';
 const ARTICLE_ID = '507f1f77bcf86cd799439011';
 const CHILD_ID = '507f1f77bcf86cd799439012';
 const GU_CHILD_ID = '507f1f77bcf86cd799439013';
+const CREATOR_ID = '507f1f77bcf86cd799439014';
 const PREFIXES = ['', '/api', '/api/admin', '/admin-api', '/admin-api/api', '/admin-api/admin', '/admin-api/api/admin'];
 const ADMIN_PREFIXES = ['/api/admin', '/admin-api/admin', '/admin-api/api/admin'];
 const TRANSLATE_PREFIXES = ['/api/public/news', '/admin-api/public/news', '/admin-api/api/public/news'];
@@ -43,6 +44,7 @@ function fixture(overrides = {}) {
   }]));
   return {
     _id: ARTICLE_ID, id: ARTICLE_ID, title: TITLES.en, description: 'Summary en', summary: 'Summary en',
+    createdByUserId: CREATOR_ID,
     content: translations.en.content, body: translations.en.content, slug: 'public-story',
     slugs: { ...SLUGS, internal: PRIVATE },
     category: 'national', lang: 'en', language: 'en', originalLang: 'en',
@@ -136,7 +138,9 @@ function contentReadCounts() {
 
 function assertPrivateExcluded(body) {
   assert.equal(JSON.stringify(body).includes(PRIVATE), false, 'Confidential synthetic metadata must not be public');
+  assert.equal(JSON.stringify(body).includes(CREATOR_ID), false, 'Creator User IDs must not be public');
   const forbidden = new Set([
+    'createdByUserId',
     'workflow', 'workflowHistory', 'internalComments', 'editorialNotes', 'verificationNotes',
     'translationMeta', 'translationReviewStatus', 'translationJobId', 'reviewedBy', 'reviewedAt',
     'machineGenerated', 'humanEdited', 'translationError', 'translationNextRetryAt',

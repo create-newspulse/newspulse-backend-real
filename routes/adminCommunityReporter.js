@@ -7,6 +7,7 @@ const YouthPulseSubmission = require('../models/YouthPulseSubmission');
 const { addStrikeForReporter } = require('../services/reporterSafetyService');
 const News = require('../models/News');
 const mongoose = require('mongoose');
+const { buildArticleCreatorFields } = require('../lib/articleCreator');
 const { upsertReporterContact } = require('../services/reporterContactService');
 const { findReporterContactByIdentifier } = require('../services/reporterLookup.service');
 const {
@@ -121,7 +122,7 @@ router.delete('/submissions/:id/permanent', requireAdminAuth, permanentDeleteCom
 router.post('/submissions/:id/permanent-delete', requireAdminAuth, permanentDeleteCommunityReporterStory);
 
 // Helper: create or update a draft News article from a submission
-async function upsertDraftFromSubmission(submission) {
+async function upsertDraftFromSubmission(submission, req) {
   if (!submission) return null;
   // Skip in test mode or when DB not connected to avoid hanging tests
   if (process.env.NODE_ENV === 'test' || mongoose.connection?.readyState !== 1) {
@@ -226,6 +227,7 @@ async function upsertDraftFromSubmission(submission) {
         language: 'en',
         source,
         communityReportId: submission._id,
+        ...buildArticleCreatorFields(req),
       });
       await article.save();
     }
@@ -398,6 +400,7 @@ async function createSubmissionPublishHandoff(req, res) {
 
       const { submission: draftedSubmission, article } = await createYouthPulseDraft(submission, {
         admin: (req.admin && (req.admin.email || req.admin.id)) || 'system',
+        req,
       });
 
       return res.json({
@@ -420,7 +423,7 @@ async function createSubmissionPublishHandoff(req, res) {
       return res.status(409).json({ ok: false, message: 'Submission must be APPROVED before publish handoff' });
     }
 
-    const article = await upsertDraftFromSubmission(submission);
+    const article = await upsertDraftFromSubmission(submission, req);
     if (article && article._id) {
       submission.linkedArticleId = article._id;
       try { submission.articleId = article._id; } catch (_) {}
@@ -519,6 +522,7 @@ async function createYouthPulseQueueDraft(req, res) {
 
     const { submission: draftedSubmission, article } = await createYouthPulseDraft(submission, {
       admin: (req.admin && (req.admin.email || req.admin.id)) || 'admin',
+      req,
     });
 
     return res.json({
@@ -769,7 +773,7 @@ router.post('/submissions/:id/decision', requireAdminAuth, async (req, res) => {
       submission.status = 'APPROVED';
       submission.rejectReason = undefined;
       // Create or update a draft News article linked to this submission
-      let article = await upsertDraftFromSubmission(submission);
+      let article = await upsertDraftFromSubmission(submission, req);
       if (article && article._id) {
         submission.linkedArticleId = article._id;
         try { submission.articleId = article._id; } catch (_) {}
@@ -881,7 +885,7 @@ router.post('/submissions/:id/approve', requireAdminAuth, async (req, res) => {
     submission.status = 'APPROVED';
     submission.rejectReason = undefined;
     // Ensure a draft article exists/updated for this submission
-    let article = await upsertDraftFromSubmission(submission);
+    let article = await upsertDraftFromSubmission(submission, req);
     if (article && article._id) {
       submission.linkedArticleId = article._id;
       try { submission.articleId = article._id; } catch (_) {}

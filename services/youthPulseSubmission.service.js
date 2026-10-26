@@ -2,6 +2,7 @@ const sanitizeHtml = require('sanitize-html');
 const mongoose = require('mongoose');
 const YouthPulseSubmission = require('../models/YouthPulseSubmission');
 const News = require('../models/News');
+const { buildArticleCreatorFields } = require('../lib/articleCreator');
 const { YOUTH_PULSE_TRACK_DEFINITIONS, normalizeTrackValue } = require('./communitySubmissionWorkflow');
 const { syncYouthPulseContributorStats } = require('./youthPulseContributor.service');
 
@@ -428,7 +429,7 @@ function buildDraftPayload(submission, existingArticle = null) {
   };
 }
 
-async function createYouthPulseDraft(submission, { admin } = {}) {
+async function createYouthPulseDraft(submission, { admin, req } = {}) {
   if (!submission) {
     const error = new Error('Submission not found');
     error.statusCode = 404;
@@ -457,7 +458,7 @@ async function createYouthPulseDraft(submission, { admin } = {}) {
   if (article) {
     Object.assign(article, payload);
   } else {
-    article = new News(payload);
+    article = new News({ ...payload, ...buildArticleCreatorFields(req) });
   }
 
   await article.save();

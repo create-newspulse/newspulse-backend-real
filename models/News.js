@@ -492,6 +492,7 @@ const newsSchema = new mongoose.Schema({
   pulseDialogue: { type: PulseDialogueSchema, default: undefined },
   authorByline: { type: require('../schemas/authorByline'), default: undefined },
   // Provenance (optional)
+  createdByUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', immutable: true, select: false },
   source: { type: String, index: true }, // e.g. 'community', 'editor'
   sourceType: { type: String, default: null, index: true },
   sourceLabel: { type: String, default: null },

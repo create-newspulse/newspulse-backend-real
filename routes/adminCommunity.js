@@ -242,7 +242,7 @@ async function createYouthPulseDraftHandler(req, res) {
       submission.track = track;
     }
 
-    const { submission: draftedSubmission, article } = await createYouthPulseDraft(submission, { admin: adminActor(req) });
+    const { submission: draftedSubmission, article } = await createYouthPulseDraft(submission, { admin: adminActor(req), req });
     return res.json({
       success: true,
       ok: true,

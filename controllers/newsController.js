@@ -3,6 +3,7 @@ const News = require('../models/News');
 const { serializePublicArticle } = require('../services/publicArticleSerializer.service');
 const { safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
+const { buildArticleCreatorFields, hasArticleCreatorInput } = require('../lib/articleCreator');
 const { buildPubliclyVisibleNewsArticleFilter } = require('../services/publicArticleVisibility.service');
 
 function normalizeLanguage(v) {
@@ -59,6 +60,9 @@ function ensureNewsSlugs(docLike) {
 exports.createNews = async (req, res) => {
   try {
     const body = { ...(req.body || {}) };
+    if (hasArticleCreatorInput(body)) {
+      return res.status(400).json({ error: 'Article creator identity is server-controlled' });
+    }
     if (Object.keys(body).some((key) => key === 'authorByline' || key.startsWith('authorByline.'))) {
       return res.status(400).json({ error: 'Author bylines must be saved through the authenticated articles API' });
     }
@@ -93,7 +97,7 @@ exports.createNews = async (req, res) => {
 
     ensureNewsSlugs(body);
 
-    const news = new News(body);
+    const news = new News({ ...body, ...buildArticleCreatorFields(req) });
     await news.save();
     res.status(201).json({ message: "News created successfully" });
   } catch (error) {
@@ -139,6 +143,9 @@ exports.updateNews = async (req, res) => {
     if (!id) return res.status(400).json({ error: 'Missing id' });
 
     const body = { ...(req.body || {}) };
+    if (hasArticleCreatorInput(body)) {
+      return res.status(400).json({ error: 'Article creator identity is server-controlled' });
+    }
     if (Object.keys(body).some((key) => key === 'authorByline' || key.startsWith('authorByline.'))) {
       return res.status(400).json({ error: 'Author bylines must be saved through the authenticated articles API' });
     }

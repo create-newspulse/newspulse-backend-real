@@ -5,6 +5,7 @@ const News = require('../models/News');
 const PublicArticle = require('../models/Article');
 const PushHistory = require('../models/PushHistory');
 const { slugifyUnicode } = require('../lib/slug');
+const { buildArticleCreatorFields } = require('../lib/articleCreator');
 const { syncPublicArticleFromNews, sponsoredArticleFields, syncNewsTranslationBuckets } = require('./syncPublicArticleFromNews.service');
 const { isPubliclyVisibleNewsArticle } = require('./publicArticleVisibility.service');
 const { assertArticleSlugsUnique, buildStoryIdentityFilter } = require('./articleSlugUniqueness.service');
@@ -293,7 +294,7 @@ async function createSiblingsFromCachedTranslations(sourceDoc, missingLanguages,
       }
       if (existing) return null;
       await assertArticleSlugsUnique(payload, { session });
-      return (await News.create([payload], { session }))[0];
+      return (await News.create([{ ...payload, ...buildArticleCreatorFields(options.req) }], { session }))[0];
     }, options);
     if (doc) created.push(doc);
   }

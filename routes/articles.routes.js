@@ -26,6 +26,7 @@ const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('..
 const { isFaithCultureCategory, buildFaithTopicPatch, isFaithTopicOnlyUpdate } = require('../lib/faithCultureTopics');
 const { canonicalizeSlug, detectSlugLocale, getSlugCandidates, safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
+const { buildArticleCreatorFields } = require('../lib/articleCreator');
 const { INDIA_STATES_UTS, tagStatesFromText, isValidStateSlug } = require('../src/utils/locationTagger');
 const {
   localizeFromNewsTranslations,
@@ -1447,6 +1448,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
         toStage: workflowStage,
         note: 'Created',
       }],
+      ...buildArticleCreatorFields(req),
     };
 
     _stripUndefinedKeysInPlace(createDoc);
