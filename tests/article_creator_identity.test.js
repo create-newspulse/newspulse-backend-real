@@ -224,7 +224,7 @@ test('manual language records belong to their creating account, not the source c
 
 for (const base of ['/api/news', '/api/api/news']) {
   for (const suffix of ['', '/news']) {
-    test(`legacy creation ${base}${suffix} stays unknown without verified authentication`, async context => {
+    test(`legacy creation ${base}${suffix} stamps the verified account instead of client claims`, async context => {
       const state = install(context);
       storeConstructedNews(context, state);
       const response = await state.request('post', `${base}${suffix}`, {
@@ -235,9 +235,9 @@ for (const base of ['/api/news', '/api/api/news']) {
         $rename: { title: 'createdByUserId' },
       }, 'editor');
       assert.equal(response.status, 201);
-      assert.equal(state.account(), undefined);
       assert.equal(state.rows.News.length, 1);
-      assert.equal(state.rows.News[0].createdByUserId, undefined);
+      assert.equal(String(state.rows.News[0].createdByUserId), String(state.account()._id));
+      assert.notEqual(String(state.rows.News[0].createdByUserId), OTHER_ID);
     });
   }
   for (const method of ['post', 'put', 'patch']) {

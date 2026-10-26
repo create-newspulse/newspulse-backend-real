@@ -78,12 +78,12 @@ model. [articleCreator.js](./lib/articleCreator.js) derives it only from
 middleware. It is CMS-record provenance, not a public byline, contributor,
 reviewer, task assignment or permission grant.
 
-Canonical/manual article creation and authenticated Community Reporter/Youth
+Canonical/manual and legacy article creation and authenticated Community Reporter/Youth
 Pulse handoffs stamp the creating account only on new records. Generated or
 cached language records use the authenticated request that creates them, when
 present; source-article ownership, translation-group membership and `requestedBy`
-labels do not establish a creator. Background work and legacy creation without
-verified authentication context leave it absent. Existing records are not
+labels do not establish a creator. Background work without verified authentication
+context leaves it absent. Existing records are not
 backfilled, and repeated handoffs or ordinary updates do not set or replace it.
 
 The field has no default or new index and is excluded from queries by default.
@@ -230,8 +230,17 @@ Legacy `PUT/PATCH /api/news/:id` in [news.js](./routes/news.js) use
 saves an article. The server's `/api/api/news/:id` normalization reaches the
 same guard. Signed bearer and supported cookie sessions require a persisted,
 eligible account and current token version; cookie writes also require a trusted
-Origin. Public GET routes and legacy POST creation are separate registrations,
-outside this update-only guard.
+Origin. Public GET routes remain separate, unauthenticated registrations.
+
+Legacy `POST /api/news` and `/api/news/news`, including their `/api/api/...`
+normalized aliases, also require `requireAdminAuth`. Creation checks the
+constructed News document's effective status before saving: `published` and
+`scheduled` require the verified account's Founder role, not role-preset-derived
+`news_publish`. Scheduled creation is protected because the system scheduler can
+later publish it. Missing status still defaults to `draft`; authenticated draft
+creation retains the existing payload handling and 201 message-only response.
+The public Community Reporter and Youth Pulse submission endpoints are separate
+from these privileged CMS creation routes.
 
 This is an authentication boundary, not complete article authorization. The
 legacy updater still lacks `news_edit`, per-record access and dedicated

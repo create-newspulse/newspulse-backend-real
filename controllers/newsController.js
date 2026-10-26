@@ -5,6 +5,7 @@ const { safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 const { buildArticleCreatorFields, hasArticleCreatorInput } = require('../lib/articleCreator');
 const { buildPubliclyVisibleNewsArticleFilter } = require('../services/publicArticleVisibility.service');
+const { isFounderRole } = require('../lib/teamAccess');
 
 function normalizeLanguage(v) {
   const s = String(v ?? '').trim().toLowerCase();
@@ -98,6 +99,13 @@ exports.createNews = async (req, res) => {
     ensureNewsSlugs(body);
 
     const news = new News({ ...body, ...buildArticleCreatorFields(req) });
+    // Scheduled records can later be published by the system scheduler.
+    if (['published', 'scheduled'].includes(news.status) && !isFounderRole(req.admin?.role)) {
+      return res.status(403).json({
+        error: 'Founder permission is required to publish or schedule news',
+        code: 'FOUNDER_REQUIRED',
+      });
+    }
     await news.save();
     res.status(201).json({ message: "News created successfully" });
   } catch (error) {

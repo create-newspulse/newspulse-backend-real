@@ -72,6 +72,27 @@ function assertNoArticleAccess(state) {
   assert.deepEqual(state.doc.toObject(), state.before);
 }
 
+function trackLegacyCreations(context) {
+  const records = [];
+  const save = context.mock.method(News.prototype, 'save', async function () {
+    await this.validate();
+    records.push(this.toObject());
+    return this;
+  });
+  return { records, save };
+}
+
+function creationPayload(language = 'en') {
+  return {
+    title: TITLES[language],
+    description: 'Synthetic draft summary',
+    content: `<p>${TITLES[language]}</p>`,
+    category: 'national',
+    language,
+    status: 'draft',
+  };
+}
+
 const deniedCases = [
   { name: 'anonymous', token: () => null },
   { name: 'malformed token', token: () => 'not-a-signed-access-token' },
@@ -206,22 +227,212 @@ for (const base of BASES) {
   }
 
   for (const suffix of ['', '/news']) {
-    test(`legacy POST ${base}${suffix} creation remains separate from update authentication`, async context => {
-      const state = installLegacyFixture(context);
-      const created = [];
-      context.mock.method(News.prototype, 'save', async function () {
-        created.push(this.toObject());
-        return this;
+    const path = `${base}${suffix}`;
+    const label = `POST ${path}`;
+
+    for (const scenario of deniedCases) {
+      test(`${label} denies ${scenario.name} before creating CMS records`, async context => {
+        const state = installLegacyFixture(context, { account: scenario.account });
+        const created = trackLegacyCreations(context);
+        const token = scenario.token ? scenario.token(state.auth) : state.auth.token('editor');
+        if (scenario.unavailable) mongoose.connection.readyState = 0;
+        let call = request(app).post(path);
+        if (token) call = call.auth(token, { type: 'bearer' });
+        const response = await call.send({
+          ...creationPayload(), status: 'published', publishedAt: null,
+          role: 'founder', isFounder: true, _authUserDoc: { _id: ARTICLE_ID, role: 'founder' },
+        });
+        assert.equal(response.status, scenario.status || 401);
+        assert.equal(response.body.code, scenario.code || 'UNAUTHORIZED');
+        assert.equal(created.save.mock.callCount(), 0);
+        assert.deepEqual(created.records, []);
+        assertNoArticleAccess(state);
       });
-      const response = await request(app).post(`${base}${suffix}`)
+    }
+
+    test(`${label} requires authentication for default, draft and publication statuses`, async context => {
+      const state = installLegacyFixture(context);
+      const created = trackLegacyCreations(context);
+      for (const status of [undefined, 'draft', 'published', 'scheduled']) {
+        for (const token of [null, 'not-a-signed-access-token']) {
+          let call = request(app).post(path);
+          if (token) call = call.auth(token, { type: 'bearer' });
+          const response = await call.send({ ...creationPayload(), status });
+          assert.equal(response.status, 401);
+          assert.equal(response.body.code, 'UNAUTHORIZED');
+        }
+      }
+      assert.equal(state.accountLookup.mock.callCount(), 0);
+      assert.equal(created.save.mock.callCount(), 0);
+      assert.deepEqual(created.records, []);
+      assertNoArticleAccess(state);
+    });
+
+    for (const role of ['founder', 'admin', 'editor', 'reporter']) {
+      for (const language of ['en', 'hi', 'gu']) {
+        test(`${label} preserves authenticated ${role} ${language} draft creation`, async context => {
+          const state = installLegacyFixture(context, { account: { specialRightsOverride: [] } });
+          const created = trackLegacyCreations(context);
+          const response = await request(app).post(`${path}/?legacy=1`)
+            .auth(state.auth.token(role), { type: 'bearer' })
+            .send({
+              ...creationPayload(language), language: undefined, lang: language,
+              translationGroupId: 'legacy-create-group', translationKey: 'legacy-create-key',
+              imageURL: 'https://example.invalid/legacy-cover.jpg',
+            });
+          assert.equal(response.status, 201);
+          assert.deepEqual(response.body, { message: 'News created successfully' });
+          assert.equal(created.records.length, 1);
+          const doc = created.records[0];
+          assert.equal(doc.title, TITLES[language]);
+          assert.equal(doc.content, `<p>${TITLES[language]}</p>`);
+          assert.equal(doc.description, 'Synthetic draft summary');
+          assert.equal(doc.status, 'draft');
+          assert.equal(doc.lang, language);
+          assert.equal(doc.language, language);
+          assert.equal(doc.slug, slugifyUnicode(TITLES[language]));
+          assert.equal(doc.slugs[language], doc.slug);
+          assert.equal(doc.translationGroupId, 'legacy-create-group');
+          assert.equal(doc.translationKey, 'legacy-create-key');
+          assert.equal(doc.coverImageUrl, 'https://example.invalid/legacy-cover.jpg');
+          assert.equal(state.accountLookup.mock.callCount(), 1);
+          assert.equal(String(doc.createdByUserId), state.accountLookup.mock.calls[0].arguments[0]);
+          assertNoArticleAccess(state);
+        });
+      }
+    }
+
+    for (const status of ['published', 'scheduled']) {
+      for (const scenario of [
+        { name: 'Admin preset', role: 'admin' },
+        { name: 'Editor preset', role: 'editor' },
+        { name: 'explicit staff Publish News grant', role: 'reporter', account: { specialRightsOverride: ['news_publish'] } },
+        { name: 'Founder token claim for an Editor account', role: 'editor', claims: { role: 'founder' } },
+      ]) {
+        test(`${label} denies ${status} creation for ${scenario.name}`, async context => {
+          const state = installLegacyFixture(context, { account: scenario.account });
+          const created = trackLegacyCreations(context);
+          const response = await request(app).post(path)
+            .auth(state.auth.token(scenario.role, scenario.claims), { type: 'bearer' })
+            .send({
+              ...creationPayload(), status, publishedAt: null, scheduledAt: '2026-01-02T00:00:00.000Z',
+              role: 'founder', isFounder: true, _authUserDoc: { _id: ARTICLE_ID, role: 'founder' },
+            });
+          assert.equal(response.status, 403);
+          assert.deepEqual(response.body, {
+            error: 'Founder permission is required to publish or schedule news',
+            code: 'FOUNDER_REQUIRED',
+          });
+          assert.equal(created.save.mock.callCount(), 0);
+          assert.deepEqual(created.records, []);
+          assertNoArticleAccess(state);
+        });
+      }
+
+      for (const language of ['en', 'hi', 'gu']) {
+        test(`${label} preserves Founder ${language} ${status} creation and timestamps`, async context => {
+          const state = installLegacyFixture(context);
+          const created = trackLegacyCreations(context);
+          const dateField = status === 'published' ? 'publishedAt' : 'scheduledAt';
+          const date = '2026-01-02T00:00:00.000Z';
+          const response = await request(app).post(path)
+            .auth(state.auth.token('founder', { role: 'editor' }), { type: 'bearer' })
+            .send({ ...creationPayload(language), status, [dateField]: date });
+          assert.equal(response.status, 201);
+          assert.deepEqual(response.body, { message: 'News created successfully' });
+          assert.equal(created.records.length, 1);
+          assert.equal(created.records[0].status, status);
+          assert.equal(created.records[0].language, language);
+          assert.equal(created.records[0][dateField].toISOString(), date);
+          assertNoArticleAccess(state);
+        });
+      }
+    }
+
+    test(`${label} keeps omitted status as draft despite publication metadata and claims`, async context => {
+      const state = installLegacyFixture(context);
+      const created = trackLegacyCreations(context);
+      const response = await request(app).post(path)
         .auth(state.auth.token('editor'), { type: 'bearer' })
-        .send({ title: 'New draft', description: 'Draft summary', content: '<p>Draft content</p>', language: 'gu', status: 'draft' });
+        .send({
+          ...creationPayload(), status: undefined, workflowStage: 'PUBLISHED',
+          workflow: { stage: 'PUBLISHED' }, publishedAt: '2026-01-02T00:00:00.000Z',
+          $set: { status: 'published' }, 'status.value': 'published',
+        });
       assert.equal(response.status, 201);
       assert.deepEqual(response.body, { message: 'News created successfully' });
-      assert.equal(created.length, 1);
-      assert.equal(created[0].status, 'draft');
-      assert.equal(created[0].lang, 'gu');
-      assert.equal(state.accountLookup.mock.callCount(), 0);
+      assert.equal(created.records.length, 1);
+      assert.equal(created.records[0].status, 'draft');
+      assertNoArticleAccess(state);
+    });
+
+    test(`${label} does not insert malformed or noncanonical publication statuses`, async context => {
+      const state = installLegacyFixture(context);
+      const created = trackLegacyCreations(context);
+      const token = state.auth.token('editor');
+      for (const status of [null, '', 'PUBLISHED', 'published ', ['published'], { value: 'published' }, true, 1]) {
+        const response = await request(app).post(path).auth(token, { type: 'bearer' })
+          .send({ ...creationPayload(), status });
+        assert.equal(response.status, 500);
+        assert.equal(typeof response.body.error, 'string');
+        assert.deepEqual(created.records, []);
+      }
+      assertNoArticleAccess(state);
+    });
+
+    for (const cookie of ['np_admin_token', 'np_token', 'token']) {
+      test(`${label} preserves signed ${cookie} creation with a trusted Origin`, async context => {
+        const state = installLegacyFixture(context);
+        const created = trackLegacyCreations(context);
+        const response = await request(app).post(path)
+          .set('Cookie', `${cookie}=${state.auth.token('founder')}`)
+          .set('Origin', 'http://localhost:5173')
+          .send({ ...creationPayload(), status: 'published' });
+        assert.equal(response.status, 201);
+        assert.deepEqual(response.body, { message: 'News created successfully' });
+        assert.equal(created.records.length, 1);
+        assert.equal(created.records[0].status, 'published');
+        assertNoArticleAccess(state);
+      });
+    }
+
+    test(`${label} rejects invalid sessions and unsafe cookie Origins without saving`, async context => {
+      const state = installLegacyFixture(context);
+      const created = trackLegacyCreations(context);
+      const cookie = `np_admin_token=${state.auth.token('founder')}`;
+      const noOrigin = await request(app).post(path).set('Cookie', cookie).send(creationPayload());
+      assert.equal(noOrigin.status, 403);
+      assert.equal(noOrigin.body.code, 'CSRF_ORIGIN_REQUIRED');
+      const untrustedOrigin = await request(app).post(path).set('Cookie', cookie)
+        .set('Origin', 'https://untrusted.example.invalid').send(creationPayload());
+      assert.equal(untrustedOrigin.status, 403);
+      const invalidCookie = await request(app).post(path)
+        .set('Cookie', 'np_admin_token=not-a-signed-token')
+        .set('Origin', 'http://localhost:5173').send(creationPayload());
+      assert.equal(invalidCookie.status, 401);
+      const invalidBearer = await request(app).post(path).auth('not-a-signed-token', { type: 'bearer' })
+        .set('Cookie', cookie).set('Origin', 'http://localhost:5173').send(creationPayload());
+      assert.equal(invalidBearer.status, 401);
+      assert.equal(created.save.mock.callCount(), 0);
+      assert.deepEqual(created.records, []);
+      assertNoArticleAccess(state);
+    });
+
+    test(`${label} preserves byline errors and reports storage failures`, async context => {
+      const state = installLegacyFixture(context);
+      const created = trackLegacyCreations(context);
+      const token = state.auth.token('founder');
+      const byline = await request(app).post(path).auth(token, { type: 'bearer' })
+        .send({ ...creationPayload(), authorByline: { enabled: true } });
+      assert.equal(byline.status, 400);
+      assert.deepEqual(byline.body, { error: 'Author bylines must be saved through the authenticated articles API' });
+      assert.equal(created.save.mock.callCount(), 0);
+      context.mock.method(News.prototype, 'save', async () => { throw new Error('Synthetic storage failure'); });
+      const failed = await request(app).post(path).auth(token, { type: 'bearer' }).send(creationPayload());
+      assert.equal(failed.status, 500);
+      assert.deepEqual(failed.body, { error: 'Synthetic storage failure' });
+      assert.deepEqual(created.records, []);
+      assertNoArticleAccess(state);
     });
 
     test(`legacy GET ${base}${suffix} remains public`, async context => {

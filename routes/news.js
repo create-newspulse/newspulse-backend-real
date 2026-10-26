@@ -13,9 +13,9 @@ const { createNews, getNews, updateNews, getPublishedNewsBySlug } = require('../
 const { requireAdminAuth } = require('../middleware/adminAuth');
 
 // Primary root path so mounted at /api/news gives /api/news (list/create)
-router.route('/').post(createNews).get(getNews);
+router.route('/').post(requireAdminAuth, createNews).get(getNews);
 // Backward compatibility path (legacy double /news/news)
-router.route('/news').post(createNews).get(getNews);
+router.route('/news').post(requireAdminAuth, createNews).get(getNews);
 
 // Compatibility: lookup published news by slug (unicode-safe)
 router.get('/slug/:slug', getPublishedNewsBySlug);
