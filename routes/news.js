@@ -10,6 +10,7 @@
 const express = require('express');
 const router = express.Router();
 const { createNews, getNews, updateNews, getPublishedNewsBySlug } = require('../controllers/newsController');
+const { requireAdminAuth } = require('../middleware/adminAuth');
 
 // Primary root path so mounted at /api/news gives /api/news (list/create)
 router.route('/').post(createNews).get(getNews);
@@ -19,7 +20,7 @@ router.route('/news').post(createNews).get(getNews);
 // Compatibility: lookup published news by slug (unicode-safe)
 router.get('/slug/:slug', getPublishedNewsBySlug);
 
-// Update by id (non-breaking addition)
-router.route('/:id').put(updateNews).patch(updateNews);
+// Authenticated legacy update compatibility.
+router.route('/:id').put(requireAdminAuth, updateNews).patch(requireAdminAuth, updateNews);
 
 module.exports = router;

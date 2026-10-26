@@ -204,6 +204,20 @@ a client-supplied role. Shared policy helpers include
 [accountLifecycle.js](./lib/accountLifecycle.js), and
 [authRequestSecurity.js](./lib/authRequestSecurity.js).
 
+Legacy `PUT/PATCH /api/news/:id` in [news.js](./routes/news.js) use
+`requireAdminAuth` before [updateNews](./controllers/newsController.js) reads or
+saves an article. The server's `/api/api/news/:id` normalization reaches the
+same guard. Signed bearer and supported cookie sessions require a persisted,
+eligible account and current token version; cookie writes also require a trusted
+Origin. Public GET routes and legacy POST creation are separate registrations,
+outside this update-only guard.
+
+This is an authentication boundary, not complete article authorization. The
+legacy updater still lacks `news_edit`, per-record access and dedicated
+publication/lifecycle authorization checks. Authentication does not establish
+permission to edit every article, and this route is not a substitute for the
+canonical CMS action guards.
+
 The Reporter Portal has its own OTP/session and ownership flow in
 [reporterPortal.js](./routes/reporterPortal.js),
 [reporterPortalAuth.js](./middleware/reporterPortalAuth.js), and
