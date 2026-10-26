@@ -69,6 +69,7 @@ const {
   normalizeTemporaryAccessList,
   requirePasswordPolicy,
   safeUserDto,
+  specialRightsIdentityFields,
 } = require('../lib/teamAccess');
 const {
   CANONICAL_TO_LEGACY_MODULE,
@@ -130,6 +131,7 @@ function syncReqUserFromAdmin(req) {
     moduleAccess: Array.isArray(req.admin.moduleAccess) ? req.admin.moduleAccess : [],
     permissions: Array.isArray(req.admin.permissions) ? req.admin.permissions : [],
     specialRights: Array.isArray(req.admin.specialRights) ? req.admin.specialRights : [],
+    ...specialRightsIdentityFields(req.admin),
     taskRights: Array.isArray(req.admin.taskRights) ? req.admin.taskRights : [],
     accountControlRights: Array.isArray(req.admin.accountControlRights) ? req.admin.accountControlRights : [],
     status: req.admin.status || 'active',
@@ -203,7 +205,7 @@ function requireTeamPermission(permission) {
 function hasStaffActionPermission(user, permission) {
   if (!user) return false;
   if (isFounderRole(user.role) || user.isFounder) return true;
-  if (hasPermission(user, permission) || hasPermission(user, 'team.manage')) return true;
+  if (hasPermission(user, permission) || (user.specialRightsConfigured !== true && hasPermission(user, 'team.manage'))) return true;
   const accountRights = new Set(Array.isArray(user.accountControlRights) ? user.accountControlRights : []);
   const permissionToAccountRight = {
     'auth.change_staff_email': 'staff_change_email',
@@ -216,6 +218,7 @@ function hasStaffActionPermission(user, permission) {
     'auth.view_login_activity': 'staff_view_details',
   };
   if (permissionToAccountRight[permission] && accountRights.has(permissionToAccountRight[permission])) return true;
+  if (user.specialRightsConfigured === true) return false;
   const granted = new Set([
     ...(Array.isArray(user.permissions) ? user.permissions : []),
     ...(Array.isArray(user.specialRights) ? user.specialRights : []),
@@ -714,11 +717,17 @@ async function resolveRoleAssignment(req, body, fallbackRole) {
   return { role, roleName: role };
 }
 
-function parseAccessOverride(req, body) {
+function parseAccessOverride(req, body, user = null) {
+  if (Object.prototype.hasOwnProperty.call(body, 'specialRightsConfigured')) {
+    return { error: { status: 400, message: 'specialRightsConfigured is server-controlled', code: 'SPECIAL_RIGHTS_CONFIGURED_READ_ONLY' } };
+  }
   const hasModules = body.moduleAccessOverride !== undefined || body.moduleAccess !== undefined;
   const hasRights = body.specialRightsOverride !== undefined || body.specialRights !== undefined;
   if (!hasModules && !hasRights) return { patch: {}, audit: [] };
   if (!actorIsFounder(req)) return { error: { status: 403, message: 'Founder role required', code: 'FOUNDER_REQUIRED' } };
+  if (hasRights && user?.specialRightsConfigured === true) {
+    return { error: { status: 409, message: 'Save configured Special Rights through the dedicated /access/staff/:id/rights endpoint', code: 'SPECIAL_RIGHTS_SAVE_REQUIRED' } };
+  }
 
   const moduleAccessOverride = hasModules ? normalizeModuleAccess(body.moduleAccessOverride || body.moduleAccess) : undefined;
   const requestedRights = hasRights ? normalizeSpecialRights(body.specialRightsOverride || body.specialRights) : undefined;
@@ -735,6 +744,24 @@ function parseAccessOverride(req, body) {
       ...(hasRights ? ['specialRightsOverride'] : []),
     ],
   };
+}
+
+async function updateUserWithAccessOverride(id, patch, res) {
+  const hasRights = Object.prototype.hasOwnProperty.call(patch, 'specialRightsOverride');
+  // Do not let an in-flight legacy save overwrite a newly configured selection.
+  const updated = hasRights
+    ? await User.findOneAndUpdate({ _id: id, specialRightsConfigured: { $ne: true } }, { $set: patch }, { new: true })
+    : await User.findByIdAndUpdate(id, { $set: patch }, { new: true });
+  if (updated) return updated;
+  if (hasRights) {
+    const current = await User.findById(id);
+    if (current?.specialRightsConfigured === true) {
+      bad(res, 409, 'Save configured Special Rights through the dedicated /access/staff/:id/rights endpoint', 'SPECIAL_RIGHTS_SAVE_REQUIRED');
+      return null;
+    }
+  }
+  bad(res, 404, 'Not found', 'NOT_FOUND');
+  return null;
 }
 
 function normalizeTemporaryAccessInput(req, value) {
@@ -1084,7 +1111,7 @@ async function updateUserHandler(req, res) {
     patch.accountStatus = status;
     audit.fields.push('status');
   }
-  const accessOverride = parseAccessOverride(req, body);
+  const accessOverride = parseAccessOverride(req, body, user);
   if (accessOverride.error) return bad(res, accessOverride.error.status, accessOverride.error.message, accessOverride.error.code);
   Object.assign(patch, accessOverride.patch);
   audit.fields.push(...accessOverride.audit);
@@ -1124,8 +1151,8 @@ async function updateUserHandler(req, res) {
     }
   }
 
-  const updated = await User.findByIdAndUpdate(req.params.id, { $set: patch }, { new: true });
-  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  const updated = await updateUserWithAccessOverride(req.params.id, patch, res);
+  if (!updated) return;
   const ensured = await ensureUserStaffId(updated, { action: 'TEAM_STAFF_ID_BACKFILLED' });
   const finalUser = ensured.user || updated;
 
@@ -1253,16 +1280,16 @@ async function accessOverrideHandler(req, res) {
   if (!user) return;
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_UPDATED'))) return;
 
-  const accessOverride = parseAccessOverride(req, req.body && typeof req.body === 'object' ? req.body : {});
+  const accessOverride = parseAccessOverride(req, req.body && typeof req.body === 'object' ? req.body : {}, user);
   if (accessOverride.error) return bad(res, accessOverride.error.status, accessOverride.error.message, accessOverride.error.code);
   if (!accessOverride.audit.length) return bad(res, 400, 'No access changes supplied', 'NO_ACCESS_CHANGES');
 
-  const updated = await User.findByIdAndUpdate(
+  const updated = await updateUserWithAccessOverride(
     req.params.id,
-    { $set: { ...accessOverride.patch, updatedBy: actorId(req), updatedAt: new Date() } },
-    { new: true },
+    { ...accessOverride.patch, updatedBy: actorId(req), updatedAt: new Date() },
+    res,
   );
-  if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
+  if (!updated) return;
   if (accessOverride.audit.includes('moduleAccessOverride')) await logAudit(req, 'TEAM_ACCESS_CHANGE', String(updated._id), { moduleAccessOverride: updated.moduleAccessOverride });
   if (accessOverride.audit.includes('specialRightsOverride')) await logAudit(req, 'TEAM_SPECIAL_RIGHTS_CHANGE', String(updated._id), { specialRightsOverride: updated.specialRightsOverride });
   return ok(res, { data: { user: safeUserDto(updated) }, user: safeUserDto(updated) });
@@ -1985,22 +2012,32 @@ async function setSpecialRightsHandler(req, res) {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const reason = auditReasonFromBody(body);
   if (!reason) return bad(res, 400, 'auditReason is required', 'AUDIT_REASON_REQUIRED');
-  const parsed = parseKeyMap(body.rights, body.specialRights, body.specialRightsOverride);
+  if (Object.prototype.hasOwnProperty.call(body, 'specialRightsConfigured')) {
+    return bad(res, 400, 'specialRightsConfigured is server-controlled', 'SPECIAL_RIGHTS_CONFIGURED_READ_ONLY');
+  }
+  const candidates = [body.specialRightsOverride, body.rights, body.specialRights].filter((value) => value !== undefined);
+  const selections = candidates.map((value) => parseKeyMap(value));
+  if (selections.some((selection) => !selection.provided)) return bad(res, 400, 'rights must be an array or key map', 'NO_RIGHT_CHANGES');
+  const parsed = selections[0] || { provided: false };
   if (!parsed.provided) return bad(res, 400, 'rights is required', 'NO_RIGHT_CHANGES');
+  const requested = normalizeSpecialRights(parsed.keys);
+  const selectionKey = requested.slice().sort().join('\n');
+  if (selections.some((selection) => normalizeSpecialRights(selection.keys).sort().join('\n') !== selectionKey)) {
+    return bad(res, 400, 'Special Rights selection fields must agree; do not submit computed rights as the permanent selection', 'CONFLICTING_SPECIAL_RIGHTS');
+  }
   // Founder-only rights can never be granted to non-founder staff via the studio.
   const founderOnly = new Set(FOUNDER_ONLY_RIGHTS);
-  const requested = normalizeSpecialRights(parsed.keys);
   const specialRightsOverride = requested.filter((key) => !founderOnly.has(key));
   const blockedFounderOnly = requested.filter((key) => founderOnly.has(key));
   const permissions = mergeLegacyPermissions(user.permissions, specialRightsOverride);
 
   const updated = await User.findByIdAndUpdate(
     req.params.id,
-    { $set: { specialRightsOverride, permissions, updatedBy: actorId(req), updatedAt: new Date() }, $inc: { accessVersion: 1 } },
+    { $set: { specialRightsOverride, specialRightsConfigured: true, permissions, updatedBy: actorId(req), updatedAt: new Date() }, $inc: { accessVersion: 1 } },
     { new: true },
   );
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
-  await logAudit(req, 'TEAM_SPECIAL_RIGHTS_CHANGE', String(updated._id), { oldValue: user.specialRightsOverride || [], newValue: specialRightsOverride, specialRightsOverride, blockedFounderOnly, reason, accessVersion: updated.accessVersion });
+  await logAudit(req, 'TEAM_SPECIAL_RIGHTS_CHANGE', String(updated._id), { oldValue: user.specialRightsOverride || [], newValue: specialRightsOverride, specialRightsOverride, specialRightsConfigured: true, wasSpecialRightsConfigured: user.specialRightsConfigured === true, blockedFounderOnly, reason, accessVersion: updated.accessVersion });
   const roleDoc = await loadRoleDocForUser(updated);
   return ok(res, {
     message: blockedFounderOnly.length ? 'Special rights updated. Founder-only rights were ignored.' : 'Special rights updated.',

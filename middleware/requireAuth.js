@@ -16,6 +16,7 @@ const {
   isProtectedFounderUser,
   normalizeModuleAccess,
   normalizeRole,
+  specialRightsIdentityFields,
 } = require('../lib/teamAccess');
 const {
   evaluateModuleAccess,
@@ -283,6 +284,7 @@ async function requireAuth(req, res, next) {
       accountControlRights: permissionFields.accountControlRights,
       moduleAccessOverride: Array.isArray(user.moduleAccessOverride) ? user.moduleAccessOverride : [],
       specialRightsOverride: Array.isArray(user.specialRightsOverride) ? user.specialRightsOverride : [],
+      ...specialRightsIdentityFields(user),
       taskRightsOverride: Array.isArray(user.taskRightsOverride) ? user.taskRightsOverride : [],
       accountControlRightsOverride: Array.isArray(user.accountControlRightsOverride) ? user.accountControlRightsOverride : [],
       status: user.status || 'active',

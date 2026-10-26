@@ -225,7 +225,113 @@ a client-supplied role. Shared policy helpers include
 [accountLifecycle.js](./lib/accountLifecycle.js), and
 [authRequestSecurity.js](./lib/authRequestSecurity.js).
 
-Legacy `PUT/PATCH /api/news/:id` in [news.js](./routes/news.js) use
+### Founder Special Rights: opt-in permanent selection
+
+[User.js](./models/User.js) stores an optional, server-controlled Boolean
+`specialRightsConfigured`. Only the value `true` activates authoritative
+individual permanent rights. The field has no persisted default or new index.
+Missing, `false`, or `null` markers retain the legacy additive calculation:
+role defaults, individual additions, and mapped legacy permissions. Older
+`specialRightsOverride: []` records are not inferred to be Founder revocations.
+There is no migration, backfill, or read-time write for this transition.
+
+The only activating operation is the existing Founder-authorized
+`PATCH /api/admin/team/access/staff/:id/rights` in
+[adminTeam.routes.js](./routes/adminTeam.routes.js), including its mounted
+compatibility aliases. It requires the existing audit reason and protected-target
+checks. It atomically saves the normalized permanent `specialRightsOverride`,
+sets `specialRightsConfigured: true`, and increments `accessVersion`.
+Clients must not supply the marker.
+
+Send the intended permanent selection as `specialRightsOverride: []` or an
+array/key map of existing backend keys, for example `["news_edit"]`.
+The existing `rights` and `specialRights` request aliases remain supported.
+If multiple selection fields are supplied, their normalized selections must
+agree; otherwise the request fails with `CONFLICTING_SPECIAL_RIGHTS` before
+writing. Do not round-trip a computed/effective rights list into these fields.
+Existing registry normalization and blocked-Founder-only-right reporting remain
+in place. `news_publish` and `news_edit` are distinct keys; neither is inferred
+from the other.
+
+For configured staff, `[]` means no permanent Special Rights, while a selected
+list replaces all preset and legacy permanent Special Rights. The shared
+permanent-right calculation in [teamAccess.js](./lib/teamAccess.js) is used by
+both effective-right lists and detailed effective-access states. Recognized
+legacy permission aliases and canonical right keys in the projected
+`permissions` list cannot restore a removed right. Unrelated legacy permissions,
+task rights, account-control rights, and Staff Access module policy are separate.
+Stored legacy permission strings are not destructively rewritten to infer
+their provenance. For configured staff, team-action guards ignore broad legacy
+`staff_manage`, `staff.manage`, and `team.manage` fallbacks: selecting one
+Special Right cannot authorize other staff actions. Separate account-control
+grants remain independent.
+
+Temporary entries remain separate: active grants add rights, active denials win,
+and expired/invalid-expiry entries do not apply. Existing null-expiry legacy
+Special Rights entries retain their existing behavior; the dedicated temporary
+API still requires a future expiry. Configured non-Founders cannot acquire
+Founder-only Special Rights through these calculations. Founder full access,
+account eligibility, Safe Zone checks, and global module restrictions remain
+at their existing authorization boundaries. This change does not delegate
+article publishing or change article mutation routes.
+
+Staff creation (including supplied preset selections), general staff updates,
+legacy permission saves, and the older combined `/users/:id/access` endpoint
+never activate the marker. Once configured, general/combined updates containing
+Special Rights fields fail with `SPECIAL_RIGHTS_SAVE_REQUIRED`; module-only and
+ordinary profile/account updates remain independent. Direct marker inputs to
+the staff access parser or dedicated rights save fail with
+`SPECIAL_RIGHTS_CONFIGURED_READ_ONLY`. There is no client reset-to-legacy action.
+
+Backend response contract for the Admin Panel:
+
+- Staff `user` DTOs retain `specialRightsOverride` as the saved permanent list
+  and `specialRights` as the effective list, and add the Boolean
+  `specialRightsConfigured`. A configured empty list must not fall back to a
+  role preset or effective list.
+- Detailed `effectiveAccess` retains its per-right states, `allowed` decisions,
+  `effectiveSpecialRights`, and separate `temporaryAccess`, and adds the same
+  marker. Raw effective lists are not substitutes for account/module decisions.
+- `/access/me` (also embedded as `/auth/me`'s `access`) adds the marker alongside
+  the existing `specialRights` summary. That summary's `specialRights` list
+  remains the stored selection, not a newly computed effective list.
+- `/access/my-modules` keeps its effective `specialRights` arrays and adds the
+  marker in both existing response envelopes.
+- The Admin Panel must save only intentional permanent selections, preserve
+  configured `[]` on reload, keep temporary rights separate, omit read-only
+  marker fields, and use an authoritative reload after its separate access
+  requests. No Admin Panel implementation is part of this backend change.
+
+  Legacy updates containing permanent Special Rights also require the marker
+  not to be `true` in the atomic database update predicate. If an intentional
+  Founder save configures the account while an older general/combined request is
+  in flight, the older request returns HTTP 409 `SPECIAL_RIGHTS_SAVE_REQUIRED`
+  without updating any of its fields. Module-only updates do not use this guard.
+
+  The canonical save uses the MongoDB `user.id`/`user._id`, not the display Staff ID:
+
+  ```http
+  PATCH /api/admin/team/access/staff/:id/rights
+  Content-Type: application/json
+
+  {"specialRightsOverride":[],"auditReason":"Founder reviewed permanent rights"}
+  ```
+
+  For a selected save, replace `[]` with the intended existing keys, such as
+  `["news_edit"]`. The successful HTTP 200 envelope remains
+  `{ ok, success, status, message, data: { user, blockedFounderOnly, effectiveAccess }, user, blockedFounderOnly }`.
+  Both `user` copies expose the same saved `specialRightsOverride`, Boolean
+  `specialRightsConfigured`, and effective `specialRights`.
+  `data.effectiveAccess.accessVersion` is the incremented access version.
+  Reload with `GET /api/admin/team/access/staff/:id`; its existing envelope is
+  `{ ok, success, status, data: { user, effectiveAccess }, user, effectiveAccess }`.
+  Missing/malformed selections return HTTP 400 `NO_RIGHT_CHANGES`; conflicting
+  selection aliases return HTTP 400 `CONFLICTING_SPECIAL_RIGHTS`; client marker
+  inputs return HTTP 400 `SPECIAL_RIGHTS_CONFIGURED_READ_ONLY`. The audit reason
+  must contain at least three trimmed characters (`AUDIT_REASON_REQUIRED`).
+  These validation failures do not configure the account.
+
+  Legacy `PUT/PATCH /api/news/:id` in [news.js](./routes/news.js) use
 `requireAdminAuth` before [updateNews](./controllers/newsController.js) reads or
 saves an article. The server's `/api/api/news/:id` normalization reaches the
 same guard. Signed bearer and supported cookie sessions require a persisted,

@@ -18,6 +18,7 @@ const {
   effectiveTaskRights,
   normalizeModuleAccess,
   normalizeRole,
+  specialRightsIdentityFields,
 } = require('../lib/teamAccess');
 const {
   ACCOUNT_STATUS,
@@ -128,6 +129,7 @@ async function requireAdminJwt(req, res, next) {
           permissions: effectivePermissions(user),
           moduleAccess: normalizeModuleAccess(user.moduleAccessOverride),
           specialRights: effectiveSpecialRights(user),
+          ...specialRightsIdentityFields(user),
           taskRights: effectiveTaskRights(user),
           accountControlRights: effectiveAccountControlRights(user),
           status: user.status || 'active',

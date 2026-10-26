@@ -49,6 +49,7 @@ const userSchema = new mongoose.Schema({
   moduleAccessOverride: { type: [String], default: [] },
   moduleAccessStates: { type: mongoose.Schema.Types.Mixed, default: undefined },
   specialRightsOverride: { type: [String], default: [] },
+  specialRightsConfigured: { type: Boolean, default: undefined },
   taskRightsOverride: { type: [String], default: [] },
   accountControlRightsOverride: { type: [String], default: [] },
   // Founder Access Studio temporary access grants (module/right with expiry)
