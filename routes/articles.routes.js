@@ -27,6 +27,7 @@ const { isFaithCultureCategory, buildFaithTopicPatch, isFaithTopicOnlyUpdate } =
 const { canonicalizeSlug, detectSlugLocale, getSlugCandidates, safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 const { buildArticleCreatorFields } = require('../lib/articleCreator');
+const { requireFounderArticleMutation } = require('../lib/articleMutationActor');
 const { INDIA_STATES_UTS, tagStatesFromText, isValidStateSlug } = require('../src/utils/locationTagger');
 const {
   localizeFromNewsTranslations,
@@ -80,7 +81,7 @@ const {
 } = require('../services/publishAsyncTranslation.service');
 const { publishCanonicalArticle } = require('../services/articlePublishing.service');
 const {
-  generateArticleTranslations,
+  generateArticleTranslationsForRequest,
   enqueueArticleTranslationGeneration,
   markSiblingTranslationsOutdated,
   estimateBackfill,
@@ -92,6 +93,7 @@ const { logAudit } = require('../lib/audit');
 const { isContentDatabaseUnavailable } = require('../lib/contentErrors');
 const {
   authorizeArticleSave, articleSaveAuthorizer, contentSaveBody, scopeChanged,
+  articleTranslationAuthorizer, authorizeArticleCreation,
 } = require('../services/articleSaveAccess.service');
 
 
@@ -1144,8 +1146,7 @@ router.post('/articles/:id/translations/generate', requireAdminAuth, async (req,
       overwrite,
     });
 
-    const result = await generateArticleTranslations(doc, {
-      req,
+    const result = await generateArticleTranslationsForRequest(doc, req, {
       targetLanguages: req.body?.targetLanguages,
       overwrite,
       confirmOverwriteHumanEdited,
@@ -1169,6 +1170,7 @@ router.post('/articles/:id/translations/generate', requireAdminAuth, async (req,
     return res.status(err.statusCode || 500).json({
       ok: false, success: false,
       message: err.statusCode ? err.message : 'Failed to generate translations',
+      ...(err.code ? { code: err.code } : {}),
       ...(err.details || {}),
     });
   }
@@ -1327,7 +1329,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     if (status !== undefined && !allowedStatuses.has(initialStatus)) {
       return res.status(400).json({ ok: false, success: false, message: 'Invalid status' });
     }
-    if (initialStatus === 'published' && !isFounderRequest(req)) {
+    if (['published', 'scheduled'].includes(initialStatus) && !isFounderRequest(req)) {
       return res.status(403).json({ ok: false, success: false, status: 403, message: 'Access Denied. Founder permission is required.' });
     }
 
@@ -1403,6 +1405,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       : { stateTags: [], stateNames: [] };
 
     const createDoc = {
+      _id: new mongoose.Types.ObjectId(),
       title,
       description: normalizedDescription,
       content: content ?? body ?? '',
@@ -1477,6 +1480,8 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     }
 
     const creation = await inArticleTransaction(async (session, transaction) => {
+      if (initialStatus === 'published') await requireFounderArticleMutation(req, session);
+      await authorizeArticleCreation(req, createDoc, session);
       const [doc] = await News.create([createDoc], { session });
       if (_isSourceTranslationDoc(doc)) {
         Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
@@ -3312,7 +3317,10 @@ async function updateArticle(req, res, next) {
             }));
           }
           return result;
-        }, { authorizeSave: articleSaveAuthorizer(req, update) });
+        }, { authorizeSave: async (source, session, transaction) => {
+          if (isSchedulingNow) await requireFounderArticleMutation(req, session);
+          return articleSaveAuthorizer(req, update)(source, session, transaction);
+        } });
         doc = mutationResult.doc;
         publicSync = mutationResult.publicSync;
       }
@@ -3584,63 +3592,66 @@ router.post('/articles/:id/retry-translation', requireAdminAuth, async (req, res
       return res.status(400).json({ ok: false, success: false, status: 400, message: 'Missing/invalid lang (use hi, gu, en, or all)' });
     }
 
-    const before = await News.findById(id)
-      .select('title description content translationGroupId sourceArticleId syncVersion lang language originalLang translationStatus translationError translationNextRetryAt translationUpdatedAt translations slug slugs status')
-      .lean();
-    if (!before) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
-
-    const baseLang = normalizeLanguage(before.originalLang) || normalizeLanguage(before.lang || before.language) || 'en';
-    const targets = langParam === 'all' ? ['en', 'hi', 'gu'] : [langParam];
-    const now = new Date();
-
-    const translationGroupId = String(before.translationGroupId || '').trim() || new mongoose.Types.ObjectId().toString();
-
-    const set = {
-      translationGroupId,
-      originalLang: baseLang,
-      [`translationStatus.${baseLang}`]: 'ready',
-      [`translationError.${baseLang}`]: null,
-      [`translationNextRetryAt.${baseLang}`]: null,
-      [`translationUpdatedAt.${baseLang}`]: now,
-      [`translations.${baseLang}.title`]: String(before.title || '').trim(),
-      [`translations.${baseLang}.summary`]: String(before.description || '').trim(),
-      [`translations.${baseLang}.content`]: String(before.content || '').trim(),
-      [`translations.${baseLang}.provider`]: 'manual',
-      [`translations.${baseLang}.generatedAt`]: now,
-    };
-
-    for (const t of targets) {
-      if (t === baseLang) continue;
-      set[`translationStatus.${t}`] = 'pending';
-      set[`translationError.${t}`] = null;
-      set[`translationNextRetryAt.${t}`] = null;
-      set[`translationUpdatedAt.${t}`] = now;
-      set[`translations.${t}.title`] = '';
-      set[`translations.${t}.summary`] = '';
-      set[`translations.${t}.content`] = '';
-      set[`translations.${t}.provider`] = 'google';
-      set[`translations.${t}.generatedAt`] = null;
-    }
-
-    if (_isSourceTranslationDoc(before, id)) {
-      Object.assign(set, prepareSourceSyncMetadata({
-        ...before,
-        _id: id,
-        originalLang: baseLang,
-        lang: baseLang,
-        language: baseLang,
+    const existing = await News.findById(id).select('_id').lean();
+    if (!existing) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
+    const mutation = await withActiveArticleSource(id, async (before, session, transaction) => {
+      const baseLang = normalizeLanguage(before.originalLang) || normalizeLanguage(before.lang || before.language) || 'en';
+      const targets = langParam === 'all' ? ['en', 'hi', 'gu'] : [langParam];
+      const now = new Date();
+      const translationGroupId = String(before.translationGroupId || before.translationKey || '').trim()
+        || new mongoose.Types.ObjectId().toString();
+      const set = {
         translationGroupId,
-        translationStatus: { ...(before.translationStatus || {}), ...Object.fromEntries(targets.map((t) => [t, t === baseLang ? 'ready' : 'pending'])) },
-      }, { now }));
-    }
-
-    const doc = await News.findByIdAndUpdate(id, { $set: set }, { new: true, runValidators: false });
-    if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
-
-    await syncArticleFromNews(doc);
-  await syncMasterArticleGroup(doc, { reason: 'article_retry_translation', invalidate: String(doc.status || '').toLowerCase() === 'published' });
-    enqueueTranslateAndSave(doc._id, { logger: console });
-
+        originalLang: baseLang,
+        [`translationStatus.${baseLang}`]: 'ready',
+        [`translationError.${baseLang}`]: null,
+        [`translationNextRetryAt.${baseLang}`]: null,
+        [`translationUpdatedAt.${baseLang}`]: now,
+        [`translations.${baseLang}.title`]: String(before.title || '').trim(),
+        [`translations.${baseLang}.summary`]: String(before.description || '').trim(),
+        [`translations.${baseLang}.content`]: String(before.content || '').trim(),
+        [`translations.${baseLang}.provider`]: 'manual',
+        [`translations.${baseLang}.generatedAt`]: now,
+      };
+      for (const t of targets) {
+        if (t === baseLang) continue;
+        set[`translationStatus.${t}`] = 'pending';
+        set[`translationError.${t}`] = null;
+        set[`translationNextRetryAt.${t}`] = null;
+        set[`translationUpdatedAt.${t}`] = now;
+        set[`translations.${t}.title`] = '';
+        set[`translations.${t}.summary`] = '';
+        set[`translations.${t}.content`] = '';
+        set[`translations.${t}.provider`] = 'google';
+        set[`translations.${t}.generatedAt`] = null;
+      }
+      if (_isSourceTranslationDoc(before, id)) {
+        Object.assign(set, prepareSourceSyncMetadata({
+          ...before, _id: id, originalLang: baseLang, lang: baseLang, language: baseLang, translationGroupId,
+          translationStatus: { ...(before.translationStatus || {}), ...Object.fromEntries(targets.map(t => [t, t === baseLang ? 'ready' : 'pending'])) },
+        }, { now }));
+      }
+      const doc = await News.findByIdAndUpdate(id, { $set: set }, { new: true, runValidators: false, session });
+      if (!doc) throw scopeChanged();
+      const result = { doc };
+      if (_isSourceTranslationDoc(doc)) {
+        const groupSync = await syncMasterArticleGroup(doc, {
+          ...transaction, reason: 'article_retry_translation', invalidate: doc.status === 'published',
+        });
+        transaction.afterCommit.push(() => { result.revalidation = groupSync?.revalidation; });
+      } else {
+        await syncPublicArticleFromNews(doc, { ...transaction, throwOnError: true });
+        await transaction.saveScope?.verifyPublicCopies(session);
+        if (doc.status === 'published') transaction.afterCommit.push(async () => {
+          result.revalidation = await invalidateArticleContent([doc], {
+            reason: 'article_retry_translation', publicVisibilityRemoved: true,
+          });
+        });
+      }
+      await enqueueTranslateAndSave(doc._id, { session, logger: console, throwOnError: true });
+      return result;
+    }, { authorizeSave: articleTranslationAuthorizer(req) });
+    const { doc } = mutation;
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
     return res.json({
       ok: true,
@@ -3649,10 +3660,16 @@ router.post('/articles/:id/retry-translation', requireAdminAuth, async (req, res
       message: 'Translation retry queued',
       data: { article: withCoverImageUrl(obj) },
       article: withCoverImageUrl(obj),
+      ...articleMutationMetadata(mutation),
     });
   } catch (e) {
     console.error('[articles.retry-translation] error:', e?.message || e);
-    return res.status(500).json({ ok: false, success: false, status: 500, message: 'Failed to retry translation' });
+    const status = e.statusCode || e.status || 500;
+    return res.status(status).json({
+      ok: false, success: false, status,
+      message: status === 500 ? 'Failed to retry translation' : e.message,
+      ...(e.code ? { code: e.code } : {}),
+    });
   }
 });
 
@@ -3687,11 +3704,10 @@ router.post('/articles/:id/unpublish', requireAdminAuth, async (req, res) => {
   }
 });
 
-// POST /api/articles/:id/schedule → set scheduled publish time (Editor/Founder)
+// POST /api/articles/:id/schedule → set scheduled publish time (Founder only)
 router.post('/articles/:id/schedule', requireAdminAuth, async (req, res) => {
   try {
-    const roleRaw = (req.admin && req.admin.role) ? String(req.admin.role).toLowerCase() : 'admin';
-    if (roleRaw === 'staff') {
+    if (!isFounderRequest(req)) {
       return res.status(403).json({ ok: false, success: false, status: 403, message: 'Forbidden' });
     }
 
@@ -3702,35 +3718,21 @@ router.post('/articles/:id/schedule', requireAdminAuth, async (req, res) => {
       return res.status(400).json({ ok: false, success: false, status: 400, message: 'publishAt/scheduledAt is required and must be a valid datetime' });
     }
 
-    const doc = await News.findById(id);
-    if (!doc) return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
-
-    if (doc.status === 'deleted' || doc.deletedAt) {
-      return res.status(409).json({ ok: false, success: false, message: 'Restore the deleted story before scheduling.' });
-    }
-    const missing = validatePublishable(doc);
-    if (missing.length) {
-      return res.status(400).json({ ok: false, success: false, status: 400, message: `Missing required fields: ${missing.join(', ')}` });
-    }
-    await assertSlugUnique(normalizeSlug(doc.slug), id, doc);
-    try {
-      await preparePulseDialogueForPublication(doc);
-    } catch (validationError) {
-      return res.status(validationError?.statusCode || validationError?.status || 400).json({
-        ok: false,
-        success: false,
-        status: validationError?.statusCode || validationError?.status || 400,
-        message: validationError?.message || 'Pulse Dialogue validation failed',
-        ...(validationError?.details || {}),
-      });
-    }
-
-    const now = new Date();
-    if (_isSourceTranslationDoc(doc)) {
-      Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
-    }
-
     const result = await inArticleTransaction(async (session, transaction) => {
+      await requireFounderArticleMutation(req, session);
+      const doc = await News.findById(id, null, { session });
+      if (!doc) throw Object.assign(new Error('Article not found'), { statusCode: 404 });
+      const { docs } = await findArticleGroup(id, session);
+      if (docs.some(member => member.status === 'deleted' || member.deletedAt)) {
+        throw Object.assign(new Error('Restore the deleted story before scheduling.'), { statusCode: 409 });
+      }
+      const missing = validatePublishable(doc);
+      if (missing.length) {
+        throw Object.assign(new Error(`Missing required fields: ${missing.join(', ')}`), { statusCode: 400 });
+      }
+      await assertSlugUnique(normalizeSlug(doc.slug), id, doc);
+      await preparePulseDialogueForPublication(doc);
+      if (_isSourceTranslationDoc(doc)) Object.assign(doc, prepareSourceSyncMetadata(doc, { now: new Date() }));
       await doc.save({ validateModifiedOnly: true, session });
       return changeArticleGroupStatus(id, 'scheduled', { ...transaction, req, scheduledAt });
     });

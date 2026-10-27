@@ -7,7 +7,7 @@ const AuditLog = require('../models/AuditLog');
 const PushHistory = require('../models/PushHistory');
 const { logAudit } = require('../lib/audit');
 const { hasSpecialRight, normalizeRole } = require('../lib/teamAccess');
-const { loadArticleMutationActor } = require('../lib/articleMutationActor');
+const { loadArticleMutationActor, requireFounderArticleMutation } = require('../lib/articleMutationActor');
 const { loadRoleForUser, isSafeZoneMasterLocked } = require('../middleware/requireAuth');
 const { evaluateModuleAccess, getFounderModulePolicy } = require('./founderAccessPolicyService');
 const {
@@ -53,20 +53,24 @@ function deletionChanged() {
   return failure(409, 'Article group changed. Reload and retry.', 'ARTICLE_DELETE_SCOPE_CHANGED');
 }
 
+function lifecycleChanged() {
+  return failure(409, 'Article group changed. Reload and retry.', 'ARTICLE_LIFECYCLE_SCOPE_CHANGED');
+}
+
 function deletionSnapshot(doc, publicCopy = false) {
   const fields = ['_id', 'status', 'deletedAt', 'updatedAt', 'sourceArticleId', 'translationGroupId', 'translationKey', 'slug'];
   fields.push(publicCopy ? 'sourceNewsId' : 'syncVersion');
   return Object.fromEntries(fields.map(field => [field, doc[field] ?? null]));
 }
 
-async function verifyDeletionMembers(seed, docs, copies, session) {
+async function verifyDeletionMembers(seed, docs, copies, session, changed = deletionChanged) {
   for (const [Model, filter, approved] of [
     [News, buildStoryIdentityFilter(seed), docs],
     [PublicArticle, buildPublicCopyFilter(docs), copies],
   ]) {
     const current = await Model.find(filter, null, { session }).select('_id').lean();
     const ids = new Set(approved.map(doc => String(doc._id)));
-    if (current.length !== ids.size || current.some(doc => !ids.has(String(doc._id)))) throw deletionChanged();
+    if (current.length !== ids.size || current.some(doc => !ids.has(String(doc._id)))) throw changed();
   }
 }
 
@@ -202,7 +206,7 @@ function historyEntry(doc, status, action, req, now) {
   };
 }
 
-async function updateMember(doc, patch, action, req, now, session, guard) {
+async function updateMember(doc, patch, action, req, now, session, guard, changed = deletionChanged) {
   const updated = await News.findOneAndUpdate(
     guard || { _id: doc._id, status: doc.status },
     {
@@ -212,7 +216,7 @@ async function updateMember(doc, patch, action, req, now, session, guard) {
     },
     { new: true, runValidators: false, session }
   ).lean();
-  if (!updated) throw guard ? deletionChanged() : failure(409, 'Article group changed. Reload and retry.');
+  if (!updated) throw guard ? changed() : failure(409, 'Article group changed. Reload and retry.');
   return updated;
 }
 
@@ -266,6 +270,7 @@ async function changeArticleGroupStatus(id, status, options = {}) {
     throw failure(400, 'A valid scheduledAt is required');
   }
   return inArticleTransaction(async (session, transaction) => {
+    if (status === 'scheduled') await requireFounderArticleMutation(options.req, session);
     if (status === 'deleted') await assertSoftDeleteAuthority(options.req, session);
     const { seed, docs } = await findArticleGroup(id, session);
     if (options.authorizeSave) await options.authorizeSave(seed, session, transaction);
@@ -274,7 +279,8 @@ async function changeArticleGroupStatus(id, status, options = {}) {
       throw failure(409, 'Restore the deleted story before changing its status.');
     }
     const copyFilter = buildPublicCopyFilter(docs);
-    const deleteCopies = status === 'deleted'
+    const changed = status === 'deleted' ? deletionChanged : lifecycleChanged;
+    const protectedCopies = status === 'deleted' || status === 'scheduled'
       ? await PublicArticle.find(copyFilter, null, { session })
         .select('_id status deletedAt updatedAt sourceNewsId sourceArticleId translationGroupId translationKey slug').lean()
       : null;
@@ -291,11 +297,11 @@ async function changeArticleGroupStatus(id, status, options = {}) {
       }
       const action = { deleted: 'REJECT', draft: 'UNPUBLISH', scheduled: 'SCHEDULE' }[status] || 'MOVE_STAGE';
       updated.push(await updateMember(doc, patch, action, options.req, now, session,
-        deleteCopies ? deletionSnapshot(doc) : undefined));
+        protectedCopies ? deletionSnapshot(doc) : undefined, changed));
     }
-    const boundedCopies = deleteCopies
-      ? { $and: [copyFilter, deleteCopies.length
-        ? { $or: deleteCopies.map(doc => deletionSnapshot(doc, true)) }
+    const boundedCopies = protectedCopies
+      ? { $and: [copyFilter, protectedCopies.length
+        ? { $or: protectedCopies.map(doc => deletionSnapshot(doc, true)) }
         : { _id: { $in: [] } }] }
       : copyFilter;
     const copies = await PublicArticle.updateMany(boundedCopies, {
@@ -308,9 +314,9 @@ async function changeArticleGroupStatus(id, status, options = {}) {
       },
     }, { session, runValidators: false });
     if (copies?.acknowledged === false) throw failure(503, 'Public article synchronization failed.');
-    if (deleteCopies) {
-      if (copies?.matchedCount !== deleteCopies.length) throw deletionChanged();
-      await verifyDeletionMembers(seed, docs, deleteCopies, session);
+    if (protectedCopies) {
+      if (copies?.matchedCount !== protectedCopies.length) throw changed();
+      await verifyDeletionMembers(seed, docs, protectedCopies, session, changed);
     }
     const result = {
       docs: updated, previousDocs: [...docs, ...(options.previousDocs || [])],
@@ -340,7 +346,9 @@ async function restoreArticleGroup(id, options = {}) {
       if (!status) restoreFallbackIds.push(String(doc._id));
       return status || 'draft';
     });
-    if (statuses.includes('published')) assertFounder(options.req);
+    if (statuses.some(status => status === 'published' || status === 'scheduled')) {
+      await requireFounderArticleMutation(options.req, session);
+    }
     const languages = docs.map(doc => String(doc.language || doc.lang || '').toLowerCase()).filter(Boolean);
     if (new Set(languages).size !== languages.length) {
       throw failure(409, 'The translation group has duplicate language records. Resolve them before restoring.');
@@ -354,7 +362,7 @@ async function restoreArticleGroup(id, options = {}) {
       }
       updated.push(await updateMember(doc, {
         status: statuses[index], deletedAt: null, deletedFromStatus: null,
-      }, 'RESTORE', options.req, now, session));
+      }, 'RESTORE', options.req, now, session, deletionSnapshot(doc), lifecycleChanged));
     }
     await syncNewsTranslationBuckets(updated, { session, now });
     // A legacy shared slug can have one compatibility copy; an eligible edition must win.

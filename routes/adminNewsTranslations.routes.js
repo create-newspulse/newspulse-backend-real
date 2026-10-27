@@ -3,7 +3,8 @@ const mongoose = require('mongoose');
 
 const News = require('../models/News');
 const { requireAdminAuth } = require('../middleware/adminAuth');
-const { generateArticleTranslations } = require('../services/articleTranslationGeneration.service');
+const { generateArticleTranslationsForRequest } = require('../services/articleTranslationGeneration.service');
+const { articleMutationMetadata } = require('../services/articleLifecycle.service');
 
 const router = express.Router();
 
@@ -42,11 +43,10 @@ router.post('/:id/generate-translations', requireAdminAuth, async (req, res) => 
       return res.status(404).json({ ok: false, success: false, message: 'News not found' });
     }
 
-    const result = await generateArticleTranslations(sourceDoc, {
-      req,
+    const result = await generateArticleTranslationsForRequest(sourceDoc, req, {
       targetLanguages: req.body?.targetLanguages,
       overwrite: req.body?.overwrite === true,
-      confirmOverwriteHumanEdited: req.body?.confirmOverwriteHumanEdited === true,
+      confirmOverwriteHumanEdited: req.body?.confirmOverwriteHumanEdited === true || req.body?.founderConfirmed === true,
     });
 
     return res.status(200).json({
@@ -62,10 +62,17 @@ router.post('/:id/generate-translations', requireAdminAuth, async (req, res) => 
       skipped: result.skipped,
       failed: result.failed,
       jobId: result.jobId,
+      ...articleMutationMetadata(result),
     });
   } catch (e) {
     console.error('[adminNews.generate-translations] error', e?.message || e);
-    return res.status(500).json({ ok: false, success: false, message: 'Failed to generate translations' });
+    const status = e.statusCode || e.status || 500;
+    return res.status(status).json({
+      ok: false, success: false,
+      message: status === 500 ? 'Failed to generate translations' : e.message,
+      ...(e.code ? { code: e.code } : {}),
+      ...(e.details || {}),
+    });
   }
 });
 

@@ -126,9 +126,9 @@ publication/workflow state, and synchronizes each ready document to a public
 copy. It also maintains legacy public-copy fallback handling.
 
 Publishing may generate missing translations. It is therefore not a
-metadata-only maintenance operation. A saved News publication can report
-incomplete public synchronization through `publicSync: { ok, failedArticleIds }`;
-do not treat that flag as equivalent to the overall save result.
+metadata-only maintenance operation. Canonical publication rolls back on a
+public-copy synchronization failure. Post-commit cache/revalidation failures
+are reported separately; they do not mean the committed publication rolled back.
 
 Language state has multiple related representations:
 
@@ -150,11 +150,43 @@ and [newsOnDemandTranslation.service.js](./services/newsOnDemandTranslation.serv
 Their readiness and regeneration rules must not be inferred from the public
 copy mapper, which copies stored translations rather than generating them.
 
+Request-initiated retry and generation use the existing content-save scope in
+[articleSaveAccess.service.js](./services/articleSaveAccess.service.js).
+Non-Founders need effective Manage News plus `news_edit`, or effective Add News /
+Draft Desk access to their verified own drafts. The entire affected group must
+remain undeleted, unlocked and unscheduled drafts; a published or scheduled
+edition prevents staff translation writes. Public-copy visibility and planned
+sibling lifecycle/chronology changes are checked as well. Client-supplied
+source/group links cannot attach a new staff record to a protected story or
+public copy. Ownership, group membership and `news_publish` alone do not confer
+publication authority.
+
+Canonical and compatibility generation share the verified Founder check for
+human-reviewed overwrite confirmation. HTTP generation is atomic across the
+requested languages: authorization, scope, provider or persistence failure
+rolls back the request's News, public-copy and translation-job changes. Failed
+requests do not report rolled-back editions as committed. Successful response
+envelopes remain compatible. Retry readiness, synchronization and queue writes
+also share one transaction, with cache effects deferred until commit.
+Trusted internal generation/workers remain separate from this request wrapper;
+no request body flag enables trusted execution.
+
+Publication-capable scheduling remains Founder-only pending a separately
+approved staff publishing implementation. Creation, dedicated schedule actions,
+status updates, workflow scheduling and restoration to Scheduled recheck the
+persisted account inside the transaction, including retries, using
+[articleMutationActor.js](./lib/articleMutationActor.js). Restoration to Published
+uses the same verified Founder boundary. Scheduling writes are bounded to the
+preflighted News/public-copy group; restoring a group containing even one
+previously scheduled edition requires Founder authority.
+
 The root server also runs a scheduled-publication tick outside test/import mode.
 [scheduledPublication.service.js](./services/scheduledPublication.service.js)
-has separate ordinary-article and Pulse Dialogue branches; the latter delegates
-to canonical publication. Do not assume all scheduled or legacy write paths
-are identical to a CMS publish request.
+delegates both ordinary stories and Pulse Dialogue to canonical publication
+with its trusted SYSTEM actor, once per logical group. It continues processing
+already-authorized scheduled stories without acquiring or inheriting a staff
+Special Right. These initiation guards do not inspect or repair historical
+production schedules or translation jobs.
 
 ## Public visibility and Gujarat Regional metadata
 

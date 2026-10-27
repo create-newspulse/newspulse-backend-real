@@ -7,7 +7,7 @@ const { buildArticleCreatorFields, hasArticleCreatorInput } = require('../lib/ar
 const { buildPubliclyVisibleNewsArticleFilter } = require('../services/publicArticleVisibility.service');
 const { isFounderRole } = require('../lib/teamAccess');
 const { inArticleTransaction } = require('../services/articleLifecycle.service');
-const { authorizeArticleSave, contentSaveBody, scopeChanged } = require('../services/articleSaveAccess.service');
+const { authorizeArticleSave, authorizeArticleCreation, contentSaveBody, scopeChanged } = require('../services/articleSaveAccess.service');
 
 function normalizeLanguage(v) {
   const s = String(v ?? '').trim().toLowerCase();
@@ -108,10 +108,15 @@ exports.createNews = async (req, res) => {
         code: 'FOUNDER_REQUIRED',
       });
     }
-    await news.save();
+    await inArticleTransaction(async session => {
+      await authorizeArticleCreation(req, news, session);
+      await news.save({ session });
+    });
     res.status(201).json({ message: "News created successfully" });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(error.statusCode || error.status || 500).json({
+      error: error.message, ...(error.code ? { code: error.code } : {}),
+    });
   }
 };
 

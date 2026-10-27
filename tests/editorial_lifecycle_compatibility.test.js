@@ -471,7 +471,7 @@ test('post-commit public version failure retains numeric permanent-delete succes
   assert.equal(state.rows.Article.length, 0);
 });
 
-test('standalone generation reports editions already committed when a later language write fails', async context => {
+test('request generation rolls back all editions when a later language write fails', async context => {
   const state = installEditorialFixture(context);
   const { ids } = seedGroup(state);
   state.rows.News = state.rows.News.filter(doc => doc.language === 'en');
@@ -484,17 +484,17 @@ test('standalone generation reports editions already committed when a later lang
   });
   const response = await state.request('post', `/api/articles/${ids[0]}/translations/generate`, { targetLanguages: ['hi', 'gu'] });
   assert.equal(response.statusCode, 503);
-  assert.equal(response.body.committed, true);
-  assert.ok(response.body.translationResult.created.hi);
-  assert.equal(state.rows.News.find(doc => doc.language === 'hi')._id, response.body.translationResult.created.hi);
+  assert.equal(response.body.committed, undefined);
+  assert.equal(response.body.translationResult, undefined);
+  assert.equal(state.rows.News.some(doc => doc.language === 'hi'), false);
   assert.equal(state.rows.News.some(doc => doc.language === 'gu'), false);
 });
 
 for (const scenario of [
-  { name: 'HI commits and GU fails', failedLanguage: 'gu', committed: ['hi'] },
+  { name: 'GU failure rolls back HI', failedLanguage: 'gu', committed: [] },
   { name: 'all editions commit', committed: ['hi', 'gu'] },
   { name: 'the first edition fails', failedLanguage: 'hi', committed: [] },
-  { name: 'partial success has a revalidation delivery failure', failedLanguage: 'gu', committed: ['hi'], deliveryFails: true },
+  { name: 'atomic success has a revalidation delivery failure', committed: ['hi', 'gu'], deliveryFails: true },
 ]) {
   test(`B2 invalidates only committed public editions once when ${scenario.name}`, async context => {
     const state = installEditorialFixture(context);
@@ -522,14 +522,17 @@ for (const scenario of [
       targetLanguages: ['hi', 'gu'], overwrite: true,
     });
     assert.equal(response.statusCode, scenario.failedLanguage ? 503 : 200, JSON.stringify(response.body));
-    const result = scenario.failedLanguage ? response.body.translationResult : response.body;
+    const result = scenario.failedLanguage ? { created: {}, updated: {} } : response.body;
     assert.deepEqual(Object.keys(result.updated), scenario.committed);
     assert.deepEqual(result.created, {});
     if (scenario.failedLanguage) {
       assert.equal(response.body.ok, false);
-      assert.equal(response.body.committed, scenario.committed.length ? true : undefined);
+      assert.equal(response.body.committed, undefined);
+      assert.equal(response.body.translationResult, undefined);
     }
-    assert.equal(state.rows.TranslationJob[0].status, scenario.failedLanguage ? 'failed' : 'review_required');
+    assert.equal(state.rows.TranslationJob.length, scenario.failedLanguage ? 0 : 1);
+    if (!scenario.failedLanguage) assert.equal(state.rows.TranslationJob[0].status, 'review_required');
+    assert.equal(state.transactions.length, 1);
     assert.equal(state.rows.News.length, 3);
     assert.equal(state.rows.Article.length, 3);
     for (const [index, language] of ['en', 'hi', 'gu'].entries()) {

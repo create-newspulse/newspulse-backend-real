@@ -373,6 +373,15 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
       $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }],
     }, null, { session });
     transaction.saveScope?.assertNewsRecords([current, ...childDocs]);
+    const patches = new Map();
+    if (!faithTopicOnly) {
+      for (const child of childDocs) if (isChildLinkedToMaster(master, child)) {
+        const childObject = child.toObject ? child.toObject({ virtuals: true }) : child;
+        const patch = buildChildNewsSyncPatch(master, childObject, { now, metadata });
+        patches.set(String(child._id), patch);
+        transaction.saveScope?.assertTranslationPlan([{ ...childObject, ...patch }]);
+      }
+    }
 
     const changed = [];
     for (const child of childDocs) {
@@ -421,7 +430,7 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
         continue;
       }
 
-      const patch = buildChildNewsSyncPatch(master, childObject, { now, metadata });
+      const patch = patches.get(String(child._id));
 
       Object.assign(child, patch);
       transaction.saveScope?.bindNewsDocument(child);

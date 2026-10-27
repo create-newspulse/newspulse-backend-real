@@ -5,11 +5,11 @@ const PublicArticle = require('../models/Article');
 const YouthPulseSubmission = require('../models/YouthPulseSubmission');
 const YouthPulseContributor = require('../models/YouthPulseContributor');
 const { hasSpecialRight, normalizeRole } = require('../lib/teamAccess');
-const { loadArticleMutationActor } = require('../lib/articleMutationActor');
+const { loadArticleMutationActor, requireFounderArticleMutation } = require('../lib/articleMutationActor');
 const { logAudit } = require('../lib/audit');
 const { loadRoleForUser, isSafeZoneMasterLocked } = require('../middleware/requireAuth');
 const { evaluateModuleAccess, getFounderModulePolicy } = require('./founderAccessPolicyService');
-const { buildStoryIdentityFilter } = require('./articleSlugUniqueness.service');
+const { buildStoryIdentityFilter, getStoryKeys } = require('./articleSlugUniqueness.service');
 const { buildPublicArticleMatch } = require('./syncPublicArticleFromNews.service');
 const { isFaithTopicSyncChild } = require('./translationGroupSync.service');
 const { isPubliclyVisibleNewsArticle } = require('./publicArticleVisibility.service');
@@ -98,6 +98,7 @@ function assertCopyState(copy, source, kind, newsIds) {
 
 async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
   publicOnly = false, checkIntent = true, faithTopicOnly = false, publicSync = true, ignoreComputed = false,
+  draftTranslation = false, syncDrafts = false,
 } = {}) {
   try {
     const user = await loadArticleMutationActor(req, session, saveDenied);
@@ -124,6 +125,10 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
     const kind = editor ? 'editor' : 'draft';
     for (const doc of records) {
       if (doc.status === 'deleted' || doc.deletedAt) throw saveDenied();
+      if (draftTranslation && (doc.status !== 'draft' || doc.scheduledAt || doc.publishAt
+        || doc.locked || doc.workflow?.locked
+        || ['scheduled', 'published'].includes(String(doc.workflowStage || '').toLowerCase())
+        || ['scheduled', 'published'].includes(String(doc.workflow?.stage || '').toLowerCase()))) throw saveDenied();
       if (!editor && (doc.status !== 'draft' || !doc.createdByUserId
         || String(doc.createdByUserId) !== String(user._id)
         || doc.locked || doc.workflow?.locked || doc.scheduledAt || doc.publishAt
@@ -143,7 +148,7 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
     const prospectiveRecords = records.map(doc => String(doc._id) === String(source._id) ? { ...doc, ...patch } : doc);
     const publicRecords = !publicSync ? [] : faithTopicOnly
       ? prospectiveRecords.filter(doc => String(doc._id) === String(source._id) || isFaithTopicSyncChild(prospective, doc))
-      : prospectiveRecords.some(doc => doc.status === 'published') ? prospectiveRecords : [];
+      : syncDrafts || prospectiveRecords.some(doc => doc.status === 'published') ? prospectiveRecords : [];
     const now = new Date();
     publicRecords.sort((a, b) =>
       Number(isPubliclyVisibleNewsArticle(a, { now })) - Number(isPubliclyVisibleNewsArticle(b, { now })));
@@ -177,9 +182,16 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
           if (youthSubmissionId(doc) !== youthSubmissionId(previous)) throw scopeChanged();
           for (const field of IDENTITY_FIELDS) {
             const serverSourceLink = field === 'sourceArticleId' && !previous[field]
-              && String(doc._id) === String(source._id) && String(doc[field]) === String(source._id);
+              && (draftTranslation || String(doc._id) === String(source._id))
+              && String(doc[field]) === String(source._id);
             if (!serverSourceLink && !sameValue(doc[field], previous[field])) throw scopeChanged();
           }
+        }
+      },
+      assertTranslationPlan(docs) {
+        this.assertNewsRecords(docs);
+        for (const doc of docs) for (const field of PUBLIC_VISIBILITY_FIELDS) {
+          if (!sameValue(doc[field], snapshots.get(String(doc._id))[field])) throw scopeChanged();
         }
       },
       bindNewsDocument(doc) {
@@ -240,4 +252,57 @@ function articleSaveAuthorizer(req, patch = {}, { followUp = false, faithTopicOn
   });
 }
 
-module.exports = { authorizeArticleSave, articleSaveAuthorizer, contentSaveBody, saveDenied, scopeChanged };
+function articleTranslationAuthorizer(req, { confirmOverwriteHumanEdited = false } = {}) {
+  return async (source, session) => {
+    if (confirmOverwriteHumanEdited) {
+      await requireFounderArticleMutation(req, session);
+      return null;
+    }
+    return authorizeArticleSave(req, source, {}, session, {
+      checkIntent: false, draftTranslation: true, syncDrafts: true,
+    });
+  };
+}
+
+async function authorizeArticleCreation(req, docLike, session) {
+  const doc = plain(docLike);
+  if (['published', 'scheduled'].includes(doc.status) || doc.scheduledAt || doc.publishAt) {
+    await requireFounderArticleMutation(req, session);
+    return;
+  }
+  try {
+    const user = await loadArticleMutationActor(req, session, saveDenied);
+    if (founder(user)) return;
+    const linked = await News.find(buildStoryIdentityFilter(doc), null, { session })
+      .select('+createdByUserId').lean();
+    if (doc.sourceArticleId && String(doc.sourceArticleId) !== String(doc._id)
+      && !linked.some(member => String(member._id) === String(doc.sourceArticleId))) throw saveDenied();
+    let scope;
+    if (linked.length) {
+      scope = await articleTranslationAuthorizer(req)(linked[0], session);
+      scope.assertNewsRecords(linked);
+    }
+    const keys = getStoryKeys(doc);
+    const copies = await PublicArticle.find({ $or: [
+      buildPublicArticleMatch(doc),
+      ...(keys.length ? [{ translationGroupId: { $in: keys } }, { translationKey: { $in: keys } }] : []),
+    ] }, null, { session }).lean();
+    const ids = new Set((scope?.ids || []).map(String));
+    if (copies.some(copy => copy.status !== 'draft' || copy.deletedAt || copy.scheduledAt || copy.publishAt
+      || !ids.has(String(copy.sourceNewsId)))) throw saveDenied();
+    if (scope) {
+      const guarded = await News.updateMany(scope.guard, { $inc: { syncVersion: 1 } }, { session });
+      if (!guarded.acknowledged || guarded.matchedCount !== scope.ids.length) throw scopeChanged();
+    }
+  } catch (error) {
+    if (error.code === 'ARTICLE_SAVE_FORBIDDEN') {
+      await logAudit(req, 'ACCESS_BLOCKED', null, { module: 'articles', reason: 'article_creation_linkage', result: 'blocked' });
+    }
+    throw error;
+  }
+}
+
+module.exports = {
+  authorizeArticleSave, articleSaveAuthorizer, articleTranslationAuthorizer, authorizeArticleCreation,
+  contentSaveBody, saveDenied, scopeChanged,
+};

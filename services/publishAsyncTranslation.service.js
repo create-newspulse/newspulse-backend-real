@@ -727,9 +727,12 @@ const JOB_TYPE = 'news-publish-translate';
 async function enqueueTranslateAndSave(newsId, options = {}) {
   const logger = options.logger || console;
   const idRaw = String(newsId || '').trim();
-  if (!idRaw) return;
 
-  if (!mongoose.isValidObjectId(idRaw)) {
+  if (!idRaw || !mongoose.isValidObjectId(idRaw)) {
+    if (options.throwOnError) {
+      throw Object.assign(new Error('Invalid translation source id.'), { statusCode: 400 });
+    }
+    if (!idRaw) return;
     // Be forgiving in tests; job creation is best-effort.
     try { logger.warn?.('[i18n][queue] invalid newsId; skipping enqueue', { id: idRaw }); } catch (_) {}
     return;
@@ -739,7 +742,7 @@ async function enqueueTranslateAndSave(newsId, options = {}) {
   const now = new Date();
 
   try {
-    await TranslationJob.findOneAndUpdate(
+    const job = await TranslationJob.findOneAndUpdate(
       { type: JOB_TYPE, newsId: newsIdObj },
       {
         $set: {
@@ -754,10 +757,17 @@ async function enqueueTranslateAndSave(newsId, options = {}) {
           attempts: 0,
         },
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
+      { upsert: true, new: true, setDefaultsOnInsert: true, ...(options.session ? { session: options.session } : {}) }
     ).lean();
+    if (options.throwOnError && !job?._id) throw new Error('Translation queue write was not acknowledged');
+    return job;
   } catch (e) {
     try { logger.warn?.('[i18n][queue] enqueue failed', { id: idRaw, message: e?.message || String(e) }); } catch (_) {}
+    if (options.throwOnError) {
+      throw Object.assign(new Error('Translation retry could not be queued. Retry the request.'), {
+        statusCode: 503, code: 'TRANSLATION_QUEUE_FAILED',
+      });
+    }
   }
 }
 

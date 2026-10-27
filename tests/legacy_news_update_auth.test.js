@@ -11,7 +11,7 @@ const User = require('../models/User');
 const SiteSettings = require('../models/SiteSettings');
 const { slugifyUnicode } = require('../lib/slug');
 const { accountAuthFixture } = require('./helpers/accountAuthFixture');
-const { installEditorialFixture } = require('./helpers/editorialLifecycleFixture');
+const { installEditorialFixture, matches } = require('./helpers/editorialLifecycleFixture');
 
 const ARTICLE_ID = '507f1f77bcf86cd799439011';
 const MISSING_ID = '507f1f77bcf86cd799439099';
@@ -70,8 +70,8 @@ function installLegacyFixture(context, { account = {}, language = 'en', status =
   const before = doc.toObject();
   const save = context.mock.method(doc, 'save', async () => doc);
   const lookup = context.mock.method(News, 'findById', async id => String(id) === ARTICLE_ID ? doc : null);
-  context.mock.method(News, 'find', () => ({
-    select() { return this; }, lean: async () => [doc.toObject()],
+  context.mock.method(News, 'find', (filter = {}) => ({
+    select() { return this; }, lean: async () => matches(doc.toObject(), filter) ? [doc.toObject()] : [],
   }));
   context.mock.method(require('../models/Article'), 'find', () => ({ lean: async () => [] }));
   context.mock.method(mongoose, 'startSession', async () => ({
@@ -309,7 +309,7 @@ for (const base of BASES) {
           assert.equal(doc.translationGroupId, 'legacy-create-group');
           assert.equal(doc.translationKey, 'legacy-create-key');
           assert.equal(doc.coverImageUrl, 'https://example.invalid/legacy-cover.jpg');
-          assert.equal(state.accountLookup.mock.callCount(), 1);
+          assert.equal(state.accountLookup.mock.callCount(), 2);
           assert.equal(String(doc.createdByUserId), state.accountLookup.mock.calls[0].arguments[0]);
           assertNoArticleAccess(state);
         });

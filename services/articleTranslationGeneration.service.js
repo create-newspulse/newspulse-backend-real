@@ -8,7 +8,8 @@ const { invalidateArticleLanguageCaches } = require('../lib/cache');
 const googleTranslation = require('./googleTranslationService');
 const { applyPulseDialogueStandardText } = require('./pulseDialogue.service');
 const { sponsoredArticleFields } = require('./syncPublicArticleFromNews.service');
-const { withActiveArticleSource, afterArticleCommit } = require('./articleLifecycle.service');
+const { withActiveArticleSource, afterArticleCommit, inArticleTransaction } = require('./articleLifecycle.service');
+const { articleTranslationAuthorizer } = require('./articleSaveAccess.service');
 const { assertArticleSlugsUnique } = require('./articleSlugUniqueness.service');
 const { syncTranslationGroupMetadata } = require('./translationGroupSync.service');
 const { invalidateArticleContent } = require('./publicContentInvalidation.service');
@@ -291,7 +292,7 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
   const sourceLanguage = (await resolveSourceLanguage(source, options)).lang;
   const enabledLanguages = normalizeLanguageList(options.targetLanguages).length
     ? normalizeLanguageList(options.targetLanguages)
-    : await getEnabledPublicLanguages();
+    : await getEnabledPublicLanguages({ readOnly: Boolean(options.authorizeSave), session: options.session });
   const targetLanguages = enabledLanguages.filter((lang) => lang !== sourceLanguage);
   const groupKey = String(source.translationGroupId || source.translationKey || new mongoose.Types.ObjectId().toString()).trim();
   const sourceHash = sourceHashForDoc(source);
@@ -336,7 +337,7 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
         continue;
       }
 
-      const result = await withActiveArticleSource(source._id, async (currentSource, session) => {
+      const result = await withActiveArticleSource(source._id, async (currentSource, session, transaction) => {
         assertCurrentSource(currentSource, groupKey, sourceHash);
         const current = await News.findOne(buildExistingQuery(groupKey, targetLang, source._id), null, { session });
         const reason = skippedTranslation(current, overwrite, allowHumanOverwrite);
@@ -349,6 +350,7 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
           for (const field of ['status', 'publishedAt', 'publishAt', 'scheduledAt', 'deletedAt', 'workflowStage']) delete payload[field];
           payload.slug = current.slug || payload.slug;
           payload.slugs = { ...payload.slugs, ...current.slugs, [targetLang]: payload.slug };
+          transaction.saveScope?.assertTranslationPlan([{ ...pickSourceObject(current), ...payload }]);
         }
         await assertArticleSlugsUnique({ ...payload, _id: current?._id }, { session });
         const doc = current
@@ -359,6 +361,7 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
           : (await News.create([{ ...payload, ...buildArticleCreatorFields(options.req) }], { session }))[0];
         if (!doc) throw Object.assign(new Error('Translation changed during generation. Retry the operation.'), { statusCode: 409 });
         if (doc.status === 'published') await syncTranslationGroupMetadata(doc, {
+          ...transaction,
           previousDoc: current.toObject(),
           patch: { title: doc.title, description: doc.description, content: doc.content, slug: doc.slug },
           invalidate: false, session,
@@ -398,6 +401,27 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
   else await afterArticleCommit(options, response, finish);
   await invalidateCommittedTranslations(response);
   return response;
+}
+
+async function generateArticleTranslationsForRequest(sourceDoc, req, options = {}) {
+  const authorizeSave = articleTranslationAuthorizer(req, options);
+  return inArticleTransaction(async (session, transaction) => {
+    const current = await News.findById(sourceDoc._id, null, { session }).lean();
+    if (!current || current.status === 'deleted' || current.deletedAt) {
+      throw Object.assign(new Error('The source story changed. Reload and retry.'), {
+        statusCode: 409, code: 'TRANSLATION_SOURCE_CHANGED',
+      });
+    }
+    await authorizeSave(current, session);
+    const result = await generateArticleTranslations(current, { ...options, ...transaction, req, authorizeSave });
+    if (!result.ok) {
+      throw Object.assign(new Error('Translation failed; no changes were saved.'), {
+        statusCode: 502, code: 'TRANSLATION_GENERATION_FAILED',
+        details: { translationResult: { ...result, status: 'failed', created: {}, updated: {}, jobId: null } },
+      });
+    }
+    return result;
+  });
 }
 
 async function enqueueArticleTranslationGeneration(sourceDocInput, options = {}) {
@@ -462,6 +486,7 @@ module.exports = {
   sourceHashForDoc,
   translateArticleFields,
   generateArticleTranslations,
+  generateArticleTranslationsForRequest,
   enqueueArticleTranslationGeneration,
   markSiblingTranslationsOutdated,
   estimateBackfill,
