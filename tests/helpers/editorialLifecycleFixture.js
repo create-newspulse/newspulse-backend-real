@@ -66,6 +66,9 @@ function matches(doc, filter = {}) {
       if (operator === '$eq') return any(actual, item => equal(item, expected));
       if (operator === '$exists') return (actual !== undefined) === expected;
       if (operator === '$not') return !matches(doc, { [key]: expected });
+      if (operator === '$type' && expected === 'array') return Array.isArray(actual);
+      if (operator === '$type' && expected === 'object') return actual != null && typeof actual === 'object'
+        && !Array.isArray(actual) && !(actual instanceof Date) && !(actual instanceof RegExp) && !actual.toHexString;
       if (operator === '$regex') return any(actual, item => expected.test(String(item || '')));
       const left = comparable(actual);
       const right = comparable(expected);
@@ -236,8 +239,8 @@ function installEditorialFixture(context, { staff, modulePolicies } = {}) {
       invoke('findById', { _id: id }, options);
       return state.rows[name].find(doc => equal(doc._id, id)) || null;
     }));
-    context.mock.method(Model, 'countDocuments', (filter = {}) => query(name, () => {
-      invoke('countDocuments', filter);
+    context.mock.method(Model, 'countDocuments', (filter = {}, options) => query(name, () => {
+      invoke('countDocuments', filter, options);
       return state.rows[name].filter(doc => matches(doc, filter)).length;
     }));
     const updateOne = (method, filter, update, options = {}) => query(name, () => {

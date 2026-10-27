@@ -97,6 +97,7 @@ const {
 
 // Router used by NewsPulse Admin Panel (/add) for Save Draft / Publish
 const router = express.Router();
+router.use(require('./ownArticleDrafts.routes'));
 
 const requireNewsManagement = requireModuleAccess('manageNews');
 

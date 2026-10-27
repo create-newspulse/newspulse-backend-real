@@ -362,6 +362,150 @@ creation retains the existing payload handling and 201 message-only response.
 The public Community Reporter and Youth Pulse submission endpoints are separate
 from these privileged CMS creation routes.
 
+### Limited own-draft read contract
+
+[ownArticleDrafts.routes.js](./routes/ownArticleDrafts.routes.js) adds a separate
+authenticated read surface, mounted before the dynamic article detail routes:
+
+- `GET /api/articles/own-drafts`
+- `GET /api/articles/own-drafts/:id`
+
+The same handlers inherit the article router's root, `/api/admin`, `/admin-api`,
+`/admin-api/api`, `/admin-api/admin` and `/admin-api/api/admin` mounts and leading
+duplicate-`/api` normalization. They are never public reads, even on a public-looking
+alias. HEAD uses the same guards. Existing full-CMS list/detail and translation
+reads retain their Manage News guards and existing response contracts.
+
+Authentication is the existing signed bearer or `np_admin_token`, `np_token`,
+or `token` cookie flow, including persisted User, account lifecycle and token-version
+checks. The new read guard evaluates that persisted User's effective `addNews`
+OR `draftDesk` using the existing Founder module-policy evaluator and a read-only
+policy lookup. It does not initialize settings, require `news_edit`, calculate
+new rights, or alter Staff Access/Special Rights. Global restrictions and active
+temporary module denials still apply. Founder retains broader access through the
+existing CMS endpoints; this deliberately named own-draft surface remains owner
+scoped for everyone.
+
+List, count and detail share a database predicate:
+
+- `createdByUserId` must match the verified persisted User `_id`, never a request
+  parameter, display Staff ID, byline, task link or translation-group relationship.
+- `status` must be exactly `draft`. Deleted/publication/scheduling timestamps must
+  be absent or null; previously published or still schedule-marked drafts do not
+  qualify for this limited contract.
+- Both workflow stage representations must be absent/null or `draft`/`DRAFT`.
+  The workflow container must be absent/null or an object, never an array/scalar.
+  Locks and `requiresFounderApproval` must be absent/null/false; future embargoes
+  in either representation are excluded. Past embargoes no longer restrict reads.
+- Legacy `isPrivate` must be absent/null/false, and `visibility` absent/null/public.
+  Their query predicates are preserved with `strictQuery: false`, rather than
+  relying on unknown-schema query casting. Array-valued ownership and restriction
+  fields are rejected, not treated as scalar membership matches.
+
+No legacy creator is inferred or backfilled. There is no established article
+assignment grant: `StaffTask.relatedNewsId` and task assignees are not one.
+Assigned-but-not-owned drafts remain unavailable pending a separate authoritative
+assignment contract.
+
+#### List request and response
+
+Only `page`, `limit` (or `pageSize`), `sort` and optional `status=draft` are accepted.
+Defaults: page 1, limit 20, `sort=-createdAt`. Zero is normalized to 1; pagination
+must otherwise be a non-negative integer, limits are capped at 100 and unsupported
+or overflowing offsets are rejected. Supplying both limit aliases requires equal
+values. Supported sorts are `-createdAt` and `-updatedAt`, each with descending
+`_id` as the stable tie-breaker. There are no creator, assignment, group,
+localization, deleted, published or arbitrary search/filter overrides.
+
+HTTP 200:
+
+```js
+{
+  ok: true, success: true, status: 200,
+  data: { items, page, limit, total, pages },
+  items, articles: items, total, page, limit, pages, sort
+}
+```
+
+`total` counts only matching owned eligible News records, not global records or
+logical translation groups. `pages = Math.ceil(total / limit)` (zero when empty).
+The list and count are independent scoped reads, not a transactional pagination
+snapshot; concurrent changes can affect totals between reads.
+
+Each list item allowlists `_id`, `id`, `title`, `slug`, `status`, `category`,
+`imageURL`, `description`, `summary`, `language`, `lang`, `coverImageUrl`,
+`createdAt` and `updatedAt`. Both ID aliases identify that single owned CMS record.
+`summary` aliases its stored `description`; language fallback uses only that
+record's `language`/`lang`, never another language bucket. Dates are ISO strings
+or null when absent. Optional absent/invalid scalar fields may be omitted.
+The cover URL follows existing CMS precedence: `coverImage.url`, legacy string
+`coverImage`, `coverImageUrl`, then `imageURL`.
+
+#### Detail request and response
+
+`:id` is the owned News `_id`, not a public-copy ID or translation-group ID.
+No query parameters are supported; detail never localizes the requested record.
+HTTP 200 is `{ ok: true, success: true, status: 200, article, data: { article } }`.
+Both article envelopes contain the same DTO. It adds these allowlisted fields
+to the list item:
+
+- `content`, `body` (same stored content), `editorialType`, `track`, `topic`.
+- String arrays: `tags`, `externalUrls`, `embeds`, `gallery`, `stateTags`, `stateNames`.
+- `coverImage`: only `url`, `publicId`, `alt`.
+- `seo`: only `metaTitle`, `metaDescription`, `canonicalUrl`.
+- `location`: only `state`, `stateSlug`, `district`, `districtSlug`, `city`, `citySlug`, `country`, `isUT`.
+- `geo`: only `state`, `district`, `city`.
+
+There are no translation buckets, sibling IDs/titles/statuses/counts, group/source
+links, locale availability, translation jobs/diagnostics, creator/account IDs,
+task/submission/contributor links, workflow notes/history/comments, byline internals,
+advertising metadata or computed permission flags. Nested fields are allowlisted;
+neither a raw document spread nor CMS/public enrichment is used. Reads query only
+News and authentication/module policy, with no sibling/public-copy fallback,
+translation generation, synchronization, article writes or content-cache operations.
+Existing authentication-time account-expiry handling remains unchanged.
+
+All responses, including authentication and validation errors, use
+`Cache-Control: private, no-store`, `Pragma: no-cache` and `Vary: Authorization, Cookie`
+(alongside any existing Vary values). Invalid, missing, foreign, unknown-creator
+and ineligible detail IDs share HTTP 404 `DRAFT_NOT_FOUND`, without sibling details.
+Missing effective module access returns 403 `DRAFT_READ_FORBIDDEN`; malformed or
+unsupported query parameters return 400 `INVALID_DRAFT_QUERY`. Authentication
+errors retain existing codes. Storage failures return 503 `DB_UNAVAILABLE` or
+500 `DRAFT_READ_FAILED`, not an empty successful list. New errors use
+`{ ok: false, success: false, status, code, message }`.
+
+#### Admin Panel integration boundary
+
+The limited Draft Desk client must opt into these endpoints and normalize the
+existing `data.items`/`items`/`articles` list envelope to its `rows` helper. Its
+verified `status=draft&page=1&limit=100&sort=-createdAt` request is supported.
+Draft Workspace's `_id`, title, summary, content, category, tags, language and
+cover-URL hydration needs are covered. Source classification and full specialized
+editor metadata are not part of this purpose-specific DTO.
+
+The existing Draft Desk opens the full article editor, which expects more metadata
+and automatically requests translation-group siblings. A separate limited-client
+adapter/workflow is required: do not call those broader APIs, infer owners, enable
+the Deleted tab, or treat omitted fields as instructions to erase saved metadata.
+This DTO is not a full-CMS replacement or a lossless PUT payload.
+There is no fallback to the separate legacy authenticated `/api/admin/drafts`
+list; this correction does not change or certify that older surface.
+
+Read access grants no edit, publish, delete or assignment permission. Existing
+PUT/PATCH authorization still evaluates the complete save operation and may deny
+a readable own draft when protected siblings would be modified. Do not retry
+that denial via an alternate endpoint or assume a successful read authorizes a
+save. No Admin Panel implementation is included here.
+
+Validation also reproduced a separate pre-existing lifecycle authorization gap
+against HEAD `20c6d35`: a Draft Desk-only Reporter with configured-empty Special
+Rights could soft-delete a group containing published siblings through
+`DELETE /api/articles/:id`, without using the new read endpoints. This read-only
+contract does not fix or certify that existing deletion path. Its correction
+requires separate Founder review; clients must not infer deletion authority from
+a successful draft read.
+
 ### Article content-save authorization and synchronization
 
 [articleSaveAccess.service.js](./services/articleSaveAccess.service.js) protects
