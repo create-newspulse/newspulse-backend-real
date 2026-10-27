@@ -441,7 +441,7 @@ async function patchWorkflowStage(req, res) {
 
     let toLower = '';
     if (action === 'set') {
-      if (roleRaw !== 'admin' && roleRaw !== 'founder') {
+      if (roleRaw !== 'admin' && roleRaw !== 'founder' && stageFromLabel(toStageRaw) !== 'published') {
         return bad(res, 'Forbidden', 403);
       }
       toLower = stageFromLabel(toStageRaw);
@@ -463,7 +463,7 @@ async function patchWorkflowStage(req, res) {
     // Enforce adjacent moves for next/back (already) and default set to any stage.
     const toUpper = toLower.toUpperCase();
     if (doc.status === 'deleted') return bad(res, 'Restore the deleted story before moving its stage', 409);
-    if ((toUpper === 'PUBLISHED' || toUpper === 'SCHEDULED' || wasPublished) && roleRaw !== 'founder') {
+    if ((toUpper === 'SCHEDULED' || (wasPublished && toUpper !== 'PUBLISHED')) && roleRaw !== 'founder') {
       return bad(res, 'Founder permission is required.', 403);
     }
     const transition = await inArticleTransaction(async (session, transaction) => {

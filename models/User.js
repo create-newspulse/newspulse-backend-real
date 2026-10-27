@@ -1,5 +1,15 @@
 const mongoose = require('mongoose');
 const { normalizeOrganizationFields } = require('../lib/teamAccess');
+const { GRANT_SOURCE } = require('../lib/newsPublishGrant');
+
+const newsPublishGrantSchema = new mongoose.Schema({
+  source: { type: String, enum: [GRANT_SOURCE], required: true },
+  subjectUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  grantedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  grantedAt: { type: Date, required: true },
+  temporaryAccessId: { type: mongoose.Schema.Types.ObjectId, default: undefined },
+  expiresAt: { type: Date, default: undefined },
+}, { _id: false });
 
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
@@ -50,6 +60,7 @@ const userSchema = new mongoose.Schema({
   moduleAccessStates: { type: mongoose.Schema.Types.Mixed, default: undefined },
   specialRightsOverride: { type: [String], default: [] },
   specialRightsConfigured: { type: Boolean, default: undefined },
+  newsPublishGrant: { type: newsPublishGrantSchema, default: undefined },
   taskRightsOverride: { type: [String], default: [] },
   accountControlRightsOverride: { type: [String], default: [] },
   // Founder Access Studio temporary access grants (module/right with expiry)
@@ -62,6 +73,7 @@ const userSchema = new mongoose.Schema({
       reason: { type: String, default: null, trim: true },
       grantedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
       grantedAt: { type: Date, default: Date.now },
+      newsPublishGrant: { type: newsPublishGrantSchema, default: undefined },
     }],
     default: [],
   },

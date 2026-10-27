@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const Role = require('../models/Role');
 const { countMeQuery, requireAuth, timeMeStep, timeMeStepAsync } = require('../middleware/requireAuth');
 const { logAudit } = require('../lib/audit');
+const { hasRecordedNewsPublishGrant } = require('../lib/newsPublishGrant');
 const {
   ADMIN_MODULE_KEYS,
   effectiveSpecialRights,
@@ -124,6 +125,7 @@ async function myAccessPayload(req) {
     accountExpiry: user?.accessExpiresAt || null,
     accessVersion: typeof user?.accessVersion === 'number' ? user.accessVersion : 0,
     specialRightsConfigured: user?.specialRightsConfigured === true,
+    newsPublishGrantRecorded: hasRecordedNewsPublishGrant(user),
     effectiveModuleAccess,
     modules: allowedModules,
     specialRights: buildSpecialRightsSummary(user),
@@ -144,6 +146,7 @@ router.get('/my-modules', async (req, res) => {
       modules: access.modules,
       specialRights: effectiveSpecialRights(user, roleDoc),
       specialRightsConfigured: access.specialRightsConfigured,
+      newsPublishGrantRecorded: access.newsPublishGrantRecorded,
       safeZoneMasterLocked: isSafeZoneMasterLocked(),
       effectiveModuleAccess: access.effectiveModuleAccess,
       accessVersion: access.accessVersion,
@@ -151,6 +154,7 @@ router.get('/my-modules', async (req, res) => {
     modules: access.modules,
     specialRights: effectiveSpecialRights(user, roleDoc),
     specialRightsConfigured: access.specialRightsConfigured,
+    newsPublishGrantRecorded: access.newsPublishGrantRecorded,
     safeZoneMasterLocked: isSafeZoneMasterLocked(),
     effectiveModuleAccess: access.effectiveModuleAccess,
     accessVersion: access.accessVersion,

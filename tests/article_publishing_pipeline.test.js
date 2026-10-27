@@ -208,7 +208,7 @@ function installPublishMocks(t, docs, options = {}) {
 async function publishForTest(t, docs, options = {}) {
   const state = installPublishMocks(t, docs, options);
   const result = await publishCanonicalArticle(docs[0]._id, {
-    req: { admin: { role: 'Founder', isFounder: true, email: 'founder@example.com' }, body: { reason: 'test publish' } },
+    actor: { byRole: 'Founder', byUserId: null },
     reason: 'test publish',
     source: 'test',
     groupPublish: options.groupPublish,
@@ -435,8 +435,8 @@ test('canonical publish reuses existing cached translations and retry does not d
   })];
   const state = installPublishMocks(t, docs);
 
-  await publishCanonicalArticle(docs[0]._id, { req: { admin: { role: 'Founder', isFounder: true } }, source: 'first' });
-  await publishCanonicalArticle(docs[0]._id, { req: { admin: { role: 'Founder', isFounder: true } }, source: 'retry' });
+  await publishCanonicalArticle(docs[0]._id, { actor: { byRole: 'Founder', byUserId: null }, source: 'first' });
+  await publishCanonicalArticle(docs[0]._id, { actor: { byRole: 'Founder', byUserId: null }, source: 'retry' });
 
   assert.equal(state.getFetchCalls(), 0);
   assert.deepEqual(state.created.map((doc) => doc.language).sort(), ['gu', 'hi']);
@@ -543,7 +543,7 @@ test('canonical publish failure leaves article drafts unpublished', async (t) =>
   installPublishMocks(t, docs, { failFetch: true });
 
   await assert.rejects(
-    () => publishCanonicalArticle(docs[0]._id, { req: { admin: { role: 'Founder', isFounder: true } }, source: 'failure' }),
+    () => publishCanonicalArticle(docs[0]._id, { actor: { byRole: 'Founder', byUserId: null }, source: 'failure' }),
     /Failed to generate required translations/
   );
   assert.equal(docs[0].status, 'draft');

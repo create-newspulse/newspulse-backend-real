@@ -16,6 +16,9 @@ const { requireAdminAuth } = require('../middleware/adminAuth');
 const { requireAuth, requireModuleAccess, requireTaskRight } = require('../middleware/requireAuth');
 const { logAudit } = require('../lib/audit');
 const {
+  issueNewsPublishGrant, hasRecordedNewsPublishGrant, hasNewsPublishGrantInput,
+} = require('../lib/newsPublishGrant');
+const {
   ACCOUNT_STATUS,
   hasNoExpiry,
   isAccountExpired,
@@ -718,6 +721,9 @@ async function resolveRoleAssignment(req, body, fallbackRole) {
 }
 
 function parseAccessOverride(req, body, user = null) {
+  if (hasNewsPublishGrantInput(body)) {
+    return { error: { status: 400, message: 'Publication grant provenance is server-controlled', code: 'PUBLICATION_GRANT_READ_ONLY' } };
+  }
   if (Object.prototype.hasOwnProperty.call(body, 'specialRightsConfigured')) {
     return { error: { status: 400, message: 'specialRightsConfigured is server-controlled', code: 'SPECIAL_RIGHTS_CONFIGURED_READ_ONLY' } };
   }
@@ -771,6 +777,9 @@ function normalizeTemporaryAccessInput(req, value) {
   const now = new Date();
   for (const raw of value) {
     if (!raw || typeof raw !== 'object') return { error: { status: 400, message: 'Invalid temporaryAccess entry', code: 'INVALID_TEMPORARY_ACCESS' } };
+    if (hasNewsPublishGrantInput(raw)) {
+      return { error: { status: 400, message: 'Publication grant provenance is server-controlled', code: 'PUBLICATION_GRANT_READ_ONLY' } };
+    }
     const moduleKey = raw.moduleKey && ADMIN_MODULE_KEYS.includes(String(raw.moduleKey).trim()) ? String(raw.moduleKey).trim() : null;
     const rightKey = raw.rightKey && SPECIAL_RIGHT_KEYS.includes(String(raw.rightKey).trim()) ? String(raw.rightKey).trim() : null;
     if (!moduleKey && !rightKey) return { error: { status: 400, message: 'Each temporaryAccess entry requires a valid moduleKey or rightKey', code: 'INVALID_TEMPORARY_TARGET' } };
@@ -1932,6 +1941,7 @@ async function buildFounderStudioEffectiveAccess(user, roleDoc) {
     accessVersion: typeof user?.accessVersion === 'number' ? user.accessVersion : 0,
     policyVersion: policy.version,
     canonicalModules,
+    newsPublishGrantRecorded: hasRecordedNewsPublishGrant(user),
   };
 }
 
@@ -2010,6 +2020,7 @@ async function setSpecialRightsHandler(req, res) {
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_SPECIAL_RIGHTS_CHANGED'))) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (hasNewsPublishGrantInput(body)) return bad(res, 400, 'Publication grant provenance is server-controlled', 'PUBLICATION_GRANT_READ_ONLY');
   const reason = auditReasonFromBody(body);
   if (!reason) return bad(res, 400, 'auditReason is required', 'AUDIT_REASON_REQUIRED');
   if (Object.prototype.hasOwnProperty.call(body, 'specialRightsConfigured')) {
@@ -2030,10 +2041,11 @@ async function setSpecialRightsHandler(req, res) {
   const specialRightsOverride = requested.filter((key) => !founderOnly.has(key));
   const blockedFounderOnly = requested.filter((key) => founderOnly.has(key));
   const permissions = mergeLegacyPermissions(user.permissions, specialRightsOverride);
+  const newsPublishGrant = specialRightsOverride.includes('news_publish') ? issueNewsPublishGrant(req, user._id) : null;
 
   const updated = await User.findByIdAndUpdate(
     req.params.id,
-    { $set: { specialRightsOverride, specialRightsConfigured: true, permissions, updatedBy: actorId(req), updatedAt: new Date() }, $inc: { accessVersion: 1 } },
+    { $set: { specialRightsOverride, specialRightsConfigured: true, newsPublishGrant, permissions, updatedBy: actorId(req), updatedAt: new Date() }, $inc: { accessVersion: 1 } },
     { new: true },
   );
   if (!updated) return bad(res, 404, 'Not found', 'NOT_FOUND');
@@ -2109,6 +2121,7 @@ async function grantTemporaryAccessHandler(req, res) {
   if (!(await ensureMutableStaffTarget(req, res, user, 'STAFF_TEMP_ACCESS_GRANTED'))) return;
 
   const body = req.body && typeof req.body === 'object' ? req.body : {};
+  if (hasNewsPublishGrantInput(body)) return bad(res, 400, 'Publication grant provenance is server-controlled', 'PUBLICATION_GRANT_READ_ONLY');
   const reason = auditReasonFromBody(body);
   if (!reason) return bad(res, 400, 'auditReason is required', 'AUDIT_REASON_REQUIRED');
   const canonicalTempModuleKey = canonicalModuleKey(body.moduleKey, { allowLegacy: true, allowAliases: true });
@@ -2121,15 +2134,19 @@ async function grantTemporaryAccessHandler(req, res) {
   if (expiresAt === undefined || !expiresAt) return bad(res, 400, 'A valid ISO expiresAt is required for temporary access', 'INVALID_DATE');
   if (expiresAt <= new Date()) return bad(res, 400, 'expiresAt must be in the future', 'INVALID_DATE');
 
+  const temporaryAccessId = new mongoose.Types.ObjectId();
+  const newsPublishGrant = rightKey === 'news_publish' && body.enabled !== false
+    ? issueNewsPublishGrant(req, user._id, { temporaryAccessId, expiresAt }) : null;
   const entry = {
-    _id: new mongoose.Types.ObjectId(),
+    _id: temporaryAccessId,
     moduleKey,
     rightKey,
     enabled: body.enabled !== false,
     expiresAt: expiresAt || null,
     reason,
     grantedBy: actorId(req),
-    grantedAt: new Date(),
+    grantedAt: newsPublishGrant?.grantedAt || new Date(),
+    ...(newsPublishGrant ? { newsPublishGrant } : {}),
   };
 
   const updated = await User.findByIdAndUpdate(

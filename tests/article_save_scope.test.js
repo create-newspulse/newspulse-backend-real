@@ -65,10 +65,11 @@ function ownedDraft(state, { siblings = false, role = 'reporter' } = {}) {
   return ids[0];
 }
 
-function assertDenied(state, before, response) {
+function assertDenied(state, before, response, code = 'ARTICLE_SAVE_FORBIDDEN') {
   assert.equal(response.status, 403, response.text);
-  assert.equal(response.body.code, 'ARTICLE_SAVE_FORBIDDEN', response.text);
-  assert.match(response.body.message || response.body.error, /authorized Editor or Founder/);
+  assert.equal(response.body.code, code, response.text);
+  assert.match(response.body.message || response.body.error,
+    code === 'ARTICLE_PUBLISH_FORBIDDEN' ? /Founder-granted Publish News/ : /authorized Editor or Founder/);
   assert.deepEqual(state.content(), before);
   assert.equal(state.invalidations.length, 0);
   assert.equal(state.calls.filter(call => CONTENT_MODELS.includes(call.name) && WRITES.has(call.method)).length, 0);
@@ -302,7 +303,8 @@ for (const base of ['/api/articles', '/api/news']) for (const body of [
   test(`${base} rejects body-driven ${Object.keys(body).join('/')} changes from an authorized content Editor`, async context => {
     const state = install(context);
     const { ids } = seedGroup(state, { status: 'draft', copies: false });
-    assertDenied(state, state.content(), await state.request('put', `${base}/${ids[0]}`, body, 'editor'));
+    assertDenied(state, state.content(), await state.request('put', `${base}/${ids[0]}`, body, 'editor'),
+      base === '/api/articles' && body.status === 'published' ? 'ARTICLE_PUBLISH_FORBIDDEN' : 'ARTICLE_SAVE_FORBIDDEN');
   });
 }
 

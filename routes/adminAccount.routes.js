@@ -350,7 +350,7 @@ async function profileHandler(req, res) {
 
   if (!editableFields.length) return bad(res, 400, 'No editable profile fields supplied', 'NO_PROFILE_CHANGES');
 
-  const blockedFields = ['email', 'staffId', 'role', 'roleId', 'roleName', 'department', 'assignedSections', 'coverageAreas', 'sections', 'accountStatus', 'status', 'permissions', 'moduleAccessOverride', 'specialRightsOverride', 'specialRightsConfigured', 'isFounder', 'isProtected'];
+  const blockedFields = ['email', 'staffId', 'role', 'roleId', 'roleName', 'department', 'assignedSections', 'coverageAreas', 'sections', 'accountStatus', 'status', 'permissions', 'moduleAccessOverride', 'specialRightsOverride', 'specialRightsConfigured', 'newsPublishGrant', 'isFounder', 'isProtected'];
   const attemptedBlockedFields = blockedFields.filter((field) => Object.prototype.hasOwnProperty.call(body, field));
   if (attemptedBlockedFields.length) {
     await logAudit(req, 'USER_PROFILE_UPDATE_BLOCKED', String(user._id), { attemptedFields: attemptedBlockedFields });

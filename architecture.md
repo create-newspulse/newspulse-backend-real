@@ -126,8 +126,10 @@ publication/workflow state, and synchronizes each ready document to a public
 copy. It also maintains legacy public-copy fallback handling.
 
 Publishing may generate missing translations. It is therefore not a
-metadata-only maintenance operation. Canonical publication rolls back on a
-public-copy synchronization failure. Post-commit cache/revalidation failures
+metadata-only maintenance operation. Request publication authorizes the whole
+existing News/public-copy group before source preparation or translation writes,
+and keeps preparation, generation and publication in one transaction. Canonical
+publication rolls back on a public-copy synchronization failure. Post-commit cache/revalidation failures
 are reported separately; they do not mean the committed publication rolled back.
 
 Language state has multiple related representations:
@@ -171,8 +173,8 @@ also share one transaction, with cache effects deferred until commit.
 Trusted internal generation/workers remain separate from this request wrapper;
 no request body flag enables trusted execution.
 
-Publication-capable scheduling remains Founder-only pending a separately
-approved staff publishing implementation. Creation, dedicated schedule actions,
+Publication-capable scheduling intentionally remains Founder-only, including
+for staff with verified `news_publish`. Creation, dedicated schedule actions,
 status updates, workflow scheduling and restoration to Scheduled recheck the
 persisted account inside the transaction, including retries, using
 [articleMutationActor.js](./lib/articleMutationActor.js). Restoration to Published
@@ -187,6 +189,117 @@ with its trusted SYSTEM actor, once per logical group. It continues processing
 already-authorized scheduled stories without acquiring or inheriting a staff
 Special Right. These initiation guards do not inspect or repair historical
 production schedules or translation jobs.
+
+### Founder-controlled staff publication: Backend contract
+
+The existing `news_publish` Special Right is usable through canonical publication
+APIs. It is not a new role or a replacement for Staff Control Center. Publication
+requires the persisted, authenticated account to remain eligible; current
+token/role checks, account restrictions, Safe Zone, temporary denials and module
+policy still apply. The verified Founder retains publication authority without
+a staff grant.
+
+For staff, [articleSaveAccess.service.js](./services/articleSaveAccess.service.js)
+combines an effective `news_publish` with verified Founder issuance and the
+existing content-edit scope:
+
+| Staff scope | Additional effective access | Authorized articles |
+| --- | --- | --- |
+| Broader editorial | Manage News (`manageNews`) **and** `news_edit` | The complete unprotected editorial group, including eligible non-owned records |
+| Limited draft workspace | Add News (`addNews`) **or** Draft Desk (`draftDesk`) | Only a complete, verified own-draft group; every existing sibling must be owned, unlocked, unscheduled and eligible |
+
+Neither ownership, a module, role presets, legacy permission strings nor an
+unattested `news_publish` grants publication. Granting `news_publish` does not
+enable Manage News or add `news_edit`. Limited staff retain their existing draft
+scope; publication does not grant subsequent Manage News access. Their linked
+Youth Pulse/protected records remain excluded. Staff cannot publish deleted,
+scheduled, locked, embargoed, private or Founder-approval-protected editions.
+Conflicting/unresolved source identities and foreign, unowned or incompatible
+public-copy matches fail closed for Founder review rather than being adopted.
+
+**Grant and revoke using the existing Founder rights controls**
+
+- `PATCH /api/admin/team/access/staff/:id/rights` accepts the intended complete
+  permanent selection and the existing audit reason. For example:
+
+  ```json
+  {
+    "specialRightsOverride": ["news_publish"],
+    "auditReason": "Allow publication of this staff member's eligible own drafts"
+  }
+  ```
+
+  Include any other permanent rights that should remain selected; for broader
+  editorial publication, `news_edit` must independently be effective. Existing
+  `rights` / `specialRights` array or key-map aliases are supported, and multiple
+  supplied selections must agree. Removing `news_publish` (including saving
+  `[]`) revokes the permanent grant.
+- The same atomic User update records server-controlled `newsPublishGrant`
+  provenance, configures the permanent selection and increments `accessVersion`.
+  [newsPublishGrant.js](./lib/newsPublishGrant.js) binds issuance to the verified
+  Founder and subject account. Publication re-reads the issuer's persisted
+  Founder identity inside the article transaction.
+- `POST /api/admin/team/access/staff/:id/temporary` supports `rightKey:
+  "news_publish"`, `enabled`, a future ISO `expiresAt`, and `auditReason`. A
+  temporary grant is bound to its server-created entry ID, subject, issuer,
+  issuance time and expiry. `enabled: false` is a denial and takes precedence.
+  Remove an entry with
+  `DELETE /api/admin/team/access/staff/:id/temporary/:temporaryAccessId`.
+  An attested active temporary grant can coexist with an intentionally empty
+  permanent selection; empty permanent rights do not erase temporary decisions.
+- Clients must not send `newsPublishGrant` or `specialRightsConfigured`.
+  Provenance inputs fail with `PUBLICATION_GRANT_READ_ONLY`; supplied
+  `grantedBy` does not establish authority. Staff creation, general account
+  edits and legacy permission saves cannot issue publishing provenance.
+  Historical grants without it must be re-saved/reissued by the Founder through
+  these controls. There is no migration, backfill, new collection or new index.
+
+**Publication calls for the subsequent Admin Panel integration**
+
+- Prefer `POST /api/articles/:id/publish` with an optional `reason`. It publishes
+  the authorized EN/HI/GU operation and returns the existing `article`,
+  `data.article`, `translationGroupId`, `publishedLanguages` and `publicSync`.
+  Use the newsroom News ID (a public copy's `sourceNewsId`), not the public
+  Article copy's own ID.
+- `POST /api/articles/:id/publish-group` and
+  `POST /api/articles/:id/publish-all-languages` use the identical authority and
+  retain their `articles` array response.
+- Canonical `POST /api/articles` with `status: "published"` returns the normal
+  201 creation envelope. `PUT/PATCH /api/articles/:id` with publication intent
+  uses the same preflight **before** content edits. Staff cannot use these
+  requests to alter other lifecycle, provenance, source/group or visibility
+  control fields.
+- `PATCH /api/admin/workflow/articles/:id/stage` with
+  `{"action":"set","toStage":"published"}` uses the same authority, without
+  granting staff arbitrary workflow-set, scheduling or unpublishing access.
+- The existing article router mounts share these handlers: the empty prefix,
+  `/api`, `/api/admin`, `/admin-api`, `/admin-api/api`, `/admin-api/admin`,
+  `/admin-api/api/admin`, `/api/api` and `/api/api/admin`. No separate alias
+  permission exists. Raw legacy `/api/news` publication writes and restoration
+  to Published remain Founder-only; delegated staff must use canonical calls.
+- `GET /api/access/me` (`data` / `access`) and
+  `GET /api/access/my-modules` (`data` and top level) expose the additive,
+  read-only `newsPublishGrantRecorded` flag. Staff DTOs and Founder effective
+  access responses expose it too. Refresh access after grants/revocations.
+  This flag describes a recorded grant, **not** a final authorization decision:
+  an active denial, restricted account, issuer change or inaccessible group can
+  still prevent publication. Generic effective-right lists retain legacy preset
+  semantics, so the presence of `news_publish` in a list alone is insufficient.
+
+Unauthorized publication returns 403 (`ARTICLE_PUBLISH_FORBIDDEN` for authority/
+provenance, or the existing `ARTICLE_SAVE_FORBIDDEN` for edit scope); authentication
+retains its existing 401/403 responses. Group changes return 409 and require a
+reload. Validation/provider/public-sync errors retain their existing status
+codes and envelopes. A 200 response with `committed: true`, failed `revalidation`
+or `postCommitWarnings` describes a saved change: reload and handle the warning,
+do not blindly repeat publication. The server rechecks authority and all affected
+records on transaction retries and preserves publication dates, language/media
+identities and bounded public-copy synchronization.
+
+This contract does not authorize scheduling or request-driven translation of
+published/protected groups. Existing draft-only staff translation protections,
+Founder human-overwrite confirmation and trusted SYSTEM scheduling remain
+separate. No Admin Panel or Frontend change is included here.
 
 ## Public visibility and Gujarat Regional metadata
 
@@ -318,8 +431,9 @@ Special Rights entries retain their existing behavior; the dedicated temporary
 API still requires a future expiry. Configured non-Founders cannot acquire
 Founder-only Special Rights through these calculations. Founder full access,
 account eligibility, Safe Zone checks, and global module restrictions remain
-at their existing authorization boundaries. This change does not delegate
-article publishing or change article mutation routes.
+at their existing authorization boundaries. The configured-selection marker
+alone does not delegate publication; the additional recorded Founder grant and
+publication scope described above are required.
 
 Staff creation (including supplied preset selections), general staff updates,
 legacy permission saves, and the older combined `/users/:id/access` endpoint
@@ -631,15 +745,19 @@ a transactional hook failure aborts the save rather than being swallowed.
 Authorization and protected enqueue configuration reads do not create or
 backfill settings.
 
-Staff content saves cannot change publication, scheduling, deletion, restoration,
+Ordinary staff content saves cannot change publication, scheduling, deletion, restoration,
 workflow/visibility controls or source/group linkage through the request body.
-An unchanged `status` is a no-op, not a group lifecycle action. Canonical
+An unchanged `status` accompanying a content save is a no-op. Canonical requests
+explicitly publishing a draft, or submitting only a published status/reason,
+instead use the separate scoped publication authorizer before the first write.
+Canonical
 allowlists continue to ignore resubmitted computed sync/timestamp/ID fields
 rather than treating them as editable data. The raw legacy updater rejects
 changes to server-controlled fields and Mongo operator payloads from staff.
-Creation is not blanketed with `news_edit`; existing creator stamping, creation
-contracts and Founder publishing restrictions remain intact. Dedicated
-publication and lifecycle endpoints are unchanged.
+Creation is not blanketed with `news_edit`; existing creator stamping and draft
+contracts remain intact. Canonical create-as-published now uses the same verified
+publication authority; scheduling, restoration and other protected lifecycle
+boundaries remain unchanged.
 Manual translation-generation/backfill endpoints also retain their existing
 authorization; this PUT/PATCH correction does not certify those independent
 entry points.
@@ -722,6 +840,9 @@ for isolating environment variables and external adapters.
 Representative regression suites include:
 
 - [article_publishing_pipeline.test.js](./tests/article_publishing_pipeline.test.js)
+- [staff_news_publish_authorization.test.js](./tests/staff_news_publish_authorization.test.js)
+- [special_rights_precedence.test.js](./tests/special_rights_precedence.test.js)
+- [article_publication_bypass_regression.test.js](./tests/article_publication_bypass_regression.test.js)
 - [sync_public_article_clears_deleted_at_on_publish.test.js](./tests/sync_public_article_clears_deleted_at_on_publish.test.js)
 - [public_regional_state_lang_ready_only.test.js](./tests/public_regional_state_lang_ready_only.test.js)
 - [public_article_visibility_regression.test.js](./tests/public_article_visibility_regression.test.js)

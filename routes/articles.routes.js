@@ -93,7 +93,7 @@ const { logAudit } = require('../lib/audit');
 const { isContentDatabaseUnavailable } = require('../lib/contentErrors');
 const {
   authorizeArticleSave, articleSaveAuthorizer, contentSaveBody, scopeChanged,
-  articleTranslationAuthorizer, authorizeArticleCreation,
+  articleTranslationAuthorizer, authorizeArticleCreation, articlePublicationAuthorizer,
 } = require('../services/articleSaveAccess.service');
 
 
@@ -1329,7 +1329,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     if (status !== undefined && !allowedStatuses.has(initialStatus)) {
       return res.status(400).json({ ok: false, success: false, message: 'Invalid status' });
     }
-    if (['published', 'scheduled'].includes(initialStatus) && !isFounderRequest(req)) {
+    if (initialStatus === 'scheduled' && !isFounderRequest(req)) {
       return res.status(403).json({ ok: false, success: false, status: 403, message: 'Access Denied. Founder permission is required.' });
     }
 
@@ -1480,10 +1480,9 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
     }
 
     const creation = await inArticleTransaction(async (session, transaction) => {
-      if (initialStatus === 'published') await requireFounderArticleMutation(req, session);
-      await authorizeArticleCreation(req, createDoc, session);
+      await authorizeArticleCreation(req, createDoc, session, { publication: initialStatus === 'published' });
       const [doc] = await News.create([createDoc], { session });
-      if (_isSourceTranslationDoc(doc)) {
+      if (_isSourceTranslationDoc(doc) && initialStatus !== 'published') {
         Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
         await doc.save({ validateModifiedOnly: true, session });
         await syncMasterArticleGroup(doc, {
@@ -2818,10 +2817,15 @@ async function updateArticle(req, res, next) {
       }
     }
     if (!isFounderRequest(req)) {
-      contentSaveBody(requestBody, before || publicBefore, false, { ignoreComputed: true });
-      status = undefined;
-      scheduled = undefined;
-      requestedStatusNorm = '';
+      const publishRequested = requestedStatusNorm === 'published' && before;
+      const contentBody = { ...requestBody };
+      if (publishRequested) delete contentBody.status;
+      contentSaveBody(contentBody, before || publicBefore, false, { ignoreComputed: true });
+      if (!publishRequested) {
+        status = undefined;
+        scheduled = undefined;
+        requestedStatusNorm = '';
+      }
     }
     if (requestedStatusNorm === 'deleted') {
       return softDeleteArticleGroup(req, res, rawId, { authorizeSave: articleSaveAuthorizer(req) });
@@ -3112,9 +3116,6 @@ async function updateArticle(req, res, next) {
     }
 
     if (isPublishingNow) {
-      if (!isFounderRequest(req)) {
-        return res.status(403).json({ ok: false, success: false, status: 403, message: 'Access Denied. Founder permission is required.' });
-      }
       if (!before) {
         return res.status(404).json({ ok: false, success: false, status: 404, message: 'Article not found' });
       }
@@ -3140,21 +3141,22 @@ async function updateArticle(req, res, next) {
             : await News.findById(rawId, null, { session });
           if (!doc) throw Object.assign(new Error('Article not found'), { statusCode: 404 });
           const groupSync = await syncTranslationGroupMetadata(doc, {
-            previousDoc: current, patch: prePublishUpdate, invalidate: false, session,
-          }, { authorizeSave: articleSaveAuthorizer(req, prePublishUpdate) });
+            ...transaction, previousDoc: current, patch: prePublishUpdate, invalidate: false,
+          });
           return publishCanonicalArticle(doc, {
             ...transaction, req,
             previousDocs: [before, ...groupSync.previousDocs],
             reason: requestBody.reason || null,
             source: 'article_update_publish',
           });
-        });
+        }, { authorizeSave: articlePublicationAuthorizer(req, prePublishUpdate) });
       } catch (publishErr) {
         return res.status(publishErr?.statusCode || publishErr?.status || 500).json({
           ok: false,
           success: false,
           status: publishErr?.statusCode || publishErr?.status || 500,
           message: publishErr?.message || 'Failed to publish article',
+          ...(publishErr?.code ? { code: publishErr.code } : {}),
           ...(publishErr?.details || {}),
         });
       }
@@ -3490,10 +3492,6 @@ router.patch('/articles/:id', requireAdminAuth, updateArticle);
 
 async function publishArticleTranslationGroup(req, res) {
   try {
-    if (!isFounderRequest(req)) {
-      return res.status(403).json({ ok: false, success: false, status: 403, message: 'Access Denied. Founder permission is required.' });
-    }
-
     const rawId = String(req.params.id || '').trim();
     if (!mongoose.Types.ObjectId.isValid(rawId)) {
       return res.status(400).json({ ok: false, success: false, status: 400, message: 'Invalid id' });
@@ -3524,6 +3522,7 @@ async function publishArticleTranslationGroup(req, res) {
       success: false,
       status: e?.statusCode || e?.status || 500,
       message: e?.message || 'Failed to publish translation group',
+      ...(e?.code ? { code: e.code } : {}),
       ...(e?.details || {}),
     });
   }
@@ -3532,13 +3531,9 @@ async function publishArticleTranslationGroup(req, res) {
 router.post('/articles/:id/publish-all-languages', requireAdminAuth, publishArticleTranslationGroup);
 router.post('/articles/:id/publish-group', requireAdminAuth, publishArticleTranslationGroup);
 
-// POST /api/articles/:id/publish → publish now (Founder only)
+// POST /api/articles/:id/publish → publish an authorized story group now
 router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
   try {
-    if (!isFounderRequest(req)) {
-      return res.status(403).json({ ok: false, success: false, status: 403, message: 'Access Denied. Founder permission is required.' });
-    }
-
     const publishResult = await publishCanonicalArticle(req.params.id, {
       req,
       reason: req.body?.reason || null,
@@ -3573,6 +3568,7 @@ router.post('/articles/:id/publish', requireAdminAuth, async (req, res) => {
       success: false,
       status: e?.statusCode || e?.status || 500,
       message: e?.message || 'Failed to publish article',
+      ...(e?.code ? { code: e.code } : {}),
       ...(e?.details || {}),
     });
   }

@@ -22,6 +22,7 @@ const {
   specialRightsIdentityFields,
 } = require('../lib/teamAccess');
 const { evaluateAllModuleAccess, normalizeModulePolicies } = require('../services/founderAccessPolicyService');
+const { hasRecordedNewsPublishGrant, GRANT_SOURCE } = require('../lib/newsPublishGrant');
 const User = require('../models/User');
 const Role = require('../models/Role');
 const AuditLog = require('../models/AuditLog');
@@ -591,7 +592,7 @@ describe('Founder Special Rights save and reload contracts', () => {
   });
 
   test('creation with omitted or supplied preset rights never activates configured mode', async () => {
-    for (const [index, selection] of [undefined, ['news_edit']].entries()) {
+    for (const [index, selection] of [undefined, ['news_edit'], ['news_publish']].entries()) {
       const response = await asFounder('post', '/api/admin/team/team/users', {
         fullName: 'Synthetic New Staff',
         email: `synthetic-created-${index}@example.invalid`,
@@ -602,7 +603,10 @@ describe('Founder Special Rights save and reload contracts', () => {
       assert.equal(response.status, 201);
       const id = response.body.data.user.id;
       assert.equal(records.get(id).specialRightsConfigured, undefined);
+      assert.equal(records.get(id).newsPublishGrant, undefined);
+      assert.equal(hasRecordedNewsPublishGrant(records.get(id)), false);
       assert.equal(response.body.data.user.specialRightsConfigured, false);
+      assert.equal(response.body.data.user.newsPublishGrantRecorded, false);
       assert.equal(response.body.data.user.specialRights.includes('news_publish'), true);
     }
     const rejected = await asFounder('post', '/api/admin/team/team/users', {
@@ -611,6 +615,73 @@ describe('Founder Special Rights save and reload contracts', () => {
     });
     assert.equal(rejected.status, 400);
     assert.equal(rejected.body.code, 'SPECIAL_RIGHTS_CONFIGURED_READ_ONLY');
+  });
+
+  test('delegated staff creation cannot forge a Founder temporary publication grant', async () => {
+    records.set(STAFF_ID, configured({ specialRightsOverride: ['staff_create'] }));
+    const response = await request(app).post('/api/admin/team/team/users')
+      .auth(tokenFor(STAFF_ID), { type: 'bearer' }).send({
+        fullName: 'Synthetic Delegated Staff', email: 'synthetic-delegated@example.invalid',
+        role: 'intern', staffId: 'NP-2026-0981',
+        temporaryAccess: [{ rightKey: 'news_publish', enabled: true, expiresAt: future(), grantedBy: FOUNDER_ID }],
+      });
+    assert.equal(response.status, 201, response.text);
+    const user = records.get(response.body.data.user.id);
+    assert.equal(user.temporaryAccess[0].grantedBy, STAFF_ID);
+    assert.equal(user.temporaryAccess[0].newsPublishGrant, undefined);
+    assert.equal(hasRecordedNewsPublishGrant(user), false);
+  });
+
+  test('publication provenance inputs are rejected by rights, staff creation and general account updates', async () => {
+    const newsPublishGrant = {
+      source: GRANT_SOURCE, subjectUserId: STAFF_ID, grantedBy: FOUNDER_ID, grantedAt: past(),
+    };
+    for (const [method, path, body] of [
+      ['patch', `/api/admin/team/access/staff/${STAFF_ID}/rights`, { rights: ['news_publish'], newsPublishGrant }],
+      ['post', `/api/admin/team/access/staff/${STAFF_ID}/temporary`, { rightKey: 'news_publish', expiresAt: future(), newsPublishGrant }],
+      ['patch', `/api/admin/team/users/${STAFF_ID}`, { fullName: 'Synthetic User', newsPublishGrant }],
+      ['patch', `/api/admin/team/users/${STAFF_ID}/access`, { newsPublishGrant }],
+      ['post', '/api/admin/team/team/users', { fullName: 'Synthetic User', email: 'synthetic-proof@example.invalid', newsPublishGrant }],
+      ['post', '/api/admin/team/team/users', {
+        fullName: 'Synthetic User', email: 'synthetic-proof@example.invalid',
+        temporaryAccess: [{ rightKey: 'news_publish', expiresAt: future(), newsPublishGrant }],
+      }],
+    ]) {
+      const response = await asFounder(method, path, { ...body, auditReason: 'Synthetic input validation' });
+      assert.equal(response.status, 400, response.text);
+      assert.equal(response.body.code, 'PUBLICATION_GRANT_READ_ONLY');
+    }
+    const profile = await request(app).patch('/api/admin/account/profile')
+      .auth(tokenFor(STAFF_ID), { type: 'bearer' }).send({ fullName: 'Synthetic Profile', newsPublishGrant });
+    assert.equal(profile.status, 400);
+    assert.equal(profile.body.code, 'PROTECTED_FIELDS');
+    assert.equal(writes.length, 0);
+  });
+
+  test('Founder re-saving historical rights records provenance and revocation atomically removes it', async () => {
+    records.set(STAFF_ID, configured({ specialRightsOverride: ['news_publish'] }));
+    assert.equal(hasRecordedNewsPublishGrant(records.get(STAFF_ID)), false);
+    const modulesBefore = records.get(STAFF_ID).moduleAccessOverride;
+    const granted = await saveRights({ rights: ['news_publish'], grantedBy: STAFF_ID });
+    assert.equal(granted.status, 200);
+    const saved = records.get(STAFF_ID);
+    assert.equal(saved.newsPublishGrant.grantedBy, FOUNDER_ID);
+    assert.equal(saved.newsPublishGrant.subjectUserId, STAFF_ID);
+    assert.equal(granted.body.user.newsPublishGrantRecorded, true);
+    assert.equal(granted.body.user.newsPublishGrant, undefined);
+    assert.deepEqual(saved.moduleAccessOverride, modulesBefore);
+    assert.deepEqual(saved.specialRightsOverride, ['news_publish']);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].$set.newsPublishGrant.source, GRANT_SOURCE);
+    for (const path of ['/api/access/me', '/api/access/my-modules']) {
+      const access = await request(app).get(path).auth(tokenFor(STAFF_ID), { type: 'bearer' });
+      assert.equal(access.status, 200);
+      assert.equal(access.body.data.newsPublishGrantRecorded, true);
+    }
+    assert.equal((await saveRights({ rights: [] })).status, 200);
+    assert.equal(records.get(STAFF_ID).newsPublishGrant, null);
+    assert.equal(hasRecordedNewsPublishGrant(records.get(STAFF_ID)), false);
+    assert.equal(writes.length, 2);
   });
 
   test('access DTOs expose the marker without confusing saved and temporary effective rights', async () => {
