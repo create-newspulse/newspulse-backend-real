@@ -498,13 +498,61 @@ a readable own draft when protected siblings would be modified. Do not retry
 that denial via an alternate endpoint or assume a successful read authorizes a
 save. No Admin Panel implementation is included here.
 
-Validation also reproduced a separate pre-existing lifecycle authorization gap
-against HEAD `20c6d35`: a Draft Desk-only Reporter with configured-empty Special
-Rights could soft-delete a group containing published siblings through
-`DELETE /api/articles/:id`, without using the new read endpoints. This read-only
-contract does not fix or certify that existing deletion path. Its correction
-requires separate Founder review; clients must not infer deletion authority from
-a successful draft read.
+### Article soft-delete authorization
+
+Soft deletion is authorized inside
+[articleLifecycle.service.js](./services/articleLifecycle.service.js), before
+the first content or `syncVersion` write. Every transaction attempt reloads the
+persisted account through [articleMutationActor.js](./lib/articleMutationActor.js),
+the same account/lifecycle/token-version check used by content saves.
+
+- Founder retains authorized control. Other accounts require effective
+  `manageNews` AND effective `news_delete`, including current global/individual
+  module restrictions, configured-empty rights, temporary grants/denials,
+  account eligibility and Safe Zone. A role label or module grant alone is
+  insufficient; `news_edit` is not a substitute or an additional delete requirement.
+- That combination is the existing broad CMS action scope. There is no
+  established limited own-draft deletion exception. Add News/Draft Desk,
+  creator identity, bylines, StaffTask links and group membership do not grant
+  deletion authority. Unknown/generated creators are not assigned an owner.
+- The entire logical News group and all matching public copies are read in
+  the transaction before deletion. CMS and public updates are bounded to those
+  record IDs and their expected status/identity snapshots. Public matched counts
+  and the final member sets are checked before commit; a conflict rolls back
+  the whole operation. Existing group writers retain their shared News write
+  dependencies. No claim is made of a cross-request bulk transaction.
+- Denied operations do not change News, public copies, translation jobs,
+  topic pins, related submissions, or content caches. An access-denied audit
+  record is separate. Successful soft deletes preserve content, IDs, slugs,
+  language links and publication timestamps, retain pre-delete status/history,
+  and preserve existing post-commit revalidation/warning responses.
+
+Active routes are `DELETE /articles/:id` on every article-router mount and
+`POST /drafts/:id/delete` under `/api/admin`, `/admin-api/admin` and
+`/admin-api/api/admin`, including leading duplicate-`/api` normalization.
+Founder canonical PUT/PATCH `status=deleted` uses the same service. Staff
+PUT/PATCH lifecycle transitions remain denied by content-save authorization,
+including legacy `/api/news/:id`; staff must use the dedicated delete action.
+The legacy Founder updater retains its single-record behavior. There is no
+active bulk soft-delete endpoint; permanent bulk deletion remains Founder-only.
+Unreferenced legacy article routers are not active aliases.
+
+Permission denial is HTTP 403 `ARTICLE_DELETE_FORBIDDEN` with a generic action
+permission message, never sibling metadata. Scope changes use HTTP 409
+`ARTICLE_DELETE_SCOPE_CHANGED` and the existing reload/retry message. Canonical
+success retains `article`, `data.article`, `deletedCount` and `deletedIds`;
+legacy draft success retains its `data` document and deletion counts/IDs.
+Draft-delete failures retain their existing fields and add a machine-readable
+`code`. Restore, unpublish, scheduling and permanent-delete authorization are
+independent and unchanged.
+
+The current Admin Panel Manage News tables, Draft Desk and Draft Workspace
+use `deleteArticle` (DELETE `articles/:id`, browser `/admin-api`).
+`deleteArticleSoft` delegates to it. The draft POST compatibility path has no
+current wired consumer. Bulk hard-delete uses `articles/forever/bulk`, not
+soft delete. Clients must treat 403 as a permission denial, not a reason to
+retry another route or mutate an entire group locally. No client changes or
+additional rights grants accompany this backend correction.
 
 ### Article content-save authorization and synchronization
 

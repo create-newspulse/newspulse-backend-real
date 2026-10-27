@@ -2,11 +2,10 @@ const mongoose = require('mongoose');
 const { isDeepStrictEqual } = require('node:util');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
-const User = require('../models/User');
 const YouthPulseSubmission = require('../models/YouthPulseSubmission');
 const YouthPulseContributor = require('../models/YouthPulseContributor');
-const { hasSpecialRight, isUserAccessEligible, normalizeRole } = require('../lib/teamAccess');
-const { ACCOUNT_STATUS, lifecycleStatus } = require('../lib/accountLifecycle');
+const { hasSpecialRight, normalizeRole } = require('../lib/teamAccess');
+const { loadArticleMutationActor } = require('../lib/articleMutationActor');
 const { logAudit } = require('../lib/audit');
 const { loadRoleForUser, isSafeZoneMasterLocked } = require('../middleware/requireAuth');
 const { evaluateModuleAccess, getFounderModulePolicy } = require('./founderAccessPolicyService');
@@ -101,13 +100,7 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
   publicOnly = false, checkIntent = true, faithTopicOnly = false, publicSync = true, ignoreComputed = false,
 } = {}) {
   try {
-    if (!session || !req._authUserDoc?._id || !req.admin) throw saveDenied();
-    req.user = req.admin;
-    const user = await User.findById(req._authUserDoc._id, null, { session }).lean();
-    if (!user || lifecycleStatus(user) !== ACCOUNT_STATUS.ACTIVE || user.loginAllowed === false
-      || !isUserAccessEligible(user)
-      || Number(user.tokenVersion || 0) !== Number(req._authUserDoc.tokenVersion || 0)
-      || normalizeRole(user.role) !== normalizeRole(req._authUserDoc.role)) throw saveDenied();
+    const user = await loadArticleMutationActor(req, session, saveDenied);
     if (founder(user)) return null;
     if (isSafeZoneMasterLocked()) throw saveDenied();
     const source = plain(sourceLike);

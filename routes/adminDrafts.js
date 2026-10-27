@@ -76,8 +76,12 @@ router.post('/drafts/:id/delete', requireAdminAuth, async (req, res) => {
     const doc = result.doc;
     return res.json({ ok: true, success: true, data: doc, deletedCount: result.changedCount, deletedIds: result.changedIds, ...articleMutationMetadata(result) });
   } catch (err) {
-    console.error('[ADMIN_DRAFTS][delete-error]', err?.message || err);
-    return res.status(err.statusCode || err.status || 503).json({ ok: false, success: false, message: err.status ? err.message : 'Failed to delete story' });
+    const status = err.statusCode || err.status || 503;
+    console.error('[ADMIN_DRAFTS][delete-error]', { code: err.code || null, status });
+    return res.status(status).json({
+      ok: false, success: false, message: err.status ? err.message : 'Failed to delete story',
+      ...(err.code ? { code: err.code } : {}),
+    });
   }
 });
 

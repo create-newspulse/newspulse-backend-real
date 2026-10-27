@@ -6,6 +6,10 @@ const TranslationJob = require('../models/TranslationJob');
 const AuditLog = require('../models/AuditLog');
 const PushHistory = require('../models/PushHistory');
 const { logAudit } = require('../lib/audit');
+const { hasSpecialRight, normalizeRole } = require('../lib/teamAccess');
+const { loadArticleMutationActor } = require('../lib/articleMutationActor');
+const { loadRoleForUser, isSafeZoneMasterLocked } = require('../middleware/requireAuth');
+const { evaluateModuleAccess, getFounderModulePolicy } = require('./founderAccessPolicyService');
 const {
   buildStoryIdentityFilter, getStoryKeys, getStorySlugs, assertArticleSlugsUnique, UNOWNED_PUBLIC_COPY_FILTER,
 } = require('./articleSlugUniqueness.service');
@@ -22,6 +26,47 @@ function failure(status, message, code = 'ARTICLE_LIFECYCLE_FAILED') {
 function assertFounder(req) {
   if (String(req?.admin?.role || '').toLowerCase() !== 'founder') {
     throw failure(403, 'Founder permission is required.', 'FOUNDER_REQUIRED');
+  }
+}
+
+async function assertSoftDeleteAuthority(req, session) {
+  const denied = () => failure(403,
+    'Effective Manage News access and the news_delete Special Right are required to delete this story.',
+    'ARTICLE_DELETE_FORBIDDEN');
+  try {
+    const user = await loadArticleMutationActor(req, session, denied);
+    if (normalizeRole(user.role) === 'founder' || user.isFounder === true) return;
+    if (isSafeZoneMasterLocked()) throw denied();
+    const policy = await getFounderModulePolicy({ readOnly: true, session });
+    if (!evaluateModuleAccess(user, 'manageNews', policy).allowed) throw denied();
+    const role = user.specialRightsConfigured !== true ? await loadRoleForUser(user, { session }) : null;
+    if (!hasSpecialRight(user, 'news_delete', role, isSafeZoneMasterLocked())) throw denied();
+  } catch (error) {
+    if (error.code === 'ARTICLE_DELETE_FORBIDDEN') {
+      await logAudit(req, 'ACCESS_BLOCKED', null, { module: 'articles', reason: 'article_delete_scope', result: 'blocked' });
+    }
+    throw error;
+  }
+}
+
+function deletionChanged() {
+  return failure(409, 'Article group changed. Reload and retry.', 'ARTICLE_DELETE_SCOPE_CHANGED');
+}
+
+function deletionSnapshot(doc, publicCopy = false) {
+  const fields = ['_id', 'status', 'deletedAt', 'updatedAt', 'sourceArticleId', 'translationGroupId', 'translationKey', 'slug'];
+  fields.push(publicCopy ? 'sourceNewsId' : 'syncVersion');
+  return Object.fromEntries(fields.map(field => [field, doc[field] ?? null]));
+}
+
+async function verifyDeletionMembers(seed, docs, copies, session) {
+  for (const [Model, filter, approved] of [
+    [News, buildStoryIdentityFilter(seed), docs],
+    [PublicArticle, buildPublicCopyFilter(docs), copies],
+  ]) {
+    const current = await Model.find(filter, null, { session }).select('_id').lean();
+    const ids = new Set(approved.map(doc => String(doc._id)));
+    if (current.length !== ids.size || current.some(doc => !ids.has(String(doc._id)))) throw deletionChanged();
   }
 }
 
@@ -157,9 +202,9 @@ function historyEntry(doc, status, action, req, now) {
   };
 }
 
-async function updateMember(doc, patch, action, req, now, session) {
+async function updateMember(doc, patch, action, req, now, session, guard) {
   const updated = await News.findOneAndUpdate(
-    { _id: doc._id, status: doc.status },
+    guard || { _id: doc._id, status: doc.status },
     {
       $set: { ...patch, workflowStage: STAGES[patch.status], workflowUpdatedAt: now },
       $inc: { syncVersion: 1 },
@@ -167,7 +212,7 @@ async function updateMember(doc, patch, action, req, now, session) {
     },
     { new: true, runValidators: false, session }
   ).lean();
-  if (!updated) throw failure(409, 'Article group changed. Reload and retry.');
+  if (!updated) throw guard ? deletionChanged() : failure(409, 'Article group changed. Reload and retry.');
   return updated;
 }
 
@@ -221,12 +266,18 @@ async function changeArticleGroupStatus(id, status, options = {}) {
     throw failure(400, 'A valid scheduledAt is required');
   }
   return inArticleTransaction(async (session, transaction) => {
+    if (status === 'deleted') await assertSoftDeleteAuthority(options.req, session);
     const { seed, docs } = await findArticleGroup(id, session);
     if (options.authorizeSave) await options.authorizeSave(seed, session, transaction);
     if (status === 'draft' && docs.some(doc => doc.status === 'published')) assertFounder(options.req);
     if (status !== 'deleted' && docs.some(doc => doc.status === 'deleted')) {
       throw failure(409, 'Restore the deleted story before changing its status.');
     }
+    const copyFilter = buildPublicCopyFilter(docs);
+    const deleteCopies = status === 'deleted'
+      ? await PublicArticle.find(copyFilter, null, { session })
+        .select('_id status deletedAt updatedAt sourceNewsId sourceArticleId translationGroupId translationKey slug').lean()
+      : null;
     const updated = [];
     for (const doc of docs) {
       const patch = { status };
@@ -239,9 +290,15 @@ async function changeArticleGroupStatus(id, status, options = {}) {
         patch.scheduledAt = patch.publishAt;
       }
       const action = { deleted: 'REJECT', draft: 'UNPUBLISH', scheduled: 'SCHEDULE' }[status] || 'MOVE_STAGE';
-      updated.push(await updateMember(doc, patch, action, options.req, now, session));
+      updated.push(await updateMember(doc, patch, action, options.req, now, session,
+        deleteCopies ? deletionSnapshot(doc) : undefined));
     }
-    const copies = await PublicArticle.updateMany(buildPublicCopyFilter(docs), {
+    const boundedCopies = deleteCopies
+      ? { $and: [copyFilter, deleteCopies.length
+        ? { $or: deleteCopies.map(doc => deletionSnapshot(doc, true)) }
+        : { _id: { $in: [] } }] }
+      : copyFilter;
+    const copies = await PublicArticle.updateMany(boundedCopies, {
       $set: {
         status, deletedAt: status === 'deleted' ? now : null,
         ...(status === 'deleted' ? {} : {
@@ -251,6 +308,10 @@ async function changeArticleGroupStatus(id, status, options = {}) {
       },
     }, { session, runValidators: false });
     if (copies?.acknowledged === false) throw failure(503, 'Public article synchronization failed.');
+    if (deleteCopies) {
+      if (copies?.matchedCount !== deleteCopies.length) throw deletionChanged();
+      await verifyDeletionMembers(seed, docs, deleteCopies, session);
+    }
     const result = {
       docs: updated, previousDocs: [...docs, ...(options.previousDocs || [])],
       doc: serializeNewsArticle(updated.find(doc => String(doc._id) === String(seed._id))),
