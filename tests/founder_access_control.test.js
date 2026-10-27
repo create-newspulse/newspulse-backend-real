@@ -19,6 +19,9 @@ const { requireAuth, requireModuleAccess } = require('../middleware/requireAuth'
 const {
   BULK_FOUNDER_ONLY_ACTION,
   BULK_FOUNDER_ONLY_CONFIRMATION,
+  CANONICAL_ADMIN_MODULE_KEYS,
+  CANONICAL_TO_LEGACY_MODULE,
+  evaluateAllModuleAccess,
   evaluateModuleAccess,
   modulePoliciesFromLegacyVisibility,
   normalizeModulePolicies,
@@ -251,6 +254,121 @@ test('effective access resolves global, individual, temporary and account states
   const rightsOnly = makeUser({ moduleAccessOverride: [], specialRightsOverride: ['finance_create_invoice'] });
   assert.equal(evaluateModuleAccess(rightsOnly, 'financeDesk', buildPolicy({ financeDesk: 'available' })).allowed, false);
 });
+
+for (const moduleKey of CANONICAL_ADMIN_MODULE_KEYS.filter(key => key !== 'safeZone')) {
+  for (const denialFirst of [false, true]) {
+    test(`temporary module denial overrides grants for ${moduleKey} (${denialFirst ? 'denial first' : 'grant first'})`, () => {
+      const now = new Date('2030-01-01T12:00:00.000Z');
+      const legacyKey = CANONICAL_TO_LEGACY_MODULE[moduleKey];
+      const grant = { moduleKey, enabled: true, expiresAt: '2030-01-01T14:00:00.000Z' };
+      const denial = { moduleKey: legacyKey, enabled: false, expiresAt: '2030-01-01T13:00:00.000Z' };
+      const policy = buildPolicy({ [moduleKey]: 'available' });
+      const expected = {
+        key: moduleKey, canonicalKey: moduleKey, visible: true, allowed: false,
+        reasonCode: 'STAFF_ACCESS_DISABLED', globalState: 'available',
+        individualState: 'disabled', temporaryExpiresAt: denial.expiresAt,
+      };
+      for (const state of ['enabled', 'disabled']) {
+        const user = makeUser({
+          moduleAccessStates: { [moduleKey]: state },
+          moduleAccessOverride: [legacyKey],
+          temporaryAccess: denialFirst ? [denial, grant] : [grant, denial],
+        });
+        assert.deepEqual(evaluateModuleAccess(user, moduleKey, policy, { now }), expected);
+        assert.deepEqual(evaluateModuleAccess(user, legacyKey, policy, { now }), expected);
+        assert.deepEqual(evaluateAllModuleAccess(user, policy, { now })[moduleKey], expected);
+      }
+    });
+  }
+}
+
+test('temporary module entries preserve expiry, grant metadata and unrelated-module behavior', () => {
+  const now = new Date('2030-01-01T12:00:00.000Z');
+  const grant = { moduleKey: 'manage_news', enabled: true, expiresAt: '2030-01-01T14:00:00.000Z' };
+  const denial = { moduleKey: 'manageNews', enabled: false, expiresAt: '2030-01-01T13:00:00.000Z' };
+  const expiredGrant = { ...grant, expiresAt: '2030-01-01T11:00:00.000Z' };
+  const expiredDenial = { ...denial, expiresAt: '2030-01-01T11:00:00.000Z' };
+  const cases = [
+    ['grant only', [grant], 'ALLOWED', grant.expiresAt],
+    ['denial only', [denial], 'STAFF_ACCESS_DISABLED', denial.expiresAt],
+    ['expired denial before grant', [expiredDenial, grant], 'ALLOWED', grant.expiresAt],
+    ['expired denial after grant', [grant, expiredDenial], 'ALLOWED', grant.expiresAt],
+    ['denial with expired grant', [expiredGrant, denial], 'STAFF_ACCESS_DISABLED', denial.expiresAt],
+    ['invalid denial', [{ ...denial, expiresAt: 'invalid-date' }, grant], 'ALLOWED', grant.expiresAt],
+    ['missing denial expiry', [{ ...denial, expiresAt: null }, grant], 'ALLOWED', grant.expiresAt],
+    ['denial expires exactly now', [{ ...denial, expiresAt: now }, grant], 'ALLOWED', grant.expiresAt],
+    ['another module denied', [{ ...denial, moduleKey: 'draft_desk' }, grant], 'ALLOWED', grant.expiresAt],
+    ['another module granted', [{ ...grant, moduleKey: 'draft_desk' }, denial], 'STAFF_ACCESS_DISABLED', denial.expiresAt],
+    ['first grant metadata retained', [grant, { ...grant, expiresAt: '2030-01-01T15:00:00.000Z' }], 'ALLOWED', grant.expiresAt],
+    ['expired grant diagnostic', [expiredGrant], 'TEMPORARY_ACCESS_EXPIRED', expiredGrant.expiresAt],
+    ['invalid expiry diagnostic', [{ ...grant, expiresAt: 'invalid-date' }], 'TEMPORARY_ACCESS_EXPIRED', 'invalid-date'],
+    ['malformed and unknown entries', [null, {}, { ...grant, moduleKey: 'unknown-module' }], 'STAFF_ACCESS_DISABLED', null],
+  ];
+  for (const [label, temporaryAccess, reasonCode, temporaryExpiresAt] of cases) {
+    const user = makeUser({ moduleAccessStates: { manageNews: 'disabled' }, temporaryAccess });
+    const decision = evaluateModuleAccess(user, 'manageNews', buildPolicy({ manageNews: 'available' }), { now });
+    assert.equal(decision.reasonCode, reasonCode, label);
+    assert.equal(decision.allowed, reasonCode === 'ALLOWED', label);
+    assert.equal(decision.temporaryExpiresAt, temporaryExpiresAt, label);
+  }
+});
+
+test('temporary module grants cannot bypass global, account or Safe Zone restrictions', () => {
+  const temporaryAccess = [{ moduleKey: 'manage_news', enabled: true, expiresAt: '2099-01-01' }];
+  for (const [globalState, reasonCode] of [
+    ['hidden', 'MODULE_HIDDEN'], ['staff_locked', 'GLOBAL_STAFF_LOCK'], ['founder_only', 'FOUNDER_ONLY'],
+  ]) {
+    const decision = evaluateModuleAccess(makeUser({ temporaryAccess }), 'manageNews', buildPolicy({ manageNews: globalState }));
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.reasonCode, reasonCode);
+  }
+  for (const [account, reasonCode] of [
+    [{ status: 'suspended' }, 'ACCOUNT_SUSPENDED'],
+    [{ accountStatus: 'locked' }, 'ACCOUNT_LOCKED'],
+    [{ accessExpiresAt: new Date('2020-01-01'), noExpiry: false }, 'ACCOUNT_EXPIRED'],
+    [{ loginAllowed: false }, 'ACCOUNT_INACTIVE'],
+  ]) {
+    const decision = evaluateModuleAccess(makeUser({ ...account, temporaryAccess }), 'manageNews', buildPolicy({ manageNews: 'available' }));
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.reasonCode, reasonCode);
+  }
+  const safeZone = evaluateModuleAccess(makeUser({
+    temporaryAccess: [{ ...temporaryAccess[0], moduleKey: 'safe_zone' }],
+  }), 'safeZone', buildPolicy({ safeZone: 'available' }));
+  assert.equal(safeZone.allowed, false);
+  assert.equal(safeZone.reasonCode, 'FOUNDER_ONLY');
+});
+
+test('temporary module denials preserve Founder authority and the fixed Dashboard control', () => {
+  const temporaryAccess = [...CANONICAL_ADMIN_MODULE_KEYS, 'dashboard']
+    .map(moduleKey => ({ moduleKey, enabled: false, expiresAt: '2099-01-01' }));
+  const founder = makeUser({ role: 'founder', temporaryAccess });
+  assert.ok(Object.values(evaluateAllModuleAccess(founder, buildPolicy())).every(decision => decision.allowed));
+  assert.equal(evaluateModuleAccess(makeUser({ temporaryAccess }), 'dashboard', buildPolicy()).allowed, true);
+});
+
+for (const denialFirst of [false, true]) {
+  test(`temporary module denial is consistent in session DTOs and middleware (${denialFirst ? 'denial first' : 'grant first'})`, async () => {
+    const app = buildAccessApp();
+    const grant = { moduleKey: 'finance_desk', enabled: true, expiresAt: '2099-01-01' };
+    const denial = { moduleKey: 'financeDesk', enabled: false, expiresAt: '2099-01-02' };
+    currentUser = makeUser({
+      moduleAccessStates: { financeDesk: 'disabled' },
+      temporaryAccess: denialFirst ? [denial, grant] : [grant, denial],
+    });
+    const token = signToken();
+    const modules = await request(app).get('/api/access/my-modules').set('Authorization', `Bearer ${token}`);
+    assert.equal(modules.status, 200);
+    assert.equal(modules.body.modules.includes('financeDesk'), false);
+    assert.equal(modules.body.effectiveModuleAccess.financeDesk.reasonCode, 'STAFF_ACCESS_DISABLED');
+    assert.deepEqual(modules.body.data.effectiveModuleAccess, modules.body.effectiveModuleAccess);
+    const direct = await request(app).get('/api/access/can-access/finance_desk').set('Authorization', `Bearer ${token}`);
+    assert.equal(direct.status, 200);
+    assert.equal(direct.body.allowed, false);
+    const protectedRoute = await request(app).get('/secure-finance').set('Authorization', `Bearer ${token}`);
+    assert.equal(protectedRoute.status, 403);
+  });
+}
 
 test('authoritative module access service covers global staff individual temporary founder and role-preset cases', () => {
   const now = new Date('2026-08-07T12:00:00.000Z');

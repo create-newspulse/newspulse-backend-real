@@ -121,6 +121,11 @@ PublicSiteSettingsSchema.statics.getOrCreate = async function (opts = {}) {
     ? { $or: [{ scope: 'production' }, { scope: { $exists: false } }] }
     : { scope: desiredScope };
 
+  if (opts.readOnly) {
+    const settings = await this.findOne(query, null, { session: opts.session }).sort({ updatedAt: -1, createdAt: -1 }).lean();
+    return settings || { scope: desiredScope, published: this.getDefaultSettings() };
+  }
+
   let settings = await this.findOne(query).sort({ updatedAt: -1, createdAt: -1 });
   if (!settings) {
     settings = await this.create({

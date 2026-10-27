@@ -40,6 +40,7 @@ function withGroupTranslations(doc, groupDocs, options = {}) {
 }
 
 async function syncNewsTranslationBuckets(groupDocs, options = {}) {
+  options.saveScope?.assertNewsRecords(groupDocs);
   const now = options.now || new Date();
   const futureVisibilityDates = groupDocs.map(doc => {
     const bucket = { title: doc.title, summary: doc.description || doc.summary, content: doc.content };
@@ -57,6 +58,7 @@ async function syncNewsTranslationBuckets(groupDocs, options = {}) {
     doc.translationStatus = next.translationStatus;
     doc.publicVisibilityRefreshAt = refreshAt;
     if (typeof doc.save === 'function') {
+      options.saveScope?.bindNewsDocument(doc);
       await doc.save({ validateModifiedOnly: true, session: options.session });
     } else {
       const result = await News.updateOne({ _id: doc._id }, {
@@ -258,6 +260,23 @@ function _buildTranslationBucket(src, options = {}) {
   return out;
 }
 
+function buildPublicArticleMatch(newsDoc, options = {}) {
+  const slug = normalizeSlug(newsDoc.slug);
+  const keys = getStoryKeys(newsDoc);
+  const ownership = [UNOWNED_PUBLIC_COPY_FILTER];
+  if (keys.length) ownership.push(
+    { translationGroupId: { $in: keys } },
+    { translationKey: { $in: keys } }
+  );
+  const or = [{ slug, $or: ownership }];
+  if (newsDoc._id) or.unshift({ sourceNewsId: newsDoc._id });
+  const previousSlug = normalizeSlug(options.previousDoc?.slug);
+  if (previousSlug && previousSlug !== slug) or.push({
+    slug: previousSlug, ...UNOWNED_PUBLIC_COPY_FILTER,
+  });
+  return { $or: or };
+}
+
 async function _syncPublicArticleFromNews(newsDoc, options = {}) {
   if (!newsDoc) return null;
   newsDoc = withGroupTranslations(newsDoc, options.groupDocs, options);
@@ -426,18 +445,10 @@ async function _syncPublicArticleFromNews(newsDoc, options = {}) {
     stateNames: Array.isArray(newsDoc.stateNames) ? newsDoc.stateNames : [],
   };
 
-  const keys = getStoryKeys(newsDoc);
-  const ownership = [UNOWNED_PUBLIC_COPY_FILTER];
-  if (keys.length) ownership.push(
-    { translationGroupId: { $in: keys } },
-    { translationKey: { $in: keys } }
-  );
-  const or = [{ slug, $or: ownership }];
-  if (newsDoc._id) or.unshift({ sourceNewsId: newsDoc._id });
-  const previousSlug = normalizeSlug(options.previousDoc?.slug);
-  if (previousSlug && previousSlug !== slug) or.push({
-    slug: previousSlug, ...UNOWNED_PUBLIC_COPY_FILTER,
-  });
+  const match = buildPublicArticleMatch(newsDoc, options);
+  const target = options.saveScope
+    ? await options.saveScope.publicWriteTarget(newsDoc, match, options.session)
+    : { filter: match, upsert: true };
 
   const updateOp = { $set: update };
   if (!pulseDialogue) updateOp.$unset = { pulseDialogue: '' };
@@ -447,11 +458,15 @@ async function _syncPublicArticleFromNews(newsDoc, options = {}) {
     updateOp.$setOnInsert = { publishedAt: new Date() };
   }
 
-  return PublicArticle.findOneAndUpdate(
-    { $or: or },
+  const saved = await PublicArticle.findOneAndUpdate(
+    target.filter,
     updateOp,
-    { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true, session: options.session }
+    { upsert: target.upsert, new: true, setDefaultsOnInsert: true, runValidators: true, session: options.session }
   ).lean();
+  if (options.saveScope && !saved) throw Object.assign(new Error('Article save scope changed. Reload and retry.'), {
+    statusCode: 409, code: 'ARTICLE_SAVE_SCOPE_CHANGED',
+  });
+  return saved;
 }
 
 async function syncPublicArticleFromNews(newsDoc, options = {}) {
@@ -461,6 +476,7 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     if (!saved?._id) throw new Error('Public article synchronization produced no record');
     return saved;
   } catch (error) {
+    if (error?.code === 'ARTICLE_SAVE_FORBIDDEN' || error?.code === 'ARTICLE_SAVE_SCOPE_CHANGED') throw error;
     const conflict = error?.code === 11000 || error?.code === 11001;
     logger.warn?.('[articles.syncPublicArticleFromNews] failed', {
       code: conflict ? 'SLUG_CONFLICT' : 'PUBLIC_ARTICLE_SYNC_FAILED',
@@ -479,5 +495,6 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
 module.exports = {
   syncPublicArticleFromNews,
   syncNewsTranslationBuckets,
+  buildPublicArticleMatch,
   sponsoredArticleFields,
 };

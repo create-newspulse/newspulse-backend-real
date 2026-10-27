@@ -180,17 +180,17 @@ function isSafeZoneMasterLocked() {
   return ['1', 'true', 'yes', 'on', 'locked'].includes(value);
 }
 
-async function loadRoleForUser(user) {
+async function loadRoleForUser(user, options = {}) {
   if (!isDbReady() || !user || normalizeRole(user.role) === 'founder' || user.isFounder) return null;
 
   if (user.roleId && mongoose.isValidObjectId(String(user.roleId))) {
-    const byId = await Role.findById(user.roleId).lean();
+    const byId = await Role.findById(user.roleId, null, { session: options.session }).lean();
     if (byId) return byId;
   }
 
   const roleSlug = String(user.role || user.roleName || '').trim().toLowerCase().replace(/\s*&\s*/g, '-').replace(/\s*\/\s*/g, '-').replace(/\s+/g, '-');
   if (!roleSlug) return null;
-  return Role.findOne({ slug: roleSlug }).lean();
+  return Role.findOne({ slug: roleSlug }, null, { session: options.session }).lean();
 }
 
 async function requireAuth(req, res, next) {
@@ -420,6 +420,8 @@ module.exports = {
   requireFounder,
   requireModuleAccess,
   requireSpecialRight,
+  loadRoleForUser,
+  isSafeZoneMasterLocked,
   requireTaskRight,
   requireAccountControlRight,
   blockFounderAccountMutation,

@@ -6,6 +6,8 @@ const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 const { buildArticleCreatorFields, hasArticleCreatorInput } = require('../lib/articleCreator');
 const { buildPubliclyVisibleNewsArticleFilter } = require('../services/publicArticleVisibility.service');
 const { isFounderRole } = require('../lib/teamAccess');
+const { inArticleTransaction } = require('../services/articleLifecycle.service');
+const { authorizeArticleSave, contentSaveBody, scopeChanged } = require('../services/articleSaveAccess.service');
 
 function normalizeLanguage(v) {
   const s = String(v ?? '').trim().toLowerCase();
@@ -147,6 +149,7 @@ exports.getNews = async (req, res) => {
 
 exports.updateNews = async (req, res) => {
   try {
+    req.user = req.admin;
     const id = String(req.params.id || '').trim();
     if (!id) return res.status(400).json({ error: 'Missing id' });
 
@@ -185,16 +188,38 @@ exports.updateNews = async (req, res) => {
     if (translationKey) body.translationKey = translationKey;
     else if (body.translationKey !== undefined) delete body.translationKey;
 
-    const doc = await News.findById(id);
-    if (!doc) return res.status(404).json({ error: 'Not found' });
-
-    doc.set(body);
-    ensureNewsSlugs(doc);
-    await doc.save();
+    const updated = await inArticleTransaction(async session => {
+      const doc = await News.findById(id, null, { session });
+      if (!doc) return null;
+      const safeBody = contentSaveBody(body, doc, isFounderRole(req.admin?.role));
+      const scope = await authorizeArticleSave(req, doc, safeBody, session, { publicSync: false });
+      scope?.bindNewsDocument(doc);
+      doc.$where = {
+        ...(doc.$where || {}),
+        status: doc.status,
+        syncVersion: doc.syncVersion ?? null,
+        updatedAt: doc.updatedAt ?? null,
+        sourceArticleId: doc.sourceArticleId ?? null,
+        translationGroupId: doc.translationGroupId ?? null,
+        translationKey: doc.translationKey ?? null,
+      };
+      doc.set(safeBody);
+      ensureNewsSlugs(doc);
+      try {
+        await doc.save({ session });
+      } catch (error) {
+        if (error.name === 'DocumentNotFoundError') throw scopeChanged();
+        throw error;
+      }
+      return doc;
+    });
+    if (!updated) return res.status(404).json({ error: 'Not found' });
 
     return res.json({ message: 'News updated successfully' });
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    const status = error.statusCode || error.status || 500;
+    console.error('[news.update] failed', { code: error.code || null, status });
+    return res.status(status).json({ error: error.message, ...(error.code ? { code: error.code } : {}) });
   }
 };
 

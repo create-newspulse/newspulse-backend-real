@@ -60,10 +60,10 @@ function toYouthPulseContributorDto(doc = {}) {
   };
 }
 
-async function syncYouthPulseContributorStats(contributorId) {
+async function syncYouthPulseContributorStats(contributorId, options = {}) {
   if (!contributorId || !mongoose.isValidObjectId(String(contributorId))) return null;
 
-  const [stats] = await YouthPulseSubmission.aggregate([
+  const aggregation = YouthPulseSubmission.aggregate([
     { $match: { contributorId: new mongoose.Types.ObjectId(String(contributorId)) } },
     {
       $group: {
@@ -83,6 +83,7 @@ async function syncYouthPulseContributorStats(contributorId) {
       },
     },
   ]);
+  const [stats] = await (options.session ? aggregation.session(options.session) : aggregation);
 
   return YouthPulseContributor.findByIdAndUpdate(
     contributorId,
@@ -94,7 +95,7 @@ async function syncYouthPulseContributorStats(contributorId) {
         lastSubmissionAt: stats?.lastSubmissionAt || null,
       },
     },
-    { new: true }
+    { new: true, session: options.session }
   );
 }
 

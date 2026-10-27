@@ -69,6 +69,8 @@ async function inArticleTransaction(work, options = {}) {
   try {
     await session.withTransaction(async () => {
       transaction.afterCommit.length = 0;
+      delete transaction.saveIntentValidated;
+      delete transaction.saveScope;
       result = await work(session, transaction);
     });
   } finally {
@@ -90,12 +92,23 @@ async function withActiveArticleSource(id, work, options = {}) {
     if (!source || source.status === 'deleted' || source.deletedAt) {
       throw failure(409, 'The source story was deleted. Translation was cancelled.', 'TRANSLATION_SOURCE_CHANGED');
     }
+    const authorizeSave = options.authorizeSave || transaction.authorizeSave;
+    if (authorizeSave) {
+      transaction.authorizeSave = authorizeSave;
+      transaction.saveScope = await authorizeSave(source, session, transaction);
+      transaction.saveIntentValidated = true;
+    }
+    const guardFilter = { ...buildStoryIdentityFilter(source), status: { $ne: 'deleted' }, deletedAt: null };
+    const boundedGuard = transaction.saveScope
+      ? { $and: [guardFilter, transaction.saveScope.guard] }
+      : guardFilter;
     // Every edition takes the same write dependency, serializing generation and group deletion.
     const guard = await News.updateMany(
-      { ...buildStoryIdentityFilter(source), status: { $ne: 'deleted' }, deletedAt: null },
+      boundedGuard,
       { $inc: { syncVersion: 1 } }, { session }
     );
-    if (!guard.acknowledged || !(guard.matchedCount > 0)) {
+    if (!guard.acknowledged || !(guard.matchedCount > 0)
+      || (transaction.saveScope && guard.matchedCount !== transaction.saveScope.ids.length)) {
       throw failure(409, 'The source story changed. Retry the operation.', 'TRANSLATION_SOURCE_CHANGED');
     }
     return work(source, session, transaction);
@@ -209,6 +222,7 @@ async function changeArticleGroupStatus(id, status, options = {}) {
   }
   return inArticleTransaction(async (session, transaction) => {
     const { seed, docs } = await findArticleGroup(id, session);
+    if (options.authorizeSave) await options.authorizeSave(seed, session, transaction);
     if (status === 'draft' && docs.some(doc => doc.status === 'published')) assertFounder(options.req);
     if (status !== 'deleted' && docs.some(doc => doc.status === 'deleted')) {
       throw failure(409, 'Restore the deleted story before changing its status.');
@@ -255,6 +269,7 @@ async function changeArticleGroupStatus(id, status, options = {}) {
 async function restoreArticleGroup(id, options = {}) {
   return inArticleTransaction(async (session, transaction) => {
     const { seed, docs } = await findArticleGroup(id, session);
+    if (options.authorizeSave) await options.authorizeSave(seed, session, transaction);
     if (docs.some(doc => doc.status !== 'deleted')) {
       throw failure(409, 'Only a completely soft-deleted story can be restored.');
     }

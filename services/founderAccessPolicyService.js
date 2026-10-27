@@ -272,9 +272,13 @@ async function getOrCreateSiteSettings() {
   return settings;
 }
 
-async function getFounderModulePolicy() {
-  if (arguments[0]?.defaultWhenDbUnavailable && !(mongoose.connection && mongoose.connection.db)) {
+async function getFounderModulePolicy(options = {}) {
+  if (options.defaultWhenDbUnavailable && !(mongoose.connection && mongoose.connection.db)) {
     return normalizeStoredPolicy(null);
+  }
+  if (options.readOnly) {
+    const settings = await SiteSettings.findOne({}, null, { session: options.session }).lean();
+    return normalizeStoredPolicy(settings);
   }
   const settings = await getOrCreateSiteSettings();
   return normalizeAndUpgradeStoredPolicy(settings);
@@ -625,6 +629,7 @@ function staffModuleStateFromLegacyList(user) {
 
 function temporaryModuleGrant(user, canonicalKey, now = new Date()) {
   const list = Array.isArray(user?.temporaryAccess) ? user.temporaryAccess : [];
+  let activeGrant = null;
   let expiredMatch = null;
 
   for (const entry of list) {
@@ -636,10 +641,10 @@ function temporaryModuleGrant(user, canonicalKey, now = new Date()) {
       continue;
     }
     if (entry.enabled === false) return { state: 'disabled', expiresAt: expiresAt.toISOString(), expired: false };
-    return { state: 'temporary', expiresAt: expiresAt.toISOString(), expired: false };
+    if (!activeGrant) activeGrant = { state: 'temporary', expiresAt: expiresAt.toISOString(), expired: false };
   }
 
-  return expiredMatch ? { state: 'temporary', expiresAt: expiredMatch, expired: true } : null;
+  return activeGrant || (expiredMatch ? { state: 'temporary', expiresAt: expiredMatch, expired: true } : null);
 }
 
 function evaluateModuleAccess(user, moduleKey, policy, options = {}) {

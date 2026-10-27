@@ -33,7 +33,10 @@ const TITLES = {
 };
 
 function install(context) {
-  const state = installEditorialFixture(context);
+  const state = installEditorialFixture(context, {
+    staff: { specialRightsConfigured: true, specialRightsOverride: ['news_edit'], moduleAccessStates: { manageNews: 'enabled' } },
+    modulePolicies: { manageNews: 'available' },
+  });
   const findUser = User.findById;
   let account;
   context.mock.method(User, 'findById', id => {
@@ -267,10 +270,11 @@ for (const base of ['/api/news', '/api/api/news']) {
         title: 'Edited', $set: { createdByUserId: OTHER_ID }, $unset: { createdByUserId: 1 },
         $rename: { title: 'createdByUserId' },
       }, 'editor');
-      assert.equal(response.status, 200);
+      assert.equal(response.status, 403);
+      assert.equal(response.body.code, 'ARTICLE_SAVE_FORBIDDEN');
       assert.equal(String(doc.createdByUserId), OWNER_ID);
-      assert.equal(doc.title, 'Edited');
-      assert.equal(save.mock.callCount(), 1);
+      assert.equal(doc.title, 'Original');
+      assert.equal(save.mock.callCount(), 0);
     });
   }
 }

@@ -39,16 +39,17 @@ function normalizeLanguageList(values) {
   return out;
 }
 
-async function getEnabledPublicLanguages() {
+async function getEnabledPublicLanguages(options = {}) {
   try {
     if (String(process.env.NODE_ENV || '').toLowerCase() === 'test' && (!mongoose.connection || mongoose.connection.readyState !== 1)) {
       return SUPPORTED_LANGS.slice();
     }
-    const settings = await PublicSiteSettings.getOrCreate();
+    const settings = await PublicSiteSettings.getOrCreate(options);
     const langs = settings?.published?.languageTheme?.languages;
     const normalized = normalizeLanguageList(langs);
     return normalized.length ? normalized : SUPPORTED_LANGS.slice();
-  } catch (_) {
+  } catch (error) {
+    if (options.readOnly) throw error;
     return SUPPORTED_LANGS.slice();
   }
 }
@@ -403,12 +404,12 @@ async function enqueueArticleTranslationGeneration(sourceDocInput, options = {})
   const source = pickSourceObject(sourceDocInput);
   if (!source?._id) return null;
   if (!canWriteTranslationJob()) return null;
-  const sourceLanguage = (await resolveSourceLanguage(source, options)).lang;
-  const enabledLanguages = await getEnabledPublicLanguages();
-  const targetLanguages = enabledLanguages.filter((lang) => lang !== sourceLanguage);
   const sourceHash = sourceHashForDoc(source);
   return withActiveArticleSource(source._id, async (current, session) => {
     assertCurrentSource(current, String(source.translationGroupId || source.translationKey || ''), sourceHash);
+    const sourceLanguage = (await resolveSourceLanguage(source, options)).lang;
+    const enabledLanguages = await getEnabledPublicLanguages({ readOnly: Boolean(options.authorizeSave), session });
+    const targetLanguages = enabledLanguages.filter((lang) => lang !== sourceLanguage);
     return upsertJob(current, { sourceLanguage, targetLanguages, sourceHash, requestedBy: options.requestedBy || null }, session);
   }, options);
 }
@@ -428,6 +429,11 @@ async function markSiblingTranslationsOutdated(sourceDocInput, options = {}) {
     ],
   };
   if (sourceLanguage) filter.$and.push({ $or: [{ language: { $ne: sourceLanguage } }, { lang: { $ne: sourceLanguage } }] });
+  if (options.saveScope) {
+    const members = await News.find(filter, null, { session: options.session }).lean();
+    options.saveScope.assertNewsRecords(members);
+    filter.$and.push({ _id: { $in: options.saveScope.ids } });
+  }
   return News.updateMany(filter, {
     $set: {
       translationReviewStatus: 'translation_outdated',

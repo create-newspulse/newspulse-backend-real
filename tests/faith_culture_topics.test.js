@@ -11,6 +11,7 @@ const News = require('../models/News');
 const PublicArticle = require('../models/Article');
 const { accountAuthFixture } = require('./helpers/accountAuthFixture');
 const { matches, runPipeline } = require('./helpers/pulseDialogueAggregate');
+const { installEditorialFixture, seedGroup } = require('./helpers/editorialLifecycleFixture');
 const { FAITH_TOPIC_CODES, buildFaithTopicPatch } = require('../lib/faithCultureTopics');
 const { computeContentFingerprint, buildChildNewsSyncPatch } = require('../services/translationGroupSync.service');
 const { sourceHashForDoc } = require('../services/articleTranslationGeneration.service');
@@ -518,11 +519,16 @@ for (const topic of ['faith-spiritual-life', null]) {
 }
 
 test('A source/category race returns 409 without changing source or sibling metadata', async context => {
-  const state = setup(context);
-  state.sourceRace = true;
-  assert.equal((await state.put({ topic: 'faith-spiritual-life' })).status, 409);
-  assert.ok([...state.docs.values()].every(doc => doc.topic === 'living-heritage'));
-  assert.equal(state.writes[0].filter.syncVersion, 4);
+  const state = installEditorialFixture(context);
+  const { ids } = seedGroup(state);
+  state.rows.News.forEach(doc => { doc.topic = 'living-heritage'; doc.syncVersion = 4; });
+  const before = JSON.stringify(state.rows);
+  const update = context.mock.method(News, 'findOneAndUpdate', async () => null);
+  const response = await state.request('put', `/api/articles/${ids[0]}`, { topic: 'faith-spiritual-life' });
+  assert.equal(response.status, 409);
+  assert.equal(JSON.stringify(state.rows), before);
+  assert.equal(update.mock.calls[0].arguments[0].syncVersion, 4);
+  assert.equal(state.invalidations.length, 0);
 });
 
 test('A zero-match sibling update cannot be reported as successful synchronization', async context => {
@@ -533,10 +539,15 @@ test('A zero-match sibling update cannot be reported as successful synchronizati
 });
 
 test('An older topic synchronization cannot overwrite a sibling with a newer source version', async context => {
-  const state = setup(context, [article(1), article(2, 'hi', { syncVersion: 6 })]);
-  assert.equal((await state.put({ topic: null })).status, 503);
-  assert.equal(state.docs.get(id(2)).topic, 'living-heritage');
-  assert.equal(state.docs.get(id(2)).syncVersion, 6);
+  const state = installEditorialFixture(context);
+  const { ids } = seedGroup(state);
+  state.rows.News.forEach(doc => { doc.topic = 'living-heritage'; doc.syncVersion = 4; });
+  state.rows.News[1].syncVersion = 6;
+  const before = JSON.stringify(state.rows);
+  const response = await state.request('put', `/api/articles/${ids[0]}`, { topic: null });
+  assert.equal(response.status, 503);
+  assert.equal(JSON.stringify(state.rows), before);
+  assert.equal(state.invalidations.length, 0);
 });
 
 test('Faith topic changes submitted while publishing reach existing siblings without an extra content sync', async context => {

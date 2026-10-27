@@ -614,13 +614,15 @@ newsSchema.set('toJSON', { virtuals: true });
 newsSchema.set('toObject', { virtuals: true });
 
 newsSchema.post('save', async function syncYouthPulseSubmission(doc) {
+  const session = typeof doc?.$session === 'function' ? doc.$session() : null;
   try {
     if (!doc || String(doc.sourceType || '').trim().toLowerCase() !== 'youth_pulse') return;
     if (!doc.youthPulseSubmissionId || !mongoose.isValidObjectId(String(doc.youthPulseSubmissionId))) return;
 
     const YouthPulseSubmission = require('./YouthPulseSubmission');
     const { syncYouthPulseContributorStats } = require('../services/youthPulseContributor.service');
-    const submission = await YouthPulseSubmission.findById(doc.youthPulseSubmissionId);
+    const submission = await YouthPulseSubmission.findById(doc.youthPulseSubmissionId, null, { session });
+    doc.$locals?.articleSaveScope?.assertYouthPulseSubmission(doc, submission);
     if (!submission) return;
 
     submission.linkedDraftId = doc._id;
@@ -632,12 +634,15 @@ newsSchema.post('save', async function syncYouthPulseSubmission(doc) {
       submission.status = 'draft_created';
     }
 
-    await submission.save();
+    await submission.save({ session });
 
     if (submission.contributorId) {
-      await syncYouthPulseContributorStats(submission.contributorId).catch(() => null);
+      await syncYouthPulseContributorStats(submission.contributorId, { session });
     }
-  } catch (_) {}
+  } catch (error) {
+    console.error('[news.youthPulseSync] failed', { code: error?.code || 'YOUTH_PULSE_SYNC_FAILED' });
+    if (session) throw error;
+  }
 });
 
 // Indexes for workflow board

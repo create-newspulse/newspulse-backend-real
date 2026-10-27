@@ -335,6 +335,12 @@ function collectTranslationGroupInvalidationTargets(masterDoc, childDocs = []) {
   };
 }
 
+function isFaithTopicSyncChild(master, child, { leavingFaith = false } = {}) {
+  return isChildLinkedToMaster(master, child)
+    && Boolean(normalizeLanguage(child.lang) || normalizeLanguage(child.language) || normalizeLanguage(child.originalLang))
+    && (isFaithCultureCategory(child.category) || (leavingFaith && FAITH_TOPIC_CODES.includes(child.topic)));
+}
+
 async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
   const logger = options.logger || console;
   let master = isPlainObject(masterDoc) ? masterDoc : null;
@@ -357,7 +363,7 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const metadata = options.metadata || prepareSourceSyncMetadata(master, { now, bumpVersion: false });
 
-  const updatedChildren = await withActiveArticleSource(master._id, async (current, session) => {
+  const updatedChildren = await withActiveArticleSource(master._id, async (current, session, transaction) => {
     if (getGroupKey(current) !== groupKey) {
       throw Object.assign(new Error('Translation group changed. Reload and retry.'), { statusCode: 409 });
     }
@@ -366,6 +372,7 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
       _id: { $ne: master._id },
       $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }],
     }, null, { session });
+    transaction.saveScope?.assertNewsRecords([current, ...childDocs]);
 
     const changed = [];
     for (const child of childDocs) {
@@ -386,8 +393,7 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
 
       const childObject = child.toObject ? child.toObject({ virtuals: true }) : child;
       if (faithTopicOnly) {
-        if (!normalizeLanguage(child.lang) && !normalizeLanguage(child.language) && !normalizeLanguage(child.originalLang)) continue;
-        if (!isFaithCultureCategory(child.category) && !(leavingFaith && FAITH_TOPIC_CODES.includes(child.topic))) continue;
+        if (!isFaithTopicSyncChild(master, child, { leavingFaith })) continue;
         if (Number(child.syncVersion || 0) > metadata.syncVersion) {
           throw new Error('Faith topic synchronization was superseded by a newer update');
         }
@@ -418,32 +424,39 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
       const patch = buildChildNewsSyncPatch(master, childObject, { now, metadata });
 
       Object.assign(child, patch);
+      transaction.saveScope?.bindNewsDocument(child);
       await child.save({ validateModifiedOnly: true, session });
       changed.push(child);
     }
     const groupDocs = [master, ...changed];
-    await syncNewsTranslationBuckets(groupDocs, { session, now });
-    const ordered = [...groupDocs].sort((a, b) =>
-      Number(isPubliclyVisibleNewsArticle(a, { now })) - Number(isPubliclyVisibleNewsArticle(b, { now })));
+    await syncNewsTranslationBuckets(groupDocs, { session, now, saveScope: transaction.saveScope });
+    const ordered = transaction.saveScope
+      ? transaction.saveScope.orderPublicRecords(groupDocs)
+      : [...groupDocs].sort((a, b) =>
+        Number(isPubliclyVisibleNewsArticle(a, { now })) - Number(isPubliclyVisibleNewsArticle(b, { now })));
     for (const doc of ordered) await syncPublicArticleFromNews(doc, {
-      logger, groupDocs, session, now, throwOnError: true,
+      logger, groupDocs, session, now, throwOnError: true, saveScope: transaction.saveScope,
     });
+    await transaction.saveScope?.verifyPublicCopies(session);
     return changed;
   }, options);
 
-  if (options.invalidate !== false) {
-    const invalidate = () => invalidateArticleContent([master, ...updatedChildren], {
-      reason: options.reason || 'translation_group_sync', publicVisibilityRemoved: true, logger,
-    });
-    if (options.session) options.afterCommit.push(invalidate);
-    else await invalidate();
-  }
-
-  return {
+  const result = {
     ok: true,
     childrenUpdated: updatedChildren.length,
     childIds: updatedChildren.map((doc) => String(doc._id)),
   };
+  if (options.invalidate !== false) {
+    const invalidate = async () => {
+      result.revalidation = await invalidateArticleContent([master, ...updatedChildren], {
+        reason: options.reason || 'translation_group_sync', publicVisibilityRemoved: true, logger,
+      });
+    };
+    if (options.session) options.afterCommit.push(invalidate);
+    else await invalidate();
+  }
+
+  return result;
 }
 
 async function syncTranslationGroupMetadataInSession(doc, options) {
@@ -467,6 +480,7 @@ async function syncTranslationGroupMetadataInSession(doc, options) {
   const imageChanged = ['coverImage', 'coverImageUrl', 'imageURL'].some(changed);
   const beforeImage = before.coverImage?.url || before.coverImageUrl || before.imageURL || null;
   const members = await News.find(buildStoryIdentityFilter(doc), null, { session: options.session }).lean();
+  options.saveScope?.assertNewsRecords(members);
   const updated = [];
   for (const member of members) {
     const patch = { ...shared };
@@ -485,16 +499,19 @@ async function syncTranslationGroupMetadataInSession(doc, options) {
   if (!updated.some(member => String(member._id) === String(doc._id))) {
     throw new Error('Article group changed during metadata synchronization');
   }
-  await syncNewsTranslationBuckets(updated, { session: options.session, now });
+  await syncNewsTranslationBuckets(updated, { session: options.session, now, saveScope: options.saveScope });
   if (updated.some(member => member.status === 'published') || before.status === 'published') {
-    const ordered = [...updated].sort((a, b) =>
-      Number(isPubliclyVisibleNewsArticle(a, { now })) - Number(isPubliclyVisibleNewsArticle(b, { now })));
+    const ordered = options.saveScope
+      ? options.saveScope.orderPublicRecords(updated)
+      : [...updated].sort((a, b) =>
+        Number(isPubliclyVisibleNewsArticle(a, { now })) - Number(isPubliclyVisibleNewsArticle(b, { now })));
     for (const member of ordered) {
       await syncPublicArticleFromNews(member, {
-        groupDocs: updated, throwOnError: true, session: options.session, now,
+        groupDocs: updated, throwOnError: true, session: options.session, now, saveScope: options.saveScope,
         previousDoc: String(member._id) === String(doc._id) ? before : undefined,
       });
     }
+    await options.saveScope?.verifyPublicCopies(options.session);
   }
   return {
     ok: true, childrenUpdated: Math.max(0, updated.length - 1),
@@ -507,8 +524,8 @@ async function syncTranslationGroupMetadataInSession(doc, options) {
 async function syncTranslationGroupMetadata(doc, options = {}) {
   const result = options.session
     ? await syncTranslationGroupMetadataInSession(doc, options)
-    : await withActiveArticleSource(doc._id, (current, session) =>
-      syncTranslationGroupMetadataInSession(current, { ...options, session }));
+    : await withActiveArticleSource(doc._id, (current, session, transaction) =>
+      syncTranslationGroupMetadataInSession(current, { ...options, ...transaction }), options);
   if (options.invalidate !== false) await invalidateArticleContent(result.docs, {
     previousDocs: result.previousDocs,
     reason: options.reason || 'article_update', publicVisibilityRemoved: true,
@@ -520,6 +537,7 @@ module.exports = {
   computeContentFingerprint,
   normalizeTranslationGroupKey,
   isChildLinkedToMaster,
+  isFaithTopicSyncChild,
   prepareSourceSyncMetadata,
   buildChildNewsSyncPatch,
   collectTranslationGroupInvalidationTargets,

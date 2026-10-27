@@ -3,6 +3,8 @@ require('./publicNewsIsolation');
 const assert = require('node:assert/strict');
 const request = require('supertest');
 const mongoose = require('mongoose');
+const User = require('../../models/User');
+const SiteSettings = require('../../models/SiteSettings');
 const { accountAuthFixture } = require('./accountAuthFixture');
 const { runPipeline } = require('./pulseDialogueAggregate');
 const app = require('../../server');
@@ -16,6 +18,8 @@ const models = {
   PushHistory: require('../../models/PushHistory'),
   WorkflowEvent: require('../../models/WorkflowEvent'),
   PublicConfigVersion: require('../../models/PublicConfigVersion'),
+  YouthPulseSubmission: require('../../models/YouthPulseSubmission'),
+  YouthPulseContributor: require('../../models/YouthPulseContributor'),
 };
 const protectedModels = Object.fromEntries(
   ['Media', 'TranslationCache', 'TranslationMemory', 'ArticleAnalyticsEvent', 'ArticleAnalyticsDaily']
@@ -94,9 +98,24 @@ function aggregate(rows, pipeline) {
   return rows;
 }
 
-function installEditorialFixture(context) {
+function installEditorialFixture(context, { staff, modulePolicies } = {}) {
   const auth = accountAuthFixture();
   auth.install(context);
+  if (staff) {
+    const findUser = User.findById;
+    context.mock.method(User, 'findById', (...args) => {
+      const query = findUser(...args);
+      const lean = query.lean.bind(query);
+      query.lean = async () => {
+        const user = await lean();
+        return user ? { ...user, ...clone(staff) } : null;
+      };
+      return query;
+    });
+  }
+  context.mock.method(SiteSettings, 'findOne', () => ({ lean: async () => (
+    modulePolicies ? { adminModulePolicy: { modulePolicies } } : null
+  ) }));
   const state = {
     rows: Object.fromEntries(Object.keys(models).map(key => [key, []])),
     calls: [], failures: {}, invalidations: [], transactions: [],
@@ -133,6 +152,7 @@ function installEditorialFixture(context) {
   };
   const hydrate = (name, row) => {
     if (!row || typeof row !== 'object') return row;
+    if (name === 'News' && state.realNewsDocuments) return models.News.hydrate(clone(row));
     const doc = clone(row);
     const serialize = () => name === 'News'
       ? { ...clone(doc), body: doc.content, id: String(doc._id) }
@@ -144,9 +164,11 @@ function installEditorialFixture(context) {
       save: { value: async (options) => {
         state.calls.push({ name, method: 'save', options });
         fail(name, 'save');
-        const index = state.rows[name].findIndex(item => equal(item._id, doc._id));
+        const index = state.rows[name].findIndex(item => equal(item._id, doc._id) && matches(item, doc.$where || {}));
         if (index < 0) throw Object.assign(new Error('Synthetic missing document'), { name: 'DocumentNotFoundError' });
-        state.rows[name][index] = clone(doc);
+        const saved = clone(doc);
+        delete saved.$where;
+        state.rows[name][index] = saved;
         return doc;
       } },
     });
@@ -176,7 +198,7 @@ function installEditorialFixture(context) {
       const map = row => {
         if (!row || typeof row !== 'object') return row;
         let out = clone(row);
-        if (selection && !selection.includes('-')) {
+        if (selection && !selection.includes('-') && !selection.split(/\s+/).every(field => field.startsWith('+'))) {
           out = { _id: row._id };
           for (const field of selection.split(/\s+/).filter(Boolean)) {
             if (get(row, field) !== undefined) put(out, field, get(row, field));
@@ -270,17 +292,19 @@ function installEditorialFixture(context) {
     });
     context.mock.method(Model, 'aggregate', pipeline => ({
       option(options) { state.calls.push({ name, method: 'aggregate', pipeline, options }); return this; },
+      session(session) { return this.option({ session }); },
       exec: async () => { fail(name, 'aggregate'); return aggregate(clone(state.rows[name]), pipeline); },
+      then(resolve, reject) { return this.exec().then(resolve, reject); },
     }));
   }
   context.mock.method(mongoose, 'startSession', async () => {
-    const session = {
+    const session = new class {
       async withTransaction(work) {
         const before = clone(state.rows);
         try { await work(); this.committed = true; }
         catch (error) { state.rows = before; this.aborted = true; throw error; }
-      },
-      async endSession() { this.ended = true; },
+      }
+      async endSession() { this.ended = true; }
     };
     state.transactions.push(session);
     return session;

@@ -549,6 +549,39 @@ test('Temporary module access accepts canonical aliases and returns allowed effe
   assert.equal(usersById.get('507f1f77bcf86cd799439012').temporaryAccess[0].moduleKey, 'dpdp_compliance');
 });
 
+for (const denialFirst of [false, true]) {
+  test(`temporary module denial survives alias-based append and reload (${denialFirst ? 'denial first' : 'grant first'})`, async () => {
+    const app = buildApp();
+    const founderToken = signToken({
+      sub: '507f1f77bcf86cd799439011', email: 'newspulse.team@gmail.com', role: 'founder', name: 'Founder',
+    });
+    const id = '507f1f77bcf86cd799439012';
+    const before = cloneUser(usersById.get(id));
+    const grant = { moduleKey: 'manageNews', enabled: true };
+    const denial = { moduleKey: 'Manage News', enabled: false };
+    for (const entry of denialFirst ? [denial, grant] : [grant, denial]) {
+      const response = await request(app)
+        .post(`/api/admin/access/staff/${id}/temporary`)
+        .set('Authorization', `Bearer ${founderToken}`)
+        .send({ ...entry, expiresAt: '2099-01-01T00:00:00.000Z', auditReason: 'review temporary module access' });
+      assert.equal(response.status, 201, JSON.stringify(response.body));
+    }
+    const stored = usersById.get(id);
+    assert.deepEqual(stored.temporaryAccess.map(entry => entry.moduleKey), ['manage_news', 'manage_news']);
+    assert.deepEqual(stored.moduleAccessStates, before.moduleAccessStates);
+    assert.deepEqual(stored.specialRightsOverride, before.specialRightsOverride);
+    assert.equal(stored.accessVersion, before.accessVersion + 2);
+    const reload = await request(app)
+      .get(`/api/admin/access/staff/${id}`)
+      .set('Authorization', `Bearer ${founderToken}`);
+    assert.equal(reload.status, 200, JSON.stringify(reload.body));
+    assert.equal(reload.body.effectiveAccess.canonicalModules.manageNews.allowed, false);
+    assert.equal(reload.body.effectiveAccess.canonicalModules.manageNews.reasonCode, 'STAFF_ACCESS_DISABLED');
+    assert.deepEqual(reload.body.data.effectiveAccess, reload.body.effectiveAccess);
+    assert.equal(reload.body.user.temporaryAccess.length, 2);
+  });
+}
+
 test('POST /api/admin/team/users rejects blank email, founder email, and invalid roles', async () => {
   const app = buildApp();
   const founderToken = signToken({

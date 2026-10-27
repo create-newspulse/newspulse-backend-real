@@ -4,6 +4,10 @@ const mongoose = require('mongoose');
 const { installEditorialFixture, seedGroup, models } = require('./helpers/editorialLifecycleFixture');
 const { serializeNewsArticle } = require('../services/articleLifecycle.service');
 const PublicSiteSettings = require('../models/PublicSiteSettings');
+const EDITOR_ACCESS = {
+  staff: { specialRightsConfigured: true, specialRightsOverride: ['news_edit'], moduleAccessStates: { manageNews: 'enabled' } },
+  modulePolicies: { manageNews: 'available' },
+};
 
 const draft = {
   title: 'Compatibility draft', description: 'Compatibility summary', content: '<p>Compatibility body</p>',
@@ -297,7 +301,7 @@ test('Founder Edit Published with an explicit Publish retains the old content if
 
 for (const [role, method] of [['founder', 'put'], ['editor', 'patch']]) {
   test(`B1 ${role} stale ${method.toUpperCase()} cannot republish one edition after whole-story Unpublish`, async context => {
-    const state = installEditorialFixture(context);
+    const state = installEditorialFixture(context, EDITOR_ACCESS);
     const { ids, publication } = seedGroup(state);
     let withdrawn;
     beforeNextArticleTransaction(context, async () => {
@@ -308,8 +312,8 @@ for (const [role, method] of [['founder', 'put'], ['editor', 'patch']]) {
     const response = await state.request(method, `/api/articles/${ids[0]}`, {
       content: '<p>Stale published edit</p>', status: 'published',
     }, role);
-    assert.equal(response.statusCode, 409, JSON.stringify(response.body));
-    assert.match(response.body.message, /changed.*reload/i);
+    assert.equal(response.statusCode, role === 'founder' ? 409 : 403, JSON.stringify(response.body));
+    assert.match(response.body.message, role === 'founder' ? /changed.*reload/i : /authorized Editor or Founder/);
     assert.equal(JSON.stringify([state.rows.News, state.rows.Article]), withdrawn);
     assert.ok([...state.rows.News, ...state.rows.Article].every(doc => doc.status === 'draft'));
     assert.ok(state.rows.News.every(doc => new Date(doc.publishedAt).getTime() === publication.getTime()));
@@ -317,7 +321,7 @@ for (const [role, method] of [['founder', 'put'], ['editor', 'patch']]) {
   });
 
   test(`B1 ${role} ordinary Edit Published still preserves its successful ${method.toUpperCase()} contract`, async context => {
-    const state = installEditorialFixture(context);
+    const state = installEditorialFixture(context, EDITOR_ACCESS);
     const { ids, publication } = seedGroup(state);
     const content = '<p>Current published edit</p>';
     const response = await state.request(method, `/api/articles/${ids[0]}`, { content, status: 'published' }, role);
@@ -350,7 +354,7 @@ for (const [role, method] of [['founder', 'put'], ['editor', 'patch']]) {
 
 for (const action of ['publish', 'unpublish', 'delete', 'delete/restore']) {
   test(`B1 a content-only edit cannot overwrite an intervening ${action}`, async context => {
-    const state = installEditorialFixture(context);
+    const state = installEditorialFixture(context, EDITOR_ACCESS);
     const status = action === 'publish' ? 'draft' : 'published';
     const { ids } = seedGroup(state, { status });
     let afterLifecycle;
@@ -371,7 +375,7 @@ for (const action of ['publish', 'unpublish', 'delete', 'delete/restore']) {
 }
 
 test('B1 a current content-only edit preserves lifecycle state and publication chronology', async context => {
-  const state = installEditorialFixture(context);
+  const state = installEditorialFixture(context, EDITOR_ACCESS);
   const { ids } = seedGroup(state);
   const lifecycleState = () => [...state.rows.News, ...state.rows.Article].map(doc => ({
     id: doc._id, status: doc.status, publishedAt: doc.publishedAt, deletedAt: doc.deletedAt,

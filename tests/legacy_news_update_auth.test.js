@@ -8,6 +8,7 @@ const request = require('supertest');
 const app = require('../server');
 const News = require('../models/News');
 const User = require('../models/User');
+const SiteSettings = require('../models/SiteSettings');
 const { slugifyUnicode } = require('../lib/slug');
 const { accountAuthFixture } = require('./helpers/accountAuthFixture');
 const { installEditorialFixture } = require('./helpers/editorialLifecycleFixture');
@@ -32,11 +33,17 @@ function installLegacyFixture(context, { account = {}, language = 'en', status =
       ...query,
       lean: async () => {
         const user = await query.lean();
-        return user ? { ...user, specialRightsOverride: ['news_edit'], ...account } : null;
+        return user ? {
+          ...user, specialRightsConfigured: true, specialRightsOverride: ['news_edit'],
+          moduleAccessStates: { manageNews: 'enabled' }, ...account,
+        } : null;
       },
     };
   });
   context.mock.method(User, 'findByIdAndUpdate', () => assert.fail('Unexpected account mutation'));
+  context.mock.method(SiteSettings, 'findOne', () => ({ lean: async () => ({
+    adminModulePolicy: { modulePolicies: { manageNews: 'available' } },
+  }) }));
 
   const doc = new News({
     _id: ARTICLE_ID,
@@ -63,6 +70,13 @@ function installLegacyFixture(context, { account = {}, language = 'en', status =
   const before = doc.toObject();
   const save = context.mock.method(doc, 'save', async () => doc);
   const lookup = context.mock.method(News, 'findById', async id => String(id) === ARTICLE_ID ? doc : null);
+  context.mock.method(News, 'find', () => ({
+    select() { return this; }, lean: async () => [doc.toObject()],
+  }));
+  context.mock.method(require('../models/Article'), 'find', () => ({ lean: async () => [] }));
+  context.mock.method(mongoose, 'startSession', async () => ({
+    withTransaction: async work => work(), endSession: async () => {},
+  }));
   return { auth, doc, before, save, lookup, accountLookup };
 }
 
@@ -451,6 +465,19 @@ for (const base of BASES) {
 for (const language of ['en', 'hi', 'gu']) {
   test(`canonical Add News ${language} creation and subsequent draft saves remain unchanged`, async context => {
     const state = installEditorialFixture(context);
+    const findUser = User.findById;
+    context.mock.method(User, 'findById', (...args) => {
+      const query = findUser(...args);
+      const lean = query.lean.bind(query);
+      query.lean = async () => {
+        const user = await lean();
+        return user ? { ...user, moduleAccessStates: { addNews: 'enabled' } } : null;
+      };
+      return query;
+    });
+    context.mock.method(SiteSettings, 'findOne', () => ({ lean: async () => ({
+      adminModulePolicy: { modulePolicies: { addNews: 'available' } },
+    }) }));
     const created = await state.request('post', '/api/articles', {
       title: TITLES[language], description: 'Synthetic draft summary', content: `<p>${TITLES[language]}</p>`,
       category: 'national', language, status: 'draft',

@@ -90,8 +90,9 @@ The field has no default or new index and is excluded from queries by default.
 Canonical write allowlists do not accept client creator claims; legacy raw-body
 writers reject direct/dotted creator fields. Mongoose immutability also protects
 ordinary document/query updates. Public serialization does not expose it.
-No draft read, edit, publication, deletion or assignment permission uses this
-field; those authorization boundaries remain separate.
+It is not a permission grant on its own. Content-save authorization uses this
+verified identity only for the limited own-draft exception described below;
+draft reads, publication, deletion and assignments remain separate boundaries.
 
 Public reads are not all served from the same model:
 
@@ -225,6 +226,19 @@ a client-supplied role. Shared policy helpers include
 [accountLifecycle.js](./lib/accountLifecycle.js), and
 [authRequestSecurity.js](./lib/authRequestSecurity.js).
 
+### Temporary Staff Access module precedence
+
+The shared module evaluator in
+[founderAccessPolicyService.js](./services/founderAccessPolicyService.js) gives
+an active temporary denial precedence over active grants for the same canonical
+module, regardless of entry order. Canonical and legacy stored keys use the
+existing normalization; display aliases are normalized when temporary access
+is saved. Without an active denial, the first valid grant and its reported
+expiry are preserved. Invalid/expired-entry handling and expired-access
+diagnostics are unchanged. Founder authority, the fixed Dashboard control,
+Safe Zone, global module restrictions and account eligibility retain their
+existing boundaries. This does not change Special Rights or publishing rights.
+
 ### Founder Special Rights: opt-in permanent selection
 
 [User.js](./models/User.js) stores an optional, server-controlled Boolean
@@ -348,11 +362,84 @@ creation retains the existing payload handling and 201 message-only response.
 The public Community Reporter and Youth Pulse submission endpoints are separate
 from these privileged CMS creation routes.
 
-This is an authentication boundary, not complete article authorization. The
-legacy updater still lacks `news_edit`, per-record access and dedicated
-publication/lifecycle authorization checks. Authentication does not establish
-permission to edit every article, and this route is not a substitute for the
-canonical CMS action guards.
+### Article content-save authorization and synchronization
+
+[articleSaveAccess.service.js](./services/articleSaveAccess.service.js) protects
+canonical `PUT/PATCH /articles/:id` on every existing router mount: the root,
+`/api`, `/api/admin`, `/admin-api`, `/admin-api/api`, `/admin-api/admin` and
+`/admin-api/api/admin`. Leading duplicate `/api` normalization uses the same
+handlers. Legacy `PUT/PATCH /api/news/:id` and `/api/api/news/:id` use the same
+authorization rules but retain their single-record update behavior; they do not
+silently acquire canonical group synchronization.
+
+- A verified Founder retains authorized editorial control.
+- Other broad content edits require effective `manageNews` Staff Access and
+  effective `news_edit`. Module policy, account eligibility, Safe Zone,
+  configured permanent rights and active temporary grants/denials are reused,
+  not replaced by role names or a second permission system.
+- Without broad edit authority, effective `addNews` or `draftDesk` permits a
+  save only when every required CMS write is to an unlocked, unscheduled draft
+  with the same verified `createdByUserId` as the authenticated account.
+  Published siblings, other creators and unknown/generated creators fail
+  closed. A group ID, byline, task link or client creator claim is not ownership.
+- Limited rights do not authorize a linked Youth Pulse submission/contributor
+  update merely because the News draft is owned. Such saves require an
+  authorized Editor or Founder. Editors' actual stored Youth Pulse links are
+  preflighted and checked by the real News save hook.
+- Public-only records have no inferred creator exception. They require broad
+  edit authority; staff cannot edit deleted records through that fallback.
+
+The authenticated context is adapted from `req.admin`/`req._authUserDoc`.
+Authorization reloads the account and resolves the complete group before the
+first content or group-wide `syncVersion` write, inside the existing article
+transaction. The version guard is bound to the approved IDs and their expected
+status, identity and, for limited drafts, creator/lock state. Transaction retries
+discard the previous scope and deferred effects and reauthorize.
+
+Metadata, translation buckets, current/previous-slug public-copy matches and
+Youth Pulse related writes remain in that transaction. Public writes are bound
+to resolved copy IDs (or a new allocated ID). Their planned ordering preserves
+mixed draft/published shared-slug groups without releasing draft text or
+changing existing visibility gates; final copy state is checked before commit.
+Faith topic-only source changes now share the synchronization transaction.
+Youth Pulse submission saves and contributor statistics use the same session;
+a transactional hook failure aborts the save rather than being swallowed.
+Authorization and protected enqueue configuration reads do not create or
+backfill settings.
+
+Staff content saves cannot change publication, scheduling, deletion, restoration,
+workflow/visibility controls or source/group linkage through the request body.
+An unchanged `status` is a no-op, not a group lifecycle action. Canonical
+allowlists continue to ignore resubmitted computed sync/timestamp/ID fields
+rather than treating them as editable data. The raw legacy updater rejects
+changes to server-controlled fields and Mongo operator payloads from staff.
+Creation is not blanketed with `news_edit`; existing creator stamping, creation
+contracts and Founder publishing restrictions remain intact. Dedicated
+publication and lifecycle endpoints are unchanged.
+Manual translation-generation/backfill endpoints also retain their existing
+authorization; this PUT/PATCH correction does not certify those independent
+entry points.
+
+Response compatibility:
+
+- Canonical success retains `ok`, `success`, `status`, `message`, `article` and
+  `data.article`; legacy success remains `{ message: "News updated successfully" }`.
+- Permission denial is HTTP 403 `ARTICLE_SAVE_FORBIDDEN`. Canonical responses
+  retain `{ ok: false, success: false, status: 403, code, message }`; legacy
+  responses use `{ error, code }`. The generic message requires an authorized
+  Editor or Founder and does not identify private siblings.
+- Scope/state conflicts return 409 and require reloading. An unauthorized main
+  save does not partially persist article, public-copy, job or Youth Pulse
+  changes, and does not invalidate related caches.
+- Translation enqueue runs in a separate post-commit transaction and rechecks
+  the current account and group. Revocation or a follow-up failure cannot undo
+  an already committed edit. The existing HTTP 200 `committed: true` and
+  `postCommitWarnings`/`revalidation` contract remains authoritative: reload the
+  saved state, do not report rollback or blindly repeat the save. Public-only
+  cache invalidation also uses the committed-save warning mechanism.
+
+No ownership backfill, account mutation, new role/right, migration or pending
+revision workflow is introduced.
 
 The Reporter Portal has its own OTP/session and ownership flow in
 [reporterPortal.js](./routes/reporterPortal.js),

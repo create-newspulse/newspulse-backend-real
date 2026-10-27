@@ -147,6 +147,13 @@ function runPipeline(input, pipeline) {
             if (field === '_id') continue;
             if ('$first' in accumulator && first) group[field] = expression(accumulator.$first, doc);
             else if ('$min' in accumulator) group[field] = Math.min(group[field] ?? Infinity, expression(accumulator.$min, doc));
+            else if ('$sum' in accumulator) {
+              const value = expression(accumulator.$sum, doc);
+              group[field] = (group[field] || 0) + (typeof value === 'number' ? value : 0);
+            } else if ('$max' in accumulator) {
+              const value = expression(accumulator.$max, doc);
+              if (group[field] === undefined || comparable(value) > comparable(group[field])) group[field] = value;
+            }
           }
           groups.set(key, group);
         }
