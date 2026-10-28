@@ -579,11 +579,31 @@ test('Public-copy CMS IDs resolve topic edits to canonical News without adding p
 });
 
 test('Faith topic authoring retains authentication and Founder publishing protection', async context => {
-  const state = setup(context, [article(1, 'en', { status: 'draft' })]);
-  assert.equal((await request(state.app).post('/api/articles').send({ ...draftPayload, topic: 'living-heritage' })).status, 401);
-  assert.equal((await request(state.app).put(`/api/articles/${id(1)}`).send({ topic: null })).status, 401);
-  assert.equal((await state.post({ ...draftPayload, topic: 'living-heritage', status: 'published' }, 'editor')).status, 403);
-  assert.equal((await state.put({ topic: 'living-heritage', status: 'published' }, id(1), 'editor')).status, 403);
-  assert.equal(state.writes.length, 0);
-  assert.equal(state.creates.length, 0);
+  const state = installEditorialFixture(context);
+  const { ids } = seedGroup(state, { status: 'draft' });
+  state.rows.News.forEach(doc => { doc.topic = 'living-heritage'; });
+  const before = clone(state.rows);
+
+  assert.equal((await state.request('post', '/api/articles', { ...draftPayload, topic: 'living-heritage' }, null)).status, 401);
+  assert.equal((await state.request('put', `/api/articles/${ids[0]}`, { topic: null }, null)).status, 401);
+  assert.equal(state.transactions.length, 0);
+
+  for (const [method, url, body] of [
+    ['post', '/api/articles', { ...draftPayload, topic: 'living-heritage', status: 'published' }],
+    ['put', `/api/articles/${ids[0]}`, { topic: 'living-heritage', status: 'published' }],
+  ]) {
+    const response = await state.request(method, url, body, 'editor');
+    assert.equal(response.status, 403, response.text);
+    assert.match(response.body.message, /effective Founder-granted Publish News right/);
+    if (method === 'put') assert.equal(response.body.code, 'ARTICLE_PUBLISH_FORBIDDEN');
+  }
+
+  for (const [model, rows] of Object.entries(state.rows)) {
+    if (model !== 'AuditLog') assert.deepEqual(clone(rows), before[model], model);
+  }
+  const writes = new Set(['save', 'create', 'updateOne', 'updateMany', 'findOneAndUpdate', 'findByIdAndUpdate', 'deleteMany']);
+  assert.deepEqual(state.calls.filter(call => call.name !== 'AuditLog' && writes.has(call.method)), []);
+  assert.deepEqual(state.invalidations, []);
+  assert.equal(state.transactions.length, 2);
+  assert.ok(state.transactions.every(session => session.aborted && session.ended && !session.committed));
 });
