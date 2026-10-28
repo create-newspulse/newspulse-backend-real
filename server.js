@@ -39,9 +39,21 @@ const {
   getConfiguredMongoDbName: _getConfiguredMongoDbNameFromEnv,
   isLocalDevelopmentLike: _isLocalDevelopmentLikeEnv,
   isLocalOrigin: _isLocalCorsOrigin,
+  isProductionLike,
   requireLocalDatabaseIsolation,
   validateLocalDatabaseIsolation,
 } = require('./lib/environmentSafety');
+
+const mongoose = require('mongoose');
+const _preserveProductionIndexes = isProductionLike(process.env);
+if (_preserveProductionIndexes) {
+  // Route/service imports initialize models, so apply this before those imports.
+  mongoose.set('autoIndex', false);
+  mongoose.set('autoCreate', false);
+  if (!_isImportedEarly) {
+    console.log('[startup] Production MongoDB index management disabled', { autoIndex: false, autoCreate: false });
+  }
+}
 
 if (require.main === module && String(process.env.NODE_ENV || '').toLowerCase() !== 'test') {
   try {
@@ -248,7 +260,6 @@ const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
-const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 const fs = require('fs');
 const multer = require('multer');
@@ -1297,28 +1308,30 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
       console.warn('[startup][founder-seed] failed', { message: e?.message || String(e) });
     }
     await _runLocalFounderStartupCheck({ db });
-    // Ensure TTL index for Broadcast Center is present.
-    try {
-      const BroadcastItem = require('./models/BroadcastItem');
-      await BroadcastItem.syncIndexes();
-    } catch (e) {
-      console.warn('[startup] BroadcastItem index sync failed', e?.message || e);
-    }
+    if (!_preserveProductionIndexes) {
+      // Ensure TTL index for Broadcast Center is present.
+      try {
+        const BroadcastItem = require('./models/BroadcastItem');
+        await BroadcastItem.syncIndexes();
+      } catch (e) {
+        console.warn('[startup] BroadcastItem index sync failed', e?.message || e);
+      }
 
-    // Ensure GlossaryTerm indexes are present.
-    try {
-      const GlossaryTerm = require('./models/GlossaryTerm');
-      await GlossaryTerm.syncIndexes();
-    } catch (e) {
-      console.warn('[startup] GlossaryTerm index sync failed', e?.message || e);
-    }
+      // Ensure GlossaryTerm indexes are present.
+      try {
+        const GlossaryTerm = require('./models/GlossaryTerm');
+        await GlossaryTerm.syncIndexes();
+      } catch (e) {
+        console.warn('[startup] GlossaryTerm index sync failed', e?.message || e);
+      }
 
-    // Ensure TranslationMemory indexes are present.
-    try {
-      const TranslationMemory = require('./models/TranslationMemory');
-      await TranslationMemory.syncIndexes();
-    } catch (_) {
-      // optional
+      // Ensure TranslationMemory indexes are present.
+      try {
+        const TranslationMemory = require('./models/TranslationMemory');
+        await TranslationMemory.syncIndexes();
+      } catch (_) {
+        // optional
+      }
     }
 
     try {
@@ -1343,21 +1356,24 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
 			console.warn('[startup] Broadcast cleanup job failed to start', e?.message || e);
 		}
 
-    // Ensure ads indexes are present.
-    try {
-      const Ad = require('./models/Ad');
-      await Ad.syncIndexes();
-    } catch (e) {
-      console.warn('[startup] Ad index sync failed', e?.message || e);
+    if (!_preserveProductionIndexes) {
+      // Ensure ads indexes are present.
+      try {
+        const Ad = require('./models/Ad');
+        await Ad.syncIndexes();
+      } catch (e) {
+        console.warn('[startup] Ad index sync failed', e?.message || e);
+      }
+
+      try {
+        const TranslationJob = require('./models/TranslationJob');
+        await TranslationJob.syncIndexes();
+      } catch (e) {
+        console.warn('[startup] TranslationJob index sync failed', e?.message || e);
+      }
     }
 
     // Publish-time translation queue worker (Mongo-backed).
-    try {
-      const TranslationJob = require('./models/TranslationJob');
-      await TranslationJob.syncIndexes();
-    } catch (e) {
-      console.warn('[startup] TranslationJob index sync failed', e?.message || e);
-    }
     try {
       const { startPublishTranslationWorker } = require('./services/publishAsyncTranslation.service');
       startPublishTranslationWorker({ logger: console });

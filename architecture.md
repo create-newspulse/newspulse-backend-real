@@ -833,6 +833,16 @@ checks and CORS helpers. Direct server startup can trigger database, index,
 worker, and cleanup activity; importing the app in tests is not a substitute
 for isolating environment variables and external adapters.
 
+In production-like environments (production `NODE_ENV` or Render indicators),
+[server.js](./server.js) sets Mongoose `autoIndex` and `autoCreate` to Boolean
+`false` before importing application models and skips the five startup
+`syncIndexes()` calls. Non-production index bootstrap is unchanged. Read-only
+TTL audits, health checks, workers, cleanup and publication scheduling remain
+active under their existing conditions. Production collections and required
+indexes must already exist; startup neither installs missing indexes nor
+reconciles drift. Index maintenance remains a separate, explicitly authorized
+operation, not a deployment side effect. Rollback builds must retain this policy.
+
 ## Validation entry points
 
 [package.json](./package.json) defines `npm test` as Node's test runner and
