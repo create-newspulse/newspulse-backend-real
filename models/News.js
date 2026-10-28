@@ -273,7 +273,7 @@ const newsSchema = new mongoose.Schema({
   // New canonical group key for translations. Keep translationGroupId for backward compatibility.
   translationKey: { type: String, index: true },
   translationGroupId: { type: String, index: true },
-  syncMode: { type: String, enum: ['auto'], default: 'auto', index: true },
+  syncMode: { type: String, enum: ['auto'], default: 'auto' },
   sourceArticleId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
   sourceLanguage: { type: String, enum: ['en', 'hi', 'gu', null], default: null, index: true },
   machineGenerated: { type: Boolean, default: false, index: true },
@@ -285,11 +285,11 @@ const newsSchema = new mongoose.Schema({
     index: true,
   },
   translatedAt: { type: Date, default: null },
-  translatedByProvider: { type: String, default: null, index: true },
-  sourceHash: { type: String, default: null, index: true },
+  translatedByProvider: { type: String, default: null },
+  sourceHash: { type: String, default: null },
   reviewedAt: { type: Date, default: null },
   reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-  translationJobId: { type: mongoose.Schema.Types.ObjectId, ref: 'TranslationJob', default: null, index: true },
+  translationJobId: { type: mongoose.Schema.Types.ObjectId, ref: 'TranslationJob', default: null },
   translationMeta: {
     provider: { type: String, default: null },
     sourceArticleId: { type: mongoose.Schema.Types.ObjectId, default: null },
@@ -303,7 +303,7 @@ const newsSchema = new mongoose.Schema({
     reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     sourceFields: { type: mongoose.Schema.Types.Mixed, default: null },
   },
-  lastSyncedAt: { type: Date, default: null, index: true },
+  lastSyncedAt: { type: Date, default: null },
   syncVersion: { type: Number, default: 0 },
   contentFingerprint: { type: String, default: null },
   topic: {
