@@ -1,3 +1,4 @@
+require('./helpers/publicNewsIsolation');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
@@ -9,10 +10,11 @@ const app = require('../server');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
 const Contributor = require('../models/Contributor');
+const { installEditorialFixture } = require('./helpers/editorialLifecycleFixture');
 
-function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
-  const b64 = Buffer.from(`${email}:0`, 'utf8').toString('base64');
-  return `np.${b64}`;
+let fixture;
+function makeFounderToken() {
+  return fixture.token('founder');
 }
 
 function queryResult(value) {
@@ -49,69 +51,47 @@ function makeArticle(overrides = {}) {
   };
 }
 
-function makeDoc(record) {
-  const doc = { ...record };
-  doc.save = async () => doc;
-  doc.toObject = () => {
-    const out = { ...doc };
-    delete out.save;
-    delete out.toObject;
-    return out;
-  };
-  return doc;
-}
-
 function installUpdateStubs(t, beforeDoc, options = {}) {
-  const originals = {
-    findById: News.findById,
-    findByIdAndUpdate: News.findByIdAndUpdate,
-    findOne: News.findOne,
-    find: News.find,
-    updateMany: News.updateMany,
-    publicFindOneAndUpdate: PublicArticle.findOneAndUpdate,
-    contributorFindById: Contributor.findById,
-  };
+  const state = fixture = installEditorialFixture(t);
+  state.rows.News.push(structuredClone(beforeDoc));
+  if (options.duplicate) state.rows.News.push(makeArticle({
+    ...options.duplicate, slug: `duplicate-${options.duplicate._id}`, slugs: {},
+  }));
   const updates = [];
   const findOneQueries = [];
-
-  t.after(() => {
-    News.findById = originals.findById;
-    News.findByIdAndUpdate = originals.findByIdAndUpdate;
-    News.findOne = originals.findOne;
-    News.find = originals.find;
-    News.updateMany = originals.updateMany;
-    PublicArticle.findOneAndUpdate = originals.publicFindOneAndUpdate;
-    Contributor.findById = originals.contributorFindById;
+  const findOne = News.findOne;
+  t.mock.method(News, 'findOne', (query, ...args) => {
+    if (query?._id?.$ne && ['en', 'hi', 'gu'].some(lang => hasLanguageClause(query, lang))) {
+      findOneQueries.push(query);
+      const duplicate = options.duplicateForQuery?.(query);
+      if (duplicate) return queryResult(duplicate);
+    }
+    return findOne(query, ...args);
   });
-
-  News.findById = () => ({ select: () => ({ lean: async () => beforeDoc }) });
-  News.find = () => queryResult([]);
-  News.updateMany = async () => ({ acknowledged: true, modifiedCount: 0 });
-  News.findOne = (query) => {
-    findOneQueries.push(query);
-    return queryResult(typeof options.duplicateForQuery === 'function' ? options.duplicateForQuery(query) : null);
-  };
-  News.findByIdAndUpdate = async (id, op) => {
-    updates.push({ id: String(id), op });
-    return makeDoc({ ...beforeDoc, ...(op && op.$set ? op.$set : {}) });
-  };
-  PublicArticle.findOneAndUpdate = () => ({ lean: async () => ({ _id: 'public-sync' }) });
-  Contributor.findById = () => ({ lean: async () => ({ _id: '507f1f77bcf86cd799439b01', status: 'active', canonicalName: 'Pulse Contributor' }) });
-
-  return { updates, findOneQueries };
+  for (const method of ['findByIdAndUpdate', 'findOneAndUpdate']) {
+    const write = News[method];
+    t.mock.method(News, method, (filter, op, writeOptions) => {
+      updates.push({ id: String(method === 'findOneAndUpdate' ? filter._id : filter), op });
+      return write(filter, op, writeOptions);
+    });
+  }
+  t.mock.method(Contributor, 'findById', () => ({ lean: async () => ({
+    _id: '507f1f77bcf86cd799439b01', status: 'active', canonicalName: 'Pulse Contributor',
+  }) }));
+  return { state, updates, findOneQueries };
 }
 
 function putArticle(id, body) {
   return request(app)
     .put(`/api/articles/${id}`)
-    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
     .send(body);
 }
 
 function restoreDraft(id, body = {}) {
   return request(app)
     .post(`/api/admin/drafts/${id}/restore`)
-    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
     .send(body);
 }
 
@@ -140,30 +120,11 @@ function assertSingleActiveSlotQuery(stubs, lang) {
 }
 
 function installDraftRestoreStubs(t, draftDoc, options = {}) {
-  const originals = {
-    findById: News.findById,
-    findOne: News.findOne,
+  const stubs = installUpdateStubs(t, draftDoc, options);
+  return {
+    ...stubs,
+    get doc() { return stubs.state.rows.News.find(doc => doc._id === draftDoc._id); },
   };
-  const findOneQueries = [];
-  let saveCount = 0;
-  const doc = makeDoc(draftDoc);
-  doc.save = async () => {
-    saveCount += 1;
-    return doc;
-  };
-
-  t.after(() => {
-    News.findById = originals.findById;
-    News.findOne = originals.findOne;
-  });
-
-  News.findById = async () => doc;
-  News.findOne = (query) => {
-    findOneQueries.push(query);
-    return queryResult(typeof options.duplicateForQuery === 'function' ? options.duplicateForQuery(query) : null);
-  };
-
-  return { doc, findOneQueries, get saveCount() { return saveCount; } };
 }
 
 test('editing a published Regional child syncs content and media without changing publication identity', async (t) => {
@@ -426,65 +387,61 @@ test('PUT draft HI changed into existing published HI slot returns genuine 409',
 test('PUT restore of deleted GU returns 409 when active GU sibling already exists', async (t) => {
   const id = '507f1f77bcf86cd799439a28';
   const stubs = installUpdateStubs(t, makeArticle({ _id: id, language: 'gu', lang: 'gu', originalLang: 'gu', status: 'deleted' }), {
-    duplicateForQuery: (query) => (hasLanguageClause(query, 'gu')
-      ? { _id: '507f1f77bcf86cd799439c28', language: 'gu', lang: 'gu', status: 'published', translationGroupId: 'tg-update-language-1' }
-      : null),
+    duplicate: { _id: '507f1f77bcf86cd799439c28', language: 'gu', lang: 'gu', status: 'published', translationGroupId: 'tg-update-language-1' },
   });
+  const before = structuredClone(stubs.state.rows);
 
   const res = await putArticle(id, { status: 'draft' });
 
   assert.equal(res.statusCode, 409);
-  assert.match(res.body.message, /translationGroupId and language/i);
+  assert.match(res.body.message, /completely soft-deleted story/i);
   assert.equal(stubs.updates.length, 0);
+  assert.deepEqual(stubs.state.rows, before);
+  assert.deepEqual(stubs.state.invalidations, []);
 });
 
 test('PUT restore of deleted GU succeeds when no active GU sibling exists', async (t) => {
   const id = '507f1f77bcf86cd799439a29';
-  const stubs = installUpdateStubs(t, makeArticle({ _id: id, language: 'gu', lang: 'gu', originalLang: 'gu', status: 'deleted' }), {
-    duplicateForQuery: (query) => (hasLanguageClause(query, 'gu') && !excludesDeletedStatus(query)
-      ? { _id: '507f1f77bcf86cd799439c29', language: 'gu', lang: 'gu', status: 'deleted', translationGroupId: 'tg-update-language-1' }
-      : null),
-  });
+  const stubs = installUpdateStubs(t, makeArticle({ _id: id, language: 'gu', lang: 'gu', originalLang: 'gu', status: 'deleted' }));
 
   const res = await putArticle(id, { status: 'draft' });
 
   assert.equal(res.statusCode, 200);
-  assertSingleActiveSlotQuery(stubs, 'gu');
+  assert.equal(stubs.state.rows.News[0].language, 'gu');
+  assert.equal(stubs.state.rows.News[0].status, 'draft');
   assert.equal(stubs.updates[0].op.$set.status, 'draft');
 });
 
 test('POST draft restore of deleted GU returns 409 when active GU sibling exists', async (t) => {
   const id = '507f1f77bcf86cd799439a2d';
   const stubs = installDraftRestoreStubs(t, makeArticle({ _id: id, language: 'gu', lang: 'gu', originalLang: 'gu', status: 'deleted' }), {
-    duplicateForQuery: (query) => (hasLanguageClause(query, 'gu')
-      ? { _id: '507f1f77bcf86cd799439c2d', language: 'gu', lang: 'gu', status: 'published', translationGroupId: 'tg-update-language-1' }
-      : null),
+    duplicate: { _id: '507f1f77bcf86cd799439c2d', language: 'gu', lang: 'gu', status: 'published', translationGroupId: 'tg-update-language-1' },
   });
+  const before = structuredClone(stubs.state.rows);
 
   const res = await restoreDraft(id);
 
   assert.equal(res.statusCode, 409);
-  assert.match(res.body.message, /translationGroupId and language/i);
-  assert.equal(stubs.saveCount, 0);
+  assert.match(res.body.message, /completely soft-deleted story/i);
+  assert.equal(stubs.updates.length, 0);
+  assert.deepEqual(stubs.state.rows, before);
+  assert.deepEqual(stubs.state.invalidations, []);
 });
 
-test('POST draft restore of deleted GU succeeds when only GU duplicate is soft-deleted', async (t) => {
+test('POST draft restore rejects duplicate soft-deleted GU editions without partially restoring the group', async (t) => {
   const id = '507f1f77bcf86cd799439a2e';
   const stubs = installDraftRestoreStubs(t, makeArticle({ _id: id, language: 'gu', lang: 'gu', originalLang: 'gu', status: 'deleted', deletedAt: new Date() }), {
-    duplicateForQuery: (query) => (hasLanguageClause(query, 'gu') && !excludesDeletedStatus(query)
-      ? { _id: '507f1f77bcf86cd799439c2e', language: 'gu', lang: 'gu', status: 'deleted', translationGroupId: 'tg-update-language-1' }
-      : null),
+    duplicate: { _id: '507f1f77bcf86cd799439c2e', language: 'gu', lang: 'gu', status: 'deleted', translationGroupId: 'tg-update-language-1' },
   });
+  const before = structuredClone(stubs.state.rows);
 
   const res = await restoreDraft(id);
 
-  assert.equal(res.statusCode, 200);
-  assert.equal(stubs.findOneQueries.length, 1);
-  assert.equal(hasLanguageClause(stubs.findOneQueries[0], 'gu'), true);
-  assert.equal(excludesDeletedStatus(stubs.findOneQueries[0]), true);
-  assert.equal(stubs.doc.status, 'draft');
-  assert.equal(stubs.doc.deletedAt, null);
-  assert.equal(stubs.saveCount, 1);
+  assert.equal(res.statusCode, 409);
+  assert.match(res.body.message, /duplicate language records/i);
+  assert.deepEqual(stubs.state.rows, before);
+  assert.equal(stubs.updates.length, 0);
+  assert.deepEqual(stubs.state.invalidations, []);
 });
 
 test('PUT duplicate validation query excludes the current article id', async (t) => {

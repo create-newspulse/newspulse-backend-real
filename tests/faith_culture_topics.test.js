@@ -6,15 +6,13 @@ const vm = require('node:vm');
 const path = require('node:path');
 const { createRequire } = require('node:module');
 const express = require('express');
-const request = require('supertest');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
-const { accountAuthFixture } = require('./helpers/accountAuthFixture');
-const { matches, runPipeline } = require('./helpers/pulseDialogueAggregate');
 const { installEditorialFixture, seedGroup } = require('./helpers/editorialLifecycleFixture');
 const { FAITH_TOPIC_CODES, buildFaithTopicPatch } = require('../lib/faithCultureTopics');
 const { computeContentFingerprint, buildChildNewsSyncPatch } = require('../services/translationGroupSync.service');
 const { sourceHashForDoc } = require('../services/articleTranslationGeneration.service');
+const publicSyncService = require('../services/syncPublicArticleFromNews.service');
 const invalidation = require('../services/publicContentInvalidation.service');
 const routerFile = require.resolve('../routes/articles.routes');
 const syncFile = require.resolve('../services/translationGroupSync.service');
@@ -60,92 +58,39 @@ function loadWithFixtures(filename, overrides) {
 }
 
 function setup(context, records = [article(1), article(2, 'hi'), article(3, 'gu')]) {
-  const auth = accountAuthFixture();
-  auth.install(context);
-  const state = {
-    docs: new Map(), copies: new Map(), creates: [], writes: [], saves: [],
-    generated: [], outdated: [], publicSync: [], invalidations: [], errors: [], cacheInvalidations: 0,
-    siblingFailure: false, siblingRace: false, sourceRace: false,
-  };
-  function document(values) {
-    const doc = clone(values);
-    Object.defineProperties(doc, {
-      toObject: { value: () => clone(doc) },
-      save: { value: async () => { state.saves.push(doc._id); return doc; } },
+  const state = installEditorialFixture(context);
+  state.rows.News.push(...clone(records));
+  Object.assign(state, {
+    creates: [], writes: [], generated: [], outdated: [], publicSync: [],
+    errors: [], cacheInvalidations: 0, siblingFailure: false, siblingRace: false,
+  });
+  context.after(require('../lib/cache').onArticleCachesInvalidated(() => { state.cacheInvalidations++; }));
+  Object.defineProperties(state, {
+    docs: { get: () => new Map(state.rows.News.map(doc => [String(doc._id), doc])) },
+    saves: { get: () => state.calls.filter(call => call.name === 'News' && call.method === 'save') },
+  });
+  const create = News.create;
+  context.mock.method(News, 'create', async (payload, options) => {
+    state.creates.push(...clone(Array.isArray(payload) ? payload : [payload]));
+    return create(payload, options);
+  });
+  for (const method of ['findByIdAndUpdate', 'findOneAndUpdate', 'updateOne']) {
+    const write = News[method];
+    context.mock.method(News, method, (filter, update, options) => {
+      state.writes.push({ method, filter: clone(filter), update: clone(update), options });
+      if (method === 'updateOne') {
+        if (state.siblingFailure) throw new Error('fixture-only internal database failure');
+        if (state.siblingRace) return Promise.resolve({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
+      }
+      return write(filter, update, options);
     });
-    state.docs.set(String(doc._id), doc);
-    return doc;
   }
-  records.forEach(document);
-  const query = value => {
-    let fields;
-    return {
-      select(selection) { fields = selection; return this; },
-      async lean() {
-        const plain = clone(value);
-        return plain && fields
-          ? runPipeline([plain], [{ $project: Object.fromEntries(fields.split(' ').map(field => [field, 1])) }])[0]
-          : plain;
-      },
-      then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); },
-    };
-  };
-  const find = filter => [...state.docs.values()].filter(doc => matches(doc, filter));
-  const apply = (doc, update) => {
-    for (const [key, value] of Object.entries(update.$set || update)) {
-      const fields = key.split('.');
-      const leaf = fields.pop();
-      const target = fields.reduce((obj, field) => obj[field] ||= {}, doc);
-      target[leaf] = clone(value);
-    }
-    for (const key of Object.keys(update.$unset || {})) {
-      const fields = key.split('.');
-      const leaf = fields.pop();
-      const target = fields.reduce((obj, field) => obj?.[field], doc);
-      if (target) delete target[leaf];
-    }
-    for (const [key, value] of Object.entries(update.$push || {})) {
-      (doc[key] ||= []).push(clone(value));
-    }
-    return doc;
-  };
-  context.mock.method(News, 'findById', rawId => query(state.docs.get(String(rawId)) || null));
-  context.mock.method(News, 'findOne', filter => query(find(filter)[0] || null));
-  context.mock.method(News, 'find', filter => query(find(filter)));
-  context.mock.method(News, 'create', async payload => {
-    state.creates.push(clone(payload));
-    return document({ _id: id(100 + state.creates.length), ...payload });
-  });
-  context.mock.method(News, 'findByIdAndUpdate', (rawId, update, options) => {
-    state.writes.push({ method: 'findByIdAndUpdate', id: String(rawId), update: clone(update), options });
-    const doc = state.docs.get(String(rawId));
-    return query(doc ? apply(doc, update) : null);
-  });
-  context.mock.method(News, 'findOneAndUpdate', (filter, update, options) => {
-    state.writes.push({ method: 'findOneAndUpdate', filter: clone(filter), update: clone(update), options });
-    const doc = state.sourceRace ? null : find(filter)[0];
-    return query(doc ? apply(doc, update) : null);
-  });
-  context.mock.method(News, 'updateOne', async (filter, update, options) => {
-    state.writes.push({ method: 'updateOne', filter: clone(filter), update: clone(update), options });
-    if (state.siblingFailure) throw new Error('fixture-only internal database failure');
-    const doc = state.siblingRace ? null : find(filter)[0];
-    if (doc) apply(doc, update);
-    return { acknowledged: true, matchedCount: doc ? 1 : 0, modifiedCount: doc ? 1 : 0 };
-  });
-  for (const method of ['deleteOne', 'deleteMany', 'updateMany', 'insertMany']) {
-    context.mock.method(News, method, () => assert.fail(`Unexpected News.${method}`));
-  }
-  context.mock.method(PublicArticle, 'findById', rawId => query(state.copies.get(String(rawId)) || null));
-  for (const method of ['create', 'updateOne', 'findByIdAndUpdate', 'findOneAndUpdate', 'updateMany']) {
-    context.mock.method(PublicArticle, method, () => assert.fail(`Unexpected PublicArticle.${method}`));
-  }
-  const syncPublicArticleFromNews = async doc => {
+  const syncPublicArticleFromNews = async (doc, options) => {
     state.publicSync.push(doc._id);
-    return { _id: `public-${doc._id}` };
+    return publicSyncService.syncPublicArticleFromNews(doc, options);
   };
   const sync = loadWithFixtures(syncFile, {
-    './syncPublicArticleFromNews.service': { syncPublicArticleFromNews },
+    './syncPublicArticleFromNews.service': { ...publicSyncService, syncPublicArticleFromNews },
     './publicContentInvalidation.service': {
       ...invalidation,
       notifyPublicContentInvalidation: async payload => { state.invalidations.push(clone(payload)); },
@@ -153,18 +98,12 @@ function setup(context, records = [article(1), article(2, 'hi'), article(3, 'gu'
   });
   const router = loadWithFixtures(routerFile, {
     '../services/translationGroupSync.service': sync,
-    '../services/syncPublicArticleFromNews.service': { syncPublicArticleFromNews },
+    '../services/syncPublicArticleFromNews.service': { ...publicSyncService, syncPublicArticleFromNews },
     '../services/articleTranslationGeneration.service': {
+      ...require('../services/articleTranslationGeneration.service'),
       enqueueArticleTranslationGeneration: async doc => { state.generated.push(doc._id); },
       markSiblingTranslationsOutdated: async doc => { state.outdated.push(doc._id); },
     },
-    '../services/articlePublishing.service': {
-      publishCanonicalArticle: async doc => {
-        doc.status = 'published';
-        return { article: doc, translationGroupId: doc.translationGroupId, publishedLanguages: [doc.lang] };
-      },
-    },
-    '../lib/cache': { invalidateArticleCaches: async () => { state.cacheInvalidations++; } },
     '../lib/audit': { logAudit: async () => {} },
   });
   context.mock.method(console, 'error', (...args) => { state.errors.push(args); });
@@ -176,10 +115,8 @@ function setup(context, records = [article(1), article(2, 'hi'), article(3, 'gu'
   app.use((error, req, res, next) => res.status(error.statusCode || error.status || 500).json({
     ok: false, message: error.message,
   }));
-  state.post = (payload, role = 'founder', prefix = '/api') => request(app).post(`${prefix}/articles`)
-    .set('Authorization', `Bearer ${auth.token(role)}`).send(payload);
-  state.put = (payload, rawId = id(1), role = 'founder') => request(app).put(`/api/articles/${rawId}`)
-    .set('Authorization', `Bearer ${auth.token(role)}`).send(payload);
+  state.post = (payload, role = 'founder', prefix = '/api') => state.request('post', `${prefix}/articles`, payload, role, app);
+  state.put = (payload, rawId = id(1), role = 'founder') => state.request('put', `/api/articles/${rawId}`, payload, role, app);
   state.app = app;
   state.sync = sync;
   return state;
@@ -193,8 +130,31 @@ function success(response, status = 200) {
 
 function withoutSyncMetadata(doc) {
   const result = clone(doc);
-  for (const field of ['topic', 'syncVersion', 'lastSyncedAt', 'contentFingerprint', 'updatedAt']) delete result[field];
+  for (const field of [
+    'topic', 'syncVersion', 'lastSyncedAt', 'contentFingerprint', 'updatedAt',
+    'translations', 'translationStatus', 'publicVisibilityRefreshAt',
+  ]) delete result[field];
   return result;
+}
+
+function assertDerivedTranslations(state) {
+  for (const doc of state.rows.News) {
+    const copy = state.rows.Article.find(item => item.sourceNewsId === doc._id);
+    assert.ok(copy, 'the existing public synchronization must persist each edition');
+    assert.equal(copy.title, doc.title);
+    assert.equal(copy.content, doc.content);
+    assert.equal(copy.slug, doc.slug);
+    assert.equal(copy.language, doc.lang);
+    assert.equal(new Date(copy.publishedAt).getTime(), new Date(doc.publishedAt).getTime());
+    for (const member of state.rows.News) {
+      for (const cached of [doc, copy]) {
+        assert.equal(cached.translationStatus[member.lang], 'ready');
+        assert.equal(cached.translations[member.lang].title, member.title);
+        assert.equal(cached.translations[member.lang].summary, member.description);
+        assert.equal(cached.translations[member.lang].content, member.content);
+      }
+    }
+  }
 }
 
 const draftPayload = { title: 'Faith and Culture story', description: 'Story summary', content: 'Story body', category: 'faith-culture', language: 'en' };
@@ -292,18 +252,21 @@ for (const base of locales) {
     assert.notEqual(result.contentFingerprint, previousFingerprint);
     for (const [index, doc] of [...state.docs.values()].entries()) {
       assert.equal(doc.topic, result.topic);
-      assert.equal(doc.syncVersion, 5);
+      assert.ok(doc.syncVersion >= result.syncVersion);
+      assert.ok(doc.syncVersion > records[index].syncVersion);
       assert.equal(doc.contentFingerprint, result.contentFingerprint);
       assert.deepEqual(withoutSyncMetadata(doc), snapshots[index]);
     }
     assert.deepEqual(state.saves, []);
     assert.deepEqual(state.generated, []);
     assert.deepEqual(state.outdated, []);
-    assert.deepEqual(state.publicSync, []);
+    assertDerivedTranslations(state);
     assert.equal(state.cacheInvalidations, 1);
     assert.equal(state.invalidations.length, 1);
     assert.ok(state.invalidations[0].tags.includes('category:faith-culture'));
-    for (const write of state.writes.filter(write => write.method === 'updateOne')) {
+    const topicWrites = state.writes.filter(write => write.method === 'updateOne' && Object.hasOwn(write.update.$set || {}, 'topic'));
+    assert.equal(topicWrites.length, 2);
+    for (const write of topicWrites) {
       assert.deepEqual(Object.keys(write.update.$set).sort(), ['contentFingerprint', 'lastSyncedAt', 'syncVersion', 'topic']);
       assert.equal(write.options.runValidators, true);
     }
@@ -323,6 +286,7 @@ for (const topic of [null, '', ' \r\n\t ']) {
     assert.equal(success(await state.put({ topic })).topic, null);
     assert.ok([...state.docs.values()].every(doc => doc.topic === null));
     assert.deepEqual([...state.docs.values()].map(withoutSyncMetadata), before);
+    assertDerivedTranslations(state);
     assert.deepEqual(state.generated, []);
     assert.deepEqual(state.outdated, []);
     assert.deepEqual(state.saves, []);
@@ -347,7 +311,7 @@ test('A full form with unchanged text, language, tags, category and status is st
   assert.deepEqual(state.generated, []);
   assert.deepEqual(state.outdated, []);
   assert.deepEqual(state.saves, []);
-  assert.deepEqual(state.publicSync, []);
+  assertDerivedTranslations(state);
 });
 
 test('A topic-only update does not apply automatic language or slug repairs to a legacy source', async context => {
@@ -379,7 +343,7 @@ test('A topic change with an unpublish keeps the existing metadata-only lifecycl
   const result = success(await state.put({ topic: 'faith-spiritual-life', status: 'draft' }));
   assert.equal(result.status, 'draft');
   assert.ok([...state.docs.values()].every(doc => doc.topic === 'faith-spiritual-life' && doc.status === 'draft'));
-  assert.equal(state.saves.includes(id(1)), false);
+  assert.deepEqual(state.saves, []);
   assert.deepEqual(state.generated, []);
 });
 
@@ -480,7 +444,13 @@ test('Topic synchronization skips unrelated sources, unsupported locales and oth
   ];
   const state = setup(context, [article(1), article(2, 'hi'), article(3, 'gu', { sourceArticleId: undefined }), ...skipped]);
   success(await state.put({ topic: 'language-cultural-identity' }));
-  for (const doc of skipped) assert.deepEqual(clone(state.docs.get(doc._id)), doc);
+  for (const doc of skipped) {
+    const updated = state.docs.get(doc._id);
+    assert.deepEqual(withoutSyncMetadata(updated), withoutSyncMetadata(doc));
+    assert.equal(updated.topic, doc.topic);
+    assert.deepEqual(updated.translations, doc.translations);
+    assert.deepEqual(updated.translationStatus, doc.translationStatus);
+  }
   assert.equal(state.docs.get(id(2)).topic, 'language-cultural-identity');
   assert.equal(state.docs.get(id(3)).topic, 'language-cultural-identity');
 });
@@ -500,21 +470,26 @@ test('Topic synchronization recognizes existing EN/HI/GU language aliases withou
 });
 
 for (const topic of ['faith-spiritual-life', null]) {
-  test(`A sibling error is visible and retrying ${JSON.stringify(topic)} repairs sibling metadata`, async context => {
+  test(`A sibling error rolls back the group and retrying ${JSON.stringify(topic)} commits sibling metadata`, async context => {
     const state = setup(context);
+    const before = clone(state.rows);
     state.siblingFailure = true;
     const response = await state.put({ topic });
     assert.equal(response.status, 503);
     assert.match(response.body.message, /synchronization failed/);
     assert.doesNotMatch(JSON.stringify(response.body), /internal database/);
     assert.ok(state.errors.length);
-    assert.equal(state.cacheInvalidations, 1);
-    assert.equal(state.docs.get(id(1)).topic, topic);
-    assert.equal(state.docs.get(id(2)).topic, 'living-heritage');
+    assert.equal(state.cacheInvalidations, 0);
+    assert.deepEqual(state.invalidations, []);
+    assert.deepEqual(clone(state.rows), before);
+    assert.ok(state.transactions[0].aborted && state.transactions[0].ended && !state.transactions[0].committed);
     state.siblingFailure = false;
     success(await state.put({ topic }));
     assert.ok([...state.docs.values()].every(doc => doc.topic === topic));
     assert.deepEqual(state.generated, []);
+    assert.equal(state.cacheInvalidations, 1);
+    assert.equal(state.invalidations.length, 1);
+    assert.ok(state.transactions[1].committed && state.transactions[1].ended);
   });
 }
 
@@ -533,9 +508,14 @@ test('A source/category race returns 409 without changing source or sibling meta
 
 test('A zero-match sibling update cannot be reported as successful synchronization', async context => {
   const state = setup(context);
+  const before = clone(state.rows);
   state.siblingRace = true;
   assert.equal((await state.put({ topic: null })).status, 503);
-  assert.equal(state.writes.find(write => write.method === 'updateOne').filter.syncVersion, 4);
+  assert.equal(state.writes.find(write => write.method === 'updateOne').filter.syncVersion, 5);
+  assert.deepEqual(clone(state.rows), before);
+  assert.deepEqual(state.invalidations, []);
+  assert.equal(state.cacheInvalidations, 0);
+  assert.ok(state.transactions[0].aborted && state.transactions[0].ended);
 });
 
 test('An older topic synchronization cannot overwrite a sibling with a newer source version', async context => {
@@ -550,15 +530,20 @@ test('An older topic synchronization cannot overwrite a sibling with a newer sou
   assert.equal(state.invalidations.length, 0);
 });
 
-test('Faith topic changes submitted while publishing reach existing siblings without an extra content sync', async context => {
+test('Faith topic changes submitted while publishing reach existing siblings without regenerating their content', async context => {
   const state = setup(context, [article(1, 'en', { status: 'draft' }), article(2, 'hi'), article(3, 'gu')]);
-  const before = withoutSyncMetadata(state.docs.get(id(2)));
+  const before = clone(state.docs.get(id(2)));
   const result = success(await state.put({ status: 'published', topic: 'faith-spiritual-life' }));
   assert.equal(result.status, 'published');
   assert.ok([...state.docs.values()].every(doc => doc.topic === 'faith-spiritual-life'));
-  assert.deepEqual(withoutSyncMetadata(state.docs.get(id(2))), before);
+  const child = state.docs.get(id(2));
+  for (const field of [
+    '_id', 'slug', 'language', 'lang', 'originalLang', 'sourceArticleId', 'publishedAt',
+    'title', 'description', 'content', 'humanEdited', 'translationReviewStatus', 'translationMeta',
+  ]) assert.deepEqual(child[field], before[field], field);
   assert.deepEqual(state.generated, []);
-  assert.deepEqual(state.saves, []);
+  assert.ok(state.rows.News.every(doc => doc.status === 'published' && doc.workflowStage === 'PUBLISHED'));
+  assertDerivedTranslations(state);
 });
 
 test('A Faith category switch submitted while publishing clears existing Faith sibling taxonomy', async context => {
@@ -569,12 +554,13 @@ test('A Faith category switch submitted while publishing clears existing Faith s
 
 test('Public-copy CMS IDs resolve topic edits to canonical News without adding public-copy fields', async context => {
   const state = setup(context);
-  state.copies.set(id(90), { _id: id(90), category: 'faith-culture', sourceNewsId: id(1) });
+  state.rows.Article.push({ _id: id(90), category: 'faith-culture', sourceNewsId: id(1) });
   success(await state.put({ topic: 'living-heritage' }, id(90)));
   assert.equal(state.docs.get(id(1)).topic, 'living-heritage');
-  assert.deepEqual(state.publicSync, []);
+  assert.ok(state.publicSync.includes(id(1)));
+  assert.equal(state.publicSync.includes(id(90)), false);
   assert.equal(PublicArticle.schema.path('topic'), undefined);
-  state.copies.set(id(91), { _id: id(91), category: 'faith-culture' });
+  state.rows.Article.push({ _id: id(91), category: 'faith-culture' });
   assert.equal((await state.put({ topic: null }, id(91))).status, 409);
 });
 

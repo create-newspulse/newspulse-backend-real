@@ -1,3 +1,4 @@
+require('./helpers/publicNewsIsolation');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
@@ -11,14 +12,22 @@ const PublicArticle = require('../models/Article');
 const PushHistory = require('../models/PushHistory');
 const { publishCanonicalArticle } = require('../services/articlePublishing.service');
 const mongoose = require('mongoose');
+const { installEditorialFixture, seedGroup } = require('./helpers/editorialLifecycleFixture');
 
-function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
-  const b64 = Buffer.from(`${email}:0`, 'utf8').toString('base64');
-  return `np.${b64}`;
-}
-
-function makeOpaqueFounderToken() {
-  return makeOpaqueAdminToken('founder@example.com');
+function installPublicationRouteFixture(context) {
+  const state = installEditorialFixture(context);
+  context.mock.method(require('../models/PublicSiteSettings'), 'getOrCreate', async () => ({
+    published: { languageTheme: { languages: ['en', 'hi', 'gu'] } },
+  }));
+  const fetch = global.fetch;
+  context.mock.method(global, 'fetch', async (url, options) => {
+    if (String(url).startsWith('http://127.0.0.1/')) return fetch(url, options);
+    const body = JSON.parse(options.body);
+    return { ok: true, status: 200, json: async () => ({ data: {
+      translations: body.q.map(value => ({ translatedText: `${body.target}:${value}` })),
+    } }) };
+  });
+  return state;
 }
 
 function makeDoc(overrides = {}) {
@@ -242,27 +251,19 @@ for (const translationMode of ['existing', 'generated', 'cached']) {
 }
 
 test('author byline survives draft creation, edit, preview, scheduling and scheduled publication', async (context) => {
-  const docs = [];
-  installPublishMocks(context, docs);
+  const state = installPublicationRouteFixture(context);
   context.mock.method(require('../models/User'), 'findOne', () => { throw new Error('Author workflow must not query Users'); });
-  context.mock.method(News, 'findOne', () => queryDoc(null));
-  context.mock.method(PublicArticle, 'findOne', () => queryDoc(null));
-  context.mock.method(News, 'findById', (id) => queryDoc(docs.find((doc) => String(doc._id) === String(id))));
-  context.mock.method(News, 'findByIdAndUpdate', async (id, update) => {
-    const doc = docs.find((item) => String(item._id) === String(id));
-    if (doc) Object.assign(doc, update.$set || {});
-    return doc;
-  });
-  const token = makeOpaqueFounderToken();
+  const token = state.token('founder');
   const created = await request(app).post('/api/admin/articles').set('Authorization', `Bearer ${token}`).send({
     title: 'Author draft', summary: 'Author summary', content: '<p>Author body</p>', category: 'national', language: 'en', status: 'draft',
     authorByline: { enabled: true, snapshot: { name: 'Independent Author', photoUrl: '/uploads/author.jpg' } },
   });
   assert.equal(created.status, 201, JSON.stringify(created.body));
-  const doc = docs[0];
+  let doc = state.rows.News[0];
   const byline = structuredClone(doc.authorByline);
   const edited = await request(app).put(`/api/admin/articles/${doc._id}`).set('Authorization', `Bearer ${token}`).send({ summary: 'Edited summary' });
   assert.equal(edited.status, 200, JSON.stringify(edited.body));
+  doc = state.rows.News.find(row => row._id === doc._id);
   assert.deepEqual(doc.authorByline, byline);
   const preview = await request(app).get(`/api/articles/${doc._id}`).set('Authorization', `Bearer ${token}`);
   assert.equal(preview.status, 200);
@@ -271,43 +272,43 @@ test('author byline survives draft creation, edit, preview, scheduling and sched
   assert.equal(publicPreview.status, 404);
   const scheduled = await request(app).post(`/api/articles/${doc._id}/schedule`).set('Authorization', `Bearer ${token}`).send({ scheduledAt: '2030-01-01T00:00:00.000Z' });
   assert.equal(scheduled.status, 200, JSON.stringify(scheduled.body));
+  doc = state.rows.News.find(row => row._id === doc._id);
   assert.equal(doc.status, 'scheduled');
   assert.deepEqual(doc.authorByline, byline);
   const { publishDueScheduledArticles } = require('../services/scheduledPublication.service');
   const result = await publishDueScheduledArticles({
     allowDisconnected: true,
-    News: { find: () => ({ limit: () => docs }) },
-    PushHistory: { create: async () => ({}) },
+    News, PushHistory,
     now: new Date('2030-01-01T00:00:00.000Z'),
   });
   assert.equal(result.published, 1);
+  doc = state.rows.News.find(row => row._id === doc._id);
   assert.equal(doc.status, 'published');
   assert.ok(doc.authorByline.snapshotCapturedAt);
   assert.deepEqual(doc.authorByline.snapshot, byline.snapshot);
   const frozen = structuredClone(doc.authorByline);
   const managed = await request(app).put(`/api/admin/articles/${doc._id}`).set('Authorization', `Bearer ${token}`).send({ summary: 'Managed summary' });
   assert.equal(managed.status, 200, JSON.stringify(managed.body));
+  doc = state.rows.News.find(row => row._id === doc._id);
   assert.deepEqual(doc.authorByline, frozen);
-  const child = makeLanguageDoc('hi', {
-    sourceArticleId: doc._id,
-    translationKey: doc.translationKey,
-    translationGroupId: doc.translationGroupId,
-    authorByline: structuredClone(frozen),
-  });
-  docs.push(child);
+  let child = state.rows.News.find(row => row.language === 'hi');
+  assert.ok(child, 'scheduled publication must persist the generated Hindi edition');
   const invalidEdit = await request(app).put(`/api/admin/articles/${doc._id}`).set('Authorization', `Bearer ${token}`).send({ authorByline: { snapshot: { name: ' ' } } });
   assert.equal(invalidEdit.status, 400);
+  doc = state.rows.News.find(row => row._id === doc._id);
   assert.deepEqual(doc.authorByline, frozen);
   const conflictingName = await request(app).put(`/api/admin/articles/${child._id}`).set('Authorization', `Bearer ${token}`).send({ authorByline: { snapshot: { name: 'Different child author' } } });
   assert.equal(conflictingName.status, 409);
   const conflicting = await request(app).put(`/api/admin/articles/${child._id}`).set('Authorization', `Bearer ${token}`).send({ authorByline: { enabled: false } });
   assert.equal(conflicting.status, 409);
+  child = state.rows.News.find(row => row._id === child._id);
   assert.deepEqual(child.authorByline, frozen);
-  const publicId = '507f1f77bcf86cd799439960';
-  context.mock.method(PublicArticle, 'findById', () => queryDoc({ sourceNewsId: doc._id }));
+  const publicId = state.rows.Article.find(copy => copy.sourceNewsId === doc._id)._id;
   const replacement = { name: 'Shailesh Rathod', publicDesignation: 'Independent Writer', shortBio: 'Updated biography' };
   const explicitEdit = await request(app).put(`/api/admin/articles/${publicId}`).set('Authorization', `Bearer ${token}`).send({ authorByline: { snapshot: replacement, snapshotCapturedAt: '2000-01-01' } });
   assert.equal(explicitEdit.status, 200, JSON.stringify(explicitEdit.body));
+  doc = state.rows.News.find(row => row._id === doc._id);
+  child = state.rows.News.find(row => row._id === child._id);
   assert.deepEqual(doc.authorByline.snapshot, replacement);
   assert.equal(child.authorByline.enabled, true);
   assert.deepEqual(child.authorByline.snapshot, replacement);
@@ -315,6 +316,8 @@ test('author byline survives draft creation, edit, preview, scheduling and sched
   assert.notEqual(new Date(doc.authorByline.snapshotCapturedAt).getUTCFullYear(), 2000);
   const fromPublicId = await request(app).put(`/api/admin/articles/${publicId}`).set('Authorization', `Bearer ${token}`).send({ authorByline: { enabled: false } });
   assert.equal(fromPublicId.status, 200, JSON.stringify(fromPublicId.body));
+  doc = state.rows.News.find(row => row._id === doc._id);
+  child = state.rows.News.find(row => row._id === child._id);
   assert.deepEqual(doc.authorByline, { enabled: false });
   assert.deepEqual(child.authorByline, { enabled: false });
 });
@@ -552,33 +555,25 @@ test('canonical publish failure leaves article drafts unpublished', async (t) =>
   assert.equal(docs[1].publishedAt, undefined);
 });
 
-test('POST /api/articles/:id/publish preserves Founder authorization', async (t) => {
-  const previousFindById = News.findById;
-  let findByIdCalled = false;
-  News.findById = async () => {
-    findByIdCalled = true;
-    return makeLanguageDoc('en');
-  };
-  t.after(() => { News.findById = previousFindById; });
-
-  const res = await request(app)
-    .post('/api/articles/507f1f77bcf86cd799439901/publish')
-    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-    .send();
-
+test('POST /api/articles/:id/publish rejects staff without verified Founder-granted publication authority', async (t) => {
+  const state = installPublicationRouteFixture(t);
+  const { ids } = seedGroup(state, { status: 'draft' });
+  const before = structuredClone(state.rows);
+  const res = await state.request('post', `/api/articles/${ids[0]}/publish`, undefined, 'admin');
   assert.equal(res.status, 403);
-  assert.match(res.body.message, /Founder permission/);
-  assert.equal(findByIdCalled, false);
+  assert.equal(res.body.code, 'ARTICLE_PUBLISH_FORBIDDEN');
+  for (const name of ['News', 'Article', 'TranslationJob']) assert.deepEqual(state.rows[name], before[name]);
+  const writes = new Set(['save', 'create', 'updateOne', 'updateMany', 'findOneAndUpdate', 'findByIdAndUpdate', 'deleteMany']);
+  assert.deepEqual(state.calls.filter(call => ['News', 'Article', 'TranslationJob'].includes(call.name) && writes.has(call.method)), []);
+  assert.deepEqual(state.invalidations, []);
 });
 
 test('POST /api/articles can direct-publish through the canonical pipeline for Founder', async (t) => {
-  const docs = [];
-  const state = installPublishMocks(t, docs);
-  News.findById = async (id) => docs.find((doc) => String(doc._id) === String(id)) || null;
+  const state = installPublicationRouteFixture(t);
 
   const res = await request(app)
     .post('/api/articles')
-    .set('Authorization', `Bearer ${makeOpaqueFounderToken()}`)
+    .set('Authorization', `Bearer ${state.token('founder')}`)
     .send({
       title: 'Direct publish source',
       summary: 'Direct publish summary',
@@ -593,5 +588,7 @@ test('POST /api/articles can direct-publish through the canonical pipeline for F
   assert.equal(res.status, 201);
   assert.equal(res.body.article.status, 'published');
   assert.deepEqual(res.body.publishedLanguages.sort(), ['en', 'gu', 'hi']);
-  assert.deepEqual(state.created.map((doc) => doc.language).sort(), ['en', 'gu', 'hi']);
+  assert.deepEqual(state.rows.News.map(doc => doc.language).sort(), ['en', 'gu', 'hi']);
+  assert.equal(state.rows.Article.length, 3);
+  assert.ok(state.rows.Article.every(copy => copy.status === 'published'));
 });

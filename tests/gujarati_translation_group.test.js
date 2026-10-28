@@ -1,3 +1,4 @@
+require('./helpers/publicNewsIsolation');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
@@ -8,15 +9,17 @@ process.env.NODE_ENV = 'test';
 const app = require('../server');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
-const PushHistory = require('../models/PushHistory');
+const { installEditorialFixture, seedGroup } = require('./helpers/editorialLifecycleFixture');
 
-function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
-  const b64 = Buffer.from(`${email}:0`, 'utf8').toString('base64');
-  return `np.${b64}`;
-}
-
-function makeOpaqueFounderToken() {
-  return makeOpaqueAdminToken('founder@example.com');
+function installGroupFixture(context, status = 'draft') {
+  const state = installEditorialFixture(context);
+  const { ids, publication } = seedGroup(state, { status });
+  const titles = { en: 'English title', hi: 'हिंदी शीर्षक', gu: 'ગુજરાતી શીર્ષક' };
+  for (const row of [...state.rows.News, ...state.rows.Article]) {
+    row.title = titles[row.language];
+    row.category = 'national';
+  }
+  return { state, ids, publication };
 }
 
 function makeQueryResult(doc, capture) {
@@ -37,16 +40,6 @@ function makeFindResult(docs) {
     catch(reject) { return Promise.resolve(docs).catch(reject); },
   };
   return query;
-}
-
-function makeDoc(obj) {
-  const doc = {
-    ...obj,
-    save: async () => doc,
-    toObject: () => ({ ...doc }),
-    toJSON: () => ({ ...doc }),
-  };
-  return doc;
 }
 
 function baseArticle(overrides = {}) {
@@ -96,160 +89,62 @@ test('News and Article models canonicalize Gujarati language aliases to gu', asy
   assert.equal(publicArticle.language, 'gu');
 });
 
-test('POST /api/articles creates Gujarati draft with language=gu', async () => {
-  const prevFindOne = News.findOne;
-  const prevCreate = News.create;
-  const created = [];
-
-  try {
-    News.findOne = () => makeQueryResult(null);
-    News.create = async (payload) => {
-      created.push(payload);
-      return makeDoc({ ...payload, _id: '507f1f77bcf86cd799439211' });
-    };
-
-    const res = await request(app)
-      .post('/api/articles')
-      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-      .send({
-        title: 'ગુજરાતી ડ્રાફ્ટ',
-        summary: 'ગુજરાતી સારાંશ',
-        content: 'ગુજરાતી લેખનું મુખ્ય લખાણ',
-        category: 'national',
-        language: 'gu',
-        translationGroupId: 'grp-create-gu-1',
-        sourceArticleId: '507f1f77bcf86cd799439299',
-        slug: 'gujarati-draft-create',
-        status: 'draft',
-      });
-
-    assert.equal(res.status, 201);
-    assert.equal(created.length, 1);
-    assert.equal(created[0].language, 'gu');
-    assert.equal(created[0].lang, 'gu');
-    assert.equal(created[0].status, 'draft');
-    assert.equal(created[0].translationGroupId, 'grp-create-gu-1');
-    assert.equal(created[0].sourceArticleId, '507f1f77bcf86cd799439299');
-  } finally {
-    News.findOne = prevFindOne;
-    News.create = prevCreate;
-  }
+test('POST /api/articles creates Gujarati draft with language=gu', async context => {
+  const state = installEditorialFixture(context);
+  const sourceId = '507f1f77bcf86cd799439299';
+  state.rows.News.push(baseArticle({
+    _id: sourceId, sourceArticleId: sourceId, status: 'draft', publishedAt: null,
+    translationGroupId: 'grp-create-gu-1', translationKey: 'grp-create-gu-1',
+  }));
+  const res = await state.request('post', '/api/articles', {
+    title: 'ગુજરાતી ડ્રાફ્ટ', summary: 'ગુજરાતી સારાંશ', content: 'ગુજરાતી લેખનું મુખ્ય લખાણ',
+    category: 'national', language: 'gu', translationGroupId: 'grp-create-gu-1',
+    sourceArticleId: sourceId, slug: 'gujarati-draft-create', status: 'draft',
+  });
+  assert.equal(res.status, 201, res.text);
+  const created = state.rows.News.filter(doc => doc._id !== sourceId);
+  assert.equal(created.length, 1);
+  assert.equal(created[0].language, 'gu');
+  assert.equal(created[0].lang, 'gu');
+  assert.equal(created[0].status, 'draft');
+  assert.equal(created[0].translationGroupId, 'grp-create-gu-1');
+  assert.equal(created[0].sourceArticleId, sourceId);
 });
 
-test('POST /api/articles prevents duplicate translationGroupId + language records', async () => {
-  const prevFindOne = News.findOne;
-  const prevCreate = News.create;
-  let findOneCalls = 0;
-  let createCalled = false;
-
-  try {
-    News.findOne = () => {
-      findOneCalls += 1;
-      return makeQueryResult(findOneCalls === 1 ? null : { _id: '507f1f77bcf86cd799439212', language: 'gu' });
-    };
-    News.create = async () => {
-      createCalled = true;
-      return null;
-    };
-
-    const res = await request(app)
-      .post('/api/articles')
-      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-      .send({
-        title: 'ડુપ્લિકેટ ગુજરાતી',
-        summary: 'સારાંશ',
-        content: 'મુખ્ય લખાણ',
-        category: 'national',
-        language: 'Gujarati',
-        translationGroupId: 'grp-duplicate-gu-1',
-        slug: 'duplicate-gujarati',
-        status: 'draft',
-      });
-
-    assert.equal(res.status, 409);
-    assert.match(res.body.message, /translationGroupId and language/i);
-    assert.equal(createCalled, false);
-  } finally {
-    News.findOne = prevFindOne;
-    News.create = prevCreate;
-  }
+test('POST /api/articles prevents duplicate translationGroupId + language records', async context => {
+  const state = installEditorialFixture(context);
+  state.rows.News.push(baseArticle({
+    language: 'gu', lang: 'gu', originalLang: 'gu', translationGroupId: 'grp-duplicate-gu-1',
+  }));
+  const before = structuredClone(state.rows);
+  const res = await state.request('post', '/api/articles', {
+    title: 'ડુપ્લિકેટ ગુજરાતી', summary: 'સારાંશ', content: 'મુખ્ય લખાણ',
+    category: 'national', language: 'Gujarati', translationGroupId: 'grp-duplicate-gu-1',
+    slug: 'duplicate-gujarati', status: 'draft',
+  });
+  assert.equal(res.status, 409);
+  assert.match(res.body.message, /translationGroupId and language/i);
+  assert.deepEqual(state.rows, before);
+  assert.equal(state.calls.filter(call => call.name === 'News' && call.method === 'create').length, 0);
 });
 
-test('POST /api/articles/:id/publish publishes Gujarati article without changing its language', async () => {
-  const id = '507f1f77bcf86cd799439221';
-  const prevFindById = News.findById;
-  const prevFind = News.find;
-  const prevFindOne = News.findOne;
-  const prevPublicFindOneAndUpdate = PublicArticle.findOneAndUpdate;
-  const prevPublicUpdateMany = PublicArticle.updateMany;
-  const prevPushCreate = PushHistory.create;
-
-  try {
-    const doc = makeDoc({
-      _id: 'gujarati-publish-test-doc',
-      title: 'ગુજરાતી પ્રકાશિત',
-      description: 'ગુજરાતી સારાંશ',
-      content: 'ગુજરાતી લેખનું મુખ્ય લખાણ',
-      category: 'national',
-      slug: 'gujarati-publish',
-      slugs: { gu: 'gujarati-publish' },
-      language: 'gu',
-      lang: 'gu',
-      originalLang: 'gu',
-      status: 'draft',
-      workflowStage: 'DRAFT',
-      translationGroupId: 'grp-publish-gu-1',
-      sourceArticleId: '507f1f77bcf86cd799439299',
-    });
-    const en = makeDoc(baseArticle({
-      _id: '507f1f77bcf86cd799439222',
-      translationGroupId: 'grp-publish-gu-1',
-      language: 'en',
-      lang: 'en',
-      originalLang: 'en',
-      status: 'draft',
-      workflowStage: 'DRAFT',
-    }));
-    const hi = makeDoc(baseArticle({
-      _id: '507f1f77bcf86cd799439223',
-      title: 'हिंदी शीर्षक',
-      description: 'हिंदी सारांश',
-      content: 'हिंदी सामग्री',
-      slug: 'hindi-title',
-      translationGroupId: 'grp-publish-gu-1',
-      language: 'hi',
-      lang: 'hi',
-      originalLang: 'hi',
-      status: 'draft',
-      workflowStage: 'DRAFT',
-    }));
-
-    News.findById = async () => doc;
-    News.find = async () => [doc, en, hi];
-    News.findOne = () => makeQueryResult(null);
-    PublicArticle.findOneAndUpdate = () => ({ lean: async () => ({ _id: 'public-gu-1' }) });
-    PublicArticle.updateMany = async () => ({ acknowledged: true, modifiedCount: 0 });
-    PushHistory.create = async () => ({ _id: 'push-1' });
-
-    const res = await request(app)
-      .post(`/api/articles/${id}/publish`)
-      .set('Authorization', `Bearer ${makeOpaqueFounderToken()}`)
-      .send();
-
-    assert.equal(res.status, 200);
-    assert.equal(doc.status, 'published');
-    assert.equal(doc.language, 'gu');
-    assert.equal(doc.lang, 'gu');
-    assert.equal(res.body.article.language, 'gu');
-    assert.deepEqual(res.body.publishedLanguages.sort(), ['en', 'gu', 'hi']);
-  } finally {
-    News.findById = prevFindById;
-    News.find = prevFind;
-    News.findOne = prevFindOne;
-    PublicArticle.findOneAndUpdate = prevPublicFindOneAndUpdate;
-    PublicArticle.updateMany = prevPublicUpdateMany;
-    PushHistory.create = prevPushCreate;
+test('POST /api/articles/:id/publish publishes Gujarati article without changing its language', async context => {
+  const { state, ids } = installGroupFixture(context);
+  for (const doc of [...state.rows.News, ...state.rows.Article]) {
+    doc.sourceArticleId = ids[2];
+    doc.sourceLanguage = 'gu';
   }
+  const publicIds = state.rows.Article.map(copy => copy._id);
+  const res = await state.request('post', `/api/articles/${ids[2]}/publish`);
+  assert.equal(res.status, 200, res.text);
+  const doc = state.rows.News.find(row => row._id === ids[2]);
+  assert.equal(doc.status, 'published');
+  assert.equal(doc.language, 'gu');
+  assert.equal(doc.lang, 'gu');
+  assert.equal(res.body.article.language, 'gu');
+  assert.deepEqual(res.body.publishedLanguages.sort(), ['en', 'gu', 'hi']);
+  assert.deepEqual(state.rows.Article.map(copy => copy._id), publicIds);
+  assert.ok(state.rows.Article.every(copy => copy.status === 'published'));
 });
 
 test('Public detail resolves EN, HI, and GU sibling records from one translation group', async () => {
@@ -411,316 +306,96 @@ test('Gujarati draft, scheduled, archived, and deleted stories are not returned 
   }
 });
 
-test('Updating Gujarati article does not modify English or Hindi siblings', async () => {
-  const id = '507f1f77bcf86cd799439231';
-  const prevFindById = News.findById;
-  const prevFindByIdAndUpdate = News.findByIdAndUpdate;
-  const prevFindOne = News.findOne;
-  const updates = [];
-
-  try {
-    const gu = baseArticle({
-      _id: id,
-      title: 'જૂનું ગુજરાતી',
-      description: 'જૂનો સારાંશ',
-      content: 'જૂનું લખાણ',
-      slug: 'old-gujarati',
-      language: 'gu',
-      lang: 'gu',
-      originalLang: 'gu',
-      status: 'draft',
-      workflowStage: 'DRAFT',
-      sourceArticleId: '507f1f77bcf86cd799439299',
-    });
-
-    News.findById = () => ({ select: () => ({ lean: async () => gu }) });
-    News.findOne = () => makeQueryResult(null);
-    News.findByIdAndUpdate = async (targetId, op) => {
-      updates.push({ targetId, op });
-      return makeDoc({ ...gu, ...(op.$set || {}) });
-    };
-
-    const res = await request(app)
-      .put(`/api/articles/${id}`)
-      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-      .send({
-        title: 'નવું ગુજરાતી',
-        summary: 'નવો સારાંશ',
-        content: 'નવું મુખ્ય લખાણ',
-        language: 'gu',
-      });
-
-    assert.equal(res.status, 200);
-    assert.ok(updates.length >= 1);
-    assert.ok(updates.every((update) => update.targetId === id));
-    const contentUpdate = updates.find((update) => update.op?.$set?.title === 'નવું ગુજરાતી');
-    assert.ok(contentUpdate);
-    assert.equal(contentUpdate.op.$set.description, 'નવો સારાંશ');
-    assert.equal(contentUpdate.op.$set.content, 'નવું મુખ્ય લખાણ');
-    assert.equal(Object.prototype.hasOwnProperty.call(contentUpdate.op.$set, 'language'), false);
-    assert.equal(Object.prototype.hasOwnProperty.call(contentUpdate.op.$set, 'lang'), false);
-    assert.equal(Object.prototype.hasOwnProperty.call(contentUpdate.op.$set, 'originalLang'), false);
-  } finally {
-    News.findById = prevFindById;
-    News.findByIdAndUpdate = prevFindByIdAndUpdate;
-    News.findOne = prevFindOne;
+test('Updating Gujarati article preserves English and Hindi sibling content and publication identities', async context => {
+  const { state, ids } = installGroupFixture(context);
+  const before = structuredClone(state.rows.News);
+  const res = await state.request('put', `/api/articles/${ids[2]}`, {
+    title: 'નવું ગુજરાતી', summary: 'નવો સારાંશ', content: 'નવું મુખ્ય લખાણ', language: 'gu',
+  });
+  assert.equal(res.status, 200, res.text);
+  const gu = state.rows.News.find(doc => doc._id === ids[2]);
+  assert.equal(gu.title, 'નવું ગુજરાતી');
+  assert.equal(gu.description, 'નવો સારાંશ');
+  assert.equal(gu.content, 'નવું મુખ્ય લખાણ');
+  assert.equal(gu.language, 'gu');
+  assert.equal(gu.lang, 'gu');
+  assert.equal(gu.originalLang, 'gu');
+  for (const previous of before.slice(0, 2)) {
+    const stored = state.rows.News.find(doc => doc._id === previous._id);
+    for (const field of [
+      '_id', 'title', 'description', 'content', 'slug', 'language', 'lang', 'originalLang',
+      'sourceArticleId', 'translationGroupId', 'publishedAt', 'createdAt', 'coverImage',
+    ]) assert.deepEqual(stored[field], previous[field], field);
   }
 });
 
-test('DELETE /api/articles/:id soft-deletes every member of a multilingual translation group', async () => {
-  const enId = '507f1f77bcf86cd799439271';
-  const hiId = '507f1f77bcf86cd799439272';
-  const guId = '507f1f77bcf86cd799439273';
-  const otherId = '507f1f77bcf86cd799439274';
-  const groupKey = 'grp-delete-all-langs';
-  const prevFindById = News.findById;
-  const prevFind = News.find;
-  const prevFindByIdAndUpdate = News.findByIdAndUpdate;
-  const prevPublicFindOneAndUpdate = PublicArticle.findOneAndUpdate;
-  const prevPublicUpdateMany = PublicArticle.updateMany;
-  const prevPushCreate = PushHistory.create;
-  const publicSyncUpdates = [];
-  const publicDemotions = [];
-  const pushRows = [];
-
-  try {
-    const en = makeDoc(baseArticle({ _id: enId, translationGroupId: groupKey, translationKey: groupKey, language: 'en', lang: 'en', originalLang: 'en', sourceArticleId: enId, workflowStage: 'PUBLISHED' }));
-    const hi = makeDoc(baseArticle({ _id: hiId, translationGroupId: groupKey, translationKey: groupKey, title: 'हिंदी शीर्षक', slug: 'hindi-delete-group', language: 'hi', lang: 'hi', originalLang: 'hi', sourceArticleId: enId, workflowStage: 'PUBLISHED' }));
-    const gu = makeDoc(baseArticle({ _id: guId, translationGroupId: groupKey, translationKey: groupKey, title: 'ગુજરાતી શીર્ષક', slug: 'gujarati-delete-group', language: 'gu', lang: 'gu', originalLang: 'gu', sourceArticleId: enId, workflowStage: 'PUBLISHED' }));
-    const other = makeDoc(baseArticle({ _id: otherId, translationGroupId: 'grp-delete-other', translationKey: 'grp-delete-other', slug: 'unrelated-delete-group', sourceArticleId: otherId, workflowStage: 'PUBLISHED' }));
-    const docs = [en, hi, gu, other];
-
-    const findGroupDocs = (filter = {}) => docs.filter((doc) => {
-      if (filter._id?.$ne !== undefined && String(doc._id) === String(filter._id.$ne)) return false;
-      if (Array.isArray(filter.$or)) {
-        return filter.$or.some((clause) => clause.translationGroupId === doc.translationGroupId || clause.translationKey === doc.translationKey);
-      }
-      return true;
-    });
-
-    News.findById = (id) => makeQueryResult(docs.find((doc) => String(doc._id) === String(id)) || null);
-    News.find = (filter) => makeFindResult(findGroupDocs(filter));
-    News.findByIdAndUpdate = async (id, op) => {
-      const doc = docs.find((item) => String(item._id) === String(id));
-      if (!doc) return null;
-      Object.assign(doc, op.$set || {});
-      if (!Array.isArray(doc.workflowHistory)) doc.workflowHistory = [];
-      if (op.$push?.workflowHistory) doc.workflowHistory.push(op.$push.workflowHistory);
-      return doc;
-    };
-    PublicArticle.findOneAndUpdate = (_query, update) => {
-      publicSyncUpdates.push(update.$set || {});
-      return { lean: async () => ({ _id: `public-${publicSyncUpdates.length}` }) };
-    };
-    PublicArticle.updateMany = async (query, update) => {
-      publicDemotions.push({ query, update });
-      return { acknowledged: true, modifiedCount: 3 };
-    };
-    PushHistory.create = async (payload) => {
-      pushRows.push(payload);
-      return { _id: `push-${pushRows.length}` };
-    };
-
-    const res = await request(app)
-      .delete(`/api/articles/${guId}`)
-      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-      .send({ reason: 'delete full story' });
-
-    assert.equal(res.status, 200);
-    assert.equal(res.body.deletedCount, 3);
-    assert.deepEqual(new Set(res.body.deletedIds), new Set([enId, hiId, guId]));
-    for (const doc of [en, hi, gu]) {
-      assert.equal(doc.status, 'deleted');
-      assert.equal(doc.workflowStage, 'REJECTED');
-      assert.ok(doc.deletedAt instanceof Date);
-    }
-    assert.equal(other.status, 'published');
-    assert.equal(publicSyncUpdates.filter((update) => update.status === 'deleted' && update.deletedAt instanceof Date).length >= 3, true);
-    assert.equal(publicDemotions.length >= 1, true);
-    assert.match(JSON.stringify(publicDemotions[0].query), /grp-delete-all-langs/);
-    assert.equal(pushRows.length, 3);
-  } finally {
-    News.findById = prevFindById;
-    News.find = prevFind;
-    News.findByIdAndUpdate = prevFindByIdAndUpdate;
-    PublicArticle.findOneAndUpdate = prevPublicFindOneAndUpdate;
-    PublicArticle.updateMany = prevPublicUpdateMany;
-    PushHistory.create = prevPushCreate;
+test('DELETE /api/articles/:id soft-deletes every member of a multilingual translation group', async context => {
+  const { state, ids, publication } = installGroupFixture(context, 'published');
+  const other = baseArticle({
+    _id: '507f1f77bcf86cd799439274', translationGroupId: 'unrelated', translationKey: 'unrelated',
+    slug: 'unrelated-delete-group', sourceArticleId: '507f1f77bcf86cd799439274',
+  });
+  state.rows.News.push(structuredClone(other));
+  const response = await state.request('delete', `/api/articles/${ids[2]}`, { reason: 'delete full story' });
+  assert.equal(response.status, 200, response.text);
+  assert.equal(response.body.deletedCount, 3);
+  assert.deepEqual(new Set(response.body.deletedIds), new Set(ids));
+  for (const doc of state.rows.News.filter(doc => ids.includes(doc._id))) {
+    assert.equal(doc.status, 'deleted');
+    assert.equal(doc.workflowStage, 'REJECTED');
+    assert.ok(doc.deletedAt instanceof Date);
+    assert.deepEqual(doc.publishedAt, publication);
   }
+  assert.deepEqual(state.rows.News.find(doc => doc._id === other._id), other);
+  assert.equal(state.rows.Article.length, 3);
+  assert.ok(state.rows.Article.every(copy => copy.status === 'deleted' && copy.deletedAt instanceof Date));
+  assert.ok(state.rows.Article.every(copy => copy.publishedAt.getTime() === publication.getTime()));
+  assert.equal(state.rows.PushHistory.length, 3);
 });
 
-test('DELETE /api/articles/:id soft-deletes only the selected legacy article when no group key exists', async () => {
+test('DELETE /api/articles/:id soft-deletes only the selected legacy article when no group key exists', async context => {
+  const state = installEditorialFixture(context);
   const legacyId = '507f1f77bcf86cd799439281';
   const siblingId = '507f1f77bcf86cd799439282';
-  const prevFindById = News.findById;
-  const prevFind = News.find;
-  const prevFindByIdAndUpdate = News.findByIdAndUpdate;
-  const prevPublicFindOneAndUpdate = PublicArticle.findOneAndUpdate;
-  const prevPublicUpdateMany = PublicArticle.updateMany;
-  const prevPushCreate = PushHistory.create;
-  let findCalled = false;
-  const updatedIds = [];
-
-  try {
-    const legacy = makeDoc(baseArticle({ _id: legacyId, translationGroupId: null, translationKey: null, slug: 'legacy-delete-one', workflowStage: 'DRAFT' }));
-    const sibling = makeDoc(baseArticle({ _id: siblingId, translationGroupId: null, translationKey: null, slug: 'legacy-do-not-delete', workflowStage: 'DRAFT' }));
-    const docs = [legacy, sibling];
-
-    News.findById = (id) => makeQueryResult(docs.find((doc) => String(doc._id) === String(id)) || null);
-    News.find = () => {
-      findCalled = true;
-      return makeFindResult(docs);
-    };
-    News.findByIdAndUpdate = async (id, op) => {
-      const doc = docs.find((item) => String(item._id) === String(id));
-      if (!doc) return null;
-      updatedIds.push(String(id));
-      Object.assign(doc, op.$set || {});
-      return doc;
-    };
-    PublicArticle.findOneAndUpdate = () => ({ lean: async () => ({ _id: 'public-legacy' }) });
-    PublicArticle.updateMany = async () => ({ acknowledged: true, modifiedCount: 1 });
-    PushHistory.create = async () => ({ _id: 'push-legacy' });
-
-    const res = await request(app)
-      .delete(`/api/articles/${legacyId}`)
-      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-      .send();
-
-    assert.equal(res.status, 200);
-    assert.equal(res.body.deletedCount, 1);
-    assert.deepEqual(res.body.deletedIds, [legacyId]);
-    assert.deepEqual(updatedIds, [legacyId]);
-    assert.equal(legacy.status, 'deleted');
-    assert.equal(sibling.status, 'published');
-    assert.equal(findCalled, false);
-  } finally {
-    News.findById = prevFindById;
-    News.find = prevFind;
-    News.findByIdAndUpdate = prevFindByIdAndUpdate;
-    PublicArticle.findOneAndUpdate = prevPublicFindOneAndUpdate;
-    PublicArticle.updateMany = prevPublicUpdateMany;
-    PushHistory.create = prevPushCreate;
-  }
+  const legacy = baseArticle({ _id: legacyId, translationGroupId: null, translationKey: null, slug: 'legacy-delete-one' });
+  const sibling = baseArticle({ _id: siblingId, translationGroupId: null, translationKey: null, slug: 'legacy-do-not-delete' });
+  state.rows.News.push(structuredClone(legacy), structuredClone(sibling));
+  const res = await state.request('delete', `/api/articles/${legacyId}`);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.deletedCount, 1);
+  assert.deepEqual(res.body.deletedIds, [legacyId]);
+  assert.equal(state.rows.News.find(doc => doc._id === legacyId).status, 'deleted');
+  assert.deepEqual(state.rows.News.find(doc => doc._id === siblingId), sibling);
 });
 
-test('Publish-all-languages validates complete EN HI GU group before changing statuses', async () => {
-  const id = '507f1f77bcf86cd799439241';
-  const prevFindById = News.findById;
-  const prevFind = News.find;
-
-  try {
-    const en = makeDoc(baseArticle({ _id: id, status: 'draft', workflowStage: 'DRAFT' }));
-    const hi = makeDoc(baseArticle({
-      _id: '507f1f77bcf86cd799439242',
-      title: 'हिंदी शीर्षक',
-      description: 'हिंदी सारांश',
-      content: 'हिंदी सामग्री',
-      slug: 'hindi-title',
-      language: 'hi',
-      lang: 'hi',
-      originalLang: 'hi',
-      status: 'draft',
-      workflowStage: 'DRAFT',
-    }));
-    const guIncomplete = makeDoc(baseArticle({
-      _id: '507f1f77bcf86cd799439243',
-      title: 'ગુજરાતી શીર્ષક',
-      description: '',
-      content: 'ગુજરાતી મુખ્ય લખાણ',
-      slug: 'gujarati-title',
-      language: 'gu',
-      lang: 'gu',
-      originalLang: 'gu',
-      status: 'draft',
-      workflowStage: 'DRAFT',
-    }));
-
-    News.findById = async () => en;
-    News.find = async () => [en, hi, guIncomplete];
-
-    const res = await request(app)
-      .post(`/api/articles/${id}/publish-all-languages`)
-      .set('Authorization', `Bearer ${makeOpaqueFounderToken()}`)
-      .send();
-
-    assert.equal(res.status, 400);
-    assert.deepEqual(res.body.invalidRecords, [{ language: 'gu', id: '507f1f77bcf86cd799439243', missingFields: ['summary'] }]);
-    assert.equal(en.status, 'draft');
-    assert.equal(hi.status, 'draft');
-    assert.equal(guIncomplete.status, 'draft');
-  } finally {
-    News.findById = prevFindById;
-    News.find = prevFind;
-  }
+test('Publish-all-languages validates complete EN HI GU group before changing statuses', async context => {
+  const { state, ids } = installGroupFixture(context);
+  state.rows.News[2].description = '';
+  const before = structuredClone(state.rows);
+  const res = await state.request('post', `/api/articles/${ids[0]}/publish-all-languages`);
+  assert.equal(res.status, 400, res.text);
+  assert.deepEqual(res.body.invalidRecords, [{ language: 'gu', id: ids[2], missingFields: ['summary'] }]);
+  for (const name of ['News', 'Article', 'TranslationJob']) assert.deepEqual(state.rows[name], before[name]);
+  assert.deepEqual(state.invalidations, []);
+  assert.ok(state.transactions[0].aborted && state.transactions[0].ended && !state.transactions[0].committed);
 });
 
-test('Publish-all-languages publishes complete EN HI GU group together', async () => {
-  const id = '507f1f77bcf86cd799439251';
-  const prevFindById = News.findById;
-  const prevFind = News.find;
-  const prevPublicFindOneAndUpdate = PublicArticle.findOneAndUpdate;
-  const prevPublicUpdateMany = PublicArticle.updateMany;
-  const prevPushCreate = PushHistory.create;
-  const saved = [];
-
-  try {
-    const en = makeDoc(baseArticle({ _id: id, status: 'draft', workflowStage: 'DRAFT' }));
-    const hi = makeDoc(baseArticle({
-      _id: '507f1f77bcf86cd799439252',
-      title: 'हिंदी शीर्षक',
-      description: 'हिंदी सारांश',
-      content: 'हिंदी सामग्री',
-      slug: 'hindi-title',
-      language: 'hi',
-      lang: 'hi',
-      originalLang: 'hi',
-      status: 'draft',
-      workflowStage: 'DRAFT',
-    }));
-    const gu = makeDoc(baseArticle({
-      _id: '507f1f77bcf86cd799439253',
-      title: 'ગુજરાતી શીર્ષક',
-      description: 'ગુજરાતી સારાંશ',
-      content: 'ગુજરાતી મુખ્ય લખાણ',
-      slug: 'gujarati-title',
-      language: 'gu',
-      lang: 'gu',
-      originalLang: 'gu',
-      status: 'draft',
-      workflowStage: 'DRAFT',
-    }));
-    for (const doc of [en, hi, gu]) {
-      doc.save = async () => {
-        saved.push(String(doc._id));
-        return doc;
-      };
-    }
-
-    News.findById = async () => en;
-    News.find = async () => [en, hi, gu];
-    PublicArticle.findOneAndUpdate = () => ({ lean: async () => ({ _id: 'public-sync' }) });
-    PublicArticle.updateMany = async () => ({ acknowledged: true, modifiedCount: 0 });
-    PushHistory.create = async () => ({ _id: 'push-group' });
-
-    const res = await request(app)
-      .post(`/api/articles/${id}/publish-all-languages`)
-      .set('Authorization', `Bearer ${makeOpaqueFounderToken()}`)
-      .send({ reason: 'complete group' });
-
-    assert.equal(res.status, 200);
-    assert.deepEqual(res.body.publishedLanguages.sort(), ['en', 'gu', 'hi']);
-    assert.equal(saved.length, 3);
-    for (const doc of [en, hi, gu]) {
-      assert.equal(doc.status, 'published');
-      assert.equal(doc.workflowStage, 'PUBLISHED');
-      assert.ok(doc.publishedAt instanceof Date);
-    }
-  } finally {
-    News.findById = prevFindById;
-    News.find = prevFind;
-    PublicArticle.findOneAndUpdate = prevPublicFindOneAndUpdate;
-    PublicArticle.updateMany = prevPublicUpdateMany;
-    PushHistory.create = prevPushCreate;
+test('Publish-all-languages publishes complete EN HI GU group together', async context => {
+  const { state, ids } = installGroupFixture(context);
+  const publicIds = state.rows.Article.map(copy => copy._id);
+  const res = await state.request('post', `/api/articles/${ids[0]}/publish-all-languages`, { reason: 'complete group' });
+  assert.equal(res.status, 200, res.text);
+  assert.deepEqual(res.body.publishedLanguages.sort(), ['en', 'gu', 'hi']);
+  assert.deepEqual(state.rows.News.map(doc => doc._id), ids);
+  assert.deepEqual(state.rows.Article.map(copy => copy._id), publicIds);
+  for (const doc of state.rows.News) {
+    assert.equal(doc.status, 'published');
+    assert.equal(doc.workflowStage, 'PUBLISHED');
+    assert.ok(doc.publishedAt instanceof Date);
+    const copy = state.rows.Article.find(item => item.sourceNewsId === doc._id);
+    assert.equal(copy.status, 'published');
+    assert.equal(copy.language, doc.language);
+    assert.deepEqual(copy.publishedAt, doc.publishedAt);
   }
+  assert.ok(state.transactions[0].committed && state.transactions[0].ended);
 });

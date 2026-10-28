@@ -1,91 +1,37 @@
+require('./helpers/publicNewsIsolation');
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const request = require('supertest');
+const { installEditorialFixture, seedGroup } = require('./helpers/editorialLifecycleFixture');
 
-process.env.NODE_ENV = 'test';
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
-
-const app = require('../server');
-const News = require('../models/News');
-const PublicArticle = require('../models/Article');
-const PushHistory = require('../models/PushHistory');
-
-function restore(originals) {
-  for (const [k, v] of Object.entries(originals.News)) News[k] = v;
-  for (const [k, v] of Object.entries(originals.PublicArticle)) PublicArticle[k] = v;
-  for (const [k, v] of Object.entries(originals.PushHistory || {})) PushHistory[k] = v;
-}
-
-test('DELETE /api/articles/:id also marks public copies as draft', async () => {
-  const id = '507f1f77bcf86cd7994390aa';
-  const originals = {
-    News: { findById: News.findById, find: News.find, findByIdAndUpdate: News.findByIdAndUpdate },
-    PublicArticle: { findOneAndUpdate: PublicArticle.findOneAndUpdate, updateMany: PublicArticle.updateMany },
-    PushHistory: { create: PushHistory.create },
+test('DELETE /api/articles/:id hides matching public copies and preserves publication chronology', async context => {
+  const state = installEditorialFixture(context);
+  const { ids, publication } = seedGroup(state);
+  state.rows.Article.push({
+    _id: '707f1f77bcf86cd79943a010', slug: 'story-en', status: 'published',
+    publishedAt: publication, sourceNewsId: null,
+  });
+  const unrelated = {
+    _id: '707f1f77bcf86cd79943a011', slug: 'unrelated', status: 'published',
+    publishedAt: publication, sourceNewsId: '507f1f77bcf86cd79943a099',
   };
+  state.rows.Article.push(unrelated);
 
-  try {
-    // The delete route uses: await News.findById(id).select(...).lean();
-    // Stub the Mongoose query chain.
-    News.findById = (_id) => ({
-      select: () => ({
-        lean: async () => (String(_id) === id
-          ? { _id: id, workflowStage: 'PUBLISHED', slug: 'hello', title: 'T', coverImage: null, coverImageUrl: null, imageURL: null, translationGroupId: 'grp1', translationKey: 'grp1' }
-          : null),
-      }),
-    });
-
-    News.find = () => ({
-      select() { return this; },
-      lean: async () => [{ _id: id, workflowStage: 'PUBLISHED', slug: 'hello', title: 'T', coverImage: null, coverImageUrl: null, imageURL: null, translationGroupId: 'grp1', translationKey: 'grp1' }],
-      then(resolve, reject) { return Promise.resolve([]).then(resolve, reject); },
-      catch(reject) { return Promise.resolve([]).catch(reject); },
-    });
-
-    News.findByIdAndUpdate = async (_id) => (String(_id) === id
-      ? {
-          _id: id,
-          slug: 'hello',
-          slugs: { en: 'hello', hi: 'namaste', gu: 'હેલો' },
-          translationKey: 'grp1',
-          translationGroupId: 'grp1',
-          status: 'deleted',
-          deletedAt: new Date(),
-          workflowStage: 'REJECTED',
-          title: 'T',
-        }
-      : null);
-      PublicArticle.findOneAndUpdate = () => ({ lean: async () => ({ _id: 'public-sync' }) });
-      PushHistory.create = async () => ({ _id: 'push-delete' });
-
-    let called = false;
-    let lastQuery = null;
-    let lastUpdate = null;
-
-    PublicArticle.updateMany = async (q, u) => {
-      called = true;
-      lastQuery = q;
-      lastUpdate = u;
-      return { acknowledged: true, modifiedCount: 1 };
-    };
-
-    const res = await request(app)
-      .delete(`/api/articles/${id}`)
-      .set('Cookie', 'np_admin=admin@newspulse.ai')
-      .send();
-
-    assert.equal(res.statusCode, 200);
-    assert.equal(res.body.ok, true);
-    assert.equal(res.body.success, true);
-    assert.equal(res.body.deletedCount, 1);
-    assert.deepEqual(res.body.deletedIds, [id]);
-
-    assert.equal(called, true);
-    assert.deepEqual(lastUpdate, { $set: { status: 'draft', publishedAt: null } });
-
-    // Sanity check: query includes at least one identifier clause.
-    assert.equal(!!(lastQuery && lastQuery.$or && Array.isArray(lastQuery.$or) && lastQuery.$or.length), true);
-  } finally {
-    restore(originals);
+  const response = await state.request('delete', `/api/articles/${ids[0]}`);
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.ok, true);
+  assert.equal(response.body.success, true);
+  assert.equal(response.body.deletedCount, 3);
+  assert.deepEqual(new Set(response.body.deletedIds), new Set(ids));
+  for (const copy of state.rows.Article.filter(copy => copy._id !== unrelated._id)) {
+    assert.equal(copy.status, 'deleted');
+    assert.ok(copy.deletedAt instanceof Date);
+    assert.deepEqual(copy.publishedAt, publication);
   }
+  assert.deepEqual(state.rows.Article.find(copy => copy._id === unrelated._id), unrelated);
+  assert.ok(state.rows.News.every(doc => doc.status === 'deleted'));
+  assert.ok(state.rows.News.every(doc => doc.publishedAt.getTime() === publication.getTime()));
+  const writes = state.calls.filter(call => call.name === 'Article' && call.method === 'updateMany');
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].options.session, state.transactions[0]);
+  assert.ok(state.transactions[0].committed && state.transactions[0].ended);
 });

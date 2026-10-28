@@ -1,12 +1,12 @@
+require('./helpers/publicNewsIsolation');
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const request = require('supertest');
 
 process.env.NODE_ENV = 'test';
 process.env.GOOGLE_TRANSLATE_API_KEY = process.env.GOOGLE_TRANSLATE_API_KEY || 'test-key';
 
 const News = require('../models/News');
-const app = require('../server');
+const { installEditorialFixture } = require('./helpers/editorialLifecycleFixture');
 const googleTranslation = require('../services/googleTranslationService');
 const {
   generateArticleTranslations,
@@ -59,15 +59,6 @@ function makeSource(overrides = {}) {
   };
   sources.set(String(source._id), source);
   return source;
-}
-
-function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
-  const b64 = Buffer.from(`${email}:0`, 'utf8').toString('base64');
-  return `np.${b64}`;
-}
-
-function makeOpaqueFounderToken() {
-  return makeOpaqueAdminToken('founder@example.com');
 }
 
 function makeInlineImageBlock(overrides = {}) {
@@ -1375,61 +1366,55 @@ test('Failed translation returns failed status without losing source article', a
   }
 });
 
-test('POST /api/articles/:id/translations/generate creates target sibling drafts', async () => {
+test('POST /api/articles/:id/translations/generate creates target sibling drafts', async context => {
   const id = '507f1f77bcf86cd799439701';
-  const originals = { findById: News.findById, findOne: News.findOne, create: News.create, updateOne: News.updateOne };
-  const prevFetch = global.fetch;
-  const created = [];
-  try {
-    News.findById = async () => makeSource({ _id: id, language: 'en', lang: 'en', originalLang: 'en', translationGroupId: 'grp-route-1', translationKey: 'grp-route-1' });
-    News.findOne = () => queryResult(null);
-    News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
-    News.create = async ([payload]) => { created.push(payload); return [{ _id: `507f1f77bcf86cd7994397${created.length}2`, ...payload }]; };
-    global.fetch = async (_url, opts) => {
-      const body = JSON.parse(String(opts.body || '{}'));
-      return { ok: true, status: 200, json: async () => ({ data: { translations: body.q.map((q) => ({ translatedText: `${body.target}:${q}` })) } }) };
-    };
-
-    const res = await request(app)
-      .post(`/api/articles/${id}/translations/generate`)
-      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-      .send({ targetLanguages: ['en', 'hi', 'gu'], overwrite: false });
-
-    assert.equal(res.status, 200);
-    assert.equal(res.body.ok, true);
-    assert.deepEqual(Object.keys(res.body.created).sort(), ['gu', 'hi']);
-    assert.deepEqual(created.map((item) => item.language).sort(), ['gu', 'hi']);
-    assert.ok(created.every((item) => item.translationReviewStatus === 'review_required'));
-  } finally {
-    restore(originals);
-    global.fetch = prevFetch;
-  }
+  const state = installEditorialFixture(context);
+  state.rows.News.push(makeSource({
+    _id: id, language: 'en', lang: 'en', originalLang: 'en', translationGroupId: 'grp-route-1', translationKey: 'grp-route-1',
+  }));
+  const fetch = global.fetch;
+  context.mock.method(global, 'fetch', async (url, opts) => {
+    if (String(url).startsWith('http://127.0.0.1/')) return fetch(url, opts);
+    const body = JSON.parse(opts.body);
+    return { ok: true, status: 200, json: async () => ({ data: {
+      translations: body.q.map(value => ({ translatedText: `${body.target}:${value}` })),
+    } }) };
+  });
+  const res = await state.request('post', `/api/articles/${id}/translations/generate`, {
+    targetLanguages: ['en', 'hi', 'gu'], overwrite: false,
+  });
+  assert.equal(res.status, 200, res.text);
+  assert.equal(res.body.ok, true);
+  assert.deepEqual(Object.keys(res.body.created).sort(), ['gu', 'hi']);
+  const created = state.rows.News.filter(doc => doc._id !== id);
+  assert.deepEqual(created.map(item => item.language).sort(), ['gu', 'hi']);
+  assert.ok(created.every(item => item.translationReviewStatus === 'review_required'));
+  assert.ok(created.every(item => item.status === 'draft' && String(item.sourceArticleId) === id));
+  assert.ok(state.transactions[0].committed && state.transactions[0].ended);
 });
 
-test('POST /api/articles/translations/backfill requires Founder and double confirmation for execution', async () => {
-  const originals = { find: News.find };
-  try {
-    News.find = () => ({
-      select() { return this; },
-      limit() { return this; },
-      lean: async () => [makeSource()],
+test('POST /api/articles/translations/backfill requires Founder and double confirmation for execution', async context => {
+  const state = installEditorialFixture(context);
+  state.rows.News.push(makeSource({ status: 'published', publishedAt: new Date('2026-01-01T00:00:00.000Z') }));
+  const before = structuredClone(state.rows.News);
+  const adminRes = await state.request('post', '/api/articles/translations/backfill', { estimateOnly: true }, 'admin');
+  assert.equal(adminRes.status, 403);
+  const estimateRes = await state.request('post', '/api/articles/translations/backfill', {
+    estimateOnly: true, onlyPublished: true, maxCount: 5,
+  });
+  assert.equal(estimateRes.status, 200, estimateRes.text);
+  assert.equal(estimateRes.body.requiresConfirmation, true);
+  assert.equal(estimateRes.body.confirmationText, 'GENERATE_TRANSLATIONS');
+  assert.equal(estimateRes.body.estimatedArticleCount, 1);
+  for (const confirmation of [{}, { confirm: true }, { confirmText: 'GENERATE_TRANSLATIONS' }]) {
+    const unconfirmed = await state.request('post', '/api/articles/translations/backfill', {
+      estimateOnly: false, onlyPublished: true, maxCount: 5, ...confirmation,
     });
-
-    const adminRes = await request(app)
-      .post('/api/articles/translations/backfill')
-      .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-      .send({ estimateOnly: true });
-    assert.equal(adminRes.status, 403);
-
-    const estimateRes = await request(app)
-      .post('/api/articles/translations/backfill')
-      .set('Authorization', `Bearer ${makeOpaqueFounderToken()}`)
-      .send({ estimateOnly: true, onlyPublished: true, maxCount: 5 });
-    assert.equal(estimateRes.status, 200);
-    assert.equal(estimateRes.body.requiresConfirmation, true);
-    assert.equal(estimateRes.body.confirmationText, 'GENERATE_TRANSLATIONS');
-    assert.equal(estimateRes.body.estimatedArticleCount, 1);
-  } finally {
-    restore(originals);
+    assert.equal(unconfirmed.status, 200);
+    assert.equal(unconfirmed.body.estimateOnly, true);
+    assert.equal(unconfirmed.body.requiresConfirmation, true);
   }
+  assert.deepEqual(state.rows.News, before);
+  assert.deepEqual(state.rows.Article, []);
+  assert.deepEqual(state.rows.TranslationJob, []);
 });

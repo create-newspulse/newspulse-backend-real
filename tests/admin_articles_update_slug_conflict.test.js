@@ -1,3 +1,4 @@
+require('./helpers/publicNewsIsolation');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
@@ -7,21 +8,12 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
 
 const app = require('../server');
 const News = require('../models/News');
-const PublicArticle = require('../models/Article');
 const Contributor = require('../models/Contributor');
+const { installEditorialFixture } = require('./helpers/editorialLifecycleFixture');
 
-function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
-  const b64 = Buffer.from(`${email}:0`, 'utf8').toString('base64');
-  return `np.${b64}`;
-}
-
-function queryResult(value) {
-  return {
-    select() { return this; },
-    lean: async () => value,
-    then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); },
-    catch(reject) { return Promise.resolve(value).catch(reject); },
-  };
+let fixture;
+function makeFounderToken() {
+  return fixture.token('founder');
 }
 
 function makeArticle(overrides = {}) {
@@ -50,100 +42,53 @@ function makeArticle(overrides = {}) {
   };
 }
 
-function makeDoc(record) {
-  const doc = { ...record, slugs: { ...(record.slugs || {}) } };
-  doc.save = async () => doc;
-  doc.toObject = () => {
-    const out = { ...doc };
-    delete out.save;
-    delete out.toObject;
-    return out;
-  };
-  return doc;
-}
-
-function applySet(doc, set = {}) {
-  const next = { ...doc, slugs: { ...(doc.slugs || {}) } };
-  for (const [key, value] of Object.entries(set)) {
-    if (key.startsWith('slugs.')) {
-      const lang = key.slice('slugs.'.length);
-      next.slugs[lang] = value;
-    } else {
-      next[key] = value;
-    }
-  }
-  return next;
-}
-
 function installArticleUpdateStubs(t, beforeDoc, options = {}) {
-  const originals = {
-    findById: News.findById,
-    findByIdAndUpdate: News.findByIdAndUpdate,
-    findOne: News.findOne,
-    find: News.find,
-    updateMany: News.updateMany,
-    publicFindOneAndUpdate: PublicArticle.findOneAndUpdate,
-    contributorFindById: Contributor.findById,
-  };
+  const state = fixture = installEditorialFixture(t);
+  state.rows.News.push(structuredClone(beforeDoc));
+  if (options.duplicate) state.rows.News.push(makeArticle({
+    ...options.duplicate, translationGroupId: 'unrelated-slug-story', translationKey: 'unrelated-slug-story',
+    sourceArticleId: null, slugs: { en: options.duplicate.slug },
+  }));
   const updates = [];
   const findOneQueries = [];
-
-  t.after(() => {
-    News.findById = originals.findById;
-    News.findByIdAndUpdate = originals.findByIdAndUpdate;
-    News.findOne = originals.findOne;
-    News.find = originals.find;
-    News.updateMany = originals.updateMany;
-    PublicArticle.findOneAndUpdate = originals.publicFindOneAndUpdate;
-    Contributor.findById = originals.contributorFindById;
-  });
-
-  let stored = { ...beforeDoc, slugs: { ...(beforeDoc.slugs || {}) } };
-  News.findById = () => ({ select: () => ({ lean: async () => stored }) });
-  News.find = () => queryResult([]);
-  News.updateMany = async () => ({ acknowledged: true, modifiedCount: 0 });
-  News.findOne = (query) => {
-    findOneQueries.push(query);
-    if (query && Object.prototype.hasOwnProperty.call(query, 'slug')) {
-      return queryResult(typeof options.duplicateForSlugQuery === 'function' ? options.duplicateForSlugQuery(query) : null);
+  const findOne = News.findOne;
+  t.mock.method(News, 'findOne', (query, ...args) => {
+    if (query?.$or?.some(clause => Object.hasOwn(clause, 'slug'))) {
+      findOneQueries.push(query);
     }
-    return queryResult(null);
-  };
-  News.findByIdAndUpdate = async (id, op) => {
-    updates.push({ id: String(id), op });
-    stored = applySet(stored, op && op.$set ? op.$set : {});
-    return makeDoc(stored);
-  };
-  PublicArticle.findOneAndUpdate = () => ({ lean: async () => ({ _id: 'public-sync' }) });
-  Contributor.findById = () => ({ lean: async () => ({ _id: '507f1f77bcf86cd79943b099', status: 'active', canonicalName: 'Pulse Contributor' }) });
-
-  return { updates, findOneQueries, getStored: () => stored };
+    return findOne(query, ...args);
+  });
+  for (const method of ['findByIdAndUpdate', 'findOneAndUpdate']) {
+    const write = News[method];
+    t.mock.method(News, method, (filter, op, writeOptions) => {
+      updates.push({ id: String(method === 'findOneAndUpdate' ? filter._id : filter), op });
+      return write(filter, op, writeOptions);
+    });
+  }
+  t.mock.method(Contributor, 'findById', () => ({ lean: async () => ({
+    _id: '507f1f77bcf86cd79943b099', status: 'active', canonicalName: 'Pulse Contributor',
+  }) }));
+  return { updates, findOneQueries, getStored: () => state.rows.News.find(doc => doc._id === beforeDoc._id) };
 }
 
 function installCreateStubs(t, options = {}) {
-  const originals = {
-    findOne: News.findOne,
-    create: News.create,
-  };
+  fixture = installEditorialFixture(t);
+  if (options.duplicate) fixture.rows.News.push(makeArticle({
+    ...options.duplicate, translationGroupId: 'unrelated-slug-story', translationKey: 'unrelated-slug-story',
+    sourceArticleId: null, slugs: { en: options.duplicate.slug },
+  }));
   const findOneQueries = [];
   let createCalls = 0;
-
-  t.after(() => {
-    News.findOne = originals.findOne;
-    News.create = originals.create;
-  });
-
-  News.findOne = (query) => {
+  const findOne = News.findOne;
+  t.mock.method(News, 'findOne', (query, ...args) => {
     findOneQueries.push(query);
-    if (query && Object.prototype.hasOwnProperty.call(query, 'slug')) {
-      return queryResult(typeof options.duplicateForSlugQuery === 'function' ? options.duplicateForSlugQuery(query) : null);
-    }
-    return queryResult(null);
-  };
-  News.create = async (payload) => {
+    return findOne(query, ...args);
+  });
+  const create = News.create;
+  t.mock.method(News, 'create', (payload, writeOptions) => {
     createCalls += 1;
-    return makeDoc({ _id: '507f1f77bcf86cd79943b777', ...payload });
-  };
+    return create(payload, writeOptions);
+  });
 
   return { findOneQueries, getCreateCalls: () => createCalls };
 }
@@ -151,19 +96,19 @@ function installCreateStubs(t, options = {}) {
 function putArticle(id, body) {
   return request(app)
     .put(`/api/articles/${id}`)
-    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
     .send(body);
 }
 
 function postArticle(body) {
   return request(app)
     .post('/api/articles')
-    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
     .send(body);
 }
 
 function slugQueries(stubs) {
-  return stubs.findOneQueries.filter((query) => query && Object.prototype.hasOwnProperty.call(query, 'slug'));
+  return stubs.findOneQueries.filter(query => query?.$or?.some(clause => Object.hasOwn(clause, 'slug')));
 }
 
 function assertTranslationIdentityUnchanged(updateOp) {
@@ -201,7 +146,7 @@ test('PUT existing article changed headline/content with same explicit slug succ
   const queries = slugQueries(stubs);
   assert.equal(queries.length, 1);
   assert.deepEqual(queries[0]._id, { $ne: id });
-  assert.equal(queries[0].slug, 'my-existing-slug');
+  assert.ok(queries[0].$or.some(clause => clause.slug === 'my-existing-slug'));
   assert.equal(stubs.updates[0].op.$set.slug, 'my-existing-slug');
 });
 
@@ -209,7 +154,7 @@ test('PUT article changed to another article slug still returns slug conflict', 
   const id = '507f1f77bcf86cd79943b103';
   const otherId = '507f1f77bcf86cd79943b104';
   const stubs = installArticleUpdateStubs(t, makeArticle({ _id: id, slug: 'story-two', slugs: { en: 'story-two' } }), {
-    duplicateForSlugQuery: (query) => (query.slug === 'story-one' ? { _id: otherId, slug: 'story-one' } : null),
+    duplicate: { _id: otherId, slug: 'story-one' },
   });
 
   const res = await putArticle(id, { slug: 'story-one' });
@@ -221,7 +166,7 @@ test('PUT article changed to another article slug still returns slug conflict', 
 
 test('POST new article with duplicate slug keeps create-time slug protection', async (t) => {
   const stubs = installCreateStubs(t, {
-    duplicateForSlugQuery: (query) => (query.slug === 'story-one' ? { _id: '507f1f77bcf86cd79943b105', slug: 'story-one' } : null),
+    duplicate: { _id: '507f1f77bcf86cd79943b105', slug: 'story-one' },
   });
 
   const res = await postArticle({

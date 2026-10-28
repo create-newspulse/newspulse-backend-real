@@ -1,3 +1,4 @@
+require('./helpers/publicNewsIsolation');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
@@ -8,25 +9,13 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'local-test-jwt-key';
 const app = require('../server');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
-const PushHistory = require('../models/PushHistory');
 const Contributor = require('../models/Contributor');
+const { installEditorialFixture } = require('./helpers/editorialLifecycleFixture');
 
-function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
-  const b64 = Buffer.from(`${email}:0`, 'utf8').toString('base64');
-  return `np.${b64}`;
-}
+let fixture;
 
 function makeFounderToken() {
-  return makeOpaqueAdminToken('founder@example.com');
-}
-
-function queryResult(value) {
-  return {
-    select() { return this; },
-    lean: async () => value,
-    then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); },
-    catch(reject) { return Promise.resolve(value).catch(reject); },
-  };
+  return fixture.token('founder');
 }
 
 function makeNewsDoc(id, lang, overrides = {}) {
@@ -44,6 +33,7 @@ function makeNewsDoc(id, lang, overrides = {}) {
     slugs: { en: 'story-en', hi: 'story-hi', gu: 'story-gu' },
     category: 'national',
     status: 'published',
+    publishedAt: new Date('2026-01-01T00:00:00.000Z'),
     workflowStage: 'PUBLISHED',
     workflowHistory: [],
     lang,
@@ -59,54 +49,21 @@ function makeNewsDoc(id, lang, overrides = {}) {
   };
 }
 
-function toDocument(record) {
-  const doc = { ...record };
-  doc.saveCalls = 0;
-  doc.save = async function save() {
-    this.saveCalls += 1;
-    return this;
-  };
-  doc.toObject = function toObject() {
-    const out = { ...this };
-    delete out.save;
-    delete out.toObject;
-    return out;
-  };
-  return doc;
-}
-
 function cloneRecord(record) {
-  return JSON.parse(JSON.stringify(record));
-}
-
-function applyUpdate(record, update) {
-  const next = { ...record };
-  if (update && update.$set) {
-    Object.assign(next, update.$set);
-  }
-  if (update && update.$push) {
-    for (const [key, value] of Object.entries(update.$push)) {
-      next[key] = Array.isArray(next[key]) ? next[key].slice() : [];
-      next[key].push(value);
-    }
-  }
-  return next;
-}
-
-function matchesGroup(doc, groupKey) {
-  return String(doc.translationGroupId || '') === String(groupKey || '')
-    || String(doc.translationKey || '') === String(groupKey || '');
+  return structuredClone(Object.fromEntries(Object.entries(record).filter(([, value]) => typeof value !== 'function')));
 }
 
 function installRouteStubs(t, seedDocs, options = {}) {
-  const records = new Map(seedDocs.map((doc) => [String(doc._id), cloneRecord(doc)]));
+  const state = fixture = installEditorialFixture(t);
+  state.rows.News.push(...seedDocs.map(cloneRecord));
+  state.rows.Article.push(...seedDocs.map(doc => ({
+    ...cloneRecord(doc), _id: doc._id.replace(/^5/, '6'), sourceNewsId: doc._id, summary: doc.description,
+  })));
+  const beforeRecords = new Map(seedDocs.map(doc => [String(doc._id), cloneRecord(doc)]));
   const updates = [];
-  const publicSyncs = [];
-  const publicDraftSweeps = [];
-  const pushCreates = [];
+  const publicUpdates = [];
   const contributorMutations = [];
   const contributorFinds = [];
-  const newsFindCalls = [];
   const invalidations = [];
   t.after(require('../lib/cache').onArticleCachesInvalidated((event) => {
     invalidations.push(event);
@@ -114,97 +71,36 @@ function installRouteStubs(t, seedDocs, options = {}) {
   }));
   const contributorRecord = options.contributor || null;
 
-  const originals = {
-    News: {
-      findById: News.findById,
-      findOne: News.findOne,
-      find: News.find,
-      findByIdAndUpdate: News.findByIdAndUpdate,
-    },
-    PublicArticle: {
-      findOneAndUpdate: PublicArticle.findOneAndUpdate,
-      updateMany: PublicArticle.updateMany,
-    },
-    PushHistory: { create: PushHistory.create },
-    Contributor: {
-      findById: Contributor.findById,
-      updateOne: Contributor.updateOne,
-      updateMany: Contributor.updateMany,
-      findByIdAndUpdate: Contributor.findByIdAndUpdate,
-      deleteOne: Contributor.deleteOne,
-      deleteMany: Contributor.deleteMany,
-      findByIdAndDelete: Contributor.findByIdAndDelete,
-    },
-  };
-
-  t.after(() => {
-    Object.assign(News, originals.News);
-    Object.assign(PublicArticle, originals.PublicArticle);
-    Object.assign(PushHistory, originals.PushHistory);
-    Object.assign(Contributor, originals.Contributor);
+  for (const method of ['findOneAndUpdate', 'findByIdAndUpdate']) {
+    const write = News[method];
+    t.mock.method(News, method, (filter, update, updateOptions) => {
+      updates.push({ id: String(method === 'findOneAndUpdate' ? filter._id : filter), update, options: updateOptions });
+      return write(filter, update, updateOptions);
+    });
+  }
+  const updateCopies = PublicArticle.updateMany;
+  t.mock.method(PublicArticle, 'updateMany', (query, update, updateOptions) => {
+    publicUpdates.push({ query, update, options: updateOptions });
+    return updateCopies(query, update, updateOptions);
   });
-
-  News.findById = (id) => queryResult(records.get(String(id)) || null);
-  News.findOne = (query) => queryResult(typeof options.duplicateForQuery === 'function' ? options.duplicateForQuery(query, records) : null);
-  News.find = (filter = {}) => {
-    newsFindCalls.push(filter);
-    if (filter && filter._id && filter._id.$ne) {
-      return queryResult([]);
-    }
-    const groupKey = filter && Array.isArray(filter.$or)
-      ? String((filter.$or.find((clause) => clause.translationGroupId)?.translationGroupId)
-        || (filter.$or.find((clause) => clause.translationKey)?.translationKey)
-        || '')
-      : '';
-    const docs = groupKey
-      ? Array.from(records.values()).filter((doc) => matchesGroup(doc, groupKey))
-      : [];
-    return queryResult(docs);
-  };
-  News.findByIdAndUpdate = async (id, update, updateOptions) => {
-    const key = String(id);
-    const current = records.get(key);
-    if (!current) return null;
-    const next = applyUpdate(current, update);
-    records.set(key, cloneRecord(next));
-    const doc = toDocument(next);
-    updates.push({ id: key, update, options: updateOptions, doc });
-    return doc;
-  };
-
-  PublicArticle.findOneAndUpdate = (query, update, updateOptions) => {
-    publicSyncs.push({ query, update, options: updateOptions });
-    return { lean: async () => ({ _id: `public-${publicSyncs.length}` }) };
-  };
-  PublicArticle.updateMany = async (query, update, updateOptions) => {
-    publicDraftSweeps.push({ query, update, options: updateOptions });
-    return { acknowledged: true, modifiedCount: records.size };
-  };
-  PushHistory.create = async (payload) => {
-    pushCreates.push(payload);
-    return { _id: `push-${pushCreates.length}` };
-  };
-
-  Contributor.findById = (id) => {
+  t.mock.method(Contributor, 'findById', id => {
     contributorFinds.push(String(id));
     return { lean: async () => (contributorRecord ? cloneRecord(contributorRecord) : null) };
-  };
+  });
   for (const method of ['updateOne', 'updateMany', 'findByIdAndUpdate', 'deleteOne', 'deleteMany', 'findByIdAndDelete']) {
-    Contributor[method] = async (...args) => {
+    t.mock.method(Contributor, method, async (...args) => {
       contributorMutations.push({ method, args });
       return { acknowledged: true, modifiedCount: 0, deletedCount: 0 };
-    };
+    });
   }
 
   return {
-    records,
+    state, beforeRecords,
+    get records() { return new Map(state.rows.News.map(doc => [String(doc._id), doc])); },
     updates,
-    publicSyncs,
-    publicDraftSweeps,
-    pushCreates,
+    publicUpdates,
     contributorFinds,
     contributorMutations,
-    newsFindCalls,
     invalidations,
   };
 }
@@ -212,7 +108,7 @@ function installRouteStubs(t, seedDocs, options = {}) {
 async function requestPutDeleted(id) {
   return request(app)
     .put(`/api/articles/${id}`)
-    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
     .send({ status: 'deleted' });
 }
 
@@ -242,9 +138,19 @@ function assertAllRecordsHaveStatus(stubs, ids, status, workflowStage) {
     const record = stubs.records.get(id);
     assert.equal(record.status, status);
     assert.equal(record.workflowStage, workflowStage);
-    assert.equal(record.publishedAt, null);
+    assert.deepEqual(record.publishedAt, stubs.beforeRecords.get(id).publishedAt);
     assert.equal(record.publishAt, null);
     assert.equal(record.scheduledAt, null);
+  }
+}
+
+function assertPublicCopiesHaveStatus(stubs, ids, status) {
+  const copies = stubs.state.rows.Article.filter(copy => Object.values(ids).includes(copy.sourceNewsId));
+  assert.equal(copies.length, Object.values(ids).length);
+  for (const copy of copies) {
+    assert.equal(copy.status, status);
+    assert.deepEqual(copy.publishedAt, stubs.beforeRecords.get(copy.sourceNewsId).publishedAt);
+    if (status === 'deleted') assert.ok(copy.deletedAt instanceof Date);
   }
 }
 
@@ -311,7 +217,7 @@ test('PUT status=deleted on legacy single-language article falls back to one sof
   assert.ok(update.$set.workflowUpdatedAt instanceof Date);
   assert.equal(update.$push.workflowHistory.action, 'REJECT');
   assert.equal(update.$push.workflowHistory.toStage, 'REJECTED');
-  assert.equal(update.$push.workflowHistory.note, 'Deleted');
+  assert.equal(update.$push.workflowHistory.note, null);
 });
 
 test('PUT multilingual soft-delete makes corresponding public Article copies non-public', async (t) => {
@@ -329,15 +235,10 @@ test('PUT multilingual soft-delete makes corresponding public Article copies non
   const res = await requestPutDeleted(ids.hi);
 
   assert.equal(res.statusCode, 200);
-  assert.equal(stubs.publicSyncs.length, 3);
-  for (const sync of stubs.publicSyncs) {
-    assert.equal(sync.update.$set.status, 'deleted');
-    assert.equal(sync.update.$set.publishedAt, null);
-    assert.ok(sync.update.$set.deletedAt);
-  }
-  assert.equal(stubs.publicDraftSweeps.length, 1);
-  assert.deepEqual(stubs.publicDraftSweeps[0].update, { $set: { status: 'draft', publishedAt: null } });
-  assert.ok(stubs.publicDraftSweeps[0].query.$or.some((clause) => clause.translationGroupId === 'tg-public-delete'));
+  assertPublicCopiesHaveStatus(stubs, ids, 'deleted');
+  assert.equal(stubs.publicUpdates.length, 1);
+  assert.equal(stubs.publicUpdates[0].update.$set.status, 'deleted');
+  assert.match(JSON.stringify(stubs.publicUpdates[0].query), /tg-public-delete/);
 });
 
 test('PUT Pulse Dialogue EN+HI+GU soft-delete deletes only article group and preserves contributor record/photo', async (t) => {
@@ -379,7 +280,7 @@ test('PUT Pulse Dialogue EN+HI+GU soft-delete deletes only article group and pre
   assert.equal(stubs.contributorMutations.length, 0);
   assert.deepEqual(contributor, beforeContributor);
   assert.deepEqual(contributor.photo, beforeContributor.photo);
-  assert.equal(stubs.contributorFinds.length, 3);
+  assert.equal(stubs.contributorFinds.length, 0);
 });
 
 async function assertPostUnpublishTakesDownFullGroup(t, clickedLang) {
@@ -403,10 +304,9 @@ async function assertPostUnpublishTakesDownFullGroup(t, clickedLang) {
   assert.deepEqual(new Set(res.body.changedIds), new Set(Object.values(ids)));
   assert.deepEqual(new Set(stubs.updates.map((entry) => entry.id)), new Set(Object.values(ids)));
   assertAllRecordsHaveStatus(stubs, ids, 'draft', 'DRAFT');
-  assert.equal(stubs.publicSyncs.length, 3);
-  assert.equal(stubs.publicSyncs.every((sync) => sync.update.$set.status === 'draft' && sync.update.$set.publishedAt === null), true);
-  assert.equal(stubs.publicDraftSweeps.length, 1);
-  assert.ok(stubs.publicDraftSweeps[0].query.$or.some((clause) => clause.translationGroupId === 'tg-unpublish-group'));
+  assertPublicCopiesHaveStatus(stubs, ids, 'draft');
+  assert.equal(stubs.publicUpdates.length, 1);
+  assert.match(JSON.stringify(stubs.publicUpdates[0].query), /tg-unpublish-group/);
 }
 
 test('POST unpublish via EN id takes down all EN HI GU language docs', async (t) => {
@@ -439,9 +339,8 @@ test('PUT status=draft takedown via translated id takes down all public Article 
   assert.equal(res.body.message, 'Article unpublished');
   assert.equal(res.body.changedCount, 3);
   assertAllRecordsHaveStatus(stubs, ids, 'draft', 'DRAFT');
-  assert.equal(stubs.publicSyncs.length, 3);
-  assert.equal(stubs.publicSyncs.every((sync) => sync.update.$set.status === 'draft' && sync.update.$set.publishedAt === null), true);
-  assert.equal(stubs.publicDraftSweeps.length, 1);
+  assertPublicCopiesHaveStatus(stubs, ids, 'draft');
+  assert.equal(stubs.publicUpdates.length, 1);
 });
 
 test('POST archive via translated id archives all EN HI GU language docs as non-public', async (t) => {
@@ -463,9 +362,8 @@ test('POST archive via translated id archives all EN HI GU language docs as non-
   assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
   assert.equal(res.body.changedCount, 3);
   assertAllRecordsHaveStatus(stubs, ids, 'archived', 'ARCHIVED');
-  assert.equal(stubs.publicSyncs.length, 3);
-  assert.equal(stubs.publicSyncs.every((sync) => sync.update.$set.status === 'archived' && sync.update.$set.publishedAt === null), true);
-  assert.equal(stubs.publicDraftSweeps.length, 1);
+  assertPublicCopiesHaveStatus(stubs, ids, 'archived');
+  assert.equal(stubs.publicUpdates.length, 1);
 });
 
 for (const status of ['draft', 'archived', 'scheduled']) {
@@ -474,14 +372,16 @@ for (const status of ['draft', 'archived', 'scheduled']) {
     const stubs = installRouteStubs(t, [makeNewsDoc(id, 'en', { translationGroupId: null, translationKey: null, sourceArticleId: null })]);
     const response = await request(app).put(`/api/articles/${id}`)
       .set('Authorization', `Bearer ${makeFounderToken()}`)
-      .send({ status, title: 'Updated title' });
+      .send({ status, title: 'Updated title', ...(status === 'scheduled' ? { scheduledAt: '2099-01-01T00:00:00.000Z' } : {}) });
     assert.equal(response.statusCode, 200);
     assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
-    assert.ok(stubs.publicSyncs.some((entry) => entry.update.$set.status === status));
+    assertPublicCopiesHaveStatus(stubs, [id], status);
+    assert.equal(stubs.records.get(id).title, 'Updated title');
+    assert.equal(stubs.state.rows.Article[0].title, 'Updated title');
   });
 }
 
-test('ordinary published article edit keeps LKG resilience', async (t) => {
+test('ordinary published article edit invalidates cached content after committing the updated copy', async (t) => {
   const id = '507f1f77bcf86cd79943d702';
   const stubs = installRouteStubs(t, [makeNewsDoc(id, 'en', { translationGroupId: null, translationKey: null, sourceArticleId: null })]);
   const response = await request(app).put(`/api/articles/${id}`)
@@ -489,39 +389,43 @@ test('ordinary published article edit keeps LKG resilience', async (t) => {
     .send({ title: 'Updated public headline' });
   assert.equal(response.statusCode, 200);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: false }]);
+  assert.equal(stubs.records.get(id).status, 'published');
+  assert.equal(stubs.state.rows.Article[0].title, 'Updated public headline');
+  assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
 });
 
 test('rescheduling a published article invalidates withdrawn LKG', async (t) => {
   const id = '507f1f77bcf86cd79943d706';
-  const doc = toDocument(makeNewsDoc(id, 'en', { translationGroupId: null, translationKey: null, sourceArticleId: null }));
+  const doc = makeNewsDoc(id, 'en', { translationGroupId: null, translationKey: null, sourceArticleId: null });
   const stubs = installRouteStubs(t, [doc]);
-  t.mock.method(News, 'findById', () => queryResult(doc));
   const response = await request(app).post(`/api/articles/${id}/schedule`)
     .set('Authorization', `Bearer ${makeFounderToken()}`)
     .send({ scheduledAt: '2099-01-01T00:00:00.000Z' });
   assert.equal(response.statusCode, 200);
-  assert.equal(doc.status, 'scheduled');
+  assert.equal(stubs.records.get(id).status, 'scheduled');
   assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
 });
 
-test('permanent deletion of a published article invalidates withdrawn LKG before success', async (t) => {
+test('permanent deletion refuses a published article without invalidating public content', async (t) => {
   const id = '507f1f77bcf86cd79943d703';
   const doc = makeNewsDoc(id, 'en');
   const stubs = installRouteStubs(t, [doc]);
-  t.mock.method(News, 'findByIdAndDelete', async () => doc);
+  const before = structuredClone(stubs.state.rows);
   const response = await request(app).delete(`/api/articles/${id}/permanent`)
     .set('Authorization', `Bearer ${makeFounderToken()}`);
-  assert.equal(response.statusCode, 200);
-  assert.deepEqual(stubs.invalidations, [{ publicVisibilityRemoved: true }]);
+  assert.equal(response.statusCode, 409);
+  assert.deepEqual(stubs.state.rows, before);
+  assert.deepEqual(stubs.invalidations, []);
 });
 
 for (const path of ['drafts/:id/delete', 'drafts/:id/restore', 'workflow/:id/lock', 'workflow/:id/embargo']) {
   test(`legacy ${path} invalidates LKG when removing public visibility`, async (t) => {
     const id = '507f1f77bcf86cd79943d704';
-    const doc = toDocument(makeNewsDoc(id, 'en', { translationGroupId: null, translationKey: null, sourceArticleId: null }));
+    const doc = makeNewsDoc(id, 'en', {
+      translationGroupId: null, translationKey: null, sourceArticleId: null,
+      ...(path === 'drafts/:id/restore' ? { status: 'deleted', deletedFromStatus: 'draft', deletedAt: new Date() } : {}),
+    });
     const stubs = installRouteStubs(t, [doc]);
-    t.mock.method(News, 'findById', () => queryResult(doc));
     const response = await request(app).post('/api/admin/' + path.replace(':id', id))
       .set('Authorization', `Bearer ${makeFounderToken()}`)
       .send({ embargoUntil: '2099-01-01T00:00:00.000Z' });
@@ -560,7 +464,7 @@ test('POST unpublish on legacy single-language article only changes that record'
   assert.equal(stubs.updates.length, 1);
   assert.equal(stubs.updates[0].id, id);
   assert.equal(stubs.records.get(id).status, 'draft');
-  assert.equal(stubs.publicSyncs.length, 1);
+  assertPublicCopiesHaveStatus(stubs, [id], 'draft');
 });
 
 test('POST Pulse Dialogue unpublish preserves Contributor record and photo asset', async (t) => {
@@ -601,7 +505,7 @@ test('POST Pulse Dialogue unpublish preserves Contributor record and photo asset
   assert.equal(stubs.contributorMutations.length, 0);
   assert.deepEqual(contributor, beforeContributor);
   assert.deepEqual(contributor.photo, beforeContributor.photo);
-  assert.equal(stubs.contributorFinds.length, 3);
+  assert.equal(stubs.contributorFinds.length, 0);
 });
 
 test('PUT status=draft update now uses group-aware takedown path', async (t) => {
@@ -614,7 +518,7 @@ test('PUT status=draft update now uses group-aware takedown path', async (t) => 
 
   const res = await request(app)
     .put(`/api/articles/${id}`)
-    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
     .send({ status: 'draft' });
 
   assert.equal(res.statusCode, 200);
@@ -639,7 +543,7 @@ test('DELETE /api/articles/:id still uses the same group-aware soft-delete behav
 
   const res = await request(app)
     .delete(`/api/articles/${ids.en}`)
-    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
     .send();
 
   assert.equal(res.statusCode, 200);

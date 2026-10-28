@@ -1,97 +1,74 @@
+require('./helpers/publicNewsIsolation');
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const request = require('supertest');
+const { installEditorialFixture, seedGroup } = require('./helpers/editorialLifecycleFixture');
 
-process.env.NODE_ENV = 'test';
-
-const app = require('../server');
-const News = require('../models/News');
-
-function restore(originals) {
-  for (const [k, v] of Object.entries(originals)) News[k] = v;
-}
-
-test('POST /api/admin/articles/forever/bulk requires auth (401)', async () => {
-  const res = await request(app)
-    .post('/api/admin/articles/forever/bulk')
-    .send({ ids: ['507f1f77bcf86cd799439011'] });
-
+test('POST /api/admin/articles/forever/bulk requires auth (401)', async context => {
+  const state = installEditorialFixture(context);
+  const res = await state.request('post', '/api/admin/articles/forever/bulk', {
+    ids: ['507f1f77bcf86cd799439011'],
+  }, null);
   assert.equal(res.statusCode, 401);
+  assert.equal(state.transactions.length, 0);
 });
 
-test('POST /api/admin/articles/forever/bulk validates ids array (400)', async () => {
-  const res1 = await request(app)
-    .post('/api/admin/articles/forever/bulk')
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
-    .send({});
-  assert.equal(res1.statusCode, 400);
-
-  const res2 = await request(app)
-    .post('/api/admin/articles/forever/bulk')
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
-    .send({ ids: [] });
-  assert.equal(res2.statusCode, 400);
-
-  const res3 = await request(app)
-    .post('/api/admin/articles/forever/bulk')
-    .set('Cookie', 'np_admin=admin@newspulse.ai')
-    .send({ ids: ['not-an-objectid'] });
-  assert.equal(res3.statusCode, 400);
-});
-
-test('POST /api/admin/articles/forever/bulk deletes only status=deleted and returns deletedCount', async () => {
-  const originals = {
-    deleteMany: News.deleteMany,
-  };
-
-  let calledWith = null;
-  try {
-    News.deleteMany = async (filter) => {
-      calledWith = filter;
-      return { acknowledged: true, deletedCount: 2 };
-    };
-
-    const ids = ['507f1f77bcf86cd799439011', '507f1f77bcf86cd799439012'];
-
-    const res = await request(app)
-      .post('/api/admin/articles/forever/bulk')
-      .set('Cookie', 'np_admin=admin@newspulse.ai')
-      .send({ ids });
-
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, { success: true, deletedCount: 2 });
-
-    assert.ok(calledWith);
-    assert.equal(calledWith.status, 'deleted');
-    assert.ok(calledWith._id && calledWith._id.$in);
-    assert.deepEqual(calledWith._id.$in, ids);
-  } finally {
-    restore(originals);
+test('POST /api/admin/articles/forever/bulk validates ids array (400)', async context => {
+  const state = installEditorialFixture(context);
+  for (const body of [{}, { ids: [] }, { ids: ['not-an-objectid'] }]) {
+    const res = await state.request('post', '/api/admin/articles/forever/bulk', body);
+    assert.equal(res.statusCode, 400);
   }
+  assert.equal(state.transactions.length, 0);
+  assert.deepEqual(state.rows.News, []);
 });
 
-test('DELETE /api/admin/articles/forever/all-deleted deletes all soft-deleted and returns deletedCount', async () => {
-  const originals = {
-    deleteMany: News.deleteMany,
-  };
+test('POST /api/admin/articles/forever/bulk deletes only soft-deleted groups and deduplicates selected siblings', async context => {
+  const state = installEditorialFixture(context);
+  const { ids } = seedGroup(state, { status: 'deleted' });
+  const unrelated = { _id: '507f1f77bcf86cd799439099', slug: 'unrelated', status: 'published' };
+  state.rows.News.push(unrelated);
+  const res = await state.request('post', '/api/admin/articles/forever/bulk', { ids: ids.slice(0, 2) });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.success, true);
+  assert.equal(res.body.deletedCount, 3);
+  assert.equal(res.body.publicDeletedCount, 3);
+  assert.deepEqual(new Set(res.body.deletedIds), new Set(ids));
+  assert.deepEqual(state.rows.News, [unrelated]);
+  assert.deepEqual(state.rows.Article, []);
+  const deletes = state.calls.filter(call => call.name === 'News' && call.method === 'deleteMany');
+  assert.equal(deletes.length, 1);
+  assert.equal(deletes[0].filter.status, 'deleted');
+  assert.deepEqual(new Set(deletes[0].filter._id.$in), new Set(ids));
+  assert.equal(deletes[0].options.session, state.transactions[0]);
+});
 
-  let calledWith = null;
-  try {
-    News.deleteMany = async (filter) => {
-      calledWith = filter;
-      return { acknowledged: true, deletedCount: 5 };
-    };
+test('DELETE /api/admin/articles/forever/all-deleted deletes complete soft-deleted groups only', async context => {
+  const state = installEditorialFixture(context);
+  const { ids } = seedGroup(state, { status: 'deleted' });
+  const unrelated = { _id: '507f1f77bcf86cd799439098', slug: 'untouched-draft', status: 'draft' };
+  state.rows.News.push(unrelated);
+  const res = await state.request('delete', '/api/admin/articles/forever/all-deleted');
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.success, true);
+  assert.equal(res.body.deletedCount, 3);
+  assert.deepEqual(new Set(res.body.deletedIds), new Set(ids));
+  assert.deepEqual(state.rows.News, [unrelated]);
+  assert.deepEqual(state.rows.Article, []);
+});
 
-    const res = await request(app)
-      .delete('/api/admin/articles/forever/all-deleted')
-      .set('Cookie', 'np_admin=admin@newspulse.ai')
-      .send();
-
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.body, { success: true, deletedCount: 5 });
-
-    assert.deepEqual(calledWith, { status: 'deleted' });
-  } finally {
-    restore(originals);
+test('permanent bulk and all-deleted actions reject authenticated non-Founder staff (403)', async context => {
+  const state = installEditorialFixture(context);
+  const { ids } = seedGroup(state, { status: 'deleted' });
+  const before = structuredClone(state.rows);
+  for (const [method, url, body] of [
+    ['post', '/api/admin/articles/forever/bulk', { ids }],
+    ['delete', '/api/admin/articles/forever/all-deleted', undefined],
+  ]) {
+    const res = await state.request(method, url, body, 'editor');
+    assert.equal(res.statusCode, 403);
   }
+  assert.deepEqual(state.rows.News, before.News);
+  assert.deepEqual(state.rows.Article, before.Article);
+  assert.equal(state.transactions.length, 0);
+  assert.deepEqual(state.invalidations, []);
 });

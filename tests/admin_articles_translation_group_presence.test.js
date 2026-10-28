@@ -1,3 +1,4 @@
+require('./helpers/publicNewsIsolation');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
@@ -7,10 +8,12 @@ process.env.NODE_ENV = 'test';
 
 const app = require('../server');
 const News = require('../models/News');
+const { accountAuthFixture } = require('./helpers/accountAuthFixture');
+const auth = accountAuthFixture();
+test.beforeEach(context => auth.install(context));
 
-function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
-  const b64 = Buffer.from(`${email}:0`, 'utf8').toString('base64');
-  return `np.${b64}`;
+function makeFounderToken() {
+  return auth.token('founder');
 }
 
 function restore(originals) {
@@ -71,7 +74,7 @@ test('GET /api/admin/articles/:id/translation-status counts source language as p
     News.findById = () => makeFindByIdResult(sourceDoc);
     News.find = () => makeFindResult(groupDocs);
 
-    const token = makeOpaqueAdminToken();
+    const token = makeFounderToken();
     const res = await request(app)
       .get('/api/admin/articles/507f1f77bcf86cd799439201/translation-status')
       .set('Authorization', `Bearer ${token}`);
@@ -153,7 +156,7 @@ test('GET /api/admin/articles/:id includes translationGroupStatus with source an
     News.findById = () => Promise.resolve(sourceDoc);
     News.find = () => makeFindResult(groupDocs);
 
-    const token = makeOpaqueAdminToken();
+    const token = makeFounderToken();
     const res = await request(app)
       .get('/api/admin/articles/507f1f77bcf86cd799439211')
       .set('Authorization', `Bearer ${token}`);

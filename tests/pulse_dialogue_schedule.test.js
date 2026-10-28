@@ -1,3 +1,4 @@
+require('./helpers/publicNewsIsolation');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
@@ -14,10 +15,11 @@ const PushHistory = require('../models/PushHistory');
 const { publishCanonicalArticle } = require('../services/articlePublishing.service');
 const { publishDueScheduledArticles } = require('../services/scheduledPublication.service');
 const { getPulseDialogueStandardText } = require('../services/pulseDialogue.service');
+const { installEditorialFixture } = require('./helpers/editorialLifecycleFixture');
 
-function makeOpaqueAdminToken(email = 'admin@newspulse.ai') {
-  const b64 = Buffer.from(`${email}:0`, 'utf8').toString('base64');
-  return `np.${b64}`;
+let routeFixture;
+function makeFounderToken() {
+  return routeFixture.token('founder');
 }
 
 function queryDoc(doc) {
@@ -109,26 +111,18 @@ function restore(originals) {
 }
 
 function installRouteMocks(t, beforeDoc, contributor) {
-  const originals = [
-    { target: News, values: { findById: News.findById, findByIdAndUpdate: News.findByIdAndUpdate, find: News.find, findOne: News.findOne } },
-    { target: Contributor, values: { findById: Contributor.findById } },
-    { target: PublicArticle, values: { findOneAndUpdate: PublicArticle.findOneAndUpdate } },
-  ];
+  const state = routeFixture = installEditorialFixture(t);
+  state.rows.News.push(JSON.parse(JSON.stringify(beforeDoc)));
   const capturedUpdates = [];
-
-  News.findById = () => ({ select: () => ({ lean: async () => beforeDoc }) });
-  News.find = async () => [];
-  News.findOne = () => queryDoc(null);
-  News.findByIdAndUpdate = async (_id, op) => {
-    capturedUpdates.push(op);
-    const doc = makeRouteDoc({ ...beforeDoc, ...(op && op.$set ? op.$set : {}) });
-    return doc;
-  };
-  Contributor.findById = () => ({ lean: async () => contributor });
-  PublicArticle.findOneAndUpdate = () => ({ lean: async () => ({ _id: 'public-route-copy' }) });
-
-  t.after(() => restore(originals));
-  return { capturedUpdates };
+  for (const method of ['findByIdAndUpdate', 'findOneAndUpdate']) {
+    const write = News[method];
+    t.mock.method(News, method, (filter, update, options) => {
+      capturedUpdates.push(update);
+      return write(filter, update, options);
+    });
+  }
+  t.mock.method(Contributor, 'findById', () => ({ lean: async () => contributor }));
+  return { capturedUpdates, state };
 }
 
 function installPublishMocks(t, docs) {
@@ -198,7 +192,7 @@ test('Pulse Dialogue draft still saves without publication metadata', async (t) 
 
   const res = await request(app)
     .put(`/api/articles/${id}`)
-    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
     .send({ category: 'pulse-dialogue' });
 
   assert.equal(res.status, 200);
@@ -222,8 +216,8 @@ test('PUT scheduling rejects invalid Pulse contributor metadata', async (t) => {
 
   const res = await request(app)
     .put(`/api/articles/${id}`)
-    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-    .send({ status: 'scheduled', scheduledAt: '2026-09-23T10:00:00.000Z' });
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
+    .send({ status: 'scheduled', scheduledAt: '2099-01-01T10:00:00.000Z' });
 
   assert.equal(res.status, 400);
   assert.match(res.body.message, /activeContributor/);
@@ -237,7 +231,7 @@ test('PUT scheduling preserves valid Pulse metadata and stores byline snapshot',
     _id: id,
     pulseDialogue: { contributorId, dialogueFormat: 'essay', bylineDesignationOverride: 'Guest Columnist' },
   });
-  const { capturedUpdates } = installRouteMocks(t, beforeDoc, {
+  const { capturedUpdates, state } = installRouteMocks(t, beforeDoc, {
     _id: contributorId,
     canonicalName: 'Active Writer',
     publicDesignation: 'Columnist',
@@ -247,16 +241,19 @@ test('PUT scheduling preserves valid Pulse metadata and stores byline snapshot',
 
   const res = await request(app)
     .put(`/api/articles/${id}`)
-    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-    .send({ status: 'scheduled', scheduledAt: '2026-09-23T10:00:00.000Z' });
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
+    .send({ status: 'scheduled', scheduledAt: '2099-01-01T10:00:00.000Z' });
 
   assert.equal(res.status, 200);
   const scheduledUpdate = capturedUpdates.find((op) => op?.$set?.status === 'scheduled');
   assert.ok(scheduledUpdate, 'expected scheduled update to be saved');
-  assert.equal(scheduledUpdate.$set.pulseDialogue.contributorId, contributorId);
-  assert.equal(scheduledUpdate.$set.pulseDialogue.dialogueFormat, 'essay');
-  assert.equal(scheduledUpdate.$set.pulseDialogue.bylineSnapshot.name, 'Active Writer');
-  assert.equal(scheduledUpdate.$set.pulseDialogue.bylineSnapshot.designation, 'Guest Columnist');
+  const stored = state.rows.News.find(doc => doc._id === id);
+  assert.equal(stored.status, 'scheduled');
+  assert.equal(stored.pulseDialogue.contributorId, contributorId);
+  assert.equal(stored.pulseDialogue.dialogueFormat, 'essay');
+  assert.equal(stored.pulseDialogue.bylineSnapshot.name, 'Active Writer');
+  assert.equal(stored.pulseDialogue.bylineSnapshot.designation, 'Guest Columnist');
+  assert.ok(state.transactions[0].committed && state.transactions[0].ended);
 });
 
 test('PUT non-Pulse scheduling remains a normal scheduled status update', async (t) => {
@@ -266,13 +263,32 @@ test('PUT non-Pulse scheduling remains a normal scheduled status update', async 
 
   const res = await request(app)
     .put(`/api/articles/${id}`)
-    .set('Authorization', `Bearer ${makeOpaqueAdminToken()}`)
-    .send({ status: 'scheduled', scheduledAt: '2026-09-23T10:00:00.000Z' });
+    .set('Authorization', `Bearer ${makeFounderToken()}`)
+    .send({ status: 'scheduled', scheduledAt: '2099-01-01T10:00:00.000Z' });
 
   assert.equal(res.status, 200);
   const scheduledUpdate = capturedUpdates.find((op) => op?.$set?.status === 'scheduled');
   assert.ok(scheduledUpdate, 'expected non-Pulse scheduled update');
   assert.equal(Object.prototype.hasOwnProperty.call(scheduledUpdate.$set, 'pulseDialogue'), false);
+});
+
+test('Pulse scheduling keeps 401 and 403 denials without protected writes', async context => {
+  const doc = makeRouteDoc();
+  const { state, capturedUpdates } = installRouteMocks(context, doc, null);
+  const before = structuredClone(state.rows);
+  for (const role of [null, 'editor']) {
+    for (const [method, url, body] of [
+      ['put', `/api/articles/${doc._id}`, { status: 'scheduled', scheduledAt: '2099-01-01T00:00:00.000Z' }],
+      ['post', `/api/articles/${doc._id}/schedule`, { scheduledAt: '2099-01-01T00:00:00.000Z' }],
+    ]) {
+      const response = await state.request(method, url, body, role);
+      assert.equal(response.status, role ? 403 : 401);
+    }
+  }
+  assert.deepEqual(capturedUpdates, []);
+  for (const name of ['News', 'Article', 'TranslationJob', 'EditorialTopic']) assert.deepEqual(state.rows[name], before[name]);
+  assert.deepEqual(state.invalidations, []);
+  assert.ok(state.transactions.every(session => session.aborted && session.ended && !session.committed));
 });
 
 test('due Pulse scheduled article publishes through canonical pipeline and syncs public-safe data', async (t) => {

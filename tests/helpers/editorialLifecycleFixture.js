@@ -331,6 +331,7 @@ function installEditorialFixture(context, { staff, modulePolicies } = {}) {
     if (role) call = call.set('Authorization', `Bearer ${auth.token(role)}`);
     return body === undefined ? call : call.send(body);
   };
+  state.token = auth.token;
   state.newsDoc = id => hydrate('News', state.rows.News.find(doc => equal(doc._id, id)));
   return state;
 }
