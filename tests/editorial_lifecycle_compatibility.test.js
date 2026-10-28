@@ -38,6 +38,21 @@ function assertTransactionWrites(state, session, start = 0) {
   for (const call of writes) assert.equal(call.options?.session, session, `${call.name}.${call.method} must use the outer transaction`);
 }
 
+async function assertAnonymousMutationRejected(state, method, path, body) {
+  const contentModels = new Set(['News', 'Article', 'TranslationJob', 'PublicConfigVersion']);
+  const snapshot = () => JSON.stringify([...contentModels].map(name => state.rows[name]));
+  const before = snapshot();
+  const calls = state.calls.filter(call => contentModels.has(call.name)).length;
+  const transactions = state.transactions.length;
+  const invalidations = state.invalidations.length;
+  const response = await state.request(method, path, body, null);
+  assert.equal(response.statusCode, 401, JSON.stringify(response.body));
+  assert.equal(snapshot(), before);
+  assert.equal(state.calls.filter(call => contentModels.has(call.name)).length, calls);
+  assert.equal(state.transactions.length, transactions);
+  assert.equal(state.invalidations.length, invalidations);
+}
+
 function beforeNextArticleTransaction(context, effect) {
   const start = mongoose.startSession;
   let pending = true;
@@ -118,21 +133,27 @@ for (const [method, suffix] of [
 }
 
 for (const path of ['/api/news', '/api/news/news']) {
-  test(`legacy POST ${path} preserves unauthenticated input handling and its message-only envelope`, async context => {
+  test(`legacy POST ${path} rejects anonymous writes and preserves authenticated input handling and its message-only envelope`, async context => {
     const state = installEditorialFixture(context);
     let saved;
-    context.mock.method(models.News.prototype, 'save', async function () {
+    let saveOptions;
+    const save = context.mock.method(models.News.prototype, 'save', async function (options) {
       await this.validate();
       saved = this.toObject();
+      saveOptions = options;
       return this;
     });
-    const response = await state.request('post', path, {
+    const body = {
       title: draft.title, description: draft.description, body: draft.content,
       category: 'business', lang: 'not-a-language', language: 'hi',
       status: 'draft', imageURL: '/uploads/legacy.jpg', translationKey: 'legacy-key',
-    }, null);
-    assert.equal(response.statusCode, 201);
+    };
+    await assertAnonymousMutationRejected(state, 'post', path, body);
+    assert.equal(save.mock.callCount(), 0);
+    const response = await state.request('post', path, body);
+    assert.equal(response.statusCode, 201, JSON.stringify(response.body));
     assert.deepEqual(response.body, { message: 'News created successfully' });
+    assert.equal(save.mock.callCount(), 1);
     assert.equal(saved.content, draft.content);
     assert.equal(saved.language, 'hi');
     assert.equal(saved.lang, 'hi');
@@ -140,43 +161,58 @@ for (const path of ['/api/news', '/api/news/news']) {
     assert.ok(saved.translationGroupId);
     assert.equal(saved.slug, 'compatibility-draft');
     assert.match(saved.coverImageUrl, /\/uploads\/legacy\.jpg$/);
-    assert.equal(state.transactions.length, 0);
+    assert.equal(state.transactions.length, 1);
+    assert.equal(saveOptions.session, state.transactions[0]);
+    assert.equal(state.transactions[0].committed, true);
+    assert.equal(state.transactions[0].ended, true);
   });
 }
 
 for (const method of ['put', 'patch']) {
-  test(`legacy ${method.toUpperCase()} preserves unauthenticated edits, language fallback and the legacy envelope`, async context => {
+  test(`legacy ${method.toUpperCase()} rejects anonymous writes and preserves authenticated edits, language fallback and the legacy envelope`, async context => {
     const state = installEditorialFixture(context);
     const { ids } = seedGroup(state, { status: 'draft' });
-    const response = await state.request(method, `/api/news/${ids[0]}`, {
+    const beforeSiblings = JSON.stringify(state.rows.News.slice(1));
+    const body = {
       title: 'Legacy edit title', lang: 'invalid', language: 'invalid',
       translationGroupId: '', translationKey: '', content: '<p>Legacy edit</p>',
-    }, null);
-    assert.equal(response.statusCode, 200);
+    };
+    await assertAnonymousMutationRejected(state, method, `/api/news/${ids[0]}`, body);
+    const response = await state.request(method, `/api/news/${ids[0]}`, body);
+    assert.equal(response.statusCode, 200, JSON.stringify(response.body));
     assert.deepEqual(response.body, { message: 'News updated successfully' });
+    assert.equal(state.rows.News[0].title, body.title);
+    assert.equal(state.rows.News[0].content, body.content);
     assert.equal(state.rows.News[0].language, 'en');
     assert.equal(state.rows.News[0].translationGroupId, 'story-test-group');
     assert.equal(state.rows.News[0].translationKey, 'story-test-group');
     assert.equal(state.rows.News[0].slug, 'story-en');
     assert.equal(state.rows.News[0].slugs.en, 'legacy-edit-title');
     assert.equal(state.rows.News[1].title, 'hi headline');
-    assert.equal(state.transactions.length, 0);
+    assert.equal(JSON.stringify(state.rows.News.slice(1)), beforeSiblings);
+    assert.equal(state.transactions.length, 1);
+    assert.equal(state.transactions[0].committed, true);
+    assert.equal(state.transactions[0].ended, true);
+    assertTransactionWrites(state, state.transactions[0]);
   });
 }
 
-test('legacy mutations keep their author-byline rejection and error envelopes', async context => {
+test('legacy mutations reject anonymous writes and keep authenticated author-byline rejection and error envelopes', async context => {
   const state = installEditorialFixture(context);
   const { ids } = seedGroup(state, { status: 'draft' });
   for (const [method, path] of [['post', '/api/news'], ['put', `/api/news/${ids[0]}`]]) {
-    const rejected = await state.request(method, path, { 'authorByline.enabled': true }, null);
+    await assertAnonymousMutationRejected(state, method, path, { 'authorByline.enabled': true });
+    const rejected = await state.request(method, path, { 'authorByline.enabled': true });
     assert.equal(rejected.statusCode, 400);
     assert.deepEqual(rejected.body, { error: 'Author bylines must be saved through the authenticated articles API' });
   }
-  const missing = await state.request('patch', '/api/news/507f1f77bcf86cd79943ffff', { title: 'Missing' }, null);
+  await assertAnonymousMutationRejected(state, 'patch', '/api/news/507f1f77bcf86cd79943ffff', { title: 'Missing' });
+  const missing = await state.request('patch', '/api/news/507f1f77bcf86cd79943ffff', { title: 'Missing' });
   assert.equal(missing.statusCode, 404);
   assert.deepEqual(missing.body, { error: 'Not found' });
   context.mock.method(models.News, 'findById', () => { throw new Error('Legacy storage failure'); });
-  const failed = await state.request('put', `/api/news/${ids[0]}`, { title: 'Error' }, null);
+  await assertAnonymousMutationRejected(state, 'put', `/api/news/${ids[0]}`, { title: 'Error' });
+  const failed = await state.request('put', `/api/news/${ids[0]}`, { title: 'Error' });
   assert.equal(failed.statusCode, 500);
   assert.deepEqual(failed.body, { error: 'Legacy storage failure' });
 });

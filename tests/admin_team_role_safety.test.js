@@ -1400,7 +1400,7 @@ test('role change does not change Staff ID and database unavailable is not false
     .send({ noExpiry: true });
 
   assert.equal(dbDownRes.status, 503);
-  assert.equal(dbDownRes.body.code, 'DB_UNAVAILABLE');
+  assert.equal(dbDownRes.body.code, 'AUTH_UNAVAILABLE');
 });
 
 test('mark-test-account flags non-founder test accounts and blocks founder', async () => {
