@@ -32,9 +32,12 @@ const TITLES = {
   gu: '\u0a97\u0ac1\u0a9c\u0ab0\u0abe\u0aa4\u0ac0 \u0ab8\u0aae\u0abe\u0a9a\u0abe\u0ab0',
 };
 
-function install(context) {
+function install(context, access = {}) {
   const state = installEditorialFixture(context, {
-    staff: { specialRightsConfigured: true, specialRightsOverride: ['news_edit'], moduleAccessStates: { manageNews: 'enabled' } },
+    staff: {
+      specialRightsConfigured: true, specialRightsOverride: ['news_edit'],
+      moduleAccessStates: { manageNews: 'enabled' }, ...access,
+    },
     modulePolicies: { manageNews: 'available' },
   });
   const findUser = User.findById;
@@ -458,21 +461,41 @@ for (const authenticated of [true, false]) {
 }
 
 test('creator provenance grants no Manage News reads, publication or permanent-deletion access', async context => {
-  const state = install(context);
-  context.mock.method(SiteSettings, 'findOne', async () => ({
-    adminModulePolicy: { modulePolicies: { manageNews: 'available' }, version: 1 },
-  }));
+  const access = {
+    specialRightsOverride: [],
+    moduleAccessStates: { manageNews: 'disabled', addNews: 'enabled', draftDesk: 'disabled' },
+  };
+  const state = install(context, access);
+  context.mock.method(SiteSettings, 'findOne', () => {
+    const settings = {
+      adminModulePolicy: {
+        modulePolicies: { manageNews: 'available', addNews: 'available', draftDesk: 'available' }, version: 1,
+      },
+    };
+    return {
+      lean: async () => settings,
+      then: (resolve, reject) => Promise.resolve(settings).then(resolve, reject),
+    };
+  });
   context.mock.method(Role, 'findOne', () => ({ lean: async () => null }));
-  const created = await state.request('post', '/api/articles', {
+  const draft = {
     title: 'Owned draft', description: 'Synthetic summary', content: '<p>Draft body</p>',
     category: 'national', language: 'en', status: 'draft',
-  }, 'editor');
-  assert.equal(created.status, 201);
+  };
+  const created = await state.request('post', '/api/articles', draft, 'editor');
+  assert.equal(created.status, 201, created.text);
+  assert.equal(state.rows.News.length, 1);
+  assert.equal(String(state.rows.News[0].createdByUserId), String(state.account()._id));
   const id = created.body.article._id;
   const before = structuredClone(state.rows.News);
   assert.equal((await state.request('get', `/api/articles/${id}`, undefined, 'editor')).status, 403);
   assert.equal((await state.request('get', '/api/articles?status=draft', undefined, 'editor')).status, 403);
   assert.equal((await state.request('post', `/api/articles/${id}/publish`, {}, 'editor')).status, 403);
   assert.equal((await state.request('delete', `/api/articles/${id}/permanent`, undefined, 'editor')).status, 403);
+  assert.deepEqual(state.rows.News, before);
+
+  access.moduleAccessStates.addNews = 'disabled';
+  const denied = await state.request('post', '/api/articles', { ...draft, title: 'Denied draft' }, 'editor');
+  assert.equal(denied.status, 403, denied.text);
   assert.deepEqual(state.rows.News, before);
 });
