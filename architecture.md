@@ -503,8 +503,9 @@ normalized aliases, also require `requireAdminAuth`. Creation checks the
 constructed News document's effective status before saving: `published` and
 `scheduled` require the verified account's Founder role, not role-preset-derived
 `news_publish`. Scheduled creation is protected because the system scheduler can
-later publish it. Missing status still defaults to `draft`; authenticated draft
-creation retains the existing payload handling and 201 message-only response.
+later publish it. Missing status still defaults to `draft`; ordinary creation
+must meet the shared creation authorization below. Authorized draft creation
+retains the existing payload handling and 201 message-only response.
 The public Community Reporter and Youth Pulse submission endpoints are separate
 from these privileged CMS creation routes.
 
@@ -635,8 +636,9 @@ and automatically requests translation-group siblings. A separate limited-client
 adapter/workflow is required: do not call those broader APIs, infer owners, enable
 the Deleted tab, or treat omitted fields as instructions to erase saved metadata.
 This DTO is not a full-CMS replacement or a lossless PUT payload.
-There is no fallback to the separate legacy authenticated `/api/admin/drafts`
-list; this correction does not change or certify that older surface.
+There is no own-draft fallback to the separate legacy `/api/admin/drafts` list.
+That unscoped list, including `deleted=1` and its aliases, requires effective
+Manage News access; Add News or Draft Desk alone cannot disclose its records.
 
 Read access grants no edit, publish, delete or assignment permission. Existing
 PUT/PATCH authorization still evaluates the complete save operation and may deny
@@ -689,8 +691,8 @@ permission message, never sibling metadata. Scope changes use HTTP 409
 success retains `article`, `data.article`, `deletedCount` and `deletedIds`;
 legacy draft success retains its `data` document and deletion counts/IDs.
 Draft-delete failures retain their existing fields and add a machine-readable
-`code`. Restore, unpublish, scheduling and permanent-delete authorization are
-independent and unchanged.
+`code`. Restore authorization is described below; unpublish, scheduling and
+permanent-delete authorization remain independent and unchanged.
 
 The current Admin Panel Manage News tables, Draft Desk and Draft Workspace
 use `deleteArticle` (DELETE `articles/:id`, browser `/admin-api`).
@@ -699,6 +701,47 @@ current wired consumer. Bulk hard-delete uses `articles/forever/bulk`, not
 soft delete. Clients must treat 403 as a permission denial, not a reason to
 retry another route or mutate an entire group locally. No client changes or
 additional rights grants accompany this backend correction.
+
+### Article creation and restore authorization
+
+Ordinary creation is authorized by the shared transactional helper in
+[articleSaveAccess.service.js](./services/articleSaveAccess.service.js), including
+canonical `POST /articles` mounts and legacy `/api/news` creation aliases.
+After persisted-account verification, a verified Founder is allowed. Other
+eligible accounts need effective Add News or Draft Desk for ordinary scoped
+drafts, or effective Manage News plus effective `news_edit`. Roles alone do not
+grant editorial module access. Existing linked-story, public-copy, ownership,
+publication, scheduling, account, temporary-denial and Safe Zone checks remain.
+
+Every transaction attempt in
+[articleLifecycle.service.js](./services/articleLifecycle.service.js) now
+authorizes restoration before content writes. A verified Founder retains
+existing restore authority. Staff must have effective Manage News access,
+`specialRightsConfigured === true`, `news_restore` in the normalized permanent
+selection, and effective `news_restore` after temporary denials and Safe Zone.
+Temporary-only restore grants are not accepted in this phase. Neither role
+presets, legacy unconfigured selections, publishing/deletion rights, bylines,
+assignments nor request claims substitute for the configured restore right.
+There is no limited own-draft restore exception.
+
+Staff restoration is limited to resolved deleted draft/archive groups. Every
+affected edition and matching public copy must satisfy the protection checks:
+no publication/scheduling provenance, unknown pre-delete state, locks, Founder
+approval requirement, private visibility, active/invalid embargo, conflicting
+group identities or unresolved source links. Matching public copies must be
+deleted and belong to resolved CMS members. Broad Manage News restoration does
+not derive authority from creator ownership; a foreign or missing creator alone
+is neither a grant nor a denial. Any previously published/scheduled edition
+keeps the whole restore Founder-only. Founder legacy Draft fallback for unknown
+pre-delete history is retained and reported explicitly.
+
+Canonical and legacy draft restore aliases share this service. Missing restore
+entitlement returns HTTP 403 `ARTICLE_RESTORE_FORBIDDEN`; legacy errors also
+propagate the machine-readable code. The unscoped legacy draft list requires
+Manage News, not `news_restore` or `news_delete`. Restoration preserves IDs,
+slugs, publication chronology, language synchronization, rollback/retry behavior
+and deferred post-commit effects. No grants, migrations or client changes are
+introduced.
 
 ### Article content-save authorization and synchronization
 
@@ -754,10 +797,11 @@ Canonical
 allowlists continue to ignore resubmitted computed sync/timestamp/ID fields
 rather than treating them as editable data. The raw legacy updater rejects
 changes to server-controlled fields and Mongo operator payloads from staff.
-Creation is not blanketed with `news_edit`; existing creator stamping and draft
-contracts remain intact. Canonical create-as-published now uses the same verified
-publication authority; scheduling, restoration and other protected lifecycle
-boundaries remain unchanged.
+Creation follows the policy above rather than a blanket `news_edit` requirement;
+existing creator stamping and authorized draft contracts remain intact.
+Canonical create-as-published uses the same verified publication authority.
+Scheduling and other protected lifecycle boundaries remain independent and
+unchanged; restoration follows the explicit restore policy above.
 Manual translation-generation/backfill endpoints also retain their existing
 authorization; this PUT/PATCH correction does not certify those independent
 entry points.

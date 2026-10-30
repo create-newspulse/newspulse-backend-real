@@ -548,5 +548,6 @@ test('restore and unpublish retain their independent permission boundaries', asy
   assert.equal((await state.request('post', `/api/articles/${ids[0]}/unpublish`, {}, 'editor')).status, 403);
   assert.equal((await state.request('post', `/api/articles/${ids[0]}/unpublish`, {}, 'founder')).status, 200);
   assert.equal((await state.request('delete', `/api/articles/${ids[0]}`, undefined, 'founder')).status, 200);
-  assert.equal((await state.request('post', `/api/articles/${ids[0]}/restore`, {}, 'editor')).status, 200);
+  assert.equal((await state.request('post', `/api/articles/${ids[0]}/restore`, {}, 'editor')).status, 403);
+  assert.equal((await state.request('post', `/api/articles/${ids[0]}/restore`, {}, 'founder')).status, 200);
 });

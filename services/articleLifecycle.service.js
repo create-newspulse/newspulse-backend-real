@@ -6,7 +6,7 @@ const TranslationJob = require('../models/TranslationJob');
 const AuditLog = require('../models/AuditLog');
 const PushHistory = require('../models/PushHistory');
 const { logAudit } = require('../lib/audit');
-const { hasSpecialRight, normalizeRole } = require('../lib/teamAccess');
+const { hasSpecialRight, normalizeRole, normalizeSpecialRights } = require('../lib/teamAccess');
 const { loadArticleMutationActor, requireFounderArticleMutation } = require('../lib/articleMutationActor');
 const { loadRoleForUser, isSafeZoneMasterLocked } = require('../middleware/requireAuth');
 const { evaluateModuleAccess, getFounderModulePolicy } = require('./founderAccessPolicyService');
@@ -47,6 +47,60 @@ async function assertSoftDeleteAuthority(req, session) {
     }
     throw error;
   }
+}
+
+function restoreDenied() {
+  return failure(403,
+    'Effective Manage News access and an explicitly Founder-configured news_restore Special Right are required to restore this story.',
+    'ARTICLE_RESTORE_FORBIDDEN');
+}
+
+async function assertRestoreAuthority(req, session) {
+  try {
+    const user = await loadArticleMutationActor(req, session, restoreDenied);
+    if (normalizeRole(user.role) === 'founder' || user.isFounder === true) return true;
+    if (isSafeZoneMasterLocked()) throw restoreDenied();
+    const policy = await getFounderModulePolicy({ readOnly: true, session });
+    if (!evaluateModuleAccess(user, 'manageNews', policy).allowed
+      || user.specialRightsConfigured !== true
+      || !normalizeSpecialRights(user.specialRightsOverride).includes('news_restore')
+      || !hasSpecialRight(user, 'news_restore', null, isSafeZoneMasterLocked())) throw restoreDenied();
+    return false;
+  } catch (error) {
+    if (error.code === 'ARTICLE_RESTORE_FORBIDDEN') {
+      await logAudit(req, 'ACCESS_BLOCKED', null, { module: 'articles', reason: 'article_restore_scope', result: 'blocked' });
+    }
+    throw error;
+  }
+}
+
+function hasPublicationHistory(doc) {
+  const history = Array.isArray(doc.workflowHistory) ? doc.workflowHistory : [];
+  const stages = [doc.deletedFromStatus, doc.workflowStage, doc.workflow?.stage,
+    ...history.flatMap(entry => [entry?.fromStage, entry?.toStage])];
+  return [doc.publishedAt, doc.publishAt, doc.scheduledAt].some(value => value != null)
+    || stages.some(stage => ['published', 'scheduled'].includes(String(stage || '').toLowerCase()))
+    || history.some(entry => ['publish', 'schedule'].includes(String(entry?.action || '').toLowerCase()));
+}
+
+async function assertStaffRestoreScope(req, docs, restoreFallbackIds, session) {
+  const copies = await PublicArticle.find(buildPublicCopyFilter(docs), null, { session }).lean();
+  const records = [...docs, ...copies];
+  if (records.some(hasPublicationHistory)) await requireFounderArticleMutation(req, session);
+  const ids = new Set(docs.map(doc => String(doc._id)));
+  const keys = new Set(docs.flatMap(getStoryKeys));
+  if (restoreFallbackIds.length || keys.size > 1) throw restoreDenied();
+  const future = value => value && (!Number.isFinite(new Date(value).getTime()) || new Date(value).getTime() > Date.now());
+  for (const doc of records) {
+    if (doc.status !== 'deleted' || doc.locked || doc.workflow?.locked || doc.requiresFounderApproval
+      || doc.isPrivate === true || (doc.visibility && doc.visibility !== 'public')
+      || future(doc.embargoUntil) || future(doc.workflow?.embargoUntil)
+      || (doc.workflow != null && (typeof doc.workflow !== 'object' || Array.isArray(doc.workflow)))
+      || (doc.workflowHistory != null && !Array.isArray(doc.workflowHistory))
+      || (doc.sourceArticleId && !ids.has(String(doc.sourceArticleId)))
+      || getStoryKeys(doc).some(key => !keys.has(key))) throw restoreDenied();
+  }
+  if (copies.some(copy => !ids.has(String(copy.sourceNewsId || '')))) throw restoreDenied();
 }
 
 function deletionChanged() {
@@ -335,6 +389,7 @@ async function changeArticleGroupStatus(id, status, options = {}) {
 
 async function restoreArticleGroup(id, options = {}) {
   return inArticleTransaction(async (session, transaction) => {
+    const isFounder = await assertRestoreAuthority(options.req, session);
     const { seed, docs } = await findArticleGroup(id, session);
     if (options.authorizeSave) await options.authorizeSave(seed, session, transaction);
     if (docs.some(doc => doc.status !== 'deleted')) {
@@ -349,6 +404,7 @@ async function restoreArticleGroup(id, options = {}) {
     if (statuses.some(status => status === 'published' || status === 'scheduled')) {
       await requireFounderArticleMutation(options.req, session);
     }
+    if (!isFounder) await assertStaffRestoreScope(options.req, docs, restoreFallbackIds, session);
     const languages = docs.map(doc => String(doc.language || doc.lang || '').toLowerCase()).filter(Boolean);
     if (new Set(languages).size !== languages.length) {
       throw failure(409, 'The translation group has duplicate language records. Resolve them before restoring.');

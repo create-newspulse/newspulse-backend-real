@@ -783,15 +783,22 @@ test('a stale compatibility Article cannot revive its hidden canonical News sour
   }
 });
 
-test('restore to Published is Founder-only; a draft-only story can be restored by an editor', async context => {
-  const state = installEditorialFixture(context);
+test('restore of publication history remains Founder-only even when deletedFromStatus is draft', async context => {
+  const state = installEditorialFixture(context, {
+    staff: {
+      moduleAccessStates: { manageNews: 'enabled' },
+      specialRightsConfigured: true, specialRightsOverride: ['news_restore'],
+    },
+    modulePolicies: { manageNews: 'available' },
+  });
   const { ids } = seedGroup(state);
   assert.equal((await state.request('delete', `/api/articles/${ids[0]}`)).statusCode, 200);
   const denied = await state.request('post', `/api/articles/${ids[1]}/restore`, {}, 'editor');
   assert.equal(denied.statusCode, 403);
   assert.ok(state.rows.News.every(doc => doc.status === 'deleted'));
   state.rows.News.forEach(doc => { doc.deletedFromStatus = 'draft'; doc.publishedAt = null; });
-  const restored = await state.request('post', `/api/articles/${ids[1]}/restore`, {}, 'editor');
+  assert.equal((await state.request('post', `/api/articles/${ids[1]}/restore`, {}, 'editor')).statusCode, 403);
+  const restored = await state.request('post', `/api/articles/${ids[1]}/restore`, {}, 'founder');
   assert.equal(restored.statusCode, 200);
   assert.ok(state.rows.News.every(doc => doc.status === 'draft'));
 });
@@ -1083,13 +1090,13 @@ test('legacy repeated deletion history restores the last usable pre-delete state
   assert.ok(state.rows.News.every(doc => doc.status === 'published'));
 });
 
-test('unknown legacy pre-delete status is surfaced explicitly and restored safely to Draft', async context => {
+test('unknown legacy pre-delete status is surfaced explicitly and restored safely to Draft by Founder', async context => {
   const state = installEditorialFixture(context);
   const { ids } = seedGroup(state, { status: 'deleted' });
   state.rows.News.forEach(doc => { delete doc.deletedFromStatus; doc.workflowHistory = []; });
   const warnings = [];
   context.mock.method(console, 'warn', (...args) => warnings.push(args));
-  const response = await state.request('post', `/api/articles/${ids[0]}/restore`, {}, 'editor');
+  const response = await state.request('post', `/api/articles/${ids[0]}/restore`, {}, 'founder');
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.body.restoreFallbackIds.sort(), [...ids].sort());
   assert.ok(state.rows.News.every(doc => doc.status === 'draft'));

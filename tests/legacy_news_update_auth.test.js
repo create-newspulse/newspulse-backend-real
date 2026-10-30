@@ -42,7 +42,7 @@ function installLegacyFixture(context, { account = {}, language = 'en', status =
   });
   context.mock.method(User, 'findByIdAndUpdate', () => assert.fail('Unexpected account mutation'));
   context.mock.method(SiteSettings, 'findOne', () => ({ lean: async () => ({
-    adminModulePolicy: { modulePolicies: { manageNews: 'available' } },
+    adminModulePolicy: { modulePolicies: { manageNews: 'available', addNews: 'available' } },
   }) }));
 
   const doc = new News({
@@ -284,8 +284,10 @@ for (const base of BASES) {
 
     for (const role of ['founder', 'admin', 'editor', 'reporter']) {
       for (const language of ['en', 'hi', 'gu']) {
-        test(`${label} preserves authenticated ${role} ${language} draft creation`, async context => {
-          const state = installLegacyFixture(context, { account: { specialRightsOverride: [] } });
+        test(`${label} preserves authorized ${role} ${language} draft creation`, async context => {
+          const state = installLegacyFixture(context, {
+            account: { specialRightsOverride: [], moduleAccessStates: { addNews: 'enabled' } },
+          });
           const created = trackLegacyCreations(context);
           const response = await request(app).post(`${path}/?legacy=1`)
             .auth(state.auth.token(role), { type: 'bearer' })

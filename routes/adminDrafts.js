@@ -3,14 +3,14 @@ const mongoose = require('mongoose');
 const News = require('../models/News');
 const { changeArticleGroupStatus, restoreArticleGroup, articleMutationMetadata } = require('../services/articleLifecycle.service');
 const { isContentDatabaseUnavailable } = require('../lib/contentErrors');
-const { requireAdminAuth } = require('../middleware/adminAuth');
+const { requireAdminAuth, requireAdminModule } = require('../middleware/adminAuth');
 
 const router = express.Router();
 
 // GET /api/admin/drafts
 // Supports filters: ?deleted=1 (only deleted), ?deleted=0 (exclude deleted), default exclude deleted
 // Optional: ?source=community|editor|pro|founder
-router.get('/drafts', requireAdminAuth, async (req, res) => {
+router.get('/drafts', requireAdminModule('manageNews'), async (req, res) => {
   try {
     if (mongoose.connection.readyState !== 1) {
       return res.status(503).json({ ok: false, success: false, code: 'ARTICLES_UNAVAILABLE', message: 'Database unavailable' });
@@ -102,7 +102,10 @@ router.post('/drafts/:id/restore', requireAdminAuth, async (req, res) => {
   } catch (err) {
     console.error('[ADMIN_DRAFTS][restore-error]', err?.message || err);
     const status = Number(err?.statusCode || err?.status) || 503;
-    return res.status(status).json({ ok: false, success: false, message: status === 500 ? 'Failed to restore draft' : err.message });
+    return res.status(status).json({
+      ok: false, success: false, message: status === 500 ? 'Failed to restore draft' : err.message,
+      ...(err.code ? { code: err.code } : {}),
+    });
   }
 });
 

@@ -119,6 +119,16 @@ function assertUnprotectedPublication(doc) {
     || getStoryKeys(doc).length > 1) throw publicationDenied();
 }
 
+async function resolveArticleEditAccess(user, session) {
+  const policy = await getFounderModulePolicy({ readOnly: true, session });
+  const canManage = evaluateModuleAccess(user, 'manageNews', policy).allowed;
+  const role = canManage && user.specialRightsConfigured !== true ? await loadRoleForUser(user, { session }) : null;
+  return {
+    editor: canManage && hasSpecialRight(user, 'news_edit', role, isSafeZoneMasterLocked()),
+    workspace: ['addNews', 'draftDesk'].some(key => evaluateModuleAccess(user, key, policy).allowed),
+  };
+}
+
 async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
   publicOnly = false, checkIntent = true, faithTopicOnly = false, publicSync = true, ignoreComputed = false,
   draftTranslation = false, syncDrafts = false, publication = false, newArticle = false,
@@ -131,11 +141,7 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
     const source = plain(sourceLike);
     if (!source) throw scopeChanged();
     if (checkIntent) contentSaveBody(req.body, source, false, { ignoreComputed });
-    const policy = await getFounderModulePolicy({ readOnly: true, session });
-    const canManage = evaluateModuleAccess(user, 'manageNews', policy).allowed;
-    const role = canManage && user.specialRightsConfigured !== true ? await loadRoleForUser(user, { session }) : null;
-    const editor = canManage && hasSpecialRight(user, 'news_edit', role, isSafeZoneMasterLocked());
-    const workspace = ['addNews', 'draftDesk'].some(key => evaluateModuleAccess(user, key, policy).allowed);
+    const { editor, workspace } = await resolveArticleEditAccess(user, session);
     if (!editor && (!workspace || publicOnly)) throw saveDenied();
     if (source.status === 'deleted' || source.deletedAt) throw saveDenied();
     if (publicOnly) return { filter: { _id: source._id, status: source.status, updatedAt: source.updatedAt ?? null } };
@@ -383,6 +389,9 @@ async function authorizeArticleCreation(req, docLike, session, { publication = f
   try {
     const user = await loadArticleMutationActor(req, session, saveDenied);
     if (founder(user)) return;
+    if (isSafeZoneMasterLocked()) throw saveDenied();
+    const { editor, workspace } = await resolveArticleEditAccess(user, session);
+    if (!editor && (!workspace || doc.status !== 'draft')) throw saveDenied();
     const linked = await News.find(buildStoryIdentityFilter(doc), null, { session })
       .select('+createdByUserId').lean();
     if (doc.sourceArticleId && String(doc.sourceArticleId) !== String(doc._id)
@@ -406,7 +415,7 @@ async function authorizeArticleCreation(req, docLike, session, { publication = f
     }
   } catch (error) {
     if (error.code === 'ARTICLE_SAVE_FORBIDDEN') {
-      await logAudit(req, 'ACCESS_BLOCKED', null, { module: 'articles', reason: 'article_creation_linkage', result: 'blocked' });
+      await logAudit(req, 'ACCESS_BLOCKED', null, { module: 'articles', reason: 'article_creation_scope', result: 'blocked' });
     }
     throw error;
   }
