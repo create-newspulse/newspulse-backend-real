@@ -8,7 +8,7 @@ const { serializePublicArticle } = require('../services/publicArticleSerializer.
 // Keep an alias named Article for routes that treat these as "Articles".
 const Article = News;
 const mongoose = require('mongoose');
-const { requireAdminAuth, requireAdminModule, requireFounderOnly } = require('../middleware/adminAuth');
+const { requireAdminAuth, requireReadOnlyAdminAuth, requireAdminModule, requireFounderOnly } = require('../middleware/adminAuth');
 const { optionalAdminAuth } = require('../middleware/optionalAdminAuth');
 const { requireModuleAccess } = require('../middleware/requireAuth');
 const {
@@ -56,7 +56,7 @@ const {
 } = require('../services/translationGroupSync.service');
 const { assertSlugUnique: assertStorySlugUnique } = require('../services/articleSlugUniqueness.service');
 const {
-  changeArticleGroupStatus, restoreArticleGroup, permanentlyDeleteArticleGroups, findArticleGroup, withActiveArticleSource,
+  changeArticleGroupStatus, restoreArticleGroup, assessArticleRestoreEligibility, permanentlyDeleteArticleGroups, findArticleGroup, withActiveArticleSource,
   inArticleTransaction, serializeNewsArticle, articleMutationMetadata,
 } = require('../services/articleLifecycle.service');
 const { countLogicalArticles } = require('../services/articleLogicalCounts.service');
@@ -3826,6 +3826,35 @@ async function permanentDeleteArticle(req, res, options = {}) {
     return lifecycleError(res, error);
   }
 }
+
+router.get('/articles/:id/restore-eligibility', (_req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.set('Pragma', 'no-cache');
+  res.vary('Authorization');
+  res.vary('Cookie');
+  next();
+}, requireReadOnlyAdminAuth, async (req, res) => {
+  try {
+    const data = await assessArticleRestoreEligibility(req.params.id, req);
+    return res.json({ ok: true, success: true, status: 200, data });
+  } catch (error) {
+    const status = error.statusCode || error.status || (isContentDatabaseUnavailable(error) ? 503 : 500);
+    const codes = {
+      400: 'INVALID_ARTICLE_ID', 403: 'ARTICLE_RESTORE_FORBIDDEN', 404: 'ARTICLE_NOT_FOUND',
+      409: 'ARTICLE_RESTORE_SCOPE_CHANGED', 503: 'RESTORE_ELIGIBILITY_UNAVAILABLE',
+    };
+    const messages = {
+      400: 'Invalid article id', 403: 'Restore assessment is not permitted.', 404: 'Article not found',
+      409: 'Article group changed. Reload and retry.',
+    };
+    const code = codes[status] || 'RESTORE_ELIGIBILITY_FAILED';
+    console.error('[articles.restore-eligibility] Assessment failed', { code, status });
+    return res.status(status).json({
+      ok: false, success: false, status, code,
+      message: messages[status] || 'Restore eligibility could not be assessed. Please try again.',
+    });
+  }
+});
 
 router.post('/articles/:id/restore', requireAdminAuth, (req, res) => restoreArticle(req, res));
 router.delete([

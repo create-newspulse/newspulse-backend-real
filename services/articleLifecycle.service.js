@@ -8,6 +8,7 @@ const PushHistory = require('../models/PushHistory');
 const { logAudit } = require('../lib/audit');
 const { hasSpecialRight, normalizeRole, normalizeSpecialRights } = require('../lib/teamAccess');
 const { loadArticleMutationActor, requireFounderArticleMutation } = require('../lib/articleMutationActor');
+const { canonicalizeSlug } = require('../lib/slug');
 const { loadRoleForUser, isSafeZoneMasterLocked } = require('../middleware/requireAuth');
 const { evaluateModuleAccess, getFounderModulePolicy } = require('./founderAccessPolicyService');
 const {
@@ -55,7 +56,7 @@ function restoreDenied() {
     'ARTICLE_RESTORE_FORBIDDEN');
 }
 
-async function assertRestoreAuthority(req, session) {
+async function assertRestoreAuthority(req, session, { audit = true } = {}) {
   try {
     const user = await loadArticleMutationActor(req, session, restoreDenied);
     if (normalizeRole(user.role) === 'founder' || user.isFounder === true) return true;
@@ -67,7 +68,7 @@ async function assertRestoreAuthority(req, session) {
       || !hasSpecialRight(user, 'news_restore', null, isSafeZoneMasterLocked())) throw restoreDenied();
     return false;
   } catch (error) {
-    if (error.code === 'ARTICLE_RESTORE_FORBIDDEN') {
+    if (audit && error.code === 'ARTICLE_RESTORE_FORBIDDEN') {
       await logAudit(req, 'ACCESS_BLOCKED', null, { module: 'articles', reason: 'article_restore_scope', result: 'blocked' });
     }
     throw error;
@@ -83,24 +84,35 @@ function hasPublicationHistory(doc) {
     || history.some(entry => ['publish', 'schedule'].includes(String(entry?.action || '').toLowerCase()));
 }
 
-async function assertStaffRestoreScope(req, docs, restoreFallbackIds, session) {
-  const copies = await PublicArticle.find(buildPublicCopyFilter(docs), null, { session }).lean();
+function staffRestoreBlockers(docs, copies, restoreFallbackIds) {
+  const blockers = new Set();
   const records = [...docs, ...copies];
-  if (records.some(hasPublicationHistory)) await requireFounderArticleMutation(req, session);
+  if (records.some(hasPublicationHistory)) blockers.add('RESTORE_PUBLICATION_HISTORY');
   const ids = new Set(docs.map(doc => String(doc._id)));
   const keys = new Set(docs.flatMap(getStoryKeys));
-  if (restoreFallbackIds.length || keys.size > 1) throw restoreDenied();
+  if (restoreFallbackIds.length) blockers.add('RESTORE_HISTORY_UNKNOWN');
+  if (keys.size > 1) blockers.add('RESTORE_GROUP_IDENTITY_CONFLICT');
   const future = value => value && (!Number.isFinite(new Date(value).getTime()) || new Date(value).getTime() > Date.now());
   for (const doc of records) {
-    if (doc.status !== 'deleted' || doc.locked || doc.workflow?.locked || doc.requiresFounderApproval
-      || doc.isPrivate === true || (doc.visibility && doc.visibility !== 'public')
-      || future(doc.embargoUntil) || future(doc.workflow?.embargoUntil)
-      || (doc.workflow != null && (typeof doc.workflow !== 'object' || Array.isArray(doc.workflow)))
-      || (doc.workflowHistory != null && !Array.isArray(doc.workflowHistory))
-      || (doc.sourceArticleId && !ids.has(String(doc.sourceArticleId)))
-      || getStoryKeys(doc).some(key => !keys.has(key))) throw restoreDenied();
+    if (doc.status !== 'deleted') blockers.add('RESTORE_NOT_DELETED');
+    if (doc.locked || doc.workflow?.locked) blockers.add('RESTORE_LOCKED');
+    if (doc.requiresFounderApproval) blockers.add('RESTORE_FOUNDER_APPROVAL_REQUIRED');
+    if (doc.isPrivate === true || (doc.visibility && doc.visibility !== 'public')) blockers.add('RESTORE_PRIVATE');
+    if (future(doc.embargoUntil) || future(doc.workflow?.embargoUntil)) blockers.add('RESTORE_EMBARGOED');
+    if (doc.workflow != null && (typeof doc.workflow !== 'object' || Array.isArray(doc.workflow))) blockers.add('RESTORE_INVALID_WORKFLOW');
+    if (doc.workflowHistory != null && !Array.isArray(doc.workflowHistory)) blockers.add('RESTORE_HISTORY_INVALID');
+    if (doc.sourceArticleId && !ids.has(String(doc.sourceArticleId))) blockers.add('RESTORE_SOURCE_UNRESOLVED');
+    if (getStoryKeys(doc).some(key => !keys.has(key))) blockers.add('RESTORE_GROUP_IDENTITY_CONFLICT');
   }
-  if (copies.some(copy => !ids.has(String(copy.sourceNewsId || '')))) throw restoreDenied();
+  if (copies.some(copy => !ids.has(String(copy.sourceNewsId || '')))) blockers.add('RESTORE_COPY_OWNERSHIP_CONFLICT');
+  return [...blockers];
+}
+
+async function assertStaffRestoreScope(req, docs, restoreFallbackIds, session) {
+  const copies = await PublicArticle.find(buildPublicCopyFilter(docs), null, { session }).lean();
+  const blockers = staffRestoreBlockers(docs, copies, restoreFallbackIds);
+  if (blockers.includes('RESTORE_PUBLICATION_HISTORY')) await requireFounderArticleMutation(req, session);
+  if (blockers.some(code => code !== 'RESTORE_PUBLICATION_HISTORY')) throw restoreDenied();
 }
 
 function deletionChanged() {
@@ -175,7 +187,7 @@ async function inArticleTransaction(work, options = {}) {
       delete transaction.saveIntentValidated;
       delete transaction.saveScope;
       result = await work(session, transaction);
-    });
+    }, options.readOnly ? { readConcern: { level: 'snapshot' } } : undefined);
   } finally {
     try {
       await session.endSession();
@@ -281,6 +293,116 @@ function restoredStatus(doc) {
       && ['DRAFT', 'SCHEDULED', 'PUBLISHED', 'ARCHIVED'].includes(String(entry.fromStage || '').toUpperCase()));
   const previous = Object.keys(STAGES).find(status => status !== 'deleted' && STAGES[status] === String(deletion?.fromStage || '').toUpperCase());
   return previous || null;
+}
+
+function restoreConflict(message, restoreReason) {
+  return Object.assign(failure(409, message), { restoreReason });
+}
+
+function assertDeletedRestoreGroup(docs) {
+  if (docs.some(doc => doc.status !== 'deleted')) {
+    throw restoreConflict('Only a completely soft-deleted story can be restored.', 'RESTORE_NOT_DELETED');
+  }
+}
+
+async function validateRestoreGroup(docs, statuses, session) {
+  const languages = docs.map(doc => String(doc.language || doc.lang || '').toLowerCase()).filter(Boolean);
+  if (new Set(languages).size !== languages.length) {
+    throw restoreConflict('The translation group has duplicate language records. Resolve them before restoring.', 'RESTORE_DUPLICATE_LANGUAGE');
+  }
+  for (const doc of docs) await assertArticleSlugsUnique(doc, { session });
+  if (docs.some((doc, index) => statuses[index] === 'published'
+    && (!doc.title || !doc.description || !doc.content || !doc.slug || !doc.publishedAt))) {
+    throw restoreConflict('The previous publication is incomplete. Review the story before restoring.', 'RESTORE_PUBLICATION_INCOMPLETE');
+  }
+}
+
+function isRestoreObject(value) {
+  return value != null && typeof value === 'object'
+    && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+}
+
+function invalidRestoreHistory(doc) {
+  return (doc.deletedFromStatus != null && (typeof doc.deletedFromStatus !== 'string'
+    || !Object.hasOwn(STAGES, doc.deletedFromStatus) || doc.deletedFromStatus === 'deleted'))
+    || (doc.workflowHistory != null && (!Array.isArray(doc.workflowHistory)
+    || doc.workflowHistory.some(entry => !isRestoreObject(entry)
+      || ['action', 'fromStage', 'toStage'].some(key => entry[key] != null && typeof entry[key] !== 'string'))));
+}
+
+async function assessArticleRestoreEligibility(id, req) {
+  return inArticleTransaction(async session => {
+    const isFounder = await assertRestoreAuthority(req, session, { audit: false });
+    if (!mongoose.isObjectIdOrHexString(id)) throw failure(400, 'Invalid article id');
+    const { seed, docs } = await findArticleGroup(id, session);
+    const copies = await PublicArticle.find(buildPublicCopyFilter(docs), null, { session }).lean();
+    const destinations = docs.map(doc => invalidRestoreHistory(doc) ? null : restoredStatus(doc));
+    const restoreFallbackIds = docs.filter((doc, index) => !destinations[index]).map(doc => String(doc._id));
+    const blockers = staffRestoreBlockers(docs, copies, restoreFallbackIds);
+    const reasons = new Set(blockers);
+    const incompleteCodes = new Set([
+      'RESTORE_HISTORY_UNKNOWN', 'RESTORE_HISTORY_INVALID', 'RESTORE_INVALID_WORKFLOW',
+      'RESTORE_GROUP_IDENTITY_CONFLICT', 'RESTORE_SOURCE_UNRESOLVED', 'RESTORE_COPY_OWNERSHIP_CONFLICT',
+      'RESTORE_MEMBER_IDENTITY_INVALID', 'RESTORE_METADATA_INVALID', 'RESTORE_INVALID_SLUG',
+      'RESTORE_DUPLICATE_LANGUAGE', 'RESTORE_PUBLICATION_INCOMPLETE',
+    ]);
+    const idOf = value => mongoose.isObjectIdOrHexString(value) ? String(value) : null;
+    const languageOf = doc => {
+      const value = typeof (doc.language || doc.lang) === 'string' ? (doc.language || doc.lang).trim().toLowerCase() : null;
+      return ['en', 'hi', 'gu'].includes(value) ? value : null;
+    };
+    for (const doc of [...docs, ...copies]) {
+      if (!idOf(doc._id) || !languageOf(doc) || typeof doc.status !== 'string' || !Object.hasOwn(STAGES, doc.status)
+        || ['sourceArticleId', 'sourceNewsId'].some(key => doc[key] != null && !idOf(doc[key]))
+        || ['translationGroupId', 'translationKey'].some(key => doc[key] != null && typeof doc[key] !== 'string')) {
+        reasons.add('RESTORE_MEMBER_IDENTITY_INVALID');
+      }
+      if (invalidRestoreHistory(doc)) reasons.add('RESTORE_HISTORY_INVALID');
+      if (doc.workflow != null && !isRestoreObject(doc.workflow)) reasons.add('RESTORE_INVALID_WORKFLOW');
+      if ([doc.publishedAt, doc.publishAt, doc.scheduledAt, doc.deletedAt, doc.embargoUntil, doc.workflow?.embargoUntil]
+        .some(value => value != null && (!(value instanceof Date) && typeof value !== 'string'
+          || !Number.isFinite(new Date(value).getTime())))
+        || [doc.locked, doc.workflow?.locked, doc.requiresFounderApproval, doc.isPrivate]
+          .some(value => value != null && typeof value !== 'boolean')
+        || [doc.workflowStage, doc.workflow?.stage].some(value => value != null && typeof value !== 'string')
+        || (doc.visibility != null && typeof doc.visibility !== 'string')) reasons.add('RESTORE_METADATA_INVALID');
+      if (typeof doc.slug !== 'string' || !canonicalizeSlug(doc.slug)
+        || (doc.slugs != null && !isRestoreObject(doc.slugs))
+        || ['en', 'hi', 'gu'].some(lang => doc.slugs?.[lang] != null
+          && (typeof doc.slugs[lang] !== 'string' || !canonicalizeSlug(doc.slugs[lang])))) reasons.add('RESTORE_INVALID_SLUG');
+    }
+    if (new Set(docs.map(doc => idOf(doc._id))).size !== docs.length
+      || new Set(copies.map(doc => idOf(doc._id))).size !== copies.length) reasons.add('RESTORE_MEMBER_IDENTITY_INVALID');
+    let conflict = false;
+    try {
+      assertDeletedRestoreGroup(docs);
+      await validateRestoreGroup(docs, destinations, session);
+    } catch (error) {
+      if (!error.restoreReason && error.code !== 'SLUG_CONFLICT') throw error;
+      reasons.add(error.restoreReason || 'RESTORE_SLUG_CONFLICT');
+      conflict = true;
+    }
+    const complete = ![...reasons].some(code => incompleteCodes.has(code));
+    const requiresFounder = destinations.some(status => status === 'published' || status === 'scheduled')
+      || blockers.length > 0;
+    const eligible = complete && !conflict && (isFounder || blockers.length === 0);
+    return {
+      articleId: idOf(seed._id),
+      eligible,
+      decision: !complete ? 'incomplete' : conflict ? 'blocked' : eligible ? 'eligible' : 'founder_required',
+      complete,
+      requiresFounder,
+      reasonCodes: [...reasons].sort(),
+      members: docs.map((doc, index) => ({
+        id: idOf(doc._id),
+        language: languageOf(doc),
+        status: typeof doc.status === 'string' && Object.hasOwn(STAGES, doc.status) ? doc.status : null,
+        restoreStatus: destinations[index],
+        historyKnown: destinations[index] !== null,
+      })),
+      publicCopies: copies.map(copy => ({ id: idOf(copy._id), sourceNewsId: idOf(copy.sourceNewsId) })),
+    };
+  }, { readOnly: true });
 }
 
 async function recordLifecycleHistory(result, options, restoring = false) {
@@ -392,9 +514,7 @@ async function restoreArticleGroup(id, options = {}) {
     const isFounder = await assertRestoreAuthority(options.req, session);
     const { seed, docs } = await findArticleGroup(id, session);
     if (options.authorizeSave) await options.authorizeSave(seed, session, transaction);
-    if (docs.some(doc => doc.status !== 'deleted')) {
-      throw failure(409, 'Only a completely soft-deleted story can be restored.');
-    }
+    assertDeletedRestoreGroup(docs);
     const restoreFallbackIds = [];
     const statuses = docs.map(doc => {
       const status = restoredStatus(doc);
@@ -405,17 +525,10 @@ async function restoreArticleGroup(id, options = {}) {
       await requireFounderArticleMutation(options.req, session);
     }
     if (!isFounder) await assertStaffRestoreScope(options.req, docs, restoreFallbackIds, session);
-    const languages = docs.map(doc => String(doc.language || doc.lang || '').toLowerCase()).filter(Boolean);
-    if (new Set(languages).size !== languages.length) {
-      throw failure(409, 'The translation group has duplicate language records. Resolve them before restoring.');
-    }
-    for (const doc of docs) await assertArticleSlugsUnique(doc, { session });
+    await validateRestoreGroup(docs, statuses, session);
     const now = options.now || new Date();
     const updated = [];
     for (const [index, doc] of docs.entries()) {
-      if (statuses[index] === 'published' && (!doc.title || !doc.description || !doc.content || !doc.slug || !doc.publishedAt)) {
-        throw failure(409, 'The previous publication is incomplete. Review the story before restoring.');
-      }
       updated.push(await updateMember(doc, {
         status: statuses[index], deletedAt: null, deletedFromStatus: null,
       }, 'RESTORE', options.req, now, session, deletionSnapshot(doc), lifecycleChanged));
@@ -497,6 +610,6 @@ async function permanentlyDeleteArticleGroups(ids, options = {}) {
 
 module.exports = {
   buildPublicCopyFilter, findArticleGroup, changeArticleGroupStatus,
-  restoreArticleGroup, permanentlyDeleteArticleGroups,
+  restoreArticleGroup, assessArticleRestoreEligibility, permanentlyDeleteArticleGroups,
   withActiveArticleSource, inArticleTransaction, afterArticleCommit, serializeNewsArticle, articleMutationMetadata,
 };

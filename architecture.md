@@ -743,6 +743,156 @@ slugs, publication chronology, language synchronization, rollback/retry behavior
 and deferred post-commit effects. No grants, migrations or client changes are
 introduced.
 
+#### Restore eligibility read contract
+
+`GET /api/articles/:id/restore-eligibility` provides an informational assessment
+of a deleted News story before displaying Restore. It uses the same article
+router mounts as POST restore: root, `/api`, `/api/admin`, `/admin-api`,
+`/admin-api/api`, `/admin-api/admin` and `/admin-api/api/admin`, including leading
+duplicate-`/api` normalization. HEAD has the same guards. It is not a public API.
+There are no query/body permission overrides or eligibility tokens.
+
+The existing signed bearer/supported-cookie authentication is required. The new
+internal read-only authentication mode in
+[adminAuth.js](./middleware/adminAuth.js) retains persisted-account, lifecycle,
+login and token-version checks without persisting account expiration. Before
+looking up any article, the service rechecks the persisted actor inside a
+snapshot read transaction. Founder is allowed; staff must satisfy the exact
+POST restore entitlement: effective `manageNews`, `specialRightsConfigured === true`,
+permanent `specialRightsOverride` containing `news_restore`, effective
+`news_restore`, account eligibility and Safe Zone. Temporary-only restore,
+role presets, other news rights and limited own-draft access do not qualify.
+Entitlement denials return no article/member data and perform no article lookup.
+
+[articleLifecycle.service.js](./services/articleLifecycle.service.js) shares
+restore authority, News/source/group resolution, matching public-copy resolution,
+staff scope checks, destination resolution and structural validation with POST.
+Every resolved existing News edition and matching public copy is considered;
+there is no selected-language filter or assumption that exactly three editions
+must exist. A linked public-copy ID resolves to its News source; a public-only
+or missing source does not become an independently restorable story.
+
+HTTP 200 means the assessment completed, **not** that restoration is authorized.
+The response contains only this envelope and allowlisted assessment data:
+
+```json
+{
+  "ok": true,
+  "success": true,
+  "status": 200,
+  "data": {
+    "articleId": "507f1f77bcf86cd79943a001",
+    "eligible": true,
+    "decision": "eligible",
+    "complete": true,
+    "requiresFounder": false,
+    "reasonCodes": [],
+    "members": [
+      {
+        "id": "507f1f77bcf86cd79943a001",
+        "language": "en",
+        "status": "deleted",
+        "restoreStatus": "draft",
+        "historyKnown": true
+      }
+    ],
+    "publicCopies": [
+      {
+        "id": "607f1f77bcf86cd79943a001",
+        "sourceNewsId": "507f1f77bcf86cd79943a001"
+      }
+    ]
+  }
+}
+```
+
+The example is a valid one-edition story; arrays enumerate the full resolved
+operation, not a paginated subset. `members` contains News records and their
+individual proposed destinations. `publicCopies` identifies all existing
+copies examined, without exposing their content or history. Invalid stored IDs
+are represented as null in an incomplete assessment, never coerced into claims.
+Language is `en`, `hi`, `gu`, or null for invalid metadata. `status` is a recognized
+current lifecycle status or null. `restoreStatus` is `draft`, `archived`,
+`published`, `scheduled`, or null when the history cannot safely be resolved;
+`historyKnown` describes that destination, not a claim that all historical
+events were retained. No raw history, notes, titles, slugs, creator/account
+details or full deleted documents are returned.
+
+- `eligible` is the current actor's result, not a durable grant.
+- `decision` is `eligible`, `founder_required`, `blocked`, or `incomplete`.
+  `founder_required` describes a fully assessed staff scope restriction;
+  `blocked` describes a known structural/state conflict.
+- `complete: false` always means `eligible: false` and `decision: "incomplete"`.
+  Unknown/malformed history, unresolved/ambiguous identity, invalid metadata and
+  incomplete publication cannot be interpreted as a known safe Draft.
+- `requiresFounder` reports a group restriction that ordinary staff restore
+  authority cannot satisfy. It does not assert that Founder can bypass a
+  structural conflict or incomplete assessment. Founder may have
+  `eligible: true` with this flag and explanatory reason codes.
+- `reasonCodes` is a sorted, deduplicated list of non-sensitive findings.
+  Findings can describe staff restrictions even in an eligible Founder response;
+  they are not a replacement for `eligible`, `complete` and `decision`.
+
+Assessment reason codes:
+
+| Code | Meaning |
+| --- | --- |
+| `RESTORE_PUBLICATION_HISTORY` | Published/Scheduled provenance in a News member or matching copy; Founder required |
+| `RESTORE_HISTORY_UNKNOWN` | A News member's pre-delete destination cannot be resolved |
+| `RESTORE_HISTORY_INVALID` | Malformed pre-delete state or workflow history |
+| `RESTORE_GROUP_IDENTITY_CONFLICT` | Conflicting News/group/copy keys |
+| `RESTORE_SOURCE_UNRESOLVED` | A source link is outside the resolved News membership |
+| `RESTORE_COPY_OWNERSHIP_CONFLICT` | A matching copy does not belong to a resolved News member |
+| `RESTORE_MEMBER_IDENTITY_INVALID` | Invalid/duplicate stored IDs, language, status or identity field shapes |
+| `RESTORE_INVALID_WORKFLOW` | Malformed workflow container |
+| `RESTORE_METADATA_INVALID` | Invalid timestamps, flag types, stages or visibility metadata |
+| `RESTORE_INVALID_SLUG` | Missing/blank/non-string slug or malformed language-slug data |
+| `RESTORE_DUPLICATE_LANGUAGE` | Duplicate News editions for a language |
+| `RESTORE_PUBLICATION_INCOMPLETE` | A Published destination lacks required existing publication data |
+| `RESTORE_NOT_DELETED` | A News member or matching copy is not deleted; a non-deleted News member blocks all actors |
+| `RESTORE_SLUG_CONFLICT` | A slug conflicts with a different News story |
+| `RESTORE_LOCKED` | An edition/copy is locked |
+| `RESTORE_FOUNDER_APPROVAL_REQUIRED` | An edition/copy requires Founder approval |
+| `RESTORE_PRIVATE` | Private/non-public visibility prevents staff restoration |
+| `RESTORE_EMBARGOED` | Active/invalid embargo prevents staff restoration |
+
+Known negative assessments retain HTTP 200 with explicit negative data.
+Request/resolution/storage errors instead return
+`{ ok: false, success: false, status, code, message }` without `data`:
+400 `INVALID_ARTICLE_ID` (requires an ObjectId/24-hex ID),
+403 `ARTICLE_RESTORE_FORBIDDEN`,
+404 `ARTICLE_NOT_FOUND`,
+409 `ARTICLE_RESTORE_SCOPE_CHANGED`,
+503 `RESTORE_ELIGIBILITY_UNAVAILABLE`, or
+500 `RESTORE_ELIGIBILITY_FAILED`.
+Authentication retains its existing 401/403 account/session errors and
+`AUTH_UNAVAILABLE` 503 responses. Failures never become empty eligible groups.
+All assessment responses, including authentication errors, carry
+`Cache-Control: private, no-store`, `Pragma: no-cache`, and
+`Vary: Authorization, Cookie` alongside existing Vary values.
+
+Assessment performs no persistence writes, including denial audits, account
+expiry updates, settings initialization, News/public-copy changes, translation
+work, cache invalidation or index operations. It creates no grants, jobs or
+stored assessment state. Existing connection/startup index policy is unchanged.
+
+The preview is deliberately fail-closed for unknown legacy history even for
+Founder: `restoreStatus: null` requires manual review, not a guessed Draft.
+The existing explicit Founder POST fallback to Draft and its
+`restoreFallbackIds` response remain unchanged. Other valid Founder restore
+capabilities and existing mutation response envelopes are preserved.
+
+Admin must enable staff Restore only for a complete, eligible assessment and
+still handle POST denials/conflicts. POST never consumes the assessment as
+authority: it independently resolves the current group, reloads permissions,
+validates all affected records and reauthorizes inside every transaction attempt,
+including retries. Changes after a GET can therefore invalidate its result.
+
+Archived-to-Draft is a separate Founder-only lifecycle transition through
+`PUT/PATCH /api/articles/:id`; changed `status` remains forbidden to staff even
+with `news_edit` or permanent `news_restore`. This API does not authorize
+unarchiving, publishing, scheduling or permanent deletion.
+
 ### Article content-save authorization and synchronization
 
 [articleSaveAccess.service.js](./services/articleSaveAccess.service.js) protects

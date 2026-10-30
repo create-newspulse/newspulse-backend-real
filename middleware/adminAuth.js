@@ -45,11 +45,15 @@ async function requireAdminAuth(req, res, next) {
   return requireAdminJwt(req, res, next);
 }
 
+async function requireReadOnlyAdminAuth(req, res, next) {
+  return requireAdminJwt(req, res, next, { readOnly: true });
+}
+
 // Strict admin auth for session probes (e.g. GET /admin-api/admin/me).
 // - Signed bearer/cookie token required (no legacy email cookies)
 // - Missing/invalid/expired token => 401 JSON
 // - Persisted accounts enforce lifecycle, token version and current role
-async function requireAdminJwt(req, res, next) {
+async function requireAdminJwt(req, res, next, { readOnly = false } = {}) {
   try {
     const authHeader = String(req.headers['authorization'] || '');
     const cookies = parseCookies(req.headers.cookie || '');
@@ -105,7 +109,7 @@ async function requireAdminJwt(req, res, next) {
         const now = new Date();
         const resolvedStatus = lifecycleStatus(user, now);
         if (resolvedStatus !== ACCOUNT_STATUS.ACTIVE) {
-          if (resolvedStatus === ACCOUNT_STATUS.EXPIRED) await expireAccount(User, user, { now });
+          if (resolvedStatus === ACCOUNT_STATUS.EXPIRED && !readOnly) await expireAccount(User, user, { now });
           return accountLifecycleResponse(res, resolvedStatus);
         }
         const accountStatus = String(user.accountStatus || user.status || 'active').toLowerCase();
@@ -150,6 +154,13 @@ async function requireAdminJwt(req, res, next) {
 
     return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
   } catch (_e) {
+    if (readOnly) {
+      console.error('[admin.auth] Read-only authentication unavailable');
+      return res.status(503).json({
+        ok: false, success: false, status: 503, code: 'AUTH_UNAVAILABLE',
+        message: 'Authentication temporarily unavailable',
+      });
+    }
     return res.status(401).json({ ok: false, success: false, status: 401, code: 'UNAUTHORIZED', message: 'Unauthorized' });
   }
 }
@@ -198,4 +209,4 @@ function requireFounderOrAdmin(req, res, next) {
   });
 }
 
-module.exports = { requireAdminAuth, requireAdminJwt, requireAdminModule, requireFounderOnly, requireFounderAuth, requireFounderOrAdmin };
+module.exports = { requireAdminAuth, requireReadOnlyAdminAuth, requireAdminJwt, requireAdminModule, requireFounderOnly, requireFounderAuth, requireFounderOrAdmin };
