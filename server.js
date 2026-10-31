@@ -45,6 +45,9 @@ const {
 } = require('./lib/environmentSafety');
 
 const mongoose = require('mongoose');
+const backgroundTasks = require('./lib/backgroundTasks');
+const { shutdownTimeout, shutdownAdmission, installGracefulShutdown } = require('./lib/gracefulShutdown');
+const _shutdownTimeoutMs = shutdownTimeout();
 const _preserveProductionIndexes = isProductionLike(process.env);
 if (_preserveProductionIndexes) {
   // Route/service imports initialize models, so apply this before those imports.
@@ -873,6 +876,7 @@ app.use('/public/broadcast', _publicBroadcastCorsOverride);
 app.use('/public-api/broadcast', _publicBroadcastCorsOverride);
 // Ensure OPTIONS preflight works for all routes.
 app.options('*', cors(corsOptions));
+app.use(shutdownAdmission());
 
 // Request logging for Broadcast Center (helps diagnose method/path mismatches like 405).
 app.use((req, res, next) => {
@@ -1297,8 +1301,11 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
   let _mongoConnectInFlight = false;
   let _mongoRetryMs = 2000;
   const _mongoRetryMaxMs = 30000;
+  let _mongoRetryTimer;
+  backgroundTasks.registerStop(() => { clearTimeout(_mongoRetryTimer); });
 
   async function _afterMongoConnected() {
+    if (backgroundTasks.closing) return;
     const dbFromUri = _resolvedMongoDbName();
     const db = dbFromUri || mongoose.connection.name || undefined;
     console.log('[startup] MongoDB connected', { db });
@@ -1307,7 +1314,9 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
     } catch (e) {
       console.warn('[startup][founder-seed] failed', { message: e?.message || String(e) });
     }
+    if (backgroundTasks.closing) return;
     await _runLocalFounderStartupCheck({ db });
+    if (backgroundTasks.closing) return;
     if (!_preserveProductionIndexes) {
       // Ensure TTL index for Broadcast Center is present.
       try {
@@ -1347,6 +1356,7 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
     } catch (e) {
       console.warn('[startup] News Pulse TTL index audit failed', e?.message || e);
     }
+    if (backgroundTasks.closing) return;
 
 		// Cleanup old Broadcast Center items (older than 24h)
 		try {
@@ -1393,7 +1403,7 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
   }
 
   async function _connectMongoOnce() {
-    if (_mongoConnectInFlight) return;
+    if (_mongoConnectInFlight || backgroundTasks.closing) return;
     _mongoConnectInFlight = true;
     try {
       await mongoose.connect(MONGO_URI, MONGO_DB_NAME ? { dbName: MONGO_DB_NAME } : undefined);
@@ -1405,6 +1415,7 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
         message: err?.message || String(err),
         name: err?.name,
       });
+      if (backgroundTasks.closing) return;
       if (_exitOnDbConnectFail) {
         console.error('[startup] EXIT_ON_DB_CONNECT_FAIL=1 set; exiting due to MongoDB connection failure');
         process.exit(1);
@@ -1413,9 +1424,9 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
       const delay = Math.min(_mongoRetryMaxMs, _mongoRetryMs);
       _mongoRetryMs = Math.min(_mongoRetryMaxMs, Math.floor(_mongoRetryMs * 1.5));
       console.warn('[startup] Will retry MongoDB connection', { inMs: delay });
-      setTimeout(() => {
+      _mongoRetryTimer = setTimeout(() => {
         _mongoConnectInFlight = false;
-        _connectMongoOnce();
+        startMongoAttempt();
       }, delay);
       return;
     } finally {
@@ -1426,24 +1437,37 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
     }
   }
 
+  function startMongoAttempt() {
+    if (backgroundTasks.closing) return;
+    backgroundTasks.track('mongo.startup', _connectMongoOnce()).catch(error => {
+      console.error('[startup] MongoDB startup failed', { code: error.code || 'MONGO_STARTUP_FAILED' });
+    });
+  }
+
   // When Mongo drops after having been connected, try to reconnect.
   mongoose.connection.on('disconnected', () => {
+    if (backgroundTasks.closing) return;
     _mongoConnectInFlight = false;
-    try { _connectMongoOnce(); } catch (_) {}
+    startMongoAttempt();
   });
 
-  _connectMongoOnce();
+  startMongoAttempt();
 }
 
 // Auto-publish scheduled articles and refresh expired visibility gates every minute.
 let _publishTickInFlight = false;
 async function _publishScheduledTick() {
-  if (_publishTickInFlight) return;
+  if (_publishTickInFlight || backgroundTasks.closing) return;
   _publishTickInFlight = true;
+  return backgroundTasks.track('scheduled-publication', _runPublishScheduledTick());
+}
+
+async function _runPublishScheduledTick() {
   try {
     const { publishDueScheduledArticles, refreshDuePublicArticleVisibility } = require('./services/scheduledPublication.service');
-    await publishDueScheduledArticles({ logger: console });
-    await refreshDuePublicArticleVisibility({ logger: console });
+    const options = { logger: console, signal: backgroundTasks.signal, isStopping: () => backgroundTasks.closing };
+    await publishDueScheduledArticles(options);
+    if (!backgroundTasks.closing) await refreshDuePublicArticleVisibility(options);
   } catch (e) {
     console.warn('[scheduler] tick failed', { name: e?.name || 'Error', code: e?.code || null });
   } finally {
@@ -1452,7 +1476,8 @@ async function _publishScheduledTick() {
 }
 
 if (!_isImported && String(process.env.NODE_ENV || '').toLowerCase() !== 'test') {
-  setInterval(_publishScheduledTick, 60_000);
+  const publishTimer = setInterval(_publishScheduledTick, 60_000);
+  backgroundTasks.registerStop(() => { clearInterval(publishTimer); });
 }
 
 // Home
@@ -3563,6 +3588,16 @@ if (require.main === module) {
       console.error(`[startup] Port ${PORT} is already in use. Stop the other process or set PORT to a free port.`);
     }
     process.exit(1);
+  });
+  backgroundTasks.registerStop(require('./services/broadcastSse.service').closeBroadcastClients);
+  installGracefulShutdown({
+    server,
+    timeoutMs: _shutdownTimeoutMs,
+    closeDatabase: () => mongoose.disconnect(),
+    closeRedis: async () => {
+      const client = require('./lib/redis').getRedisClient();
+      if (client) await client.quit();
+    },
   });
 }
 

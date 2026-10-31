@@ -1,3 +1,4 @@
+require('./helpers/publicNewsIsolation');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
@@ -15,10 +16,11 @@ const alertService = require('../services/newsPulseEngineAlertService');
 const monitoring = require('../services/newsPulseEngineMonitoringService');
 
 const STAFF_EMAIL = 'staff@newspulse.ai';
+const STAFF_ID = '507f1f77bcf86cd799439011';
 
 function signAdminToken(role) {
   return jwt.sign(
-    { sub: 'staff-id', email: STAFF_EMAIL, role },
+    { sub: STAFF_ID, email: STAFF_EMAIL, role, type: 'access', tokenVersion: 0 },
     process.env.JWT_SECRET || 'dev-secret-change-me',
   );
 }
@@ -30,10 +32,12 @@ function stubDbReady(t, ready = true) {
 }
 
 function stubAdminUser(t, role) {
-  const prevFindOne = User.findOne;
-  t.after(() => { User.findOne = prevFindOne; });
-  User.findOne = () => ({
-    lean: async () => ({ email: STAFF_EMAIL, role, isFounder: role === 'founder', status: 'active' }),
+  const prevFindById = User.findById;
+  t.after(() => { User.findById = prevFindById; });
+  User.findById = (id) => ({
+    lean: async () => id === STAFF_ID
+      ? { _id: STAFF_ID, email: STAFF_EMAIL, role, isFounder: role === 'founder', status: 'active', tokenVersion: 0 }
+      : null,
   });
 }
 

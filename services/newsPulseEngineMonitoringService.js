@@ -5,6 +5,7 @@ const SystemSetting = require('../models/SystemSetting');
 const { getNewsPulseEngineHealth } = require('./newsPulseEngineHealthService');
 const { listAlerts, safelyCreateFounderIncidentAlert } = require('./newsPulseEngineAlertService');
 const { isProductionLike, isTestLike } = require('../lib/environmentSafety');
+const backgroundTasks = require('../lib/backgroundTasks');
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 const RESOLVED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -13,6 +14,8 @@ const SYSTEM_ACTOR = { id: null, email: null, role: 'system' };
 
 let monitoringTimer = null;
 let monitoringInFlight = false;
+let monitoringRun = null;
+let unregisterStop;
 let configuredIntervalMs = DEFAULT_INTERVAL_MS;
 const runtimeStatus = {
   enabled: false,
@@ -126,6 +129,7 @@ async function updateLatestState(snapshot, now) {
 }
 
 async function maybeCreateAlert(type, incident, options = {}) {
+  options.signal?.throwIfAborted();
   return safelyCreateFounderIncidentAlert(type, incident, options);
 }
 
@@ -133,6 +137,7 @@ async function processCheck(check, now, options = {}) {
   if (!check || !check.id) return { action: 'skipped' };
 
   const open = await findOpenIncident(check.id);
+  options.signal?.throwIfAborted();
   if (isIncidentEligible(check)) {
     const patch = incidentPatchFromCheck(check, now);
     if (open) {
@@ -202,6 +207,7 @@ async function recordHealthSnapshot(snapshot, options = {}) {
   const checks = Array.isArray(snapshot && snapshot.checks) ? snapshot.checks : [];
   const processed = [];
   for (const check of checks) {
+    options.signal?.throwIfAborted();
     try {
       processed.push(await processCheck(check, now, options));
     } catch (error) {
@@ -209,23 +215,34 @@ async function recordHealthSnapshot(snapshot, options = {}) {
     }
   }
 
+  options.signal?.throwIfAborted();
   const latestState = await updateLatestState(snapshot, now);
   return { ok: true, processed, latestState };
 }
 
-async function runMonitoringOnce(options = {}) {
+function runMonitoringOnce(options = {}) {
   if (monitoringInFlight) {
-    return { ok: false, skipped: true, reason: 'already_running' };
+    return Promise.resolve({ ok: false, skipped: true, reason: 'already_running' });
+  }
+  if (backgroundTasks.closing) {
+    return Promise.resolve({ ok: false, skipped: true, reason: 'shutdown' });
   }
 
   monitoringInFlight = true;
+  monitoringRun = backgroundTasks.track('engine.monitoring', performMonitoring(options));
+  monitoringRun.then(() => { monitoringRun = null; }, () => { monitoringRun = null; });
+  return monitoringRun;
+}
+
+async function performMonitoring(options) {
   const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
   const healthService = options.healthService || getNewsPulseEngineHealth;
   const logger = options.logger || console;
 
   try {
     const snapshot = await healthService();
-    const recordResult = await recordHealthSnapshot(snapshot, { now });
+    backgroundTasks.signal.throwIfAborted();
+    const recordResult = await recordHealthSnapshot(snapshot, { now, signal: backgroundTasks.signal });
     runtimeStatus.lastRunAt = now.toISOString();
     runtimeStatus.lastRunStatus = recordResult.ok ? 'ok' : (recordResult.reason || 'skipped');
     return { ok: true, snapshot, recordResult };
@@ -254,9 +271,9 @@ function startNewsPulseEngineMonitoring(options = {}) {
   configuredIntervalMs = intervalMs;
   runtimeStatus.enabled = enabled;
 
-  if (!enabled) {
+  if (!enabled || backgroundTasks.closing) {
     runtimeStatus.running = false;
-    return { started: false, reason: 'disabled' };
+    return { started: false, reason: backgroundTasks.closing ? 'shutdown' : 'disabled' };
   }
 
   if (monitoringTimer) {
@@ -265,6 +282,7 @@ function startNewsPulseEngineMonitoring(options = {}) {
   }
 
   const runOptions = { healthService: options.healthService, logger: options.logger || console };
+  unregisterStop = backgroundTasks.registerStop(stopNewsPulseEngineMonitoring);
   monitoringTimer = setInterval(() => {
     runMonitoringOnce(runOptions).catch(() => null);
   }, intervalMs);
@@ -282,6 +300,8 @@ function stopNewsPulseEngineMonitoring() {
   if (monitoringTimer) clearInterval(monitoringTimer);
   monitoringTimer = null;
   runtimeStatus.running = false;
+  unregisterStop?.();
+  return monitoringRun || Promise.resolve();
 }
 
 function getMonitoringStatus(env = process.env) {

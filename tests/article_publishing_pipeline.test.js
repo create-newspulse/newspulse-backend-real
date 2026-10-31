@@ -40,6 +40,7 @@ function makeDoc(overrides = {}) {
     slugs: { en: 'english-title' },
     category: 'national',
     status: 'draft',
+    scheduledAt: overrides.status === 'scheduled' ? new Date('2020-01-01T00:00:00.000Z') : null,
     language: 'en',
     lang: 'en',
     originalLang: 'en',

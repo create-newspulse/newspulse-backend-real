@@ -1037,12 +1037,97 @@ indexes must already exist; startup neither installs missing indexes nor
 reconciles drift. Index maintenance remains a separate, explicitly authorized
 operation, not a deployment side effect. Rollback builds must retain this policy.
 
+## Worker ownership and shutdown
+
+[publishAsyncTranslation.service.js](./services/publishAsyncTranslation.service.js)
+continues to consume only `news-publish-translate` jobs. It uses the existing
+[TranslationJob](./models/TranslationJob.js) fields and existing unique
+`{ type, newsId }` index, not a new collection, schema, index or migration.
+Every claim gets a distinct `lockedBy` token and incremented `attempts`.
+[translationJobLease.service.js](./services/translationJobLease.service.js)
+checks the job identity, source, type, running state, token, attempt and
+unexpired `lockedAt` before renewing or acknowledging work.
+
+The existing stale-claim period remains 20 minutes. Active work renews its
+lease every one-third of that period, as well as at fenced writes.
+Polling is single-flight within each process, including outstanding claims;
+the existing per-process concurrency and polling configuration remain in use.
+This is not a cluster-wide concurrency cap. Re-enqueueing revokes a previous
+claim; an old execution must discard its result rather than finish or requeue
+the newer owner's job.
+
+Pending, ready, failure, timeout and cache-repair translation writes take the
+job write dependency in the same transaction as the News/group/public-copy
+writes. Ownership and source checks repeat on transaction retries. Provider
+requests run outside these write transactions: an already-sent request cannot
+be undone, but its late result cannot write through a lost claim. Queue
+completion/retry acknowledgements are conditional on the same ownership.
+Unknown ownership, failed reads and unacknowledged writes are not successful
+completion.
+
+[scheduledPublication.service.js](./services/scheduledPublication.service.js)
+rechecks current scheduled/due state before taking the group write dependency
+and invoking the canonical publisher, within one transaction. A competing
+scheduler or a reschedule/archive/delete causes re-evaluation rather than
+publication based on an old candidate. Expired public-visibility refreshes use
+the same transactional recheck pattern. Existing SYSTEM execution and
+Founder-only request scheduling permissions are unchanged.
+
+[backgroundTasks.js](./lib/backgroundTasks.js) tracks automatic work and known
+detached follow-ups. Root startup registers stop/drain handling for translation
+polling, scheduled publication, broadcast cleanup, monitoring and prewarming;
+MongoDB startup/reconnect cannot restart them after shutdown begins. Cleanup
+registers only one timer per process. Its existing delete predicate is
+idempotent. Monitoring retains its existing durable incident/alert dedupe and
+claim rules, not a new global monitoring leader. In-flight cache rebuilds,
+SEO audits, public-version bumps and broadcast follow-ups/snapshots are tracked
+through draining. SSE streams and their heartbeats are closed.
+
+[gracefulShutdown.js](./lib/gracefulShutdown.js), installed by the root server,
+handles `SIGTERM` and `SIGINT` once. It stops accepting connections/new
+autonomous work and waits for accepted requests and tracked work before
+closing MongoDB and Redis. Normal API behavior is unchanged; business requests
+reaching the shutdown admission guard receive HTTP 503 with
+`{ ok:false, success:false, status:503, code:"SERVER_SHUTTING_DOWN", message }`,
+`Cache-Control: no-store`, `Connection: close` and `Retry-After: 1`.
+Legacy liveness responses are not evidence that the process has drained.
+
+`SHUTDOWN_TIMEOUT_MS` is optional and defaults to **25000**; a non-positive,
+non-integer or out-of-range Node timer value fails startup. The deadline must be shorter
+than the host's actual termination grace, which requires operational
+verification. On timeout, the server aborts cooperative work, closes remaining
+HTTP sockets, reports an incomplete shutdown and exits nonzero. It does not
+release unfinished translation leases early or label their jobs complete.
+Replacement workers can reclaim abandoned jobs through the existing stale
+lease rule. An abort observed before transaction commit rolls back that
+attempt; termination cannot undo an already committed transaction.
+
+These protections require cooperating versions. The first deployment from an
+older build that ignores fencing/shutdown still requires a separately approved,
+verified non-overlapping cutover: quiesce producers, account for in-flight and
+scheduled work, stop every old writer, then activate the new build. Starting a
+candidate against the production database already activates workers, even
+before HTTP promotion. A manual deploy alone does not establish non-overlap.
+Rollback artifacts participating in overlap must retain both this protocol and
+the index/authentication/public-visibility protections.
+
+Required existing indexes and transaction support must already be present;
+startup does not provision them. There is no exactly-once guarantee for
+external provider/email delivery or a durable outbox for post-commit
+cache/revalidation effects. Forced termination can interrupt those effects;
+reload committed state before retrying a mutation. Request-driven
+`article-translation-generate` records and read-time translation state are not
+jobs in the publish queue and do not acquire its 20-minute recovery contract.
+MongoDB TTL expiration remains independent of application shutdown.
+
 ## Validation entry points
 
 [package.json](./package.json) defines `npm test` as Node's test runner and
 `npm run build` as a syntax check of the root server, not a bundled build.
 Representative regression suites include:
 
+- [worker_deployment_safety.test.js](./tests/worker_deployment_safety.test.js)
+- [worker_shutdown.test.js](./tests/worker_shutdown.test.js)
 - [article_publishing_pipeline.test.js](./tests/article_publishing_pipeline.test.js)
 - [staff_news_publish_authorization.test.js](./tests/staff_news_publish_authorization.test.js)
 - [special_rights_precedence.test.js](./tests/special_rights_precedence.test.js)

@@ -4,6 +4,7 @@ const googleTranslate = require('./googleTranslate.service');
 const mongoose = require('mongoose');
 const BroadcastItem = require('../models/BroadcastItem');
 const { isGoogleTranslateConfigured } = require('./translationEnabled');
+const backgroundTasks = require('../lib/backgroundTasks');
 
 const SUPPORTED_LANGS = new Set(['en', 'hi', 'gu']);
 
@@ -423,7 +424,11 @@ function addClient({ res, lang }) {
   return client;
 }
 
-async function emitBroadcastUpdated({ reason } = {}) {
+function emitBroadcastUpdated(options = {}) {
+  return backgroundTasks.track('broadcast.update', deliverBroadcastUpdate(options));
+}
+
+async function deliverBroadcastUpdate({ reason } = {}) {
   const version = await bumpBroadcastVersion({ reason: reason || 'broadcast_change' });
 
   // Compute snapshots per lang once.
@@ -451,10 +456,19 @@ async function emitBroadcastUpdated({ reason } = {}) {
   return version;
 }
 
+function closeBroadcastClients() {
+  for (const client of clients.values()) {
+    clearInterval(client.pingInterval);
+    client.res.end();
+  }
+  clients.clear();
+}
+
 module.exports = {
   normalizeLang,
   buildBroadcastSnapshot,
   addClient,
   emitBroadcastUpdated,
+  closeBroadcastClients,
   setNoCacheHeaders,
 };

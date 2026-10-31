@@ -69,7 +69,7 @@ test('translateAndSave handles translation failures without throwing docUpdated 
   const updatedDocs = [];
 
   News.findById = () => makeLean(baseDoc);
-  News.updateOne = async () => ({ acknowledged: true });
+  News.updateOne = async () => ({ acknowledged: true, matchedCount: 1 });
   News.findByIdAndUpdate = async (_id, update) => {
     updatedDocs.push(update);
     return { ...baseDoc, ...(update && update.$set ? update.$set : {}) };
@@ -110,7 +110,7 @@ test('translateAndSave marks all non-base languages ready when translations succ
   const updatedDocs = [];
 
   News.findById = () => makeLean(baseDoc);
-  News.updateOne = async () => ({ acknowledged: true });
+  News.updateOne = async () => ({ acknowledged: true, matchedCount: 1 });
   News.findByIdAndUpdate = async (_id, update) => {
     updatedDocs.push(update);
     return { ...baseDoc, ...(update && update.$set ? update.$set : {}) };

@@ -607,13 +607,24 @@ test('async translation follow-up rolls back source readiness when group synchro
   });
   const google = require('../services/googleTranslate.service');
   const { translateAndSave } = require('../services/publishAsyncTranslation.service');
-  context.mock.method(google, 'translateMany', async values => ({ ok: true, items: values.map(value => `Translated ${value}`) }));
+  let pendingRows;
+  context.mock.method(google, 'translateMany', async values => {
+    pendingRows = structuredClone(state.rows);
+    return { ok: true, items: values.map(value => `Translated ${value}`) };
+  });
   state.failures['Article.findOneAndUpdate'] = {};
   await assert.rejects(translateAndSave(ids[0]), /Public article synchronization failed/);
+  assert.deepEqual(state.rows, pendingRows);
   assert.equal(state.rows.News[0].translationStatus.hi, 'pending');
   assert.equal(state.rows.News[0].translations.hi, undefined);
   assert.ok(state.rows.Article.every(doc => Object.keys(doc.translations).length === 0));
-  assert.ok(state.transactions.every(session => session.aborted));
+  // Pending preparation commits before provider work; readiness and retry writes must roll back.
+  const [pending, ...synchronizations] = state.transactions;
+  assert.equal(pending.committed, true);
+  assert.ok(!pending.aborted);
+  assert.equal(synchronizations.length, 2);
+  assert.ok(synchronizations.every(session => session.aborted && !session.committed));
+  assert.ok(state.transactions.every(session => session.ended));
   assert.equal(state.invalidations.length, 0);
 });
 

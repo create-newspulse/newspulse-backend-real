@@ -179,14 +179,16 @@ async function inArticleTransaction(work, options = {}) {
     return work(options.session, options);
   }
   const session = await mongoose.startSession();
-  const transaction = { session, afterCommit: [] };
+  const transaction = { session, afterCommit: [], signal: options.signal };
   let result;
   try {
     await session.withTransaction(async () => {
+      options.signal?.throwIfAborted();
       transaction.afterCommit.length = 0;
       delete transaction.saveIntentValidated;
       delete transaction.saveScope;
       result = await work(session, transaction);
+      options.signal?.throwIfAborted();
     }, options.readOnly ? { readConcern: { level: 'snapshot' } } : undefined);
   } finally {
     try {

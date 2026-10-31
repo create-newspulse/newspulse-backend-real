@@ -337,7 +337,7 @@ router.get('/config', async (_req, res) => {
 
 // GET /api/public/broadcast/stream?lang=en
 // Also mounted at /public/broadcast/stream?lang=en via server mount.
-router.get('/stream', async (req, res) => {
+router.get('/stream', require('../lib/gracefulShutdown').shutdownAdmission(), async (req, res) => {
   const lang = Object.prototype.hasOwnProperty.call(req.query || {}, 'lang')
     ? _normalizeLang(req.query && req.query.lang, 'gu')
     : 'gu';
@@ -348,11 +348,13 @@ router.get('/stream', async (req, res) => {
 
   // Send initial state immediately.
   try {
-    const snapshot = await buildBroadcastSnapshot({ lang });
+    const snapshot = await require('../lib/backgroundTasks').track('broadcast.snapshot', buildBroadcastSnapshot({ lang }));
+    if (res.writableEnded || res.destroyed) return;
     res.write('event: broadcast_updated\n');
     res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
   } catch (_) {
     // Keep stream open even if initial load fails.
+    if (res.writableEnded || res.destroyed) return;
     try {
       res.write('event: broadcast_updated\n');
       res.write(`data: ${JSON.stringify({ version: 0, breaking: { enabled: false, mode: 'auto', durationSeconds: 12, items: [] }, live: { enabled: false, mode: 'auto', durationSeconds: 12, items: [] } })}\n\n`);

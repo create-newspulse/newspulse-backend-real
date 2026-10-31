@@ -1062,7 +1062,7 @@ async function startSeoAudit(req, options = {}) {
     performance: emptyPerformance(),
   });
   await logAudit(req, 'SEO_AUDIT_STARTED', String(audit._id || audit.id), { module: 'seo', targetType: 'seo_audit', targetId: String(audit._id || audit.id), newValue: { siteUrl, mode } });
-  const runner = runSeoAudit(audit._id || audit.id, req);
+  const runner = require('../lib/backgroundTasks').track('seo.audit', runSeoAudit(audit._id || audit.id, req));
   if (options.runInline) return hydrateAuditDto(await runner);
   runner.catch((error) => { if (String(process.env.NODE_ENV || '').toLowerCase() !== 'test') console.warn('[seo-audit] background audit failed', error?.message || error); });
   return hydrateAuditDto(audit);

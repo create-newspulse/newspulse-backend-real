@@ -332,7 +332,7 @@ test('due Pulse scheduled article publishes through canonical pipeline and syncs
   assert.equal(pushHistory[0].meta.source, 'scheduler');
 });
 
-test('non-Pulse due scheduling delegates to the canonical publisher without single-edition writes', async () => {
+test('non-Pulse due scheduling delegates to the canonical publisher without single-edition writes', async (t) => {
   const doc = makeRouteDoc({
     _id: '507f1f77bcf86cd79943a115',
     category: 'national',
@@ -342,6 +342,7 @@ test('non-Pulse due scheduling delegates to the canonical publisher without sing
     workflowStage: 'SCHEDULED',
     pulseDialogue: undefined,
   });
+  installPublishMocks(t, [doc]);
   const NewsStub = { find: () => ({ limit: async () => [doc] }) };
   let canonicalCalls = 0;
 

@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 
 const PublicConfigVersion = require('../models/PublicConfigVersion');
+const backgroundTasks = require('../lib/backgroundTasks');
 
 function isDbReady() {
   return mongoose.connection && mongoose.connection.readyState === 1;
@@ -29,7 +30,11 @@ async function getPublicConfigVersion() {
   return state.version;
 }
 
-async function bumpPublicConfigVersion() {
+function bumpPublicConfigVersion() {
+  return backgroundTasks.track('public-config.version', incrementPublicConfigVersion());
+}
+
+async function incrementPublicConfigVersion() {
   if (!isDbReady()) return { version: 0, updatedAt: null };
 
   const current = await PublicConfigVersion.findOne({ key: 'public' }).lean();

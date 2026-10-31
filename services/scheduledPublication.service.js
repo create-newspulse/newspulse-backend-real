@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
+const News = require('../models/News');
 const { publishCanonicalArticle } = require('./articlePublishing.service');
-const { withActiveArticleSource } = require('./articleLifecycle.service');
+const { withActiveArticleSource, inArticleTransaction } = require('./articleLifecycle.service');
 const { syncTranslationGroupMetadata } = require('./translationGroupSync.service');
 const { invalidateArticleContent } = require('./publicContentInvalidation.service');
 
@@ -9,7 +10,6 @@ async function refreshDuePublicArticleVisibility(options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const stats = { processed: 0, refreshed: 0, failed: 0, skipped: 0 };
   if (mongoose.connection.readyState !== 1) return { ...stats, unavailable: true };
-  const News = require('../models/News');
   const candidates = await News.find({
     status: 'published',
     $or: [
@@ -24,19 +24,22 @@ async function refreshDuePublicArticleVisibility(options = {}) {
     .select('_id translationGroupId translationKey sourceArticleId').lean();
   const seen = new Set();
   for (const candidate of candidates) {
+    if (options.signal?.aborted || options.isStopping?.()) break;
     stats.processed += 1;
     const key = String(candidate.translationGroupId || candidate.translationKey || candidate.sourceArticleId || candidate._id);
     if (seen.has(key)) { stats.skipped += 1; continue; }
     seen.add(key);
     try {
-      const result = await withActiveArticleSource(candidate._id, async (current, session) => {
-        if (current.status !== 'published') return null;
+      const result = await inArticleTransaction(async (session, transaction) => {
+        const current = await News.findById(candidate._id, null, { session }).lean();
+        if (!current || current.status !== 'published' || current.deletedAt) return null;
         if (Object.hasOwn(current, 'publicVisibilityRefreshAt')) {
           if (!current.publicVisibilityRefreshAt || new Date(current.publicVisibilityRefreshAt) > now) return null;
         } else if (![current.embargoUntil, current.workflow?.embargoUntil, current.publishAt, current.scheduledAt]
           .some(value => value != null && new Date(value) <= now)) return null;
-        return syncTranslationGroupMetadata(current, { session, now, invalidate: false });
-      });
+        return withActiveArticleSource(current._id, source =>
+          syncTranslationGroupMetadata(source, { ...transaction, now, invalidate: false }), transaction);
+      }, { signal: options.signal });
       if (!result) { stats.skipped += 1; continue; }
       await invalidateArticleContent(result.docs, {
         previousDocs: result.previousDocs, reason: 'article_visibility_refresh',
@@ -62,10 +65,10 @@ async function publishDueScheduledArticles(options = {}) {
     return { processed: 0, published: 0, failed: 0, skipped: 0 };
   }
 
-  const News = options.News || require('../models/News');
+  const candidatesModel = options.News || News;
   const publishArticle = options.publishCanonicalArticle || publishCanonicalArticle;
 
-  const candidatesQuery = News.find({
+  const candidatesQuery = candidatesModel.find({
     status: 'scheduled',
     scheduledAt: { $lte: now },
     $and: [
@@ -80,6 +83,7 @@ async function publishDueScheduledArticles(options = {}) {
   const publishedGroups = new Set();
 
   for (const doc of candidates || []) {
+    if (options.signal?.aborted || options.isStopping?.()) break;
     stats.processed += 1;
     try {
       const groupKey = String(doc.translationGroupId || doc.translationKey || doc.sourceArticleId || doc._id || '').trim();
@@ -87,10 +91,25 @@ async function publishDueScheduledArticles(options = {}) {
         stats.skipped += 1;
         continue;
       }
-      await publishArticle(doc, {
-        actor: { byUserId: null, byRole: 'SYSTEM' },
-        reason: 'Auto-published by scheduler', source: 'scheduler', now, logger,
-      });
+      const published = await inArticleTransaction(async (session, transaction) => {
+        const current = await News.findById(doc._id, null, { session }).lean();
+        const scheduledAt = current?.scheduledAt ? new Date(current.scheduledAt) : null;
+        if (!current || current.status !== 'scheduled' || current.deletedAt
+          || !scheduledAt || !Number.isFinite(scheduledAt.getTime()) || scheduledAt > now
+          || current.locked === true || (current.embargoUntil && new Date(current.embargoUntil) > now)) return false;
+        return withActiveArticleSource(current._id, async source => {
+          await publishArticle(source, {
+            ...transaction,
+            actor: { byUserId: null, byRole: 'SYSTEM' },
+            reason: 'Auto-published by scheduler', source: 'scheduler', now, logger,
+          });
+          return true;
+        }, transaction);
+      }, { signal: options.signal });
+      if (!published) {
+        stats.skipped += 1;
+        continue;
+      }
       publishedGroups.add(groupKey);
       stats.published += 1;
     } catch (e) {

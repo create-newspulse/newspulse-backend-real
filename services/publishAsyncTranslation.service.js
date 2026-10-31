@@ -3,12 +3,15 @@ const { slugifyUnicode } = require('../lib/slug');
 const googleTranslate = require('./googleTranslate.service');
 const { syncPublicArticleFromNews } = require('./syncPublicArticleFromNews.service');
 const { syncTranslationGroupFromMaster } = require('./translationGroupSync.service');
-const { withActiveArticleSource, afterArticleCommit } = require('./articleLifecycle.service');
+const { withActiveArticleSource, afterArticleCommit, inArticleTransaction } = require('./articleLifecycle.service');
 const { invalidateArticleContent } = require('./publicContentInvalidation.service');
 const { isGoogleTranslateConfigured } = require('./translationEnabled');
 const TranslationJob = require('../models/TranslationJob');
 const os = require('os');
 const mongoose = require('mongoose');
+const { randomUUID } = require('crypto');
+const backgroundTasks = require('../lib/backgroundTasks');
+const { createTranslationJobLease, TRANSLATION_LEASE_MS } = require('./translationJobLease.service');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 const TRANSLATION_PROVIDER_VALUES = new Set(['google', 'openai', 'manual']);
@@ -111,14 +114,30 @@ function _retryDelayMinutesForErrorMessage(msg) {
   return _isRateLimitErrorMessage(m) ? 15 : 5;
 }
 
-async function persistTranslationUpdate(id, update, expectedSource, logger, reason) {
-  return withActiveArticleSource(id, async (current, session, transaction) => {
-    if (['title', 'description', 'content'].some(field =>
-      String(current[field] || '') !== String(expectedSource[field] || ''))) {
-      throw Object.assign(new Error('The source story changed. Translation was cancelled.'), {
-        statusCode: 409, code: 'TRANSLATION_SOURCE_CHANGED',
-      });
-    }
+function assertSameTranslationSource(current, expectedSource) {
+  const language = doc => normalizeLang(doc.originalLang) || normalizeLang(doc.lang) || normalizeLang(doc.language) || 'en';
+  if (!current || ['title', 'description', 'content'].some(field =>
+    String(current[field] || '') !== String(expectedSource[field] || ''))
+    || language(current) !== language(expectedSource)) {
+    throw Object.assign(new Error('The source story changed. Translation was cancelled.'), {
+      statusCode: 409, code: 'TRANSLATION_SOURCE_CHANGED',
+    });
+  }
+}
+
+async function withTranslationWrite(id, expectedSource, options, work) {
+  return inArticleTransaction(async (session, transaction) => {
+    // The job write dependency and all edition/copy writes commit together.
+    if (options.jobLease) await options.jobLease.fence(session);
+    return withActiveArticleSource(id, current => {
+      assertSameTranslationSource(current, expectedSource);
+      return work(current, session, transaction);
+    }, transaction);
+  }, { signal: options.jobLease?.signal });
+}
+
+async function persistTranslationUpdate(id, update, expectedSource, logger, reason, options = {}) {
+  return withTranslationWrite(id, expectedSource, options, async (_current, session, transaction) => {
     const updated = await News.findByIdAndUpdate(id, update, { new: true, runValidators: false, session });
     if (!updated) throw Object.assign(new Error('The source story changed.'), { statusCode: 409, code: 'TRANSLATION_SOURCE_CHANGED' });
     if (updated.translationGroupId || updated.translationKey) {
@@ -452,6 +471,7 @@ function ensureNewsSlugsFromTranslations(doc) {
 
 async function translateAndSave(newsId, options = {}) {
   const logger = options.logger || console;
+  options.jobLease?.assertActive();
 
   if (!isGoogleTranslateConfigured()) {
     return { ok: true, skipped: true };
@@ -485,7 +505,7 @@ async function translateAndSave(newsId, options = {}) {
     }
 
     try {
-      await persistTranslationUpdate(id, { $set: setFail }, doc0, logger, 'publish_async_translation_config_error');
+      await persistTranslationUpdate(id, { $set: setFail }, doc0, logger, 'publish_async_translation_config_error', options);
     } catch (error) {
       logger.warn?.('[i18n][publish] failure state was not persisted', { id, code: error.code || 'TRANSLATION_PERSISTENCE_FAILED' });
       throw error;
@@ -504,6 +524,7 @@ async function translateAndSave(newsId, options = {}) {
   // Persistence failures reach the existing queue retry handler.
   for (const dst of SUPPORTED_LANGS) {
     if (dst === baseLang) continue;
+    options.jobLease?.assertActive();
 
     const now = new Date();
 
@@ -527,11 +548,12 @@ async function translateAndSave(newsId, options = {}) {
           `translationUpdatedAt.${dst}`,
         ].join(' '))
         .lean();
-    } catch (_) {
-      current = null;
+    } catch (error) {
+      logger.warn?.('[i18n][publish] source reload failed', { id, code: error.code || 'TRANSLATION_SOURCE_UNAVAILABLE' });
+      throw error;
     }
 
-    if (!current) continue;
+    assertSameTranslationSource(current, doc0);
 
     const status = current?.translationStatus?.[dst] || null;
     const retryAt = current?.translationNextRetryAt?.[dst] ? new Date(current.translationNextRetryAt[dst]) : null;
@@ -555,7 +577,7 @@ async function translateAndSave(newsId, options = {}) {
                 [`translationUpdatedAt.${dst}`]: now,
               },
             },
-            current, logger, 'publish_async_translation_stuck_pending'
+            current, logger, 'publish_async_translation_stuck_pending', options
           );
         } catch (error) {
           logger.warn?.('[i18n][publish] timeout state was not persisted', { id, code: error.code || 'TRANSLATION_PERSISTENCE_FAILED' });
@@ -597,7 +619,7 @@ async function translateAndSave(newsId, options = {}) {
                 [`translationUpdatedAt.${dst}`]: now,
               },
             },
-            current, logger, 'publish_async_translation_cache_repair'
+            current, logger, 'publish_async_translation_cache_repair', options
           );
         } catch (error) {
           logger.warn?.('[i18n][publish] cache repair was not persisted', { id, code: error.code || 'TRANSLATION_PERSISTENCE_FAILED' });
@@ -610,18 +632,19 @@ async function translateAndSave(newsId, options = {}) {
     // Cooldown: do not retry until nextRetryAt.
     if (status === 'failed' && retryAt && now < retryAt) continue;
 
-    // Ensure status is pending while we translate (queue job lock prevents stampede).
-    try {
-      const setPending = {
-        [`translationStatus.${dst}`]: 'pending',
-        [`translationError.${dst}`]: null,
-        [`translationNextRetryAt.${dst}`]: null,
-        [`translationUpdatedAt.${dst}`]: now,
-      };
-      // Keep originalLang pinned.
-      if (!normalizeLang(current?.originalLang)) setPending.originalLang = baseLang;
-      await News.updateOne({ _id: id }, { $set: setPending }).catch(() => null);
-    } catch (_) {}
+    const setPending = {
+      [`translationStatus.${dst}`]: 'pending',
+      [`translationError.${dst}`]: null,
+      [`translationNextRetryAt.${dst}`]: null,
+      [`translationUpdatedAt.${dst}`]: now,
+    };
+    if (!normalizeLang(current.originalLang)) setPending.originalLang = baseLang;
+    await withTranslationWrite(id, current, options, async (_source, session) => {
+      const result = await News.updateOne({ _id: id }, { $set: setPending }, { session });
+      if (!result?.acknowledged || result.matchedCount !== 1) {
+        throw Object.assign(new Error('Translation pending state was not saved.'), { code: 'TRANSLATION_PERSISTENCE_FAILED' });
+      }
+    });
 
     try {
       // Prepare batch: title + summary + chunked content.
@@ -630,7 +653,9 @@ async function translateAndSave(newsId, options = {}) {
       const { chunks, joiner } = chunkContentSafely(current.content, 4200);
 
       const q = [title, summary, ...chunks];
+      options.jobLease?.assertActive();
       const tr = await googleTranslate.translateMany(q, dst, { sourceLang: baseLang, apiKey, format: 'html' });
+      options.jobLease?.assertActive();
       if (!tr || tr.ok !== true || !Array.isArray(tr.items) || tr.items.length !== q.length) {
         const errMsg = tr && tr.ok === false && tr.error ? tr.error : 'Translate failed';
         throw new Error(errMsg);
@@ -672,7 +697,7 @@ async function translateAndSave(newsId, options = {}) {
       // Ensure source language is persisted.
       setOk.originalLang = baseLang;
 
-      const docUpdated = await persistTranslationUpdate(id, { $set: setOk }, current, logger, 'publish_async_translation_ready');
+      const docUpdated = await persistTranslationUpdate(id, { $set: setOk }, current, logger, 'publish_async_translation_ready', options);
       if (docUpdated) {
         try {
           logger.info?.('[i18n][publish] saved translation', {
@@ -685,7 +710,7 @@ async function translateAndSave(newsId, options = {}) {
 
       }
     } catch (e) {
-      if (e.code === 'TRANSLATION_SOURCE_CHANGED') throw e;
+      if (['TRANSLATION_SOURCE_CHANGED', 'TRANSLATION_JOB_LEASE_LOST', 'WORKER_SHUTDOWN'].includes(e.code)) throw e;
       const msg = e?.message || String(e);
       const isRateLimit = _isRateLimitErrorMessage(msg);
       const delayMin = _retryDelayMinutesForErrorMessage(msg);
@@ -700,7 +725,7 @@ async function translateAndSave(newsId, options = {}) {
               [`translationUpdatedAt.${dst}`]: now,
             },
           },
-          current, logger, 'publish_async_translation_failed'
+          current, logger, 'publish_async_translation_failed', options
         );
       } catch (error) {
         logger.warn?.('[i18n][publish] retry state was not persisted', { id, code: error.code || 'TRANSLATION_PERSISTENCE_FAILED' });
@@ -771,40 +796,45 @@ async function enqueueTranslateAndSave(newsId, options = {}) {
   }
 }
 
-let _workerStarted = false;
-let _workerTimer = null;
+let worker;
 
-function startPublishTranslationWorker(options = {}) {
+function createPublishTranslationWorker(options = {}) {
   const logger = options.logger || console;
-  const env = String(process.env.NODE_ENV || '').toLowerCase();
-  if (env === 'test') return;
-  if (_workerStarted) return;
-  _workerStarted = true;
-
+  const tasks = options.tasks || backgroundTasks;
+  const Job = options.Job || TranslationJob;
+  const newsModel = options.News || News;
+  const translate = options.translate || translateAndSave;
+  const configured = options.isConfigured || isGoogleTranslateConfigured;
+  const clock = options.now || (() => new Date());
   const concurrencyRaw = options.concurrency ?? process.env.TRANSLATION_QUEUE_CONCURRENCY;
   const concurrency = Math.max(2, Math.min(5, parseInt(String(concurrencyRaw || '3'), 10) || 3));
   const pollMsRaw = options.pollMs ?? process.env.TRANSLATION_QUEUE_POLL_MS;
   const pollMs = Math.max(500, Math.min(10000, parseInt(String(pollMsRaw || '1000'), 10) || 1000));
+  const workerId = `${os.hostname()}:${process.pid}:${randomUUID()}`;
+  const active = new Set();
+  let timer;
+  let polling;
+  let stopped = false;
+  let unregister;
 
-  const workerId = `${os.hostname()}:${process.pid}`;
-  const staleMs = 20 * 60 * 1000;
-  let active = 0;
-
-  async function _processJob(job) {
-    const jobId = job && job._id ? String(job._id) : '';
-    const newsId = job && job.newsId ? String(job.newsId) : '';
-    const startedAt = new Date();
+  async function processJob(job, lease) {
+    const jobId = String(job._id);
+    const newsId = String(job.newsId);
+    lease.startHeartbeat();
 
     try {
-      await translateAndSave(newsId, { logger });
+      const result = await translate(newsId, { logger, jobLease: lease });
+      lease.assertActive();
+      if (result?.ok === false) {
+        throw Object.assign(new Error(result.error || 'Translation failed.'), { code: 'TRANSLATION_JOB_FAILED' });
+      }
 
-      // Decide whether to requeue based on any nextRetryAt values.
-      const doc = await News.findById(newsId)
+      const doc = await newsModel.findById(newsId)
         .select('lang language originalLang translationStatus translationNextRetryAt translationUpdatedAt translations')
-        .lean()
-        .catch(() => null);
+        .lean();
+      if (!doc) throw Object.assign(new Error('The translation source was removed.'), { code: 'TRANSLATION_SOURCE_CHANGED' });
 
-      const now = new Date();
+      const now = clock();
       let nextRunAt = null;
       const baseLang = normalizeLang(doc?.originalLang) || normalizeLang(doc?.lang) || normalizeLang(doc?.language) || 'en';
 
@@ -829,69 +859,41 @@ function startPublishTranslationWorker(options = {}) {
         if (!nextRunAt) nextRunAt = _addSeconds(now, 30);
       }
 
-      if (nextRunAt) {
-        await TranslationJob.updateOne(
-          { _id: jobId },
-          {
-            $set: {
-              status: 'queued',
-              runAt: nextRunAt,
-              lockedAt: null,
-              lockedBy: null,
-              finishedAt: null,
-            },
-          }
-        ).catch(() => null);
+      await lease.stopHeartbeat();
+      await lease.update({
+        status: nextRunAt ? 'queued' : 'done',
+        ...(nextRunAt ? { runAt: nextRunAt } : {}),
+        lockedAt: null, lockedBy: null,
+        finishedAt: nextRunAt ? null : clock(),
+      });
+    } catch (error) {
+      await lease.stopHeartbeat();
+      if (lease.signal.aborted) {
+        logger.warn?.('[i18n][queue] discarded interrupted claim', { jobId, code: lease.signal.reason?.code });
         return;
       }
-
-      await TranslationJob.updateOne(
-        { _id: jobId },
-        {
-          $set: {
-            status: 'done',
-            lockedAt: null,
-            lockedBy: null,
-            finishedAt: new Date(),
-          },
-        }
-      ).catch(() => null);
-    } catch (e) {
-      const msg = e?.message || String(e);
       try {
-        await TranslationJob.updateOne(
-          { _id: jobId },
-          {
-            $set: {
-              status: 'queued',
-              runAt: new Date(Date.now() + 2 * 60 * 1000),
-              lockedAt: null,
-              lockedBy: null,
-              lastError: msg,
-            },
-          }
-        ).catch(() => null);
-      } catch (_) {}
-
-      try {
-        logger.warn?.('[i18n][queue] job failed; requeued', {
-          jobId,
-          newsId,
-          message: msg,
-          durationMs: Date.now() - startedAt.getTime(),
+        await lease.update({
+          status: 'queued', runAt: new Date(clock().getTime() + 2 * 60 * 1000),
+          lockedAt: null, lockedBy: null, lastError: error.message || 'Translation job failed.',
         });
-      } catch (_) {}
+        logger.warn?.('[i18n][queue] job failed; requeued', { jobId, newsId, code: error.code || 'TRANSLATION_JOB_FAILED' });
+      } catch (retryError) {
+        logger.error?.('[i18n][queue] retry not acknowledged', { jobId, code: retryError.code || 'TRANSLATION_QUEUE_FAILED' });
+        if (retryError.code !== 'TRANSLATION_JOB_LEASE_LOST') throw retryError;
+      }
+    } finally {
+      await lease.stopHeartbeat();
+      lease.dispose();
     }
   }
 
-  async function _tick() {
-    if (!_workerStarted) return;
-    if (!isGoogleTranslateConfigured()) return;
-
-    while (active < concurrency) {
-      const now = new Date();
-      const staleCutoff = new Date(now.getTime() - staleMs);
-      const job = await TranslationJob.findOneAndUpdate(
+  async function poll() {
+    while (!stopped && !tasks.closing && active.size < concurrency) {
+      const now = clock();
+      const owner = `${workerId}:${randomUUID()}`;
+      const staleCutoff = new Date(now.getTime() - TRANSLATION_LEASE_MS);
+      const job = await Job.findOneAndUpdate(
         {
           type: JOB_TYPE,
           runAt: { $lte: now },
@@ -904,7 +906,7 @@ function startPublishTranslationWorker(options = {}) {
           $set: {
             status: 'running',
             lockedAt: now,
-            lockedBy: workerId,
+            lockedBy: owner,
           },
           $inc: { attempts: 1 },
         },
@@ -912,25 +914,68 @@ function startPublishTranslationWorker(options = {}) {
       ).lean();
 
       if (!job) break;
-
-      active++;
-      _processJob(job)
-        .catch(() => null)
-        .finally(() => {
-          active = Math.max(0, active - 1);
-        });
+      const lease = createTranslationJobLease(job, { owner, signal: tasks.signal, logger, now: clock, Job });
+      if (stopped || tasks.closing) {
+        try {
+          await lease.update({ status: 'queued', lockedAt: null, lockedBy: null, runAt: clock() });
+        } finally {
+          lease.dispose();
+        }
+        break;
+      }
+      const task = tasks.track('translation.job', processJob(job, lease));
+      active.add(task);
+      task.then(() => active.delete(task), error => {
+        active.delete(task);
+        logger.error?.('[i18n][queue] job persistence failed', { jobId: String(job._id), code: error.code || 'TRANSLATION_QUEUE_FAILED' });
+      });
     }
   }
 
-  _workerTimer = setInterval(() => {
-    _tick().catch((e) => {
-      try { logger.warn?.('[i18n][queue] tick failed', { message: e?.message || String(e) }); } catch (_) {}
-    });
-  }, pollMs);
+  function tick() {
+    if (polling) return polling;
+    if (stopped || tasks.closing || !configured()) return Promise.resolve();
+    polling = tasks.track('translation.poll', Promise.resolve().then(poll));
+    polling.then(() => { polling = null; }, () => { polling = null; });
+    return polling;
+  }
 
-  try {
+  async function stop() {
+    stopped = true;
+    clearInterval(timer);
+    timer = null;
+    unregister?.();
+    await Promise.allSettled([polling, ...active].filter(Boolean));
+    // A claim already in flight is returned before poll settles.
+    await Promise.allSettled([...active]);
+  }
+
+  function start() {
+    if (timer || stopped || tasks.closing) return;
+    unregister = tasks.registerStop(stop);
+    timer = setInterval(() => {
+      tick().catch(error => logger.warn?.('[i18n][queue] tick failed', { code: error.code || 'TRANSLATION_QUEUE_FAILED' }));
+    }, pollMs);
+    timer.unref?.();
     logger.log?.('[i18n][queue] publish translation worker started', { concurrency, pollMs, workerId });
-  } catch (_) {}
+  }
+
+  return { start, stop, tick, get activeCount() { return active.size; } };
+}
+
+function startPublishTranslationWorker(options = {}) {
+  if (String(process.env.NODE_ENV || '').toLowerCase() === 'test' || backgroundTasks.closing) return;
+  if (!worker) {
+    worker = createPublishTranslationWorker(options);
+    worker.start();
+  }
+  return worker;
+}
+
+async function stopPublishTranslationWorker() {
+  const current = worker;
+  if (current) await current.stop();
+  if (worker === current) worker = null;
 }
 
 module.exports = {
@@ -941,5 +986,7 @@ module.exports = {
   markPublishTranslationPending,
   enqueueTranslateAndSave,
   translateAndSave,
+  createPublishTranslationWorker,
   startPublishTranslationWorker,
+  stopPublishTranslationWorker,
 };
