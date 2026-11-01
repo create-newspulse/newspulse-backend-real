@@ -257,6 +257,7 @@ async function performMonitoring(options) {
 }
 
 function isMonitoringEnabled(env = process.env) {
+  if (!backgroundTasks.isBackgroundWorkersEnabled(env)) return false;
   if (isTestLike(env)) return false;
   const flag = String(env.NEWS_PULSE_MONITORING_ENABLED || '').trim().toLowerCase();
   if (['0', 'false', 'off', 'disabled', 'no'].includes(flag)) return false;

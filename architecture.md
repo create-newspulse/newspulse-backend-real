@@ -1035,7 +1035,9 @@ TTL audits, health checks, workers, cleanup and publication scheduling remain
 active under their existing conditions. Production collections and required
 indexes must already exist; startup neither installs missing indexes nor
 reconciles drift. Index maintenance remains a separate, explicitly authorized
-operation, not a deployment side effect. Rollback builds must retain this policy.
+operation, not a deployment side effect. The automatic worker pause below is an
+additional startup gate, not a change to this index policy. Rollback builds must
+retain this policy.
 
 ## Worker ownership and shutdown
 
@@ -1106,10 +1108,66 @@ These protections require cooperating versions. The first deployment from an
 older build that ignores fencing/shutdown still requires a separately approved,
 verified non-overlapping cutover: quiesce producers, account for in-flight and
 scheduled work, stop every old writer, then activate the new build. Starting a
-candidate against the production database already activates workers, even
-before HTTP promotion. A manual deploy alone does not establish non-overlap.
+candidate against the production database normally activates workers, even
+before HTTP promotion; use the paused first-deployment procedure below.
+A manual deploy alone does not establish non-overlap.
 Rollback artifacts participating in overlap must retain both this protocol and
 the index/authentication/public-visibility protections.
+
+### Paused first Render deployment
+
+`BACKGROUND_WORKERS_ENABLED` is optional and defaults to `true` when absent.
+Only `true` and `false` (case-insensitive, surrounding whitespace ignored) are
+accepted; an empty or other value fails startup before database connection.
+It is a process-start setting, not a hot-toggle or a cluster-wide lock.
+The startup log `[startup] Automatic background workers` reports `enabled`.
+
+With `false`, the new process does not start translation polling, scheduled
+publication, expired-visibility refresh, broadcast cleanup, Engine monitoring
+(including its incident/alert writes and mail), or canonical latest-feed
+prewarming. Automatic Founder seeding is also skipped. MongoDB connection,
+read-only startup diagnostics and ordinary HTTP APIs remain available.
+Monitoring status reports disabled. Existing worker-specific switches still
+apply when the global setting is `true`.
+
+After separate Founder approval, use this two-stage procedure:
+
+1. **Prepare:** quiesce editorial/API producers and account for old in-flight
+   work. Identify every old web instance, worker service, replica and external
+   scheduler that can write. Verify the deployed artifact includes this flag;
+   older builds ignore it. Keep the existing production index policy and
+   shutdown/host termination budget. Do not start an enabled candidate first.
+2. **Stage 1:** in the Render Backend service's **Environment**, set
+   `BACKGROUND_WORKERS_ENABLED=false` and save it for the intended deployment.
+   Avoid an automatic deploy of an older/unpaused artifact when saving settings;
+   use Render's save-without-deploy option if needed, then deploy the approved
+   artifact with the flag already applied. Do not change Frontend/Admin services.
+   Apply the setting to every new Backend instance/service that can start these
+   workers. Confirm the new process log reports `enabled: false`, HTTP health
+   and authenticated/public APIs work, and monitoring is disabled.
+3. **Old-instance barrier:** confirm through Render instance/deploy status and
+   termination logs that **all old writers have actually terminated**, including
+   old replicas and separate worker services. A healthy new instance, HTTP
+   promotion or a sent SIGTERM alone is not confirmation. The new flag cannot
+   stop an old build. Keep the new Backend paused if termination is uncertain.
+4. **Stage 2:** only after that barrier, set
+   `BACKGROUND_WORKERS_ENABLED=true` in the same Render service environment and
+   save/redeploy or restart the approved artifact so every new process receives
+   it. Confirm the startup log reports `enabled: true`, then check existing
+   worker logs/status and outstanding jobs before resuming producers. Removing
+   the variable also restores the default, but explicit `true` is clearer.
+
+This pauses automatic application workers, **not all writes**. Authentication,
+API publishing/translation, enqueueing, read-triggered translation/cache work,
+API-requested SEO audits, broadcast delivery, version bumps and post-commit
+invalidation keep their existing behavior and permissions. Do not use the flag
+as read-only mode or as permission for overlapping old/new API writers. Queued
+translations and due publication/visibility work are delayed, not discarded;
+on enablement they resume under the existing polling, stale-claim and due-state
+rules. MongoDB TTL expiration continues independently. Changing environment
+values does not cancel already accepted work or stop an existing process;
+normal graceful shutdown still drains it. Rolling back to a build without this
+flag/fencing requires a new separately approved non-overlapping cutover.
 
 Required existing indexes and transaction support must already be present;
 startup does not provision them. There is no exactly-once guarantee for

@@ -44,6 +44,48 @@ test('shutdown has the approved configurable 25000ms default', () => {
   assert.equal(shutdownTimeout({ SHUTDOWN_TIMEOUT_MS: '18000' }), 18_000);
 });
 
+test('worker admission defaults to enabled and accepts only explicit boolean settings', () => {
+  assert.equal(backgroundTasks.isBackgroundWorkersEnabled({}), true);
+  assert.equal(backgroundTasks.isBackgroundWorkersEnabled({ BACKGROUND_WORKERS_ENABLED: 'true' }), true);
+  assert.equal(backgroundTasks.isBackgroundWorkersEnabled({ BACKGROUND_WORKERS_ENABLED: ' FALSE ' }), false);
+  for (const value of ['', ' ', '0', '1', 'disabled', 'tru', 'no']) {
+    assert.throws(() => backgroundTasks.isBackgroundWorkersEnabled({ BACKGROUND_WORKERS_ENABLED: value }),
+      /BACKGROUND_WORKERS_ENABLED must be true or false/);
+  }
+});
+
+test('paused worker starters register no timers or triggers and keep request work admitted', async context => {
+  const previous = process.env.BACKGROUND_WORKERS_ENABLED;
+  process.env.BACKGROUND_WORKERS_ENABLED = 'false';
+  context.after(() => {
+    if (previous === undefined) delete process.env.BACKGROUND_WORKERS_ENABLED;
+    else process.env.BACKGROUND_WORKERS_ENABLED = previous;
+  });
+  context.mock.method(global, 'setInterval', () => assert.fail('Paused workers must not register intervals'));
+  context.mock.method(global, 'setTimeout', () => assert.fail('Paused workers must not register timeouts'));
+  assert.equal(cleanup.startBroadcastCleanupJob(), undefined);
+  assert.equal(require('../services/publishAsyncTranslation.service').startPublishTranslationWorker(), undefined);
+  assert.deepEqual(monitoring.startNewsPulseEngineMonitoring({
+    env: { NODE_ENV: 'production', BACKGROUND_WORKERS_ENABLED: 'false', NEWS_PULSE_MONITORING_ENABLED: 'true' },
+    healthService: () => assert.fail('Paused monitoring must not run'),
+  }), { started: false, reason: 'disabled' });
+  assert.equal(monitoring.getMonitoringStatus().enabled, false);
+  const mongo = new EventEmitter();
+  mongo.readyState = 1;
+  const redis = new EventEmitter();
+  const stop = startCanonicalLatestPrewarm({
+    mongo, redis, redisReady: () => true,
+    refresh: () => assert.fail('Paused prewarm must not run'),
+  });
+  mongo.emit('connected');
+  redis.emit('ready');
+  assert.equal(mongo.listenerCount('connected'), 0);
+  assert.equal(redis.listenerCount('ready'), 0);
+  await stop();
+  assert.equal(backgroundTasks.closing, false);
+  assert.equal(await backgroundTasks.run('request-follow-up', () => 'completed'), 'completed');
+});
+
 for (const value of ['0', '-1', 'NaN', 'Infinity', '12ms', '1.5', ' ', '2147483648', '9007199254740991']) {
   test(`invalid shutdown budget ${JSON.stringify(value)} fails explicitly`, () => {
     assert.throws(() => shutdownTimeout({ SHUTDOWN_TIMEOUT_MS: value }), /positive integer/);

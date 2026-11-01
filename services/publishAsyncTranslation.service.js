@@ -889,7 +889,7 @@ function createPublishTranslationWorker(options = {}) {
   }
 
   async function poll() {
-    while (!stopped && !tasks.closing && active.size < concurrency) {
+    while (backgroundTasks.isBackgroundWorkersEnabled() && !stopped && !tasks.closing && active.size < concurrency) {
       const now = clock();
       const owner = `${workerId}:${randomUUID()}`;
       const staleCutoff = new Date(now.getTime() - TRANSLATION_LEASE_MS);
@@ -934,7 +934,7 @@ function createPublishTranslationWorker(options = {}) {
 
   function tick() {
     if (polling) return polling;
-    if (stopped || tasks.closing || !configured()) return Promise.resolve();
+    if (!backgroundTasks.isBackgroundWorkersEnabled() || stopped || tasks.closing || !configured()) return Promise.resolve();
     polling = tasks.track('translation.poll', Promise.resolve().then(poll));
     polling.then(() => { polling = null; }, () => { polling = null; });
     return polling;
@@ -951,7 +951,7 @@ function createPublishTranslationWorker(options = {}) {
   }
 
   function start() {
-    if (timer || stopped || tasks.closing) return;
+    if (!backgroundTasks.isBackgroundWorkersEnabled() || timer || stopped || tasks.closing) return;
     unregister = tasks.registerStop(stop);
     timer = setInterval(() => {
       tick().catch(error => logger.warn?.('[i18n][queue] tick failed', { code: error.code || 'TRANSLATION_QUEUE_FAILED' }));
@@ -964,6 +964,7 @@ function createPublishTranslationWorker(options = {}) {
 }
 
 function startPublishTranslationWorker(options = {}) {
+  if (!backgroundTasks.isBackgroundWorkersEnabled()) return;
   if (String(process.env.NODE_ENV || '').toLowerCase() === 'test' || backgroundTasks.closing) return;
   if (!worker) {
     worker = createPublishTranslationWorker(options);

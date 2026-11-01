@@ -134,6 +134,56 @@ test('overlapping workers claim a queued translation only once', async context =
   assert.equal(fixture.state.rows.TranslationJob[0].attempts, 1);
 });
 
+test('paused translation polling leaves queued jobs untouched until normal admission resumes', async context => {
+  const fixture = install(context);
+  let calls = 0;
+  const instance = worker(context, fixture, { translate: async () => { calls += 1; return { ok: true }; } });
+  const previous = process.env.BACKGROUND_WORKERS_ENABLED;
+  context.after(() => {
+    if (previous === undefined) delete process.env.BACKGROUND_WORKERS_ENABLED;
+    else process.env.BACKGROUND_WORKERS_ENABLED = previous;
+  });
+  const before = structuredClone(fixture.state.rows);
+  process.env.BACKGROUND_WORKERS_ENABLED = 'false';
+  instance.start();
+  await instance.tick();
+  assert.deepEqual(fixture.state.rows, before);
+  assert.equal(calls, 0);
+  assert.equal(fixture.state.calls.some(call => call.name === 'TranslationJob' && call.method === 'findOneAndUpdate'), false);
+  delete process.env.BACKGROUND_WORKERS_ENABLED;
+  await instance.tick();
+  await instance.stop();
+  assert.equal(calls, 1);
+  assert.equal(fixture.state.rows.TranslationJob[0].status, 'done');
+  assert.equal(fixture.state.rows.TranslationJob[0].attempts, 1);
+});
+
+test('paused workers preserve authenticated request mutations and translation enqueue', async context => {
+  const fixture = install(context);
+  const previous = process.env.BACKGROUND_WORKERS_ENABLED;
+  process.env.BACKGROUND_WORKERS_ENABLED = 'false';
+  context.after(() => {
+    if (previous === undefined) delete process.env.BACKGROUND_WORKERS_ENABLED;
+    else process.env.BACKGROUND_WORKERS_ENABLED = previous;
+  });
+  for (const language of ['en', 'hi', 'gu']) {
+    const response = await fixture.state.request('get',
+      `/api/public/news?category=faith-culture&lang=${language}&strictLocale=true`, undefined, null);
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.body.items.map(item => item.slug), [`story-${language}`]);
+  }
+  const path = `/api/articles/${fixture.ids[0]}/unpublish`;
+  const anonymous = await fixture.state.request('post', path, {}, null);
+  assert.equal(anonymous.statusCode, 401);
+  assert.ok(fixture.state.rows.News.every(doc => doc.status === 'published'));
+  const founder = await fixture.state.request('post', path, {});
+  assert.equal(founder.statusCode, 200);
+  assert.ok([...fixture.state.rows.News, ...fixture.state.rows.Article].every(doc => doc.status === 'draft'));
+  await enqueueTranslateAndSave(fixture.ids[0], { throwOnError: true, logger: quiet });
+  assert.equal(fixture.state.rows.TranslationJob[0].status, 'queued');
+  assert.equal(fixture.state.rows.TranslationJob[0].attempts, 0);
+});
+
 test('a stale execution cannot acknowledge a job reclaimed and completed by a newer worker', async context => {
   const fixture = install(context);
   const entered = deferred();

@@ -46,6 +46,10 @@ const {
 
 const mongoose = require('mongoose');
 const backgroundTasks = require('./lib/backgroundTasks');
+const _backgroundWorkersEnabled = backgroundTasks.isBackgroundWorkersEnabled();
+if (!_isImportedEarly) {
+  console.log('[startup] Automatic background workers', { enabled: _backgroundWorkersEnabled });
+}
 const { shutdownTimeout, shutdownAdmission, installGracefulShutdown } = require('./lib/gracefulShutdown');
 const _shutdownTimeoutMs = shutdownTimeout();
 const _preserveProductionIndexes = isProductionLike(process.env);
@@ -458,11 +462,13 @@ const { ensureCategoryStripEnabled, buildPublishedSettingsResponse } = require('
 const User = require('./models/User');
 const publicNewsRouter = require('./routes/publicNews.routes');
 const publicPulseDialogueRouter = require('./routes/publicPulseDialogue.routes');
-require('./lib/publicNewsPrewarm').startCanonicalLatestPrewarm({
-  refresh: publicNewsRouter.refreshCanonicalLatest,
-  mongo: mongoose.connection,
-  redis: require('./lib/redis').getRedisClient(),
-});
+if (_backgroundWorkersEnabled) {
+  require('./lib/publicNewsPrewarm').startCanonicalLatestPrewarm({
+    refresh: publicNewsRouter.refreshCanonicalLatest,
+    mongo: mongoose.connection,
+    redis: require('./lib/redis').getRedisClient(),
+  });
+}
 const breakingRouter = require('./routes/breaking.routes');
 const adminNewsTranslationsRouter = require('./routes/adminNewsTranslations.routes');
 const publicTrendingTopicsRouter = require('./routes/publicTrendingTopics.routes');
@@ -1309,10 +1315,12 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
     const dbFromUri = _resolvedMongoDbName();
     const db = dbFromUri || mongoose.connection.name || undefined;
     console.log('[startup] MongoDB connected', { db });
-    try {
-      await seedFounderFromEnvIfNeeded({ logger: console });
-    } catch (e) {
-      console.warn('[startup][founder-seed] failed', { message: e?.message || String(e) });
+    if (_backgroundWorkersEnabled) {
+      try {
+        await seedFounderFromEnvIfNeeded({ logger: console });
+      } catch (e) {
+        console.warn('[startup][founder-seed] failed', { message: e?.message || String(e) });
+      }
     }
     if (backgroundTasks.closing) return;
     await _runLocalFounderStartupCheck({ db });
@@ -1358,13 +1366,15 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
     }
     if (backgroundTasks.closing) return;
 
-		// Cleanup old Broadcast Center items (older than 24h)
-		try {
-			const { startBroadcastCleanupJob } = require('./services/broadcastCleanup');
-			startBroadcastCleanupJob();
-		} catch (e) {
-			console.warn('[startup] Broadcast cleanup job failed to start', e?.message || e);
-		}
+    // Cleanup old Broadcast Center items (older than 24h).
+    if (_backgroundWorkersEnabled) {
+      try {
+        const { startBroadcastCleanupJob } = require('./services/broadcastCleanup');
+        startBroadcastCleanupJob();
+      } catch (e) {
+        console.warn('[startup] Broadcast cleanup job failed to start', e?.message || e);
+      }
+    }
 
     if (!_preserveProductionIndexes) {
       // Ensure ads indexes are present.
@@ -1382,6 +1392,8 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
         console.warn('[startup] TranslationJob index sync failed', e?.message || e);
       }
     }
+
+    if (!_backgroundWorkersEnabled) return;
 
     // Publish-time translation queue worker (Mongo-backed).
     try {
@@ -1457,7 +1469,7 @@ if (process.env.NODE_ENV === 'test' || _isImported) {
 // Auto-publish scheduled articles and refresh expired visibility gates every minute.
 let _publishTickInFlight = false;
 async function _publishScheduledTick() {
-  if (_publishTickInFlight || backgroundTasks.closing) return;
+  if (!_backgroundWorkersEnabled || _publishTickInFlight || backgroundTasks.closing) return;
   _publishTickInFlight = true;
   return backgroundTasks.track('scheduled-publication', _runPublishScheduledTick());
 }
@@ -1475,7 +1487,7 @@ async function _runPublishScheduledTick() {
   }
 }
 
-if (!_isImported && String(process.env.NODE_ENV || '').toLowerCase() !== 'test') {
+if (_backgroundWorkersEnabled && !_isImported && String(process.env.NODE_ENV || '').toLowerCase() !== 'test') {
   const publishTimer = setInterval(_publishScheduledTick, 60_000);
   backgroundTasks.registerStop(() => { clearInterval(publishTimer); });
 }

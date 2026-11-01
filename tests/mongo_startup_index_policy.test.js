@@ -91,6 +91,32 @@ for (const fixture of productionFixtures) {
   });
 }
 
+test('explicitly enabled workers retain normal connected startup', () => {
+  const result = runStartup({ env: { NODE_ENV: 'production', BACKGROUND_WORKERS_ENABLED: 'true' } });
+  assertConnectedStartup(result);
+  assertIndexPreserving(result);
+});
+
+for (const fixture of [
+  { name: 'production', env: { NODE_ENV: 'production', BACKGROUND_WORKERS_ENABLED: 'false' } },
+  { name: 'production reconnect', env: { NODE_ENV: 'production', BACKGROUND_WORKERS_ENABLED: 'false' }, reconnect: true },
+  { name: 'Render', env: { NODE_ENV: 'development', RENDER: 'true', BACKGROUND_WORKERS_ENABLED: 'false' } },
+  { name: 'dotenv', dotenv: { NODE_ENV: 'production', BACKGROUND_WORKERS_ENABLED: 'false' } },
+]) {
+  test(`${fixture.name}: paused startup serves APIs without admitting automatic writers`, () => {
+    const result = runStartup(fixture);
+    const connections = fixture.reconnect ? 2 : 1;
+    assert.equal(result.connections, connections);
+    assert.equal(result.listens, 1);
+    assert.equal(result.health['/api/system/health'].body.data.mongo.connected, true);
+    assert.deepEqual(result.services, { createAdsTransport: 1 });
+    assert.deepEqual(result.schedulers, []);
+    assert.equal(result.audits.filter(name => name === 'news_pulse_incidents').length, connections);
+    assert.equal(result.audits.filter(name => name === 'news_pulse_alerts').length, connections);
+    assertIndexPreserving(result);
+  });
+}
+
 test('development retains automatic index creation and all five startup synchronizations', () => {
   const result = runStartup({ env: { NODE_ENV: 'development' } });
   assertConnectedStartup(result);

@@ -21,6 +21,7 @@ async function cleanupOldBroadcastItems() {
 }
 
 function startBroadcastCleanupJob() {
+  if (!backgroundTasks.isBackgroundWorkersEnabled()) return;
   if (timer || backgroundTasks.closing) return timer;
   stopping = false;
   // Run once at startup, then every 30 minutes.

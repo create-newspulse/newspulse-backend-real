@@ -20,7 +20,7 @@ Object.assign(process.env, {
   ADMIN_SEED_FOUNDER_PASSWORD: 'synthetic-startup-fixture-only',
 });
 
-const environmentKeys = new Set(['NODE_ENV', 'RENDER', 'RENDER_SERVICE_ID', 'RENDER_EXTERNAL_URL']);
+const environmentKeys = new Set(['NODE_ENV', 'RENDER', 'RENDER_SERVICE_ID', 'RENDER_EXTERNAL_URL', 'BACKGROUND_WORKERS_ENABLED']);
 function applyEnvironment(values = {}) {
   for (const [key, value] of Object.entries(values)) {
     assert.ok(environmentKeys.has(key), 'Only synthetic startup-mode settings may be supplied');
