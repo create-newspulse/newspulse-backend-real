@@ -1,12 +1,17 @@
 const PublicArticle = require('../models/Article');
+const mongoose = require('mongoose');
 const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
 const { INDIA_STATES_UTS, isValidStateSlug } = require('../src/utils/locationTagger');
 const { ensureTrackTag, normalizeTrackValue } = require('./communitySubmissionWorkflow');
 const { normalizeSpotlightPriority } = require('./spotlightPriority.service');
 const { buildPublicPulseDialogueFromArticle } = require('./pulseDialogue.service');
-const { getStoryKeys, UNOWNED_PUBLIC_COPY_FILTER } = require('./articleSlugUniqueness.service');
+const { getStoryKeys, buildStoryIdentityFilter, UNOWNED_PUBLIC_COPY_FILTER } = require('./articleSlugUniqueness.service');
 const News = require('../models/News');
 const { isPubliclyVisibleNewsArticle } = require('./publicArticleVisibility.service');
+const {
+  loadTranslationGroupStatus, resolvePersistedTranslationSourceId,
+  translationSourceIdentityError, TRANSLATION_GROUP_FIELDS,
+} = require('./translationGroupStatus');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 const SPONSORED_ARTICLE_FIELDS = [
@@ -19,12 +24,19 @@ function sponsoredArticleFields(doc) {
     .filter(field => doc?.[field] !== undefined).map(field => [field, doc[field]]));
 }
 
+function isActiveEdition(doc) {
+  return doc.status !== 'deleted' && !doc.deletedAt;
+}
+
 function withGroupTranslations(doc, groupDocs, options = {}) {
   const out = doc.toObject ? doc.toObject() : { ...doc };
   if (!Array.isArray(groupDocs)) return out;
   out.translations = { ...out.translations };
   out.translationStatus = { ...out.translationStatus };
-  for (const member of groupDocs) {
+  const editions = options.preserveDeletedEditions
+    ? [...groupDocs].sort((a, b) => Number(isActiveEdition(a)) - Number(isActiveEdition(b)))
+    : groupDocs;
+  for (const member of editions) {
     const lang = normalizeLang(member.language || member.lang);
     if (!lang) continue;
     const bucket = { title: member.title, summary: member.description || member.summary, content: member.content };
@@ -40,9 +52,10 @@ function withGroupTranslations(doc, groupDocs, options = {}) {
 }
 
 async function syncNewsTranslationBuckets(groupDocs, options = {}) {
-  options.saveScope?.assertNewsRecords(groupDocs);
+  const writable = options.preserveDeletedEditions ? groupDocs.filter(isActiveEdition) : groupDocs;
+  options.saveScope?.assertNewsRecords(writable);
   const now = options.now || new Date();
-  const futureVisibilityDates = groupDocs.map(doc => {
+  const futureVisibilityDates = writable.map(doc => {
     const bucket = { title: doc.title, summary: doc.description || doc.summary, content: doc.content };
     if (!normalizeLang(doc.language || doc.lang) || !_hasFullTranslationBucket(bucket)) return null;
     const visibleAt = new Date(Math.max(...[
@@ -52,7 +65,7 @@ async function syncNewsTranslationBuckets(groupDocs, options = {}) {
   }).filter(Boolean);
   const refreshAt = futureVisibilityDates.length
     ? new Date(Math.min(...futureVisibilityDates.map(value => value.getTime()))) : null;
-  for (const doc of groupDocs) {
+  for (const doc of writable) {
     const next = withGroupTranslations(doc, groupDocs, { ...options, now });
     doc.translations = next.translations;
     doc.translationStatus = next.translationStatus;
@@ -277,6 +290,99 @@ function buildPublicArticleMatch(newsDoc, options = {}) {
   return { $or: or };
 }
 
+async function assertPublicCopyOwnership(copy, persisted, { session, preserveDeletedEditions = false } = {}) {
+  const conflict = () => translationSourceIdentityError('The public copy ownership conflicts with its CMS story.');
+  const editionId = String(persisted._id);
+  const ownerId = copy.sourceNewsId ? String(copy.sourceNewsId) : null;
+  const canonicalId = resolvePersistedTranslationSourceId(copy);
+  const declaredSourceId = resolvePersistedTranslationSourceId(persisted);
+  if (preserveDeletedEditions && (copy.status === 'deleted' || copy.deletedAt)) throw conflict();
+
+  if (ownerId === editionId) {
+    if (!canonicalId || canonicalId === (declaredSourceId || editionId)) return;
+    if (declaredSourceId) throw conflict();
+  }
+  if (!ownerId && !canonicalId) throw conflict();
+
+  // Shared copies require persisted edition/source evidence, not matching display keys.
+  const { groupStatus } = await loadTranslationGroupStatus(persisted, {
+    session, allowDeletedDuplicates: preserveDeletedEditions,
+  });
+  if ((declaredSourceId || editionId) !== groupStatus.sourceArticleId) throw conflict();
+  const memberIds = new Set(groupStatus.groupArticles.map(member => member.id));
+  if (canonicalId && canonicalId !== groupStatus.sourceArticleId) throw conflict();
+  if (ownerId) {
+    const owner = await News.findById(ownerId, null, { session }).select(TRANSLATION_GROUP_FIELDS).lean();
+    if (!owner || !memberIds.has(ownerId)) throw conflict();
+    if (preserveDeletedEditions && (owner.status === 'deleted' || owner.deletedAt)) throw conflict();
+    const ownerSourceId = resolvePersistedTranslationSourceId(owner);
+    if ((ownerSourceId || ownerId) !== groupStatus.sourceArticleId) throw conflict();
+  } else if (canonicalId !== groupStatus.sourceArticleId) {
+    throw conflict();
+  }
+}
+
+async function publicCopyCandidates(newsDoc, options = {}) {
+  let match = buildPublicArticleMatch(newsDoc, options);
+  // A slug collision is inspected even when its stale keys exclude it from the write match.
+  let copies = await PublicArticle.find(match, null, { session: options.session }).lean();
+  let persisted;
+  if (options.preservePublicationMetadata && !copies.length) {
+    persisted = await News.findById(newsDoc._id, null, { session: options.session })
+      .select(TRANSLATION_GROUP_FIELDS).lean();
+    if (!persisted) throw translationSourceIdentityError('The public copy CMS edition is missing.');
+    const sourceId = resolvePersistedTranslationSourceId(persisted) || persisted._id;
+    const linked = await PublicArticle.find({ $or: [
+      { sourceNewsId: sourceId }, { sourceArticleId: sourceId, sourceNewsId: null },
+    ] }, null, { session: options.session }).lean();
+    for (const copy of linked) {
+      const ownerId = copy.sourceNewsId || copy.sourceArticleId;
+      const owner = await News.findById(ownerId, null, { session: options.session })
+        .select(TRANSLATION_GROUP_FIELDS).lean();
+      // Reuse a historical shared projection only when the CMS editions actually share a slug.
+      if (owner && normalizeSlug(owner.slug) === normalizeSlug(newsDoc.slug)) copies.push(copy);
+    }
+    if (copies.length) match = { _id: { $in: copies.map(copy => copy._id) } };
+  }
+  const collisions = await PublicArticle.find({ slug: normalizeSlug(newsDoc.slug) }, null, { session: options.session }).lean();
+  const candidates = new Map([...copies, ...collisions].map(copy => [String(copy._id), copy]));
+  if (options.preservePublicationMetadata && copies.length > 1) {
+    throw translationSourceIdentityError('More than one public copy matches this CMS edition.');
+  }
+  if (candidates.size) {
+    persisted = persisted || await News.findById(newsDoc._id, null, { session: options.session })
+      .select(TRANSLATION_GROUP_FIELDS).lean();
+    if (!persisted) throw translationSourceIdentityError('The public copy CMS edition is missing.');
+    for (const copy of candidates.values()) await assertPublicCopyOwnership(copy, persisted, options);
+  }
+  return { match, copies };
+}
+
+async function assertPublicArticleSaveOwnership(current, {
+  session, patch = {}, preserveDeletedEditions = false, preservePublicationMetadata = false,
+} = {}) {
+  const members = await News.find({
+    ...buildStoryIdentityFilter(current),
+    ...(preserveDeletedEditions ? { status: { $ne: 'deleted' }, deletedAt: null } : {}),
+  }, null, { session }).lean();
+  const prospective = members.map(member => String(member._id) === String(current._id)
+    ? { ...member, ...patch } : member);
+  if (current.status !== 'published' && !prospective.some(member => member.status === 'published')) return;
+  for (const member of prospective) {
+    if (!normalizeSlug(member.slug)) continue;
+    await publicCopyCandidates(member, {
+      session, previousDoc: String(member._id) === String(current._id) ? current : undefined,
+      preserveDeletedEditions, preservePublicationMetadata,
+    });
+  }
+}
+
+function publicCopyIdentityGuard(copy) {
+  return Object.fromEntries([
+    '_id', 'sourceNewsId', 'sourceArticleId', 'sourceLanguage', 'translationGroupId', 'translationKey', 'updatedAt',
+  ].map(field => [field, copy[field] ?? null]));
+}
+
 async function _syncPublicArticleFromNews(newsDoc, options = {}) {
   if (!newsDoc) return null;
   newsDoc = withGroupTranslations(newsDoc, options.groupDocs, options);
@@ -445,17 +551,44 @@ async function _syncPublicArticleFromNews(newsDoc, options = {}) {
     stateNames: Array.isArray(newsDoc.stateNames) ? newsDoc.stateNames : [],
   };
 
-  const match = buildPublicArticleMatch(newsDoc, options);
+  const { match, copies } = await publicCopyCandidates(newsDoc, options);
   const target = options.saveScope
     ? await options.saveScope.publicWriteTarget(newsDoc, match, options.session)
-    : { filter: match, upsert: true };
+    : copies.length
+      ? { filter: { $and: [match, publicCopyIdentityGuard(copies[0])] }, upsert: false }
+      : { filter: { _id: new mongoose.Types.ObjectId() }, upsert: true };
+  if (options.saveScope && !target.upsert) {
+    target.filter = { $and: [target.filter, { $or: copies.map(publicCopyIdentityGuard) }] };
+  }
 
   const updateOp = { $set: update };
   if (!pulseDialogue) updateOp.$unset = { pulseDialogue: '' };
+  if (options.preserveSourceIdentity) {
+    // Content saves preserve existing copy identity; missing links never imply a new original.
+    const identity = options.preserveSourceIdentity;
+    delete update.sourceNewsId;
+    delete update.sourceArticleId;
+    delete update.sourceLanguage;
+    updateOp.$setOnInsert = {
+      sourceNewsId: newsDoc._id || null,
+      sourceArticleId: identity.sourceArticleId || newsDoc.sourceArticleId || null,
+      sourceLanguage: identity.sourceLanguage || newsDoc.sourceLanguage || null,
+    };
+  }
+  if (options.preservePublicationMetadata) {
+    // A content correction is not a republication or a repair of historical public metadata.
+    for (const field of [
+      'slug', 'slugs', 'status', 'publishedAt', 'publishAt', 'scheduledAt', 'deletedAt',
+      'locked', 'embargoUntil', 'visibility', 'isPrivate',
+    ]) {
+      updateOp.$setOnInsert = { ...updateOp.$setOnInsert, [field]: update[field] };
+      delete update[field];
+    }
+  }
   if (isPublished && !newsDoc.publishedAt) {
     // A legacy source without a timestamp must not republish an existing copy.
     delete update.publishedAt;
-    updateOp.$setOnInsert = { publishedAt: new Date() };
+    updateOp.$setOnInsert = { ...updateOp.$setOnInsert, publishedAt: new Date() };
   }
 
   const saved = await PublicArticle.findOneAndUpdate(
@@ -463,7 +596,7 @@ async function _syncPublicArticleFromNews(newsDoc, options = {}) {
     updateOp,
     { upsert: target.upsert, new: true, setDefaultsOnInsert: true, runValidators: true, session: options.session }
   ).lean();
-  if (options.saveScope && !saved) throw Object.assign(new Error('Article save scope changed. Reload and retry.'), {
+  if (!saved && (options.saveScope || !target.upsert)) throw Object.assign(new Error('Article save scope changed. Reload and retry.'), {
     statusCode: 409, code: 'ARTICLE_SAVE_SCOPE_CHANGED',
   });
   return saved;
@@ -476,7 +609,7 @@ async function syncPublicArticleFromNews(newsDoc, options = {}) {
     if (!saved?._id) throw new Error('Public article synchronization produced no record');
     return saved;
   } catch (error) {
-    if (error?.code === 'ARTICLE_SAVE_FORBIDDEN' || error?.code === 'ARTICLE_SAVE_SCOPE_CHANGED') throw error;
+    if (['ARTICLE_SAVE_FORBIDDEN', 'ARTICLE_SAVE_SCOPE_CHANGED', 'TRANSLATION_SOURCE_IDENTITY_INVALID'].includes(error?.code)) throw error;
     const conflict = error?.code === 11000 || error?.code === 11001;
     logger.warn?.('[articles.syncPublicArticleFromNews] failed', {
       code: conflict ? 'SLUG_CONFLICT' : 'PUBLIC_ARTICLE_SYNC_FAILED',
@@ -496,5 +629,7 @@ module.exports = {
   syncPublicArticleFromNews,
   syncNewsTranslationBuckets,
   buildPublicArticleMatch,
+  publicCopyCandidates,
+  assertPublicArticleSaveOwnership,
   sponsoredArticleFields,
 };

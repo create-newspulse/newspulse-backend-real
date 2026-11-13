@@ -3,7 +3,9 @@ const News = require('../models/News');
 const mongoose = require('mongoose');
 const { requireAdminAuth } = require('../middleware/adminAuth');
 const { enqueueTranslateAndSave } = require('../services/publishAsyncTranslation.service');
-const { buildTranslationGroupStatus, resolveBaseLang } = require('../services/translationGroupStatus');
+const {
+  loadTranslationGroupStatus, TRANSLATION_GROUP_FIELDS, TRANSLATION_SOURCE_IDENTITY_INVALID,
+} = require('../services/translationGroupStatus');
 const { adminListReporterContacts } = require('../controllers/communityReporterController');
 const { normalizeSpotlightPriority } = require('../services/spotlightPriority.service');
 
@@ -182,18 +184,11 @@ router.get('/articles/:id/translation-status', requireAdminAuth, async (req, res
     }
 
     const doc = await News.findById(id)
-      .select('title slug lang language originalLang translationStatus translationError translationUpdatedAt translationNextRetryAt translationKey translationGroupId spotlightEnabled spotlightPinned spotlightPriority spotlightExpiresAt')
+      .select(`${TRANSLATION_GROUP_FIELDS} translationStatus translationError translationUpdatedAt translationNextRetryAt spotlightEnabled spotlightPinned spotlightPriority spotlightExpiresAt`)
       .lean();
     if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
 
-    const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
-    const groupDocs = groupKey
-      ? await News.find({ $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }] })
-        .select('_id lang language originalLang translationKey translationGroupId title slug status')
-        .lean()
-      : [doc];
-
-    const groupStatus = buildTranslationGroupStatus(doc, groupDocs);
+    const { groupStatus, groupKey } = await loadTranslationGroupStatus(doc, { editorRead: true });
 
     const out = {
       id: String(doc._id),
@@ -224,6 +219,9 @@ router.get('/articles/:id/translation-status', requireAdminAuth, async (req, res
     return res.json({ ok: true, success: true, data: out });
   } catch (e) {
     console.error('[ADMIN_ARTICLES][translation-status-error]', e?.message || e);
+    if (e?.code === TRANSLATION_SOURCE_IDENTITY_INVALID) {
+      return res.status(409).json({ ok: false, success: false, code: e.code, message: e.message });
+    }
     return res.status(500).json({ ok: false, success: false, message: 'Internal error' });
   }
 });
@@ -370,14 +368,7 @@ router.get('/articles/:id', requireAdminAuth, async (req, res) => {
     if (!doc) return res.status(404).json({ ok: false, message: 'Article not found' });
     const article = withEditorialTypeFallback(doc.toJSON()); // include virtuals (e.g. body)
 
-    const baseLang = resolveBaseLang(article);
-    const groupKey = String(article.translationKey || article.translationGroupId || '').trim();
-    const groupDocs = groupKey
-      ? await News.find({ $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }] })
-        .select('_id lang language originalLang translationKey translationGroupId title slug status')
-        .lean()
-      : [article];
-    const translationGroupStatus = buildTranslationGroupStatus({ ...article, originalLang: article.originalLang || baseLang }, groupDocs);
+    const { groupStatus: translationGroupStatus } = await loadTranslationGroupStatus(article, { editorRead: true });
 
     let communityReport = null;
     if (article.source === 'community' && article.communityReportId) {
@@ -406,6 +397,9 @@ router.get('/articles/:id', requireAdminAuth, async (req, res) => {
     });
   } catch (e) {
     console.error('[ADMIN_ARTICLES][detail-error]', e?.message || e);
+    if (e?.code === TRANSLATION_SOURCE_IDENTITY_INVALID) {
+      return res.status(409).json({ ok: false, success: false, code: e.code, message: e.message });
+    }
     return res.status(500).json({ ok: false, message: 'Failed to load article details' });
   }
 });

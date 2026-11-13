@@ -485,13 +485,17 @@ async function syncTranslationGroupMetadataInSession(doc, options) {
   const shared = Object.fromEntries(Object.entries(input)
     .filter(([key]) => sharedFields.has(key) || key.startsWith('location.')));
   const language = normalizeLang(doc.language || doc.lang);
-  if (language && supplied('slug')) shared[`slugs.${language}`] = doc.slug;
+  if (language && supplied('slug') && !options.preservePublicationMetadata) shared[`slugs.${language}`] = doc.slug;
   const imageChanged = ['coverImage', 'coverImageUrl', 'imageURL'].some(changed);
   const beforeImage = before.coverImage?.url || before.coverImageUrl || before.imageURL || null;
   const members = await News.find(buildStoryIdentityFilter(doc), null, { session: options.session }).lean();
-  options.saveScope?.assertNewsRecords(members);
+  const history = options.preserveDeletedEditions
+    ? members.filter(member => member.status === 'deleted' || member.deletedAt) : [];
+  const writable = options.preserveDeletedEditions
+    ? members.filter(member => member.status !== 'deleted' && !member.deletedAt) : members;
+  options.saveScope?.assertNewsRecords(writable);
   const updated = [];
-  for (const member of members) {
+  for (const member of writable) {
     const patch = { ...shared };
     const memberImage = member.coverImage?.url || member.coverImageUrl || member.imageURL || null;
     if (imageChanged && (!memberImage || memberImage === beforeImage || String(member._id) === String(doc._id))) {
@@ -508,17 +512,24 @@ async function syncTranslationGroupMetadataInSession(doc, options) {
   if (!updated.some(member => String(member._id) === String(doc._id))) {
     throw new Error('Article group changed during metadata synchronization');
   }
-  await syncNewsTranslationBuckets(updated, { session: options.session, now, saveScope: options.saveScope });
+  const translationDocs = [...history, ...updated];
+  await syncNewsTranslationBuckets(translationDocs, {
+    session: options.session, now, saveScope: options.saveScope, preserveDeletedEditions: options.preserveDeletedEditions,
+  });
+  const publicDocs = [];
   if (updated.some(member => member.status === 'published') || before.status === 'published') {
     const ordered = options.saveScope
       ? options.saveScope.orderPublicRecords(updated)
       : [...updated].sort((a, b) =>
         Number(isPubliclyVisibleNewsArticle(a, { now })) - Number(isPubliclyVisibleNewsArticle(b, { now })));
     for (const member of ordered) {
-      await syncPublicArticleFromNews(member, {
-        groupDocs: updated, throwOnError: true, session: options.session, now, saveScope: options.saveScope,
+      const publicDoc = await syncPublicArticleFromNews(member, {
+        groupDocs: translationDocs, throwOnError: true, session: options.session, now, saveScope: options.saveScope,
         previousDoc: String(member._id) === String(doc._id) ? before : undefined,
+        preserveSourceIdentity: options.preserveSourceIdentity, preserveDeletedEditions: options.preserveDeletedEditions,
+        preservePublicationMetadata: options.preservePublicationMetadata,
       });
+      publicDocs.push(publicDoc);
     }
     await options.saveScope?.verifyPublicCopies(options.session);
   }
@@ -526,7 +537,7 @@ async function syncTranslationGroupMetadataInSession(doc, options) {
     ok: true, childrenUpdated: Math.max(0, updated.length - 1),
     childIds: updated.filter(member => String(member._id) !== String(doc._id)).map(member => String(member._id)),
     publicSync: { ok: true, failedArticleIds: [] },
-    docs: updated, previousDocs: [before, ...members],
+    docs: updated, publicDocs, previousDocs: [before, ...members],
   };
 }
 
@@ -535,7 +546,7 @@ async function syncTranslationGroupMetadata(doc, options = {}) {
     ? await syncTranslationGroupMetadataInSession(doc, options)
     : await withActiveArticleSource(doc._id, (current, session, transaction) =>
       syncTranslationGroupMetadataInSession(current, { ...options, ...transaction }), options);
-  if (options.invalidate !== false) await invalidateArticleContent(result.docs, {
+  if (options.invalidate !== false) await invalidateArticleContent([...result.docs, ...result.publicDocs], {
     previousDocs: result.previousDocs,
     reason: options.reason || 'article_update', publicVisibilityRemoved: true,
   });

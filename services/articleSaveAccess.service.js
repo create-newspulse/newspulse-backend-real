@@ -12,7 +12,7 @@ const { logAudit } = require('../lib/audit');
 const { loadRoleForUser, isSafeZoneMasterLocked } = require('../middleware/requireAuth');
 const { evaluateModuleAccess, getFounderModulePolicy } = require('./founderAccessPolicyService');
 const { buildStoryIdentityFilter, getStoryKeys } = require('./articleSlugUniqueness.service');
-const { buildPublicArticleMatch } = require('./syncPublicArticleFromNews.service');
+const { buildPublicArticleMatch, publicCopyCandidates } = require('./syncPublicArticleFromNews.service');
 const { isFaithTopicSyncChild } = require('./translationGroupSync.service');
 const { isPubliclyVisibleNewsArticle } = require('./publicArticleVisibility.service');
 const { buildPublicCopyFilter } = require('./articleLifecycle.service');
@@ -58,6 +58,20 @@ function sameValue(left, right) {
   return isDeepStrictEqual(normalize(left), normalize(right));
 }
 
+function unchangedControl(key, value, doc) {
+  const previous = key === 'id' ? String(doc._id || '') : valueAt(doc, key);
+  const supplied = key === 'status' && typeof value === 'string' ? value.trim().toLowerCase() : value;
+  return sameValue(supplied, previous);
+}
+
+function hasUnchangedArticleControls(body, docLike) {
+  const doc = plain(docLike) || {};
+  return Object.entries(body || {}).every(([key, value]) => {
+    if (key.startsWith('$') || key.split('.').some(part => ['__proto__', 'prototype', 'constructor'].includes(part))) return false;
+    return !CONTROL_FIELDS.has(key.split('.')[0]) || unchangedControl(key, value, doc);
+  });
+}
+
 function contentSaveBody(body, docLike, isFounder = false, { ignoreComputed = false } = {}) {
   if (isFounder) return { ...body };
   const doc = plain(docLike) || {};
@@ -69,14 +83,12 @@ function contentSaveBody(body, docLike, isFounder = false, { ignoreComputed = fa
       out[key] = value;
       continue;
     }
-    const previous = key === 'id' ? String(doc._id || '') : valueAt(doc, key);
-    const supplied = key === 'status' && typeof value === 'string' ? value.trim().toLowerCase() : value;
-    if (!sameValue(supplied, previous)) throw saveDenied();
+    if (!unchangedControl(key, value, doc)) throw saveDenied();
   }
   return out;
 }
 
-function assertCopyState(copy, source, kind, newsIds, publishing = false) {
+function assertCopyState(copy, source, kind, newsIds, publishing = false, preservePublicationMetadata = false) {
   if (String(copy.status || '') !== String(source.status || '')) throw saveDenied();
   if (kind === 'draft' && (!newsIds.has(String(copy.sourceNewsId || ''))
     || copy.status !== (publishing ? 'published' : 'draft') || copy.deletedAt)) {
@@ -90,6 +102,7 @@ function assertCopyState(copy, source, kind, newsIds, publishing = false) {
       .sort((a, b) => new Date(b) - new Date(a))[0] || null,
   };
   for (const field of PUBLIC_VISIBILITY_FIELDS.filter(key => key !== 'status')) {
+    if (field === 'publishedAt' && preservePublicationMetadata) continue;
     if (field === 'publishedAt' && source.status === 'published' && !source.publishedAt) continue;
     const oldValue = copy[field];
     const newValue = next[field];
@@ -131,7 +144,8 @@ async function resolveArticleEditAccess(user, session) {
 
 async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
   publicOnly = false, checkIntent = true, faithTopicOnly = false, publicSync = true, ignoreComputed = false,
-  draftTranslation = false, syncDrafts = false, publication = false, newArticle = false,
+  draftTranslation = false, syncDrafts = false, publication = false, newArticle = false, preserveDeletedEditions = false,
+  preservePublicationMetadata = false,
 } = {}) {
   try {
     const user = await loadArticleMutationActor(req, session, publication ? publicationDenied : saveDenied);
@@ -149,6 +163,7 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
     const prospective = { ...source, ...patch };
     const records = await News.find({
       $or: [buildStoryIdentityFilter(source), buildStoryIdentityFilter(prospective)],
+      ...(preserveDeletedEditions ? { status: { $ne: 'deleted' }, deletedAt: null } : {}),
     }, null, { session }).select('+createdByUserId').lean();
     const existingIds = records.map(doc => doc._id);
     if (newArticle) {
@@ -200,9 +215,13 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
     const copies = new Map();
     const finalCopySources = new Map();
     for (const doc of publicRecords) {
-      const matches = await PublicArticle.find(buildPublicArticleMatch(doc, {
+      const copyOptions = {
         previousDoc: String(doc._id) === String(source._id) ? source : undefined,
-      }), null, { session }).lean();
+        session, preserveDeletedEditions, preservePublicationMetadata,
+      };
+      const matches = preservePublicationMetadata
+        ? (await publicCopyCandidates(doc, copyOptions)).copies
+        : await PublicArticle.find(buildPublicArticleMatch(doc, copyOptions), null, { session }).lean();
       for (const copy of matches) {
         copies.set(String(copy._id), copy);
         finalCopySources.set(String(copy._id), doc);
@@ -212,7 +231,7 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
       if (publication && (!ids.has(String(copy.sourceNewsId || ''))
         || (copy.sourceArticleId && !ids.has(String(copy.sourceArticleId)))
         || getStoryKeys(copy).some(key => !groupKeys.has(key)))) throw publicationDenied();
-      assertCopyState(copy, finalCopySources.get(id), kind, ids);
+      assertCopyState(copy, finalCopySources.get(id), kind, ids, false, preservePublicationMetadata);
     }
     if (publication) {
       const groupCopies = await PublicArticle.find(buildPublicCopyFilter(records), null, { session }).lean();
@@ -294,7 +313,9 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
         }
         if (matches.length) {
           const copy = matches[0];
-          writtenCopySources.set(String(copy._id), plain(doc));
+          writtenCopySources.set(String(copy._id), preservePublicationMetadata
+            ? { ...plain(doc), ...Object.fromEntries(PUBLIC_VISIBILITY_FIELDS.map(field => [field, copy[field]])), workflow: undefined }
+            : plain(doc));
           return {
             filter: { $and: [filter, { _id: copy._id, status: copy.status }] },
             upsert: false,
@@ -345,10 +366,12 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
   }
 }
 
-function articleSaveAuthorizer(req, patch = {}, { followUp = false, faithTopicOnly = false } = {}) {
+function articleSaveAuthorizer(req, patch = {}, {
+  followUp = false, faithTopicOnly = false, preserveDeletedEditions = false, preservePublicationMetadata = false,
+} = {}) {
   return (source, session, transaction) => authorizeArticleSave(req, source, patch, session, {
     checkIntent: !followUp && !transaction.saveIntentValidated,
-    publicSync: !followUp, faithTopicOnly, ignoreComputed: true,
+    publicSync: !followUp, faithTopicOnly, ignoreComputed: true, preserveDeletedEditions, preservePublicationMetadata,
   });
 }
 
@@ -424,5 +447,5 @@ async function authorizeArticleCreation(req, docLike, session, { publication = f
 module.exports = {
   authorizeArticleSave, articleSaveAuthorizer, articleTranslationAuthorizer, authorizeArticleCreation,
   articlePublicationAuthorizer,
-  contentSaveBody, saveDenied, scopeChanged,
+  contentSaveBody, hasUnchangedArticleControls, saveDenied, scopeChanged,
 };

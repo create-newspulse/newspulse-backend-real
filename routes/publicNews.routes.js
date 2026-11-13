@@ -105,6 +105,7 @@ router.get('/breaking', noCache, listPublicBreakingNews);
 
 // GET /api/public/news/translations/:translationGroupId
 router.get('/translations/:translationGroupId', listPublicNewsTranslations);
+router.get('/group/:translationGroupId', listPublicNewsTranslations);
 
 // GET /api/public/news/translation?translationKey=...&lang=...
 router.get('/translation', getPublicNewsByTranslationKey);

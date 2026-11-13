@@ -45,7 +45,7 @@ const {
   hasVisibleNewsSource,
 } = require('../services/publicArticleVisibility.service');
 
-const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
+const { syncPublicArticleFromNews, assertPublicArticleSaveOwnership } = require('../services/syncPublicArticleFromNews.service');
 const { ensureTrackTag, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { normalizeSpotlightPriority } = require('../services/spotlightPriority.service');
 const {
@@ -75,7 +75,10 @@ const {
   buildPublicContentSiblingOrClauses,
   pickBestLocalizedGroupDoc,
 } = require('../services/publicCategoryListing.service');
-const { buildTranslationGroupStatus } = require('../services/translationGroupStatus');
+const {
+  loadTranslationGroupStatus, TRANSLATION_GROUP_FIELDS, TRANSLATION_SOURCE_IDENTITY_INVALID,
+  resolveArticleSaveIdentity, assertArticleSaveLanguage, translationSourceIdentityError,
+} = require('../services/translationGroupStatus');
 const {
   enqueueTranslateAndSave,
 } = require('../services/publishAsyncTranslation.service');
@@ -92,7 +95,7 @@ const { invalidateArticleCaches } = require('../lib/cache');
 const { logAudit } = require('../lib/audit');
 const { isContentDatabaseUnavailable } = require('../lib/contentErrors');
 const {
-  authorizeArticleSave, articleSaveAuthorizer, contentSaveBody, scopeChanged,
+  authorizeArticleSave, articleSaveAuthorizer, contentSaveBody, hasUnchangedArticleControls, scopeChanged,
   articleTranslationAuthorizer, authorizeArticleCreation, articlePublicationAuthorizer,
 } = require('../services/articleSaveAccess.service');
 
@@ -859,6 +862,16 @@ function _isSourceTranslationDoc(docLike, fallbackId) {
   return !sourceId || (ownId && sourceId === ownId);
 }
 
+function assertContentSaveSourceIdentity(body, current, identity) {
+  if (!Object.prototype.hasOwnProperty.call(body, 'sourceArticleId')) return;
+  const value = body.sourceArticleId;
+  const supplied = value == null || value === '' ? null : _normalizeSourceArticleId(value)?.toLowerCase();
+  const stored = current.sourceArticleId ? String(current.sourceArticleId).toLowerCase() : null;
+  if (supplied !== undefined && (supplied === stored
+    || (identity.kind !== 'unresolved' && supplied === identity.sourceArticleId))) return;
+  throw translationSourceIdentityError('Source identity cannot be changed by an article content save.');
+}
+
 function _buildSharedSyncFieldsFromBody(body) {
   const externalUrls = _parseStringListInput(body?.externalUrls);
   const embeds = _parseStringListInput(body?.embeds);
@@ -1028,6 +1041,15 @@ function hasArticleContentEdit(update, before) {
     || Object.prototype.hasOwnProperty.call(update, 'seo')
     || Object.prototype.hasOwnProperty.call(update, 'coverImage')
   ));
+}
+
+function isIdentityPreservingContentSave(body, current) {
+  const language = getStoredArticleEffectiveLanguage(current);
+  return Boolean(current && (hasArticleContentEdit(body) || Object.prototype.hasOwnProperty.call(body, 'body'))
+    && hasUnchangedArticleControls(body, current)
+    && ['language', 'lang'].every(key => body[key] === undefined || normalizeLanguage(body[key]) === language)
+    && (body.originalLang === undefined || normalizeLanguage(body.originalLang) === normalizeLanguage(current.originalLang))
+    && (body.slug === undefined || normalizeSlug(body.slug) === normalizeSlug(current.slug)));
 }
 
 // POST /api/admin/articles/media/image -> upload inline rich-text article image
@@ -2311,17 +2333,11 @@ router.get('/articles/:id/translation-status', requireAdminModule('manageNews'),
     }
 
     const doc = await News.findById(rawId)
-      .select('title slug lang language originalLang translationStatus translationError translationUpdatedAt translationNextRetryAt translationKey translationGroupId')
+      .select(`${TRANSLATION_GROUP_FIELDS} translationStatus translationError translationUpdatedAt translationNextRetryAt`)
       .lean();
     if (!doc) return res.status(404).json({ ok: false, success: false, message: 'Article not found' });
 
-    const groupKey = String(doc.translationKey || doc.translationGroupId || '').trim();
-    const groupDocs = groupKey
-      ? await News.find({ $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }] })
-        .select('_id lang language originalLang translationKey translationGroupId title slug status')
-        .lean()
-      : [doc];
-    const groupStatus = buildTranslationGroupStatus(doc, groupDocs);
+    const { groupStatus, groupKey } = await loadTranslationGroupStatus(doc, { editorRead: true });
 
     const baseLang = groupStatus.baseLang;
     const out = {
@@ -2377,6 +2393,9 @@ router.get('/articles/:id/translation-status', requireAdminModule('manageNews'),
     return res.json({ ok: true, success: true, data: out });
   } catch (e) {
     console.error('[ADMIN_ARTICLES][translation-status-error]', e?.message || e);
+    if (e?.code === TRANSLATION_SOURCE_IDENTITY_INVALID) {
+      return res.status(409).json({ ok: false, success: false, code: e.code, message: e.message });
+    }
     return res.status(500).json({ ok: false, success: false, message: 'Internal error' });
   }
 });
@@ -2643,6 +2662,7 @@ router.get('/articles/:id', optionalAdminAuth, authorizeAdminArticleDetail, asyn
     let doc = isAdminRequest
       ? await News.findById(rawId)
       : await News.findOne({ ...buildPubliclyVisibleNewsArticleFilter(), _id: rawId }).lean();
+    let isPublicCopy = false;
 
     // Fallback: some deployments/edit flows reference the public Article model by id.
     if (!doc) {
@@ -2650,6 +2670,7 @@ router.get('/articles/:id', optionalAdminAuth, authorizeAdminArticleDetail, asyn
         ? await PublicArticle.findById(rawId)
         : await PublicArticle.findOne({ ...buildPubliclyVisiblePublicArticleFilter(), _id: rawId }).lean();
       if (doc && !isAdminRequest && !await hasVisibleNewsSource(doc)) doc = null;
+      isPublicCopy = Boolean(doc);
     }
 
     if (!doc) {
@@ -2658,6 +2679,12 @@ router.get('/articles/:id', optionalAdminAuth, authorizeAdminArticleDetail, asyn
 
     const obj = doc.toObject ? doc.toObject({ virtuals: true }) : doc;
     const out0 = withCoverImageUrl(isAdminRequest ? obj : withPublicAuthorByline(obj));
+
+    let translationGroupStatus;
+    if (isAdminRequest && isAdminArticleDetailRequest(req)) {
+      const result = await loadTranslationGroupStatus(out0, { publicCopy: isPublicCopy, editorRead: true });
+      translationGroupStatus = result.groupStatus;
+    }
 
     const localized = await (async () => {
       if (!langNorm) {
@@ -2683,17 +2710,6 @@ router.get('/articles/:id', optionalAdminAuth, authorizeAdminArticleDetail, asyn
     })();
 
     const out = isAdminRequest ? localized.out : serializePublicArticle(localized.out);
-
-    let translationGroupStatus;
-    if (isAdminRequest && isAdminArticleDetailRequest(req)) {
-      const groupKey = String(out0?.translationKey || out0?.translationGroupId || '').trim();
-      const groupDocs = groupKey
-        ? await News.find({ $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }] })
-          .select('_id lang language originalLang translationKey translationGroupId title slug status')
-          .lean()
-        : [out0];
-      translationGroupStatus = buildTranslationGroupStatus(out0, groupDocs);
-    }
 
     if (langNorm && localized.translationPending) {
       try {
@@ -2863,6 +2879,67 @@ async function updateArticle(req, res, next) {
         return res.status(409).json({ ok: false, message: 'Article category changed; reload and retry the update' });
       }
     }
+    const isStatusOnlyRequest = Object.keys(requestBody).every((key) => ['status', 'reason', 'publishedAt'].includes(key));
+    const unchangedContentControls = before && before.status !== 'deleted' && !before.deletedAt
+      && isIdentityPreservingContentSave(requestBody, before);
+    const preservePublicationMetadata = Boolean(unchangedContentControls && before.status === 'published');
+    const unchangedDraft = unchangedContentControls && requestedStatusNorm === 'draft' && before.status === 'draft';
+    const unchangedSchedule = unchangedContentControls && scheduled === null
+      && before.scheduledAt == null && before.publishAt == null && (!requestedStatusNorm || unchangedDraft);
+    const allowDeletedDuplicates = Boolean(before && before.status !== 'deleted' && !before.deletedAt
+      && !isStatusOnlyRequest && (scheduled === undefined || unchangedSchedule)
+      && (!requestedStatusNorm || (requestedStatusNorm === 'published' && before.status === 'published') || unchangedDraft));
+    const saveIdentity = before ? await resolveArticleSaveIdentity(before, {
+      allowDeletedDuplicates, includeGroupStatus: Boolean(unchangedDraft),
+    }) : null;
+    const verifiedSaveIdentity = saveIdentity?.kind === 'source' || saveIdentity?.kind === 'translation';
+    // Draft on one edition can still be a real group withdrawal when another edition is published.
+    const ignoreDraftControl = Boolean(unchangedDraft && verifiedSaveIdentity && saveIdentity.allActiveEditionsDraft);
+    if (unchangedDraft && !ignoreDraftControl && saveIdentity?.deletedEditionIds?.length) {
+      throw translationSourceIdentityError('Draft status would change other active editions in the historical group.');
+    }
+    const ignoreScheduleControl = Boolean(unchangedSchedule && verifiedSaveIdentity
+      && (!requestedStatusNorm || ignoreDraftControl));
+    if (ignoreDraftControl) {
+      status = undefined;
+      requestedStatusNorm = '';
+    }
+    if (ignoreScheduleControl) scheduled = undefined;
+    const preserveDeletedEditions = Boolean(saveIdentity?.deletedEditionIds?.length);
+    const hasChildSourceLink = before && [before.sourceArticleId, before.translationMeta?.sourceArticleId]
+      .some(id => id && String(id).toLowerCase() !== String(before._id).toLowerCase());
+    const canEditSourceMetadata = saveIdentity?.kind === 'source'
+      || (saveIdentity?.standalone && !hasChildSourceLink);
+    const identitySafeAuthorizer = (authorize, patch = update) => async (current, session, transaction) => {
+      const scope = await authorize(current, session, transaction);
+      if (transaction && !transaction.saveIntentValidated) {
+        // A no-op decision must still hold against the transaction's current state, including retries.
+        if ((ignoreDraftControl || ignoreScheduleControl || preservePublicationMetadata)
+          && (!isIdentityPreservingContentSave(requestBody, current)
+            || (preservePublicationMetadata && current.status !== 'published')
+            || (ignoreScheduleControl && (current.scheduledAt != null || current.publishAt != null)))) {
+          throw scopeChanged();
+        }
+        const identity = await resolveArticleSaveIdentity(current, {
+          session, allowDeletedDuplicates, includeGroupStatus: Boolean(unchangedDraft),
+        });
+        if (JSON.stringify(identity) !== JSON.stringify(saveIdentity)) throw scopeChanged();
+        assertContentSaveSourceIdentity(requestBody, current, identity);
+        assertArticleSaveLanguage(current, { ...current, ...patch }, identity);
+        if (preserveDeletedEditions && [
+          'language', 'lang', 'originalLang', 'sourceArticleId', 'sourceLanguage', 'translationGroupId', 'translationKey',
+          'slug', 'status', 'deletedAt', 'publishedAt', 'publishAt', 'scheduledAt',
+        ].some(field => patch[field] !== undefined && String(patch[field] ?? '') !== String(current[field] ?? ''))) {
+          throw translationSourceIdentityError('Identity or lifecycle changes require review of the complete historical edition group.');
+        }
+      }
+      if (transaction) {
+        transaction.preserveDeletedEditions = preserveDeletedEditions;
+        transaction.preservePublicationMetadata = preservePublicationMetadata;
+      }
+      await assertPublicArticleSaveOwnership(current, { session, patch, preserveDeletedEditions, preservePublicationMetadata });
+      return scope;
+    };
     const faithTopicPatch = buildFaithTopicPatch({
       category,
       existingCategory: before?.category,
@@ -2872,9 +2949,12 @@ async function updateArticle(req, res, next) {
     if (!faithTopicPatch.ok) {
       return res.status(400).json({ ok: false, success: false, message: faithTopicPatch.message });
     }
-    if (before && faithTopicPatch.value !== undefined && !_isSourceTranslationDoc(before, rawId)) {
+    if (before && faithTopicPatch.value !== undefined && !canEditSourceMetadata) {
       const previousTopic = String(before.topic ?? '').trim().toLowerCase() || null;
       if (faithTopicPatch.value !== previousTopic) {
+        if (saveIdentity.kind === 'unresolved') {
+          throw translationSourceIdentityError('The source for this topic change cannot be verified.');
+        }
         return res.status(409).json({ ok: false, message: 'Change the Faith topic on the source article to keep translations aligned' });
       }
       faithTopicPatch.value = undefined;
@@ -2883,7 +2963,6 @@ async function updateArticle(req, res, next) {
 
     const beforeStatusForLifecycle = String(before?.status || '').toLowerCase();
     const isLifecycleTakedownStatus = requestedStatusNorm === 'draft' || requestedStatusNorm === 'archived';
-    const isStatusOnlyRequest = Object.keys(requestBody).every((key) => ['status', 'reason', 'publishedAt'].includes(key));
     if (beforeStatusForLifecycle === 'deleted') {
       if (requestedStatusNorm && isStatusOnlyRequest) {
         return restoreArticle(req, res, rawId, { authorizeSave: articleSaveAuthorizer(req) });
@@ -3004,8 +3083,11 @@ async function updateArticle(req, res, next) {
       return res.status(pulseDialogueFields.status || 400).json({ ok: false, success: false, message: pulseDialogueFields.message });
     }
     const authorByline = await buildAuthorBylinePatch(requestBody, { ...before, category: category ?? before?.category });
-    if (authorByline !== undefined && before && !_isSourceTranslationDoc(before, rawId)
+    if (authorByline !== undefined && before && !canEditSourceMetadata
       && JSON.stringify(publicAuthorByline(authorByline)) !== JSON.stringify(publicAuthorByline(before.authorByline))) {
+      if (saveIdentity.kind === 'unresolved') {
+        throw translationSourceIdentityError('The source for this author byline change cannot be verified.');
+      }
       return res.status(409).json({ ok: false, message: 'Change the author byline on the source article to keep translations aligned' });
     }
 
@@ -3037,7 +3119,7 @@ async function updateArticle(req, res, next) {
           ...(imageURL === undefined ? { imageURL: nextCover.url } : {}),
         } : {}),
       } : {}),
-      ...(resolvedSlug !== undefined ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
+      ...(resolvedSlug !== undefined && !preservePublicationMetadata ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
       ...sharedSyncFields,
       ...sponsoredArticleFields.value,
       ..._buildPulseDialogueDotSet(pulseDialogueFields.value),
@@ -3045,17 +3127,20 @@ async function updateArticle(req, res, next) {
 
     // Defensive: remove any accidental undefined keys before updates.
     _stripUndefinedKeysInPlace(update);
+    delete update.sourceArticleId;
     if (editorialPatch.shouldUnset) {
       delete update.editorialType;
     }
 
-    if (before && _isSourceTranslationDoc(before, rawId) && isFaithTopicOnlyUpdate(before, update, {
+    if (before && canEditSourceMetadata && isFaithTopicOnlyUpdate(before, update, {
       ignoreLanguageRepair: shouldFixMislabel && !requestedLanguageChangesIdentity,
     })) {
       const result = await inArticleTransaction(async (session, transaction) => {
         const current = await News.findById(rawId, null, { session }).lean();
         if (!current) throw scopeChanged();
-        transaction.authorizeSave = articleSaveAuthorizer(req, update, { faithTopicOnly: true });
+        transaction.authorizeSave = identitySafeAuthorizer(
+          articleSaveAuthorizer(req, update, { faithTopicOnly: true, preserveDeletedEditions }), { topic: update.topic }
+        );
         transaction.saveScope = await transaction.authorizeSave(current, session, transaction);
         transaction.saveIntentValidated = true;
         const { lastSyncedAt, syncVersion, contentFingerprint } = prepareSourceSyncMetadata({ ...before, topic: update.topic });
@@ -3072,6 +3157,7 @@ async function updateArticle(req, res, next) {
           faithTopicOnly: true,
           requireFaithTopicSync: true,
           invalidate: true,
+          preserveSourceIdentity: saveIdentity,
         });
         return { doc, sync };
       });
@@ -3110,7 +3196,8 @@ async function updateArticle(req, res, next) {
     const isRestoringDeleted = beforeStatusNorm === 'deleted' && nextStatusNorm && nextStatusNorm !== 'deleted';
     const nextEffectiveStatus = nextStatusNorm || beforeStatusNorm;
     const willOccupyActiveLanguageSlot = nextEffectiveStatus !== 'deleted';
-    const shouldTreatAsSyncSource = _isSourceTranslationDoc(before, rawId);
+    const shouldUpdateSyncMetadata = saveIdentity?.kind === 'source'
+      || (saveIdentity?.kind === 'unresolved' && !hasChildSourceLink);
     if (willOccupyActiveLanguageSlot && (before?.translationGroupId || before?.translationKey) && effectiveLang) {
       await assertTranslationGroupLanguageUnique(before?.translationGroupId || before?.translationKey, effectiveLang, rawId);
     }
@@ -3142,6 +3229,7 @@ async function updateArticle(req, res, next) {
           if (!doc) throw Object.assign(new Error('Article not found'), { statusCode: 404 });
           const groupSync = await syncTranslationGroupMetadata(doc, {
             ...transaction, previousDoc: current, patch: prePublishUpdate, invalidate: false,
+            preserveSourceIdentity: saveIdentity,
           });
           return publishCanonicalArticle(doc, {
             ...transaction, req,
@@ -3149,7 +3237,7 @@ async function updateArticle(req, res, next) {
             reason: requestBody.reason || null,
             source: 'article_update_publish',
           });
-        }, { authorizeSave: articlePublicationAuthorizer(req, prePublishUpdate) });
+        }, { authorizeSave: identitySafeAuthorizer(articlePublicationAuthorizer(req, prePublishUpdate), prePublishUpdate) });
       } catch (publishErr) {
         return res.status(publishErr?.statusCode || publishErr?.status || 500).json({
           ok: false,
@@ -3227,7 +3315,7 @@ async function updateArticle(req, res, next) {
       update.stateNames = [];
     }
 
-    if (shouldTreatAsSyncSource) {
+    if (shouldUpdateSyncMetadata) {
       const now = new Date();
       const syncMetadata = prepareSourceSyncMetadata({
         ...before,
@@ -3238,7 +3326,12 @@ async function updateArticle(req, res, next) {
         translationError: before?.translationError,
         translationNextRetryAt: before?.translationNextRetryAt,
         translationUpdatedAt: before?.translationUpdatedAt,
+        ...(saveIdentity.kind === 'source' ? { sourceLanguage: saveIdentity.sourceLanguage } : {}),
       }, { now });
+      if (saveIdentity.kind !== 'source' || preserveDeletedEditions) {
+        delete syncMetadata.sourceArticleId;
+        delete syncMetadata.sourceLanguage;
+      }
       Object.assign(update, syncMetadata);
     }
 
@@ -3292,12 +3385,13 @@ async function updateArticle(req, res, next) {
           const edited = await News.findByIdAndUpdate(rawId, updateOp, { new: true, runValidators: !metaOnly, session });
           if (!edited) throw Object.assign(new Error('Article changed. Reload and retry.'), { statusCode: 409 });
           if (!metaOnly) {
-            ensureNewsSlugs(edited);
+            if (!preservePublicationMetadata) ensureNewsSlugs(edited);
             transaction.saveScope?.bindNewsDocument(edited);
             await edited.save({ validateModifiedOnly: true, session });
           }
           const groupSync = await syncTranslationGroupMetadata(edited, {
             ...transaction, patch: update, previousDoc: current, invalidate: false,
+            preserveSourceIdentity: saveIdentity,
           });
           const result = ['draft', 'scheduled', 'archived'].includes(nextStatusNorm)
             ? await changeArticleGroupStatus(rawId, nextStatusNorm, {
@@ -3307,22 +3401,26 @@ async function updateArticle(req, res, next) {
           result.doc = result.doc || groupSync.docs.find(member => String(member._id) === rawId);
           result.publicSync = groupSync.publicSync;
           if (result === groupSync) transaction.afterCommit.push(async () => {
-            result.revalidation = await invalidateArticleContent(result.docs, {
+            result.revalidation = await invalidateArticleContent([...result.docs, ...(result.publicDocs || [])], {
               previousDocs: [before, ...result.previousDocs], reason: 'article_update', publicVisibilityRemoved: true,
             });
           });
           if (hasArticleContentEdit(update)) {
-            await markSiblingTranslationsOutdated(edited, { reason: 'source_updated', session, saveScope: transaction.saveScope });
+            await markSiblingTranslationsOutdated(edited, {
+              reason: 'source_updated', session, saveScope: transaction.saveScope, preserveDeletedEditions,
+            });
             transaction.afterCommit.push(() => enqueueArticleTranslationGeneration(result.doc, {
               requestedBy: getActor(req).byUserId ? String(getActor(req).byUserId) : getActor(req).byRole,
-              authorizeSave: articleSaveAuthorizer(req, {}, { followUp: true }),
+              authorizeSave: preserveDeletedEditions
+                ? identitySafeAuthorizer(articleSaveAuthorizer(req, {}, { followUp: true, preserveDeletedEditions }), {})
+                : articleSaveAuthorizer(req, {}, { followUp: true }),
             }));
           }
           return result;
-        }, { authorizeSave: async (source, session, transaction) => {
+        }, { authorizeSave: identitySafeAuthorizer(async (source, session, transaction) => {
           if (isSchedulingNow) await requireFounderArticleMutation(req, session);
-          return articleSaveAuthorizer(req, update)(source, session, transaction);
-        } });
+          return articleSaveAuthorizer(req, update, { preserveDeletedEditions, preservePublicationMetadata })(source, session, transaction);
+        }) });
         doc = mutationResult.doc;
         publicSync = mutationResult.publicSync;
       }
@@ -3479,6 +3577,7 @@ async function updateArticle(req, res, next) {
     });
   } catch (err) {
     console.error('[articles.update] failed', { code: err?.code || null, status: err?.statusCode || err?.status || 500 });
+    if (err?.code === TRANSLATION_SOURCE_IDENTITY_INVALID) return lifecycleError(res, err);
     if (err?.status === 409) {
       return res.status(409).json({ ok: false, success: false, message: err.message || 'Slug already exists' });
     }

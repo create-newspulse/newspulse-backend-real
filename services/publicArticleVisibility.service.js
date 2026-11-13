@@ -78,13 +78,10 @@ function isEditorialRankingEligible(doc) {
 }
 
 async function hasVisibleNewsSource(doc) {
-  const sourceId = doc?.sourceNewsId || doc?.sourceArticleId;
-  if (!sourceId) return true;
-  const News = require('../models/News');
-  const source = await News.findOne({
-    ...buildPubliclyVisibleNewsArticleFilter(), _id: sourceId,
-  }).select('_id').lean();
-  return Boolean(source);
+  // Load lazily because listing validation uses the visibility predicates above.
+  const { filterPublicListingCandidates } = require('./publicArticleListing.service');
+  const eligible = await filterPublicListingCandidates([doc]);
+  return eligible.length === 1;
 }
 
 module.exports = {

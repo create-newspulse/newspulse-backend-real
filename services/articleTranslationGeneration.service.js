@@ -10,8 +10,8 @@ const { applyPulseDialogueStandardText } = require('./pulseDialogue.service');
 const { sponsoredArticleFields } = require('./syncPublicArticleFromNews.service');
 const { withActiveArticleSource, afterArticleCommit, inArticleTransaction } = require('./articleLifecycle.service');
 const { articleTranslationAuthorizer } = require('./articleSaveAccess.service');
-const { assertArticleSlugsUnique } = require('./articleSlugUniqueness.service');
-const { syncTranslationGroupMetadata } = require('./translationGroupSync.service');
+const { assertArticleSlugsUnique, getStoryKeys } = require('./articleSlugUniqueness.service');
+const { syncTranslationGroupMetadata, normalizeTranslationGroupKey } = require('./translationGroupSync.service');
 const { invalidateArticleContent } = require('./publicContentInvalidation.service');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
@@ -259,7 +259,7 @@ async function ensureSourceGroup(sourceDoc, groupKey, session) {
 }
 
 function assertCurrentSource(source, groupKey, sourceHash) {
-  const currentGroup = source.translationGroupId || source.translationKey;
+  const currentGroup = normalizeTranslationGroupKey(source.translationGroupId) || normalizeTranslationGroupKey(source.translationKey);
   if ((currentGroup && String(currentGroup) !== groupKey) || sourceHashForDoc(source) !== sourceHash) {
     throw Object.assign(new Error('The source story changed. Translation was cancelled; retry with the current edition.'), {
       statusCode: 409, code: 'TRANSLATION_SOURCE_CHANGED',
@@ -430,7 +430,7 @@ async function enqueueArticleTranslationGeneration(sourceDocInput, options = {})
   if (!canWriteTranslationJob()) return null;
   const sourceHash = sourceHashForDoc(source);
   return withActiveArticleSource(source._id, async (current, session) => {
-    assertCurrentSource(current, String(source.translationGroupId || source.translationKey || ''), sourceHash);
+    assertCurrentSource(current, getStoryKeys(source)[0] || '', sourceHash);
     const sourceLanguage = (await resolveSourceLanguage(source, options)).lang;
     const enabledLanguages = await getEnabledPublicLanguages({ readOnly: Boolean(options.authorizeSave), session });
     const targetLanguages = enabledLanguages.filter((lang) => lang !== sourceLanguage);
@@ -452,6 +452,7 @@ async function markSiblingTranslationsOutdated(sourceDocInput, options = {}) {
       { humanEdited: { $ne: true } },
     ],
   };
+  if (options.preserveDeletedEditions) filter.$and.push({ status: { $ne: 'deleted' }, deletedAt: null });
   if (sourceLanguage) filter.$and.push({ $or: [{ language: { $ne: sourceLanguage } }, { lang: { $ne: sourceLanguage } }] });
   if (options.saveScope) {
     const members = await News.find(filter, null, { session: options.session }).lean();

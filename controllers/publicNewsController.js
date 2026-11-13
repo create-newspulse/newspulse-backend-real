@@ -16,6 +16,7 @@ const {
   isPubliclyVisibleNewsArticle,
 } = require('../services/publicArticleVisibility.service');
 const { getLinkedSponsoredFeatureForArticle } = require('../services/sponsoredFeatures.service');
+const { publicCopyCandidates } = require('../services/syncPublicArticleFromNews.service');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey, getPublicCategoryMatchValues } = require('../lib/categories');
 const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode, detectSlugLocale } = require('../lib/slug');
@@ -643,6 +644,7 @@ const PUBLIC_ARTICLE_DETAIL_SELECT = [
   'translationGroupId',
   'sourceNewsId',
   'sourceArticleId',
+  'translationMeta.sourceArticleId',
   'spotlightEnabled',
   'spotlightPinned',
   'spotlightPriority',
@@ -823,6 +825,39 @@ function attachMobileResponseFields(obj, { includeBody = false } = {}) {
   }
 
   return serializePublicArticle(out);
+}
+
+async function withPublicCopyPublication(doc) {
+  let copies;
+  try {
+    ({ copies } = await publicCopyCandidates(doc, { preservePublicationMetadata: true }));
+  } catch (error) {
+    if (error?.code !== 'TRANSLATION_SOURCE_IDENTITY_INVALID') throw error;
+    // A conflicting projection must not hide an independently visible CMS article.
+    console.warn('[public-news] Ignored conflicting public-copy metadata', { code: error.code });
+    return doc;
+  }
+  const copy = copies[0];
+  if (!copy || !isPubliclyVisibleNewsArticle(copy) || !await hasVisibleNewsSource(copy)) return doc;
+  return { ...doc, slug: copy.slug, slugs: copy.slugs || null, publishedAt: copy.publishedAt ?? null };
+}
+
+async function findPublicNewsFallback(slugOrId) {
+  const base = buildPubliclyVisiblePublicArticleFilter();
+  const lookup = isObjectIdLike(slugOrId) ? { _id: slugOrId } : {
+    $or: ['slug', 'slugs.en', 'slugs.hi', 'slugs.gu'].map(field => ({
+      [field]: { $in: getSlugCandidates(slugOrId) },
+    })),
+  };
+  const copy = await PublicArticle.findOne({
+    ...base, $and: [...(base.$and || []), lookup],
+  }).select(PUBLIC_ARTICLE_DETAIL_SELECT).lean();
+  if (!copy || !await hasVisibleNewsSource(copy)) return null;
+  if (!copy.sourceNewsId) return { doc: _mapPublicArticleToNewsLikeShape(copy), docSource: 'publicArticle' };
+  const doc = await News.findOne({
+    ...buildPublicPublishedFilter({}), _id: copy.sourceNewsId,
+  }).select(PUBLIC_DETAIL_SELECT).lean();
+  return doc ? { doc, docSource: 'news' } : null;
 }
 
 function pickCanonicalSlug(doc, lang) {
@@ -1724,7 +1759,8 @@ async function listPublicNewsTranslations(req, res) {
       .sort({ language: 1, publishedAt: -1, createdAt: -1 })
       .lean();
 
-    const items = (itemsRaw || []).map((doc) => attachMobileResponseFields(withCoverImageUrl(doc)));
+    const items = await Promise.all((itemsRaw || []).map(async doc =>
+      attachMobileResponseFields(withCoverImageUrl(await withPublicCopyPublication(doc)))));
     return res.status(200).json(items);
   } catch (e) {
     return publicNewsReadError(res, e);
@@ -1789,46 +1825,10 @@ async function getPublicNewsBySlugOrId(req, res) {
     doc = await News.findOne(lookup).select(PUBLIC_DETAIL_SELECT).lean();
 
     if (!doc) {
-      // Fallback: regional feeds are backed by PublicArticle (_id differs from News).
-      // Try resolving PublicArticle by id/slug, then hop back to News via sourceNewsId when possible.
-      const paBase = buildPubliclyVisiblePublicArticleFilter({});
-      const paLookup = { ...paBase, $and: [...(paBase.$and || [])] };
-
-      if (isObjectIdLike(slugOrIdRaw)) {
-        paLookup._id = slugOrIdRaw;
-      } else {
-        const slugCandidates = getSlugCandidates(slugOrIdRaw);
-        const slugFilter = slugCandidates.length === 1 ? slugCandidates[0] : { $in: slugCandidates };
-        paLookup.$and.push({
-          $or: [
-            { slug: slugFilter },
-            { 'slugs.en': slugFilter },
-            { 'slugs.hi': slugFilter },
-            { 'slugs.gu': slugFilter },
-          ],
-        });
-      }
-
-      const paDoc = await PublicArticle.findOne(paLookup).select(PUBLIC_ARTICLE_DETAIL_SELECT).lean();
-
-      if (paDoc) {
-        debug('resolved_public_article', {
-          publicArticleId: String(paDoc?._id || ''),
-          sourceNewsId: paDoc?.sourceNewsId ? String(paDoc.sourceNewsId) : null,
-          publicArticleLang: String(paDoc?.language || paDoc?.lang || ''),
-        });
-
-        if (paDoc.sourceNewsId) {
-          const bySource = { ...base, _id: paDoc.sourceNewsId, $and: [...(base.$and || [])] };
-          const newsBySource = await News.findOne(bySource).select(PUBLIC_DETAIL_SELECT).lean();
-          if (newsBySource) {
-            doc = newsBySource;
-            docSource = 'news';
-          }
-        } else if (await hasVisibleNewsSource(paDoc)) {
-          doc = _mapPublicArticleToNewsLikeShape(paDoc);
-          docSource = 'publicArticle';
-        }
+      const fallback = await findPublicNewsFallback(slugOrIdRaw);
+      if (fallback) {
+        doc = fallback.doc;
+        docSource = fallback.docSource;
       }
     }
 
@@ -1842,6 +1842,7 @@ async function getPublicNewsBySlugOrId(req, res) {
       doc = siblingForRequestedLang;
       docSource = 'news';
     }
+    if (docSource === 'news') doc = await withPublicCopyPublication(doc);
     const realTranslations = await getPublishedRealTranslationAvailability(doc);
 
     if (_matchesDebugStory(doc, slugOrIdRaw)) {
@@ -2029,12 +2030,21 @@ async function getPublicNewsBySlug(req, res) {
     const requestedLang = getRequestedLang(req);
 
     const fallbackEnabled = isFallbackModeEnabled(req);
-    const doc = await News.findOne({ ...base, $and: [...(base.$and || []), slugClause] }).select(PUBLIC_DETAIL_SELECT).lean();
+    let doc = await News.findOne({ ...base, $and: [...(base.$and || []), slugClause] }).select(PUBLIC_DETAIL_SELECT).lean();
+    let docSource = 'news';
+    if (!doc) {
+      const fallback = await findPublicNewsFallback(rawFromUrl || decodedParam);
+      if (fallback) {
+        doc = fallback.doc;
+        docSource = fallback.docSource;
+      }
+    }
 
     if (!doc) return res.status(404).json({ message: 'Not found' });
 
     const siblingForRequestedLang = await findPublishedTranslationSiblingForLang(doc, requestedLang, PUBLIC_DETAIL_SELECT);
-    const resolvedDoc = siblingForRequestedLang || doc;
+    const resolvedDoc = siblingForRequestedLang || docSource === 'news'
+      ? await withPublicCopyPublication(siblingForRequestedLang || doc) : doc;
     const realTranslations = await getPublishedRealTranslationAvailability(resolvedDoc);
 
     let out = withCoverImageUrl(resolvedDoc);

@@ -23,6 +23,7 @@ function buildArticleRevalidationTargets(docLike) {
   const articleId = doc._id ? String(doc._id) : null;
   const categoryDefinition = category ? getPublicCategoryDefinition(category) : null;
   const publicCategorySlug = categoryDefinition?.publicSlug || getCanonicalPublicCategoryKey(category);
+  const publicCategoryPath = publicCategorySlug === 'regional' ? 'regional/gujarat' : publicCategorySlug;
 
   const paths = _unique([
     '/', '/hi', '/gu', '/latest', '/hi/latest', '/gu/latest',
@@ -31,9 +32,9 @@ function buildArticleRevalidationTargets(docLike) {
     slugs.en ? `/news/${slugs.en}` : null,
     slugs.hi ? `/hi/news/${slugs.hi}` : null,
     slugs.gu ? `/gu/news/${slugs.gu}` : null,
-    publicCategorySlug ? `/category/${publicCategorySlug}` : null,
-    publicCategorySlug ? `/hi/category/${publicCategorySlug}` : null,
-    publicCategorySlug ? `/gu/category/${publicCategorySlug}` : null,
+    publicCategoryPath ? `/${publicCategoryPath}` : null,
+    publicCategoryPath ? `/hi/${publicCategoryPath}` : null,
+    publicCategoryPath ? `/gu/${publicCategoryPath}` : null,
   ].map(_normalizePath));
 
   const tags = _unique([
@@ -90,6 +91,7 @@ async function notifyPublicContentInvalidation(payload = {}, options = {}) {
   if (token) {
     headers.Authorization = `Bearer ${token}`;
     headers['x-revalidate-token'] = token;
+    headers['x-revalidate-secret'] = token;
   }
 
   const body = {
@@ -110,6 +112,12 @@ async function notifyPublicContentInvalidation(payload = {}, options = {}) {
 
     if (!res.ok) {
       throw new Error(`Revalidation endpoint returned HTTP ${res.status}`);
+    }
+    if (res.headers?.get('content-type')?.includes('application/json')) {
+      const delivery = await res.json();
+      if (delivery?.ok === false || (Array.isArray(delivery?.failed) && delivery.failed.length)) {
+        throw new Error('Revalidation endpoint reported incomplete regeneration');
+      }
     }
 
     return { ok: true, delivered: true, reason, paths, tags };
