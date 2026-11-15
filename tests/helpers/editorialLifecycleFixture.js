@@ -7,6 +7,7 @@ const User = require('../../models/User');
 const SiteSettings = require('../../models/SiteSettings');
 const { accountAuthFixture } = require('./accountAuthFixture');
 const { runPipeline } = require('./pulseDialogueAggregate');
+const { publicListingCursor } = require('./publicListingCursor');
 const app = require('../../server');
 
 const models = {
@@ -218,6 +219,12 @@ function installEditorialFixture(context, { staff, modulePolicies } = {}) {
       limit(value) { limit = value; return this; },
       collation() { return this; }, session() { return this; }, maxTimeMS() { return this; },
       lean() { lean = true; return execute(); },
+      cursor(options) {
+        lean = true;
+        const stats = { name, method: 'cursor', selection, options };
+        state.calls.push(stats);
+        return publicListingCursor(execute, stats);
+      },
       then(resolveValue, reject) { return execute().then(resolveValue, reject); },
       catch(reject) { return execute().catch(reject); },
     };
