@@ -331,6 +331,19 @@ This eligibility check runs before selection, counting, and pagination.
 The native-language branch and Gujarati base-language fallback are unchanged.
 Language-variant deduplication remains a separate part of response handling.
 
+Regional cards expose the stored publication status and publication/creation/
+update timestamps; null dates remain null, missing dates remain omitted, and
+translation generation dates are never used as publication timestamps. The
+projection includes `originalLang`, `language`, and legacy `lang`. `language`,
+`lang`, and `resolvedLang` identify the rendered text, while `requestedLang`,
+`isTranslated`, and `isFallback` describe the existing localization decision.
+A Gujarati request that falls back to another original language remains labeled
+with its rendered language. A complete selected translation bucket can establish
+its locale without inventing an unknown original language. Unverifiable required
+status/language evidence or invalid stored dates follows the existing 503 error
+path rather than returning partial metadata. Visibility, geography, translation
+readiness, and pagination behavior remain unchanged.
+
 Public article responses use
 [publicArticleSerializer.service.js](./services/publicArticleSerializer.service.js)
 after eligibility and localization. Its response-only allowlist preserves each

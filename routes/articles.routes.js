@@ -37,7 +37,9 @@ const {
 const { ensureOnDemandNewsTranslation } = require('../services/newsOnDemandTranslation.service');
 const { isGoogleTranslateConfigured } = require('../services/translationEnabled');
 
-const { mapArticleForLang, localizeArticleForLang } = require('../services/mapArticleForLang');
+const {
+  mapArticleForLang, localizeArticleForLang, normalizeLang: normalizeArticleLang,
+} = require('../services/mapArticleForLang');
 
 const {
   buildPubliclyVisibleNewsArticleFilter,
@@ -2241,7 +2243,7 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
 
     const [itemsRaw, total] = await Promise.all([
       PublicArticle.find(filter)
-        .select('title summary content slug slugs language originalLang translations translationStatus coverImage publishedAt createdAt updatedAt geo tags category translationKey translationGroupId spotlightEnabled spotlightPinned spotlightPriority spotlightExpiresAt authorByline.enabled authorByline.snapshot')
+        .select('title summary content slug slugs language lang originalLang translations translationStatus coverImage status publishedAt createdAt updatedAt geo tags category translationKey translationGroupId spotlightEnabled spotlightPinned spotlightPriority spotlightExpiresAt authorByline.enabled authorByline.snapshot')
         .sort({ publishedAt: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -2263,12 +2265,35 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
       const mapped = localizeArticleForLang(doc, desired, { fallbackToBase: desired === 'gu' });
       if (!mapped) continue;
 
+      const originalLang = normalizeArticleLang(doc.originalLang) || normalizeArticleLang(doc.lang || doc.language);
+      const resolvedLang = normalizeArticleLang(mapped.resolvedLang);
+      const invalidDates = ['publishedAt', 'createdAt', 'updatedAt'].some(field => {
+        const value = doc[field];
+        return value != null && (!(value instanceof Date || typeof value === 'string')
+          || !Number.isFinite(new Date(value).getTime()));
+      });
+      if (doc.status !== 'published' || !resolvedLang
+        || (!mapped.isTranslated && originalLang !== resolvedLang) || invalidDates) {
+        throw Object.assign(new Error('Regional article metadata is unavailable. Retry the request.'), { statusCode: 503 });
+      }
+
       const storedSlug = String(doc.slug || mapped.slug || '').trim();
       const out = {
         _id: String(doc._id),
         slug: storedSlug || mapped.slug,
         canonicalSlug: mapped.canonicalSlug,
         slugs: doc.slugs || null,
+        status: doc.status,
+        publishedAt: doc.publishedAt,
+        createdAt: doc.createdAt,
+        updatedAt: doc.updatedAt,
+        language: resolvedLang,
+        lang: resolvedLang,
+        ...(originalLang ? { originalLang } : {}),
+        requestedLang: mapped.requestedLang,
+        resolvedLang,
+        isTranslated: Boolean(mapped.isTranslated),
+        isFallback: resolvedLang !== desired,
         category: doc.category || null,
         stateSlug,
         imageUrl,

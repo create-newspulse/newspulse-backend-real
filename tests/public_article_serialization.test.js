@@ -103,7 +103,7 @@ function setup(context, { news = fixture(), article = null, siblings } = {}) {
   context.after(() => { mongoose.connection.readyState = previous; });
   context.mock.method(News, 'find', () => query(siblings || (news ? [news] : [])));
   context.mock.method(News, 'findOne', () => query(news));
-  context.mock.method(News, 'findById', async () => news);
+  context.mock.method(News, 'findById', () => query(news));
   context.mock.method(News, 'countDocuments', async () => news ? 1 : 0);
   context.mock.method(Article, 'find', () => query(article ? [article] : []));
   context.mock.method(Article, 'findOne', () => query(article));
@@ -311,17 +311,67 @@ test('i18n-only and base-content compatibility branches remain public-safe', asy
   }
 });
 
-test('regional cards exclude extra nested slug metadata across aliases', async context => {
-  setup(context, { article: fixture({ category: 'regional' }) });
+test('regional metadata and public rendering survive serialization across aliases', async context => {
+  const source = fixture({ category: 'regional', publishedAt: new Date('2025-12-31') });
+  setup(context, { article: source });
   for (const prefix of PREFIXES) {
-    const response = await request(app).get(`${prefix}/public/regional?state=gujarat&lang=hi`);
+    for (const lang of LANGUAGES) {
+      const response = await request(app).get(`${prefix}/public/regional?state=gujarat&lang=${lang}`);
+      assert.equal(response.status, 200);
+      assertPrivateExcluded(response.body);
+      const article = articleFrom(response.body);
+      assert.equal(article._id, source._id);
+      assert.equal(article.slug, source.slug);
+      assert.equal(article.canonicalSlug, SLUGS[lang]);
+      assert.equal(article.title, TITLES[lang]);
+      assert.deepEqual(article.slugs, SLUGS);
+      assert.deepEqual(article.authorByline, { enabled: true, snapshot: BYLINE });
+      assert.equal(article.imageUrl, IMAGE.url);
+      assert.equal(article.status, source.status);
+      assert.equal(article.language, lang);
+      assert.equal(article.lang, lang);
+      assert.equal(article.requestedLang, lang);
+      assert.equal(article.resolvedLang, lang);
+      assert.equal(article.originalLang, 'en');
+      assert.equal(article.isTranslated, lang !== 'en');
+      assert.equal(article.isFallback, false);
+      assert.equal(article.sourceLanguage, undefined);
+      for (const field of ['publishedAt', 'createdAt', 'updatedAt']) {
+        assert.equal(article[field], source[field].toISOString(), field);
+      }
+      assert.notEqual(article.publishedAt, article.generatedAt);
+    }
+  }
+});
+
+test('regional metadata labels English fallback on Gujarati requests without leaking private fields', async context => {
+  const source = fixture({ category: 'regional', translations: {}, translationStatus: {}, publishedAt: null });
+  setup(context, { article: source });
+  for (const path of ['/api/public/regional?state=gujarat&lang=gu', '/api/public/regional/gujarat?lang=gu']) {
+    const response = await request(app).get(path);
     assert.equal(response.status, 200);
     assertPrivateExcluded(response.body);
+    assert.equal(response.body.data.lang, 'gu');
+    assert.equal(response.body.data.total, 1);
     const article = articleFrom(response.body);
-    assert.equal(article.title, TITLES.hi);
+    assert.equal(article._id, source._id);
+    assert.equal(article.slug, source.slug);
+    assert.equal(article.title, TITLES.en);
     assert.deepEqual(article.slugs, SLUGS);
     assert.deepEqual(article.authorByline, { enabled: true, snapshot: BYLINE });
     assert.equal(article.imageUrl, IMAGE.url);
+    assert.equal(article.status, 'published');
+    assert.equal(article.language, 'en');
+    assert.equal(article.lang, 'en');
+    assert.equal(article.requestedLang, 'gu');
+    assert.equal(article.resolvedLang, 'en');
+    assert.equal(article.originalLang, 'en');
+    assert.equal(article.isTranslated, false);
+    assert.equal(article.isFallback, true);
+    assert.equal(article.sourceLanguage, undefined);
+    assert.equal(article.publishedAt, null);
+    assert.equal(article.createdAt, source.createdAt.toISOString());
+    assert.equal(article.updatedAt, source.updatedAt.toISOString());
   }
 });
 
@@ -500,7 +550,7 @@ test('disabled accounts and revoked signed tokens cannot obtain administrative e
 
 test('all detail aliases enforce module permissions and preserve authorized CMS detail', async context => {
   const source = fixture({ status: 'draft' });
-  const child = fixture({ _id: CHILD_ID, title: 'Hidden sibling', status: 'draft', lang: 'hi', slug: 'hidden-sibling' });
+  const child = fixture({ _id: CHILD_ID, title: 'Hidden sibling', status: 'draft', lang: 'hi', language: 'hi', slug: 'hidden-sibling' });
   setup(context, { news: source, siblings: [source, child] });
   const { auth, founderToken, adminToken, admin, policy } = await setupNewsManagementAuth(context);
   const detailPaths = [`/articles/${ARTICLE_ID}`, '/articles/slug/public-story', '/articles/by-slug/public-story'];

@@ -1,7 +1,9 @@
+require('./helpers/publicNewsIsolation');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
 const Article = require('../models/Article');
+const { runPipeline } = require('./helpers/pulseDialogueAggregate');
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
 
 process.env.NODE_ENV = 'test';
@@ -42,6 +44,10 @@ test('GET /api/public/regional/:state?lang=en returns ready-only translations an
         slug: 'gu-1',
         slugs: { gu: 'gu-1', en: 'en-1' },
         category: 'regional',
+        status: 'published',
+        publishedAt: new Date('2026-01-02T00:00:00.000Z'),
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-03-05T00:00:00.000Z'),
         originalLang: 'gu',
         title: 'મૂળ શીર્ષક',
         summary: 'મૂળ સારાંશ',
@@ -77,13 +83,27 @@ test('GET /api/public/regional/:state?lang=en returns ready-only translations an
     assert.equal(res.body.data.items.length, 1);
 
     const item = res.body.data.items[0];
+    assert.equal(item._id, dataset[0]._id);
     assert.equal(item.slug, 'gu-1');
+    assert.equal(item.canonicalSlug, 'en-1');
     assert.equal(item.imageUrl, 'https://img.example/1.jpg');
     assert.equal(item.title, 'Translated title');
     assert.equal(item.summary, 'Translated summary');
     assert.equal(item.content, 'Translated content');
     assert.equal(item.provider, 'google');
     assert.equal(new Date(item.generatedAt).toISOString(), '2026-03-06T00:00:00.000Z');
+    assert.equal(item.status, 'published');
+    assert.equal(item.language, 'en');
+    assert.equal(item.lang, 'en');
+    assert.equal(item.originalLang, 'gu');
+    assert.equal(item.requestedLang, 'en');
+    assert.equal(item.resolvedLang, 'en');
+    assert.equal(item.isTranslated, true);
+    assert.equal(item.isFallback, false);
+    for (const field of ['publishedAt', 'createdAt', 'updatedAt']) {
+      assert.equal(item[field], dataset[0][field].toISOString(), field);
+    }
+    assert.notEqual(item.publishedAt, item.generatedAt);
 
     // Query should include ready-only translation match for the requested lang.
     assert.ok(capture.query);
@@ -107,6 +127,103 @@ test('GET /api/public/regional/:state?lang=en returns ready-only translations an
   } finally {
     Article.find = prevFind;
     Article.countDocuments = prevCount;
+  }
+});
+
+test('Regional metadata retains legacy lang through the database projection', async t => {
+  const text = {
+    en: 'Regional English news',
+    hi: '\u0915\u094d\u0937\u0947\u0924\u094d\u0930\u0940\u092f \u0938\u092e\u093e\u091a\u093e\u0930',
+    gu: '\u0aaa\u0acd\u0ab0\u0abe\u0aa6\u0ac7\u0ab6\u0abf\u0a95 \u0ab8\u0aae\u0abe\u0a9a\u0abe\u0ab0',
+  };
+  for (const [original, requested] of [['en', 'en'], ['hi', 'hi'], ['gu', 'gu'], ['en', 'gu']]) {
+    await t.test(`${original} original requested in ${requested}`, async context => {
+      const doc = {
+        _id: '507f1f77bcf86cd799439041',
+        slug: `legacy-regional-${original}`,
+        slugs: { [original]: `legacy-regional-${original}` },
+        category: 'regional', status: 'published', lang: original.toUpperCase(),
+        title: text[original], summary: text[original], content: `<p>${text[original]}</p>`,
+        geo: { state: 'gujarat' }, translations: {}, translationStatus: {},
+        publishedAt: new Date('2026-01-02T00:00:00.000Z'),
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-01-03T00:00:00.000Z'),
+      };
+      context.mock.method(Article, 'find', () => {
+        const capture = {};
+        const query = makeChainableQuery([doc], capture);
+        query.lean = async () => runPipeline([doc], [{
+          $project: Object.fromEntries(capture.selectArg.split(/\s+/).map(field => [field, 1])),
+        }]);
+        return query;
+      });
+      context.mock.method(Article, 'countDocuments', async () => 1);
+
+      for (const path of [
+        `/api/public/regional?state=gujarat&lang=${requested}`,
+        `/api/public/regional/gujarat?lang=${requested}`,
+      ]) {
+        const response = await request(app).get(path);
+        assert.equal(response.status, 200, path);
+        assert.equal(response.body.data.lang, requested);
+        assert.equal(response.body.data.total, 1);
+        assert.equal(response.body.data.items.length, 1);
+        const [item] = response.body.data.items;
+        assert.equal(item._id, doc._id);
+        assert.equal(item.slug, doc.slug);
+        assert.equal(item.title, doc.title);
+        assert.equal(item.summary, doc.summary);
+        assert.equal(item.content, doc.content);
+        assert.equal(item.status, doc.status);
+        assert.equal(item.language, original);
+        assert.equal(item.lang, original);
+        assert.equal(item.originalLang, original);
+        assert.equal(item.resolvedLang, original);
+        assert.equal(item.requestedLang, requested);
+        assert.equal(item.isTranslated, false);
+        assert.equal(item.isFallback, original !== requested);
+        for (const field of ['publishedAt', 'createdAt', 'updatedAt']) {
+          assert.equal(item[field], doc[field].toISOString(), field);
+        }
+      }
+    });
+  }
+});
+
+test('Regional metadata preserves null and absent dates without using translation generation dates', async t => {
+  for (const absent of [null, undefined]) {
+    await t.test(`stored dates are ${String(absent)}`, async context => {
+      const doc = {
+        _id: '507f1f77bcf86cd799439042',
+        slug: 'legacy-regional-dates', category: 'regional', status: 'published',
+        originalLang: 'gu', language: 'gu', geo: { state: 'gujarat' },
+        publishedAt: absent, createdAt: absent, updatedAt: absent,
+        translationStatus: { en: 'ready' },
+        translations: {
+          en: {
+            title: 'Translated regional title', summary: 'Translated regional summary',
+            content: '<p>Translated regional content</p>',
+            generatedAt: new Date('2026-03-06T00:00:00.000Z'),
+          },
+        },
+      };
+      context.mock.method(Article, 'find', () => makeChainableQuery([doc], {}));
+      context.mock.method(Article, 'countDocuments', async () => 1);
+
+      for (const path of ['/api/public/regional?state=gujarat&lang=en', '/api/public/regional/gujarat?lang=en']) {
+        const response = await request(app).get(path);
+        assert.equal(response.status, 200, path);
+        assert.equal(response.body.data.total, 1);
+        assert.equal(response.body.data.items.length, 1);
+        const [item] = response.body.data.items;
+        assert.equal(item.status, 'published');
+        assert.equal(item.generatedAt, '2026-03-06T00:00:00.000Z');
+        for (const field of ['publishedAt', 'createdAt', 'updatedAt']) {
+          assert.equal(item[field], absent, field);
+          assert.equal(Object.hasOwn(item, field), absent === null, field);
+        }
+      }
+    });
   }
 });
 
@@ -278,6 +395,7 @@ test('GET /api/public/regional dedupes items by translationGroupId (prefers orig
         slugs: { en: 'story-en', gu: 'story-gu' },
         translationGroupId: 'grp-1',
         category: 'regional',
+        status: 'published',
         originalLang: 'en',
         language: 'en',
         title: 'Original English title',
@@ -295,6 +413,7 @@ test('GET /api/public/regional dedupes items by translationGroupId (prefers orig
         slugs: { en: 'story-en', gu: 'story-gu' },
         translationGroupId: 'grp-1',
         category: 'regional',
+        status: 'published',
         originalLang: 'gu',
         language: 'gu',
         title: 'મૂળ',
@@ -353,6 +472,7 @@ test('GET /api/public/regional dedupes items by slugs.en when translationGroupId
         slug: 'gujarati-slug-1',
         slugs: { en: 'final-result-of-unarmed-psi', gu: 'gujarati-slug-1' },
         category: 'regional',
+        status: 'published',
         originalLang: 'gu',
         language: 'gu',
         title: 'મૂળ',
@@ -370,6 +490,7 @@ test('GET /api/public/regional dedupes items by slugs.en when translationGroupId
         slug: 'english-slug-1',
         slugs: { en: 'final-result-of-unarmed-psi', gu: 'gujarati-slug-1' },
         category: 'regional',
+        status: 'published',
         originalLang: 'en',
         language: 'en',
         title: 'Original English',
@@ -427,7 +548,9 @@ test('canonical Regional sync satisfies the unchanged Gujarat state predicate', 
   t.mock.method(Article, 'findOneAndUpdate', (_filter, update) => ({
     lean: async () => ({ _id: update.$set.sourceNewsId, ...update.$set }),
   }));
-  const synced = await Promise.all(sources.map((source) => syncPublicArticleFromNews(source)));
+  t.mock.method(Article, 'find', () => makeChainableQuery([], {}));
+  const synced = await Promise.all(sources.map((source) => syncPublicArticleFromNews(source, { throwOnError: true })));
+  assert.ok(synced.every(Boolean));
   const capture = {};
   const matchingState = (doc, stateClause) => stateClause.$or.some((clause) =>
     Object.entries(clause).every(([field, condition]) => {

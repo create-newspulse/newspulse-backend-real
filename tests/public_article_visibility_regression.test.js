@@ -232,6 +232,7 @@ function stubModels({ news = [], publicArticles = [] }) {
 
 test('synchronized Gujarat copies pass the unchanged Regional query without admitting ineligible sources', { concurrency: false }, withDbReady(async () => {
   const originalUpsert = PublicArticle.findOneAndUpdate;
+  const originalFind = PublicArticle.find;
   const copies = [];
   const sources = [
     { location: { state: 'Gujarat', stateSlug: null } },
@@ -254,10 +255,11 @@ test('synchronized Gujarat copies pass the unchanged Regional query without admi
       return copy;
     },
   });
+  PublicArticle.find = () => makeFindQuery([]);
   let stubs;
   try {
     for (const [index, metadata] of sources.entries()) {
-      await syncPublicArticleFromNews({
+      const source = {
         _id: `507f1f77bcf86cd7994395${String(index).padStart(2, '0')}`,
         title: 'Source title',
         description: 'Source summary',
@@ -272,7 +274,8 @@ test('synchronized Gujarat copies pass the unchanged Regional query without admi
         translations: { en: { title: 'English translation', summary: 'English summary', content: 'English body' } },
         translationStatus: { en: 'ready' },
         ...metadata,
-      });
+      };
+      assert.ok(await syncPublicArticleFromNews(source, { throwOnError: true }));
     }
     for (const copy of copies.slice(0, 5)) {
       assert.equal(copy.geo.state, 'gujarat');
@@ -309,6 +312,7 @@ test('synchronized Gujarat copies pass the unchanged Regional query without admi
   } finally {
     if (stubs) stubs.restore();
     PublicArticle.findOneAndUpdate = originalUpsert;
+    PublicArticle.find = originalFind;
   }
 }));
 
