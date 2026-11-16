@@ -141,6 +141,42 @@ Language state has multiple related representations:
 - Per-language slugs, cached translation buckets, and readiness/error/retry
   metadata support language-specific reads.
 
+Request translation generation uses the source validation in
+[translationGroupStatus.js](./services/translationGroupStatus.js) inside its
+existing transaction, authorizes every resolved edition, and generates from the
+canonical CMS source. Existing editions are found by their verified IDs and
+source links, not just a group key. A consistent existing CMS key is reused;
+when all CMS keys are absent or placeholders, the existing source-key
+initialization runs only after source identity is established. It does not
+backfill other editions or public copies. Conflicting keys, unresolved source
+links and incompatible linked public copies require Founder review, including
+copies linked to a keyed standalone original. The existing
+keyed standalone-original creation workflow and generation response envelopes
+remain unchanged; malformed source links or translation markers without a source
+anchor cannot use that original-creation path. Human-edit protection honors both
+top-level and nested flags; the existing explicit Founder-confirmed overwrite
+workflow is unchanged.
+
+Shared identity discovery recognizes BSON references and validated legacy
+24-hex strings, including case and JavaScript-compatible surrounding whitespace,
+in direct and nested source fields. Discovery does not rewrite stored links or
+authorize a relationship: conflicting source/group/language evidence and
+unanchored children retain their existing review errors. Translation-generation
+preflight also discovers legacy public-copy references. A copy without an
+edition-specific owner may use verified canonical ownership; an explicit edition
+owner must still belong to the resolved group and match its edition language.
+Source-less or conflicting copies matched by group keys are not adopted.
+
+Translation-mode authorization reads and generation write dependencies use the
+same discovery predicate. Staff guards compare the exact stored source reference
+without Mongoose recasting legacy strings, while retaining account, ownership,
+draft-only and protected-record checks; supported owner-ID formatting does not
+grant ownership of a foreign or canonical-only copy to limited draft staff.
+Slug checks exclude verified existing edition IDs as well as ordinary story
+matches, without excluding unrelated stories. Other write-dependency paths and
+publication authority are unchanged. Existing-edition generation reuses verified
+IDs and retains the existing URL and publication-date preservation behavior.
+
 [translationGroupSync.service.js](./services/translationGroupSync.service.js)
 propagates source changes to linked sibling News records and synchronizes their
 public copies. It checks source linkage and preserves child cover-image fields

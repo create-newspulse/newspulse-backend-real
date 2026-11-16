@@ -511,19 +511,30 @@ test('request generation rolls back all editions when a later language write fai
   const state = installEditorialFixture(context);
   const { ids } = seedGroup(state);
   state.rows.News = state.rows.News.filter(doc => doc.language === 'en');
+  state.rows.Article = state.rows.Article.filter(doc => doc.sourceNewsId === ids[0]);
+  const before = structuredClone(state.rows);
+  const attemptedLanguages = [];
   const google = require('../services/googleTranslationService');
   context.mock.method(google, 'translateText', async (text, _from, to) => ({ ok: true, text: `${to} ${text}` }));
   const create = models.News.create;
   context.mock.method(models.News, 'create', (payload, options) => {
+    attemptedLanguages.push(payload[0].language);
     if (payload[0].language === 'gu') throw Object.assign(new Error('Later edition failed'), { statusCode: 503 });
     return create(payload, options);
   });
   const response = await state.request('post', `/api/articles/${ids[0]}/translations/generate`, { targetLanguages: ['hi', 'gu'] });
   assert.equal(response.statusCode, 503);
+  assert.deepEqual(attemptedLanguages, ['hi', 'gu'], 'The later persistence failure must actually be reached');
   assert.equal(response.body.committed, undefined);
   assert.equal(response.body.translationResult, undefined);
   assert.equal(state.rows.News.some(doc => doc.language === 'hi'), false);
   assert.equal(state.rows.News.some(doc => doc.language === 'gu'), false);
+  for (const [name, rows] of Object.entries(before)) {
+    if (name !== 'AuditLog') assert.deepEqual(state.rows[name], rows, name);
+  }
+  assert.ok(state.rows.AuditLog.some(entry => entry.action === 'TRANSLATION_REQUESTED'));
+  assert.equal(state.transactions.at(-1).aborted, true);
+  assert.equal(state.invalidations.length, 0);
 });
 
 for (const scenario of [

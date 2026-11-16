@@ -53,6 +53,7 @@ function expression(value, doc, variables = {}) {
       if (result === undefined) return 'missing';
       if (result === null) return 'null';
       if (Array.isArray(result)) return 'array';
+      if (result?.toHexString) return 'objectId';
       return typeof result;
     }
     case '$concat': return args().join('');

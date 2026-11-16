@@ -16,6 +16,7 @@ const { buildPublicArticleMatch, publicCopyCandidates } = require('./syncPublicA
 const { isFaithTopicSyncChild } = require('./translationGroupSync.service');
 const { isPubliclyVisibleNewsArticle } = require('./publicArticleVisibility.service');
 const { buildPublicCopyFilter } = require('./articleLifecycle.service');
+const { buildTranslationGroupIdentityFilter, resolvePersistedTranslationSourceId } = require('./translationGroupStatus');
 
 const CONTROL_FIELDS = new Set([
   '_id', 'id', 'status', 'scheduledAt', 'publishAt', 'publishedAt', 'deletedAt', 'deletedFromStatus',
@@ -88,9 +89,11 @@ function contentSaveBody(body, docLike, isFounder = false, { ignoreComputed = fa
   return out;
 }
 
-function assertCopyState(copy, source, kind, newsIds, publishing = false, preservePublicationMetadata = false) {
+function assertCopyState(copy, source, kind, newsIds, publishing = false, preservePublicationMetadata = false, legacySourceReferences = false) {
   if (String(copy.status || '') !== String(source.status || '')) throw saveDenied();
-  if (kind === 'draft' && (!newsIds.has(String(copy.sourceNewsId || ''))
+  const ownerId = legacySourceReferences
+    ? resolvePersistedTranslationSourceId({ sourceArticleId: copy.sourceNewsId }) : String(copy.sourceNewsId || '');
+  if (kind === 'draft' && (!newsIds.has(ownerId)
     || copy.status !== (publishing ? 'published' : 'draft') || copy.deletedAt)) {
     throw saveDenied();
   }
@@ -161,8 +164,9 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
     if (publicOnly) return { filter: { _id: source._id, status: source.status, updatedAt: source.updatedAt ?? null } };
 
     const prospective = { ...source, ...patch };
+    const identityFilter = draftTranslation ? buildTranslationGroupIdentityFilter : buildStoryIdentityFilter;
     const records = await News.find({
-      $or: [buildStoryIdentityFilter(source), buildStoryIdentityFilter(prospective)],
+      $or: [identityFilter(source), identityFilter(prospective)],
       ...(preserveDeletedEditions ? { status: { $ne: 'deleted' }, deletedAt: null } : {}),
     }, null, { session }).select('+createdByUserId').lean();
     const existingIds = records.map(doc => doc._id);
@@ -231,7 +235,7 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
       if (publication && (!ids.has(String(copy.sourceNewsId || ''))
         || (copy.sourceArticleId && !ids.has(String(copy.sourceArticleId)))
         || getStoryKeys(copy).some(key => !groupKeys.has(key)))) throw publicationDenied();
-      assertCopyState(copy, finalCopySources.get(id), kind, ids, false, preservePublicationMetadata);
+      assertCopyState(copy, finalCopySources.get(id), kind, ids, false, preservePublicationMetadata, draftTranslation);
     }
     if (publication) {
       const groupCopies = await PublicArticle.find(buildPublicCopyFilter(records), null, { session }).lean();
@@ -249,7 +253,12 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
       publicationGroupKey: publication ? [...groupKeys][0] : undefined,
       guard: { $or: records.filter(doc => !newArticle || String(doc._id) !== String(source._id)).map(doc => ({
         _id: doc._id, status: doc.status, deletedAt: doc.deletedAt ?? null,
-        ...Object.fromEntries(IDENTITY_FIELDS.map(field => [field, doc[field] ?? null])),
+        ...Object.fromEntries(IDENTITY_FIELDS.filter(field => !draftTranslation || field !== 'sourceArticleId')
+          .map(field => [field, doc[field] ?? null])),
+        // Field predicates would recast legacy strings; the write guard must retain their exact stored value.
+        ...(draftTranslation ? { $expr: { $eq: [
+          { $ifNull: ['$sourceArticleId', null] }, { $literal: doc.sourceArticleId ?? null },
+        ] } } : {}),
         ...(!editor ? { createdByUserId: doc.createdByUserId, locked: doc.locked ?? null } : {}),
       })) },
       assertNewsRecords(docs) {
@@ -309,7 +318,7 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
           if (!copies.has(String(copy._id)) && !createdCopies.has(String(copy._id))) throw saveDenied();
           const previous = writtenCopySources.get(String(copy._id))
             || { ...copies.get(String(copy._id)), workflow: undefined };
-          assertCopyState(copy, previous, kind, ids, publication && previous.status === 'published');
+          assertCopyState(copy, previous, kind, ids, publication && previous.status === 'published', false, draftTranslation);
         }
         if (matches.length) {
           const copy = matches[0];
@@ -331,7 +340,7 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
           const copy = await PublicArticle.findById(id, null, { session: activeSession }).lean();
           if (!copy) throw scopeChanged();
           const previous = !publication && copies.has(id) ? { ...copies.get(id), workflow: undefined } : source;
-          assertCopyState(copy, previous, kind, ids, publication);
+          assertCopyState(copy, previous, kind, ids, publication, false, draftTranslation);
         }
       },
       async hidePublicationCopies(activeSession) {

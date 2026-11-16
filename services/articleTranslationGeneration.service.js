@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const News = require('../models/News');
+const PublicArticle = require('../models/Article');
 const PublicSiteSettings = require('../models/PublicSiteSettings');
 const TranslationJob = require('../models/TranslationJob');
 const { slugifyUnicode } = require('../lib/slug');
@@ -10,8 +11,13 @@ const { applyPulseDialogueStandardText } = require('./pulseDialogue.service');
 const { sponsoredArticleFields } = require('./syncPublicArticleFromNews.service');
 const { withActiveArticleSource, afterArticleCommit, inArticleTransaction } = require('./articleLifecycle.service');
 const { articleTranslationAuthorizer } = require('./articleSaveAccess.service');
-const { assertArticleSlugsUnique, getStoryKeys } = require('./articleSlugUniqueness.service');
+const { assertArticleSlugsUnique, buildStoryIdentityFilter, getStoryKeys } = require('./articleSlugUniqueness.service');
 const { syncTranslationGroupMetadata, normalizeTranslationGroupKey } = require('./translationGroupSync.service');
+const {
+  loadTranslationGroupStatus, resolveRowLang, translationSourceIdentityError,
+  assertTranslationSourceLanguage, assertPublicCopyIdentity, TRANSLATION_GROUP_FIELDS,
+  buildSourceReferenceFilter, buildTranslationGroupIdentityFilter, resolvePersistedTranslationSourceId,
+} = require('./translationGroupStatus');
 const { invalidateArticleContent } = require('./publicContentInvalidation.service');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
@@ -87,15 +93,22 @@ function sourceHashForDoc(docLike) {
   }));
 }
 
-function buildExistingQuery(groupKey, lang, excludeId) {
+function buildExistingQuery(groupKey, lang, sourceId) {
   const q = {
     $and: [
-      { $or: [{ translationGroupId: groupKey }, { translationKey: groupKey }] },
+      buildStoryIdentityFilter({ _id: sourceId, translationGroupId: groupKey }),
       { $or: [{ language: lang }, { lang }] },
     ],
   };
-  if (excludeId) q._id = { $ne: excludeId };
+  q._id = { $ne: sourceId };
   return q;
+}
+
+async function findExistingTranslation(groupKey, lang, sourceId, editionIds, session) {
+  const id = editionIds?.[lang];
+  const existing = await News.findOne(id ? { _id: id } : buildExistingQuery(groupKey, lang, sourceId), null, { session });
+  if (id && !existing) throw translationSourceIdentityError('An existing translation edition disappeared.');
+  return existing;
 }
 
 function pickSourceObject(docLike) {
@@ -272,7 +285,7 @@ function skippedTranslation(existing, overwrite, allowHumanOverwrite) {
   if (existing.status === 'deleted' || existing.deletedAt) {
     throw Object.assign(new Error('Restore the translation group before generating translations.'), { statusCode: 409 });
   }
-  if (existing.humanEdited && !(overwrite && allowHumanOverwrite)) return 'human_edited';
+  if ((existing.humanEdited || existing.translationMeta?.humanEdited) && !(overwrite && allowHumanOverwrite)) return 'human_edited';
   return overwrite ? null : 'exists';
 }
 
@@ -294,7 +307,10 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
     ? normalizeLanguageList(options.targetLanguages)
     : await getEnabledPublicLanguages({ readOnly: Boolean(options.authorizeSave), session: options.session });
   const targetLanguages = enabledLanguages.filter((lang) => lang !== sourceLanguage);
-  const groupKey = String(source.translationGroupId || source.translationKey || new mongoose.Types.ObjectId().toString()).trim();
+  const groupKey = normalizeTranslationGroupKey(options.sourceGroupKey)
+    || normalizeTranslationGroupKey(source.translationGroupId)
+    || normalizeTranslationGroupKey(source.translationKey)
+    || new mongoose.Types.ObjectId().toString();
   const sourceHash = sourceHashForDoc(source);
   const requestedBy = options.requestedBy || actorLabel(options.req);
   const overwrite = Boolean(options.overwrite);
@@ -324,7 +340,7 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
 
   try {
     for (const targetLang of targetLanguages) {
-      const existing = await News.findOne(buildExistingQuery(groupKey, targetLang, source._id), null, { session: options.session });
+      const existing = await findExistingTranslation(groupKey, targetLang, source._id, options.existingEditionIds, options.session);
       const skipReason = skippedTranslation(existing, overwrite, allowHumanOverwrite);
       if (skipReason) {
         skipped[targetLang] = { reason: skipReason, id: String(existing._id) };
@@ -339,7 +355,7 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
 
       const result = await withActiveArticleSource(source._id, async (currentSource, session, transaction) => {
         assertCurrentSource(currentSource, groupKey, sourceHash);
-        const current = await News.findOne(buildExistingQuery(groupKey, targetLang, source._id), null, { session });
+        const current = await findExistingTranslation(groupKey, targetLang, source._id, options.existingEditionIds, session);
         const reason = skippedTranslation(current, overwrite, allowHumanOverwrite);
         if (reason) return { skipped: { reason, id: String(current._id) } };
         const payload = buildTranslatedPayload(currentSource, translated.fields, {
@@ -352,7 +368,12 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
           payload.slugs = { ...payload.slugs, ...current.slugs, [targetLang]: payload.slug };
           transaction.saveScope?.assertTranslationPlan([{ ...pickSourceObject(current), ...payload }]);
         }
-        await assertArticleSlugsUnique({ ...payload, _id: current?._id }, { session });
+        await assertArticleSlugsUnique({ ...payload, _id: current?._id }, {
+          session,
+          ...(options.legacySourceReferences ? {
+            verifiedEditionIds: Object.values(options.existingEditionIds || {}).filter(Boolean),
+          } : {}),
+        });
         const doc = current
           ? await News.findOneAndUpdate(
             { _id: current._id, status: { $ne: 'deleted' }, deletedAt: null },
@@ -403,6 +424,76 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
   return response;
 }
 
+async function validateLinkedPublicCopies(members, session, identity) {
+  const ids = members.map(doc => doc._id);
+  const byId = new Map(members.map(doc => [
+    resolvePersistedTranslationSourceId({ sourceArticleId: doc._id }), doc,
+  ]));
+  const keys = [...new Set(members.flatMap(getStoryKeys))];
+  const copies = await PublicArticle.find({ $or: [
+    { sourceNewsId: { $in: ids } }, { sourceArticleId: { $in: ids } },
+    ...(keys.length ? [{ translationGroupId: { $in: keys } }, { translationKey: { $in: keys } }] : []),
+    buildSourceReferenceFilter(['sourceNewsId', 'sourceArticleId', 'translationMeta.sourceArticleId'], ids),
+  ] }, null, { session }).select(`${TRANSLATION_GROUP_FIELDS} sourceNewsId`).lean();
+  for (const copy of copies) {
+    const ownerId = resolvePersistedTranslationSourceId({ sourceArticleId: copy.sourceNewsId });
+    const owner = byId.get(ownerId);
+    if (ownerId && !owner) {
+      throw translationSourceIdentityError('The public copy CMS edition link is missing or conflicts with its group.');
+    }
+    if (identity.standalone || !ownerId) {
+      assertPublicCopyIdentity(copy, {
+        ...identity, editionId: owner?._id, editionLanguage: owner ? resolveRowLang(owner) : null,
+        allowCanonicalOnly: true,
+      });
+    } else {
+      await loadTranslationGroupStatus(copy, { publicCopy: true, session });
+    }
+  }
+}
+
+async function resolveRequestTranslationSource(current, session) {
+  const keys = getStoryKeys(current);
+  const validKeyTypes = ['translationGroupId', 'translationKey']
+    .every(field => current[field] == null || typeof current[field] === 'string');
+  const validMeta = current.translationMeta == null
+    || (typeof current.translationMeta === 'object' && !Array.isArray(current.translationMeta));
+  const missingSourceLinks = [current.sourceArticleId, current.translationMeta?.sourceArticleId]
+    .every(value => value == null || value === '');
+  const hasTranslationMarkers = current.machineGenerated || current.humanEdited || current.translatedByProvider
+    || current.translationJobId || current.translationMeta?.targetLanguage
+    || current.translationMeta?.machineGenerated || current.translationMeta?.humanEdited;
+  if (validKeyTypes && validMeta && keys.length === 1 && missingSourceLinks && !hasTranslationMarkers) {
+    const members = await News.find(buildTranslationGroupIdentityFilter(current), null, { session }).lean();
+    // Preserve the existing keyed, standalone original-creation workflow before it has any children.
+    if (members.length === 1 && String(members[0]._id) === String(current._id)) {
+      const sourceLanguage = resolveRowLang(current);
+      if (!sourceLanguage) throw translationSourceIdentityError('The translation source language is missing.');
+      assertTranslationSourceLanguage(current, sourceLanguage);
+      await validateLinkedPublicCopies(members, session, {
+        sourceId: current._id, editionId: current._id, editionLanguage: sourceLanguage,
+        groupKey: keys[0], baseLang: sourceLanguage, standalone: true,
+      });
+      return { source: current, members, sourceLanguage, sourceGroupKey: keys[0], existingEditionIds: {} };
+    }
+  }
+
+  const { groupStatus, groupKey } = await loadTranslationGroupStatus(current, { session });
+  const ids = groupStatus.groupArticles.map(doc => doc.id);
+  const members = await News.find({ _id: { $in: ids } }, null, { session }).lean();
+  const source = members.find(doc => String(doc._id) === groupStatus.sourceArticleId);
+  if (!source || members.length !== ids.length) {
+    throw translationSourceIdentityError('A translation group edition is missing.');
+  }
+  await validateLinkedPublicCopies(members, session, {
+    sourceId: groupStatus.sourceArticleId, groupKey, baseLang: groupStatus.baseLang,
+  });
+  return {
+    source, members, sourceLanguage: groupStatus.baseLang, sourceGroupKey: groupKey,
+    existingEditionIds: Object.fromEntries(SUPPORTED_LANGS.map(lang => [lang, groupStatus.perLang[lang].articleId])),
+  };
+}
+
 async function generateArticleTranslationsForRequest(sourceDoc, req, options = {}) {
   const authorizeSave = articleTranslationAuthorizer(req, options);
   return inArticleTransaction(async (session, transaction) => {
@@ -413,7 +504,11 @@ async function generateArticleTranslationsForRequest(sourceDoc, req, options = {
       });
     }
     await authorizeSave(current, session);
-    const result = await generateArticleTranslations(current, { ...options, ...transaction, req, authorizeSave });
+    const { source, members, ...identity } = await resolveRequestTranslationSource(current, session);
+    for (const member of members) await authorizeSave(member, session);
+    const result = await generateArticleTranslations(source, {
+      ...options, ...transaction, ...identity, req, authorizeSave, legacySourceReferences: true,
+    });
     if (!result.ok) {
       throw Object.assign(new Error('Translation failed; no changes were saved.'), {
         statusCode: 502, code: 'TRANSLATION_GENERATION_FAILED',
@@ -486,6 +581,8 @@ module.exports = {
   resolveSourceLanguage,
   sourceHashForDoc,
   translateArticleFields,
+  findExistingTranslation,
+  resolveRequestTranslationSource,
   generateArticleTranslations,
   generateArticleTranslationsForRequest,
   enqueueArticleTranslationGeneration,

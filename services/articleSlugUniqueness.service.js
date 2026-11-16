@@ -37,6 +37,9 @@ async function assertArticleSlugsUnique(doc, options = {}) {
   const identity = buildStoryIdentityFilter(doc);
   if (doc?._id) filter._id = { $ne: doc._id };
   if (identity) filter.$nor = [identity];
+  if (options.verifiedEditionIds?.length) {
+    filter.$nor = [...(filter.$nor || []), { _id: { $in: options.verifiedEditionIds } }];
+  }
   const existing = await News.findOne(filter, null, { session: options.session })
     .select('_id').lean();
   if (existing) {

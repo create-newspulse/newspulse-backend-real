@@ -17,6 +17,7 @@ const {
 const { syncPublicArticleFromNews, syncNewsTranslationBuckets } = require('./syncPublicArticleFromNews.service');
 const { isPubliclyVisibleNewsArticle } = require('./publicArticleVisibility.service');
 const { invalidateArticleContent } = require('./publicContentInvalidation.service');
+const { buildTranslationGroupIdentityFilter } = require('./translationGroupStatus');
 
 const STAGES = { draft: 'DRAFT', scheduled: 'SCHEDULED', published: 'PUBLISHED', archived: 'ARCHIVED', deleted: 'REJECTED' };
 
@@ -215,7 +216,9 @@ async function withActiveArticleSource(id, work, options = {}) {
       transaction.saveScope = await authorizeSave(source, session, transaction);
       transaction.saveIntentValidated = true;
     }
-    const guardFilter = { ...buildStoryIdentityFilter(source), status: { $ne: 'deleted' }, deletedAt: null };
+    const identity = options.legacySourceReferences
+      ? buildTranslationGroupIdentityFilter(source) : buildStoryIdentityFilter(source);
+    const guardFilter = { ...identity, status: { $ne: 'deleted' }, deletedAt: null };
     const boundedGuard = transaction.saveScope
       ? { $and: [guardFilter, transaction.saveScope.guard] }
       : guardFilter;

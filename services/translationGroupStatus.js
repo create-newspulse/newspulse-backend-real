@@ -5,6 +5,8 @@ const { buildStoryIdentityFilter, getStoryKeys } = require('./articleSlugUniquen
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 const TRANSLATION_SOURCE_IDENTITY_INVALID = 'TRANSLATION_SOURCE_IDENTITY_INVALID';
 const TRANSLATION_GROUP_FIELDS = '_id title slug status deletedAt lang language originalLang translationKey translationGroupId sourceArticleId sourceLanguage translationMeta.sourceArticleId translationMeta.sourceLanguage translationMeta.targetLanguage';
+const ID_TRIM_CHARS = '\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007'
+  + '\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
 
 function identityError(message) {
   return Object.assign(new Error(`${message} Founder review is required.`), {
@@ -35,6 +37,24 @@ function toIdString(v) {
   const value = typeof v === 'string' ? v.trim() : typeof v.toHexString === 'function' ? v.toHexString() : '';
   if (!/^[a-f0-9]{24}$/i.test(value)) throw identityError('Invalid translation source or edition ID.');
   return value.toLowerCase();
+}
+
+function buildSourceReferenceFilter(fields, values) {
+  const ids = [...new Set(values.map(toIdString).filter(Boolean))];
+  if (!ids.length || !fields.length) throw identityError('Translation reference lookup identity is missing.');
+  // Keep legacy strings outside Mongoose's ObjectId casts and match JavaScript trim(), not MongoDB's default trim set.
+  const expressions = fields.map(field => ({
+    $in: [{
+      $toLower: { $trim: {
+        input: { $cond: [
+          { $in: [{ $type: `$${field}` }, ['string', 'objectId']] },
+          { $toString: `$${field}` }, '',
+        ] },
+        chars: ID_TRIM_CHARS,
+      } },
+    }, ids],
+  }));
+  return { $expr: expressions.length === 1 ? expressions[0] : { $or: expressions } };
 }
 
 function sourceIdFor(doc) {
@@ -76,12 +96,18 @@ function assertSourceLanguage(doc, baseLang) {
   }
 }
 
-function assertPublicCopyIdentity(doc, { sourceId, editionId, editionLanguage, groupKey, baseLang }) {
+function assertPublicCopyIdentity(doc, {
+  sourceId, editionId, editionLanguage, groupKey, baseLang, allowCanonicalOnly = false,
+}) {
   const copySourceId = sourceIdFor(doc);
-  if (toIdString(doc?.sourceNewsId) !== toIdString(editionId)
+  const ownerId = toIdString(doc?.sourceNewsId);
+  const canonicalOnly = allowCanonicalOnly && !ownerId && copySourceId !== null && copySourceId === toIdString(sourceId);
+  const copyLanguage = resolveRowLang(doc);
+  if ((!ownerId && !canonicalOnly)
+    || (ownerId && ownerId !== toIdString(editionId))
     || (copySourceId && copySourceId !== toIdString(sourceId))
     || groupKeysFor(doc).some(key => key !== groupKey)
-    || resolveRowLang(doc) !== editionLanguage) {
+    || (ownerId && copyLanguage !== editionLanguage)) {
     throw identityError('The public copy conflicts with its CMS translation edition.');
   }
   assertSourceLanguage(doc, baseLang);
@@ -128,12 +154,15 @@ function resolveTranslationGroup(requestedDoc, groupDocs, { allowDeletedDuplicat
   return { source, baseLang, rows: groupDocs };
 }
 
-function statusGroupFilter(doc) {
+function buildTranslationGroupIdentityFilter(doc) {
   const id = toIdString(doc?._id);
   if (!id) throw identityError('The requested translation edition ID is missing.');
   const sourceId = sourceIdFor(doc);
   groupKeysFor(doc);
-  return buildStoryIdentityFilter({ ...doc, _id: id, sourceArticleId: sourceId });
+  return { $or: [
+    buildStoryIdentityFilter({ ...doc, _id: id, sourceArticleId: sourceId }),
+    buildSourceReferenceFilter(['sourceArticleId', 'translationMeta.sourceArticleId'], [id, sourceId]),
+  ] };
 }
 
 function editorGroupRows(requested, rows) {
@@ -167,7 +196,7 @@ async function historicalEditorStatus(requested, rows, { session, publicCopy } =
   }
   const PublicArticle = require('../models/Article');
   const copies = await PublicArticle.find({
-    $or: [{ sourceNewsId: requested._id }, statusGroupFilter(requested)],
+    $or: [{ sourceNewsId: requested._id }, buildTranslationGroupIdentityFilter(requested)],
   }, null, { session }).select(`${TRANSLATION_GROUP_FIELDS} sourceNewsId`).lean();
   const copy = copies[0];
   if (copies.length !== 1 || copy.status !== 'published' || copy.deletedAt
@@ -209,7 +238,7 @@ async function loadTranslationGroupStatus(doc, {
     if (!requested) throw identityError('The public copy CMS edition is missing.');
   }
 
-  const filter = statusGroupFilter(requested);
+  const filter = buildTranslationGroupIdentityFilter(requested);
   let rows = await News.find(filter, null, { session }).select(TRANSLATION_GROUP_FIELDS).lean();
   if (editorRead && ![requested, ...rows].some(row => sourceIdFor(row))) {
     return historicalEditorStatus(requested, rows, { session, publicCopy: publicCopy ? doc : null });
@@ -224,7 +253,7 @@ async function loadTranslationGroupStatus(doc, {
   // A legacy child may lack the source's key, or be connected only through another edition.
   const searchedIds = [toIdString(requested._id), sourceIdFor(requested)];
   if (!searchedIds.includes(sourceId) || (groupKey && !groupKeysFor(requested).includes(groupKey))) {
-    const sourceFilter = statusGroupFilter({ _id: sourceId, translationGroupId: groupKey });
+    const sourceFilter = buildTranslationGroupIdentityFilter({ _id: sourceId, translationGroupId: groupKey });
     rows = await News.find({ $or: [filter, sourceFilter] }, null, { session }).select(TRANSLATION_GROUP_FIELDS).lean();
   }
   // Mutation callers remain strict; only explicit editor reads may omit verified retired duplicates.
@@ -243,7 +272,7 @@ async function loadTranslationGroupStatus(doc, {
 
 async function resolveArticleSaveIdentity(doc, { session, allowDeletedDuplicates = false, includeGroupStatus = false } = {}) {
   const requestedId = toIdString(doc?._id);
-  const rows = await News.find(statusGroupFilter(doc), null, { session }).select(TRANSLATION_GROUP_FIELDS).lean();
+  const rows = await News.find(buildTranslationGroupIdentityFilter(doc), null, { session }).select(TRANSLATION_GROUP_FIELDS).lean();
   const evidence = [doc, ...rows];
   resolveGroupKey(evidence);
   const declaredSources = evidence.map(sourceIdFor).filter(Boolean);
@@ -389,6 +418,8 @@ module.exports = {
   normalizeLang,
   resolveBaseLang,
   resolveRowLang,
+  buildSourceReferenceFilter,
+  buildTranslationGroupIdentityFilter,
   buildTranslationGroupStatus,
   loadTranslationGroupStatus,
   resolveArticleSaveIdentity,
