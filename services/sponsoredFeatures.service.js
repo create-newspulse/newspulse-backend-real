@@ -4,6 +4,9 @@ const SponsoredFeature = require('../models/SponsoredFeature');
 const Article = require('../models/Article');
 const { buildPubliclyVisiblePublicArticleFilter } = require('./publicArticleVisibility.service');
 const {
+  PUBLIC_LISTING_IDENTITY_FIELDS, filterPublicListingCandidates,
+} = require('./publicArticleListing.service');
+const {
   normalizePlacementKey,
   isItemInSchedule,
   SPONSORED_FEATURE_TYPE,
@@ -99,11 +102,22 @@ async function findLinkedArticleByAnyId(id, { publicOnly = true, now = new Date(
   const filter = publicOnly ? buildPubliclyVisiblePublicArticleFilter({ now }) : {};
   filter.$or = [{ _id: rawId }, { sourceNewsId: rawId }];
 
-  return Article.findOne(filter).select(LINKED_ARTICLE_SELECT).lean();
+  const fields = publicOnly
+    ? `${LINKED_ARTICLE_SELECT} ${PUBLIC_LISTING_IDENTITY_FIELDS}`
+    : LINKED_ARTICLE_SELECT;
+  return Article.findOne(filter).select(fields).lean();
 }
 
 function isSponsoredArticleDoc(doc) {
   return !!(doc && (doc.isSponsoredArticle === true || doc.isSponsored === true));
+}
+
+// Keep public metadata eligibility separate from administrative copy inspection.
+async function findEligibleLinkedArticleByAnyId(id, { now = new Date() } = {}) {
+  const doc = await findLinkedArticleByAnyId(id, { publicOnly: true, now });
+  if (!isSponsoredArticleDoc(doc)) return null;
+  const [eligible] = await filterPublicListingCandidates([doc], { now });
+  return eligible || null;
 }
 
 function isComboCampaignEnabled(featureDoc) {
@@ -140,10 +154,10 @@ async function getLinkedSponsoredFeatureForArticle(articleDoc, { now = new Date(
 
   const featureDoc = await SponsoredFeature.findById(featureId).select(LINKED_FEATURE_SELECT).lean();
   if (!featureDoc || !isComboCampaignEnabled(featureDoc) || !featureDoc.linkedArticleId) return null;
-
-  const linkedArticleDoc = await findLinkedArticleByAnyId(featureDoc.linkedArticleId, { publicOnly: true, now });
-  if (!linkedArticleDoc || !isSponsoredArticleDoc(linkedArticleDoc)) return null;
   if (!doesFeatureLinkToArticle(featureDoc, articleDoc)) return null;
+
+  const linkedArticleDoc = await findEligibleLinkedArticleByAnyId(featureDoc.linkedArticleId, { now });
+  if (!linkedArticleDoc) return null;
 
   const linkedArticle = buildLinkedArticleDto(linkedArticleDoc);
   return {
@@ -214,10 +228,9 @@ async function getActiveSponsoredFeatureByPlacement(placementKey, { now = new Da
 
   for (const candidate of candidates || []) {
     if (!isItemInSchedule(candidate, now)) continue;
-    const linkedArticleDoc = candidate.linkedArticleId
-      ? await findLinkedArticleByAnyId(candidate.linkedArticleId, { publicOnly: true, now })
+    const linkedArticle = candidate.linkedArticleId && isComboCampaignEnabled(candidate)
+      ? await findEligibleLinkedArticleByAnyId(candidate.linkedArticleId, { now })
       : null;
-    const linkedArticle = isSponsoredArticleDoc(linkedArticleDoc) ? linkedArticleDoc : null;
     return {
       feature: candidate,
       linkedArticle,

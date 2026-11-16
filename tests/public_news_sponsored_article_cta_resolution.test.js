@@ -43,10 +43,14 @@ function withDbReady(fn) {
 
 test('GET /api/public/news/:slugOrId resolves sponsored CTA from article-level fields before linked feature fallback', { concurrency: false }, withDbReady(async () => {
   const prevNewsFindOne = News.findOne;
+  const prevNewsFind = News.find;
   const prevFeatureFindById = SponsoredFeature.findById;
   const prevArticleFindOne = Article.findOne;
 
   try {
+    News.find = () => makeFindOneResult([
+      { _id: '507f1f77bcf86cd799439250', status: 'published' },
+    ]);
     News.findOne = () => makeFindOneResult({
       _id: '507f1f77bcf86cd799439250',
       title: 'Sponsored story',
@@ -109,6 +113,7 @@ test('GET /api/public/news/:slugOrId resolves sponsored CTA from article-level f
     assert.equal(res.body.linkedSponsoredFeature.destinationUrl, 'https://example.com/feature-cta');
   } finally {
     News.findOne = prevNewsFindOne;
+    News.find = prevNewsFind;
     SponsoredFeature.findById = prevFeatureFindById;
     Article.findOne = prevArticleFindOne;
   }
@@ -116,10 +121,14 @@ test('GET /api/public/news/:slugOrId resolves sponsored CTA from article-level f
 
 test('GET /api/public/news/:slugOrId falls back to a live linked sponsored feature CTA when article-level CTA is absent', { concurrency: false }, withDbReady(async () => {
   const prevNewsFindOne = News.findOne;
+  const prevNewsFind = News.find;
   const prevFeatureFindById = SponsoredFeature.findById;
   const prevArticleFindOne = Article.findOne;
 
   try {
+    News.find = () => makeFindOneResult([
+      { _id: '507f1f77bcf86cd799439260', status: 'published' },
+    ]);
     News.findOne = () => makeFindOneResult({
       _id: '507f1f77bcf86cd799439260',
       title: 'Sponsored story',
@@ -176,6 +185,7 @@ test('GET /api/public/news/:slugOrId falls back to a live linked sponsored featu
     assert.equal(res.body.resolvedSponsorCtaSource, 'linked_feature');
   } finally {
     News.findOne = prevNewsFindOne;
+    News.find = prevNewsFind;
     SponsoredFeature.findById = prevFeatureFindById;
     Article.findOne = prevArticleFindOne;
   }

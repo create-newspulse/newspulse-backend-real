@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const SponsoredFeature = require('../models/SponsoredFeature');
 const Article = require('../models/Article');
+const News = require('../models/News');
 const { getLinkedSponsoredFeatureForArticle } = require('../services/sponsoredFeatures.service');
 
 function makeFindOneResult(doc) {
@@ -60,9 +61,12 @@ test('getLinkedSponsoredFeatureForArticle returns null when the feature does not
   }
 });
 
-test('getLinkedSponsoredFeatureForArticle returns linked feature CTA data only for a real combo relation', async () => {
+test('getLinkedSponsoredFeatureForArticle returns linked feature CTA data only for a real combo relation', async (context) => {
   const prevFindById = SponsoredFeature.findById;
   const prevFindOne = Article.findOne;
+  context.mock.method(News, 'find', () => makeFindOneResult([
+    { _id: '507f1f77bcf86cd799439123', status: 'published' },
+  ]));
 
   try {
     SponsoredFeature.findById = () => makeFindByIdResult({

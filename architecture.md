@@ -365,6 +365,21 @@ authorized CMS access are unchanged. Existing response envelopes, language
 readiness and allowed fallbacks are preserved, including the legacy article
 slug miss response of HTTP 200 with `{exists:false}`.
 
+Public sponsored-link selection and News-detail enrichment validate the complete
+copy identity before returning article-link metadata. Ineligible links do not
+remove independent paid placements or rewrite configured destination URLs.
+Administrative copy inspection remains separate, so existing unpaged admin
+lists do not gain per-entry ownership queries; the active-slot preview shares
+the public selection decision.
+
+The [Sponsored Features admin router](./routes/adminSponsoredFeatures.routes.js)
+requires effective `ads_manager` module access, plus `ads_view` for reads or
+`ads_manage_campaigns` for campaign mutations. These are the existing shared
+Founder/Staff guards, including configured and temporary Special Rights; no
+role preset or client-supplied permission bypasses individual module policy.
+Founder access is preserved. List and dashboard rejections reach the existing
+Express error handler, which hides server-error messages and stacks in production.
+
 Parent validation uses batches of 100 candidates and indexed CMS `_id` reads of
 at most 200 IDs, with a second bounded read for canonical relationships when
 needed. Paged feeds stream only identity/ordering fields in their existing sort

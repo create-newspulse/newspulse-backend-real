@@ -1,10 +1,13 @@
+require('./helpers/publicNewsIsolation');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const PublicArticle = require('../models/Article');
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
 
-test('syncPublicArticleFromNews copies sponsored article fields to the public article', async () => {
+test('syncPublicArticleFromNews copies sponsored article fields to the public article', async t => {
+  t.mock.method(PublicArticle, 'find', () => ({ lean: async () => [] }));
   const originalFindOneAndUpdate = PublicArticle.findOneAndUpdate;
 
   try {
