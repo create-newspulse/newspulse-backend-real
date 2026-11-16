@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
+const { publicListingCursor } = require('./helpers/publicListingCursor');
 
 process.env.NODE_ENV = 'test';
 
@@ -62,10 +63,12 @@ test('GET /api/public/stories honors x-lang header for feed filtering/localizati
     };
 
     Article.find = () => ({
+      select() { return this; },
       sort() { return this; },
       skip() { return this; },
       limit() { return this; },
       lean: async () => [story],
+      cursor() { return publicListingCursor(() => this.lean()); },
     });
 
     const res = await request(app)

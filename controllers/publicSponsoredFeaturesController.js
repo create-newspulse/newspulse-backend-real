@@ -2,6 +2,9 @@ const mongoose = require('mongoose');
 
 const Article = require('../models/Article');
 const {
+  PUBLIC_LISTING_IDENTITY_FIELDS, filterPublicListingCandidates,
+} = require('../services/publicArticleListing.service');
+const {
   SPONSORED_FEATURE_PLACEMENT_KEYS,
   normalizePlacementKey,
   placementKeyToPlacement,
@@ -175,10 +178,10 @@ async function findFreshSpotlightStories(now) {
   for (const hours of SPOTLIGHT_WINDOWS_HOURS) {
     const filter = buildFreshSpotlightFilter(now, hours);
     const docs = await Article.find(filter)
-      .select(SPOTLIGHT_SELECT)
+      .select(`${SPOTLIGHT_SELECT} ${PUBLIC_LISTING_IDENTITY_FIELDS}`)
       .sort({ publishedAt: -1, createdAt: -1 })
       .lean();
-    candidates = uniqueFreshCandidates(docs);
+    candidates = uniqueFreshCandidates(await filterPublicListingCandidates(docs, { now }));
     if (candidates.length >= SPOTLIGHT_STORY_LIMIT || hours === SPOTLIGHT_WINDOWS_HOURS[SPOTLIGHT_WINDOWS_HOURS.length - 1]) break;
   }
 

@@ -13,6 +13,8 @@ router.use(noCache);
 router.get('/sponsored-feature', getActiveSponsoredFeature);
 router.get('/sponsored-features', getActiveSponsoredFeature);
 router.get('/sponsored-features/slot/:placementKey', getActiveSponsoredFeature);
-router.get('/homepage/center-slot', getHomepageCenterSlot);
+router.get('/homepage/center-slot', (req, res, next) => {
+  getHomepageCenterSlot(req, res).catch(next);
+});
 
 module.exports = router;

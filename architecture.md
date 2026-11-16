@@ -341,8 +341,47 @@ separate. No Admin Panel or Frontend change is included here.
 
 [publicArticleVisibility.service.js](./services/publicArticleVisibility.service.js)
 provides separate News and Public Article filters. Both enforce published,
-non-deleted content and applicable timestamp/privacy constraints. News also
-checks lock/embargo fields. Preserve the appropriate filter at each read path.
+non-deleted content and applicable timestamp/privacy and lock/embargo constraints.
+Preserve the appropriate filter at each read path.
+
+[publicArticleListing.service.js](./services/publicArticleListing.service.js)
+validates persisted CMS ownership for public stories, Regional lists, homepage
+Spotlight and Article-backed ticker candidates before selection. An explicit
+`sourceNewsId` must identify a visible edition; another published sibling does
+not rescue a deleted, hidden or missing representative. Canonical-only copies
+use `sourceArticleId`. Declared source links and group keys must agree with the
+referenced CMS records; missing optional fields alone are not conflicts.
+A verified visible edition can remain public while its canonical source is a
+draft. Source-less public-only content and verified shared multilingual copies
+remain supported without requiring one CMS edition per cached language.
+Conflicting copies are excluded and logged for review, never repaired or relinked.
+Public-copy detail checks reuse this ownership validation for story slugs,
+article IDs and both article slug aliases. The public News ID/slug fallback
+retains `translationMeta.sourceArticleId` in its projection and validates the
+copy before either serving it or following `sourceNewsId`. Top-level and supported
+nested source references must agree; one visible but unrelated parent cannot
+authorize conflicting or withdrawn-copy content. Native visible CMS reads and
+authorized CMS access are unchanged. Existing response envelopes, language
+readiness and allowed fallbacks are preserved, including the legacy article
+slug miss response of HTTP 200 with `{exists:false}`.
+
+Parent validation uses batches of 100 candidates and indexed CMS `_id` reads of
+at most 200 IDs, with a second bounded read for canonical relationships when
+needed. Paged feeds stream only identity/ordering fields in their existing sort
+order, apply eligibility before skipping/counting/limiting, then hydrate and
+recheck the selected page. Regional totals continue to count eligible public
+copies before its existing page-level language deduplication. Grouped stories
+and Spotlight filter before group/category winners, ranking and freshness-window
+selection. Ticker candidate limits apply after ownership validation. No parent
+eligibility is cached; lookup failures, timeouts and page changes propagate as
+errors rather than successful empty feeds. Stories and Article-backed ticker
+responses retain listing pagination 400 and changed-page/timeout 503 statuses.
+Their error envelopes use fixed public messages without internal error text or
+stacks; unexpected errors remain 500. Validation queries share a bounded
+2.5-second budget per validation operation. A singleton detail check adds zero
+to two bounded CMS ownership reads, with no sibling scan, writes or repairs;
+lookup failures remain errors rather than content misses. Cache invalidation
+and withdrawal/revalidation flows are unchanged.
 
 For exact `category === "regional"`, the canonical public sync represents the
 Gujarat desk using:

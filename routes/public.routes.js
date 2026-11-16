@@ -5,6 +5,7 @@ const mongoose = require('mongoose');
 // If your frontend uses a different shape/model, tell me and I’ll swap it.
 const Article = require('../models/Article');
 const { serializePublicArticle } = require('../services/publicArticleSerializer.service');
+const { filterPublicListingCandidates, listPublicArticlePage } = require('../services/publicArticleListing.service');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
 const { getSlugCandidates } = require('../lib/slug');
 const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
@@ -212,9 +213,9 @@ router.get('/stories', async (req, res) => {
     let stories = [];
     if (isGroupedCategoryListing) {
       const groupedRequestedLang = desired || 'en';
-      const matchedStories = await Article.find(q)
+      const matchedStories = await filterPublicListingCandidates(await Article.find(q)
         .sort({ publishedAt: -1, createdAt: -1 })
-        .lean();
+        .lean());
 
       const lookups = (matchedStories || []).map((story) => getPublicContentLookup(story));
       const groupKeys = Array.from(new Set(lookups.map((entry) => entry.groupKey).filter(Boolean)));
@@ -238,9 +239,9 @@ router.get('/stories', async (req, res) => {
             { $or: siblingClauses },
           ],
         };
-        siblingStories = await Article.find(siblingQuery)
+        siblingStories = await filterPublicListingCandidates(await Article.find(siblingQuery)
           .sort({ publishedAt: -1, createdAt: -1 })
-          .lean();
+          .lean());
       }
 
       const groupedStories = new Map();
@@ -299,11 +300,7 @@ router.get('/stories', async (req, res) => {
         })),
       });
     } else {
-      stories = await Article.find(q)
-        .sort({ publishedAt: -1, createdAt: -1 })
-        .skip(skip)
-        .limit(lim)
-        .lean();
+      ({ docs: stories } = await listPublicArticlePage(q, { skip, limit: lim }));
 
       if (desired === 'hi' || desired === 'en') {
         stories = (stories || []).map((s) => applyCachedTranslationToStory(s, desired));
@@ -314,7 +311,10 @@ router.get('/stories', async (req, res) => {
 
     return res.json({ success: true, data: stories.map(serializePublicArticle) });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err?.message || String(err) });
+    const status = [400, 503].includes(err?.statusCode) ? err.statusCode : 500;
+    const message = status === 400 ? 'Invalid public listing pagination'
+      : status === 503 ? 'Public listing changed or timed out. Retry the request.' : 'Failed to load stories';
+    return res.status(status).json({ success: false, message });
   }
 });
 

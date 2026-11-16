@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
+const { publicListingCursor } = require('./helpers/publicListingCursor');
 
 process.env.NODE_ENV = 'test';
 
@@ -27,10 +28,12 @@ test('GET /api/public/stories includes normalized imageUrl', async () => {
     };
 
     Article.find = () => ({
+      select() { return this; },
       sort() { return this; },
       skip() { return this; },
       limit() { return this; },
       lean: async () => [story],
+      cursor() { return publicListingCursor(() => this.lean()); },
     });
 
     const res = await request(app).get('/api/public/stories?lang=en&limit=1&page=1');

@@ -7,6 +7,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const { accountAuthFixture } = require('./helpers/accountAuthFixture');
 const { matches } = require('./helpers/pulseDialogueAggregate');
+const { publicListingCursor } = require('./helpers/publicListingCursor');
 
 process.env.GOOGLE_TRANSLATE_API_KEY = 'synthetic-translation-key';
 process.env.TRANSLATION_ENABLED = 'true';
@@ -93,6 +94,7 @@ function query(value) {
     select() { return this; }, sort() { return this; }, collation() { return this; },
     skip() { return this; }, limit() { return this; },
     lean: async () => value,
+    cursor() { return publicListingCursor(() => this.lean()); },
     then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); },
   };
 }

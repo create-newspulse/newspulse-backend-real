@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
 const mongoose = require('mongoose');
+const { publicListingCursor } = require('./helpers/publicListingCursor');
 
 process.env.NODE_ENV = 'test';
 
@@ -65,10 +66,12 @@ function makeNewsQuery(items) {
 
 function makeArticleQuery(items) {
   return {
+    select() { return this; },
     sort() { return this; },
     skip() { return this; },
     limit() { return this; },
     lean: async () => items,
+    cursor() { return publicListingCursor(() => this.lean()); },
   };
 }
 

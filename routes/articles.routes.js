@@ -4,6 +4,7 @@ const News = require('../models/News');
 const PublicArticle = require('../models/Article');
 const { buildAuthorBylinePatch, withPublicAuthorByline, publicAuthorByline } = require('../services/authorByline.service');
 const { serializePublicArticle } = require('../services/publicArticleSerializer.service');
+const { listPublicArticlePage } = require('../services/publicArticleListing.service');
 // CMS/admin "articles" are stored in the News collection in this codebase.
 // Keep an alias named Article for routes that treat these as "Articles".
 const Article = News;
@@ -2242,15 +2243,17 @@ async function _handlePublicRegionalQuery(req, res, next, options = {}) {
       filter.$and = (filter.$and || []).concat([{ $or: [originalMatch, readyMatch].filter(Boolean) }]);
     }
 
-    const [itemsRaw, total] = await Promise.all([
-      PublicArticle.find(filter)
-        .select('title summary content slug slugs language lang originalLang translations translationStatus coverImage status publishedAt createdAt updatedAt geo tags category translationKey translationGroupId spotlightEnabled spotlightPinned spotlightPriority spotlightExpiresAt authorByline.enabled authorByline.snapshot')
-        .sort({ publishedAt: -1, createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
-      PublicArticle.countDocuments(filter),
-    ]);
+    const { docs: itemsRaw, total } = await listPublicArticlePage(filter, {
+      skip, limit, includeTotal: true,
+      select: [
+        'title summary content slug slugs language lang originalLang translations translationStatus',
+        'coverImage status publishedAt createdAt updatedAt',
+        'geo tags state district city location category editorialType track topic',
+        'translationKey translationGroupId spotlightEnabled spotlightPinned spotlightPriority spotlightExpiresAt',
+        'isSponsored isSponsoredArticle sponsorFeatureLinkedId',
+        'authorByline.enabled authorByline.snapshot',
+      ].join(' '),
+    });
 
     if ((_isTruthyEnv(process.env.DEBUG_REGIONAL_FEED) || _isTruthyEnv(process.env.REGIONAL_FEED_DEBUG)) && stateSlug === 'gujarat') {
       try {

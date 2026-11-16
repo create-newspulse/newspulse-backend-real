@@ -1,5 +1,5 @@
 const BroadcastItem = require('../models/BroadcastItem');
-const Article = require('../models/Article');
+const { listPublicArticlePage } = require('../services/publicArticleListing.service');
 
 const { mapArticleForLang } = require('../services/mapArticleForLang');
 const { buildPubliclyVisiblePublicArticleFilter } = require('../services/publicArticleVisibility.service');
@@ -133,10 +133,7 @@ async function getNationalLiveTicker(req, res) {
     ]);
 
     // Fetch a few extra and filter strictly by requested lang via cached translations.
-    const articleDocs = await Article.find(articleFilter)
-      .sort({ publishedAt: -1, createdAt: -1 })
-      .limit(Math.min(50, remaining * 6))
-      .lean();
+    const { docs: articleDocs } = await listPublicArticlePage(articleFilter, { limit: Math.min(50, remaining * 6) });
 
     const storyItems = (articleDocs || [])
       .map((a) => {
@@ -150,7 +147,8 @@ async function getNationalLiveTicker(req, res) {
 
     return res.status(200).json(out);
   } catch (e) {
-    return res.status(500).json({ ok: false, code: 'SERVER_ERROR', message: 'Failed to load national live ticker' });
+    const status = [400, 503].includes(e?.statusCode) ? e.statusCode : 500;
+    return res.status(status).json({ ok: false, code: 'SERVER_ERROR', message: 'Failed to load national live ticker' });
   }
 }
 

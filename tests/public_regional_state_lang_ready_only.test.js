@@ -3,6 +3,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
 const Article = require('../models/Article');
+const News = require('../models/News');
+const { publicListingCursor } = require('./helpers/publicListingCursor');
 const { runPipeline } = require('./helpers/pulseDialogueAggregate');
 const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFromNews.service');
 
@@ -28,6 +30,10 @@ function makeChainableQuery(items, capture) {
       return this;
     },
     lean: async () => items,
+    cursor(options) {
+      capture.cursor = { options };
+      return publicListingCursor(() => this.lean(), capture.cursor);
+    },
   };
 }
 
@@ -109,7 +115,8 @@ test('GET /api/public/regional/:state?lang=en returns ready-only translations an
     assert.ok(capture.query);
     assert.equal(capture.query.category, 'regional');
     assert.deepEqual(capture.sortArg, { publishedAt: -1, createdAt: -1 });
-    assert.equal(capture.skip, 0);
+    assert.equal(capture.skip, null, 'Pagination must not skip candidates before parent validation');
+    assert.equal(capture.cursor.closed, true);
     assert.equal(capture.limit, 20);
 
     // Shared visibility filter is expressed via $and clauses.
@@ -549,6 +556,9 @@ test('canonical Regional sync satisfies the unchanged Gujarat state predicate', 
     lean: async () => ({ _id: update.$set.sourceNewsId, ...update.$set }),
   }));
   t.mock.method(Article, 'find', () => makeChainableQuery([], {}));
+  t.mock.method(News, 'find', filter => makeChainableQuery(sources.filter(source => (
+    filter._id.$in.some(value => String(value) === source._id)
+  )), {}));
   const synced = await Promise.all(sources.map((source) => syncPublicArticleFromNews(source, { throwOnError: true })));
   assert.ok(synced.every(Boolean));
   const capture = {};

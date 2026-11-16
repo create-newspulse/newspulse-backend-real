@@ -1,3 +1,4 @@
+const Article = require('../models/Article');
 const News = require('../models/News');
 const { getStoryKeys } = require('./articleSlugUniqueness.service');
 const {
@@ -7,6 +8,9 @@ const { isPubliclyVisibleNewsArticle } = require('./publicArticleVisibility.serv
 
 const BATCH_SIZE = 100;
 const QUERY_MS = 2500;
+const SORT = { publishedAt: -1, createdAt: -1 };
+const PUBLIC_LISTING_IDENTITY_FIELDS = '_id sourceNewsId sourceArticleId translationGroupId translationKey translationMeta.sourceArticleId';
+const CANDIDATE_FIELDS = `${PUBLIC_LISTING_IDENTITY_FIELDS} publishedAt createdAt updatedAt`;
 const PARENT_FIELDS = [
   '_id sourceArticleId translationMeta.sourceArticleId translationGroupId translationKey',
   'status deletedAt locked embargoUntil publishedAt publishAt scheduledAt visibility isPrivate',
@@ -105,4 +109,68 @@ async function filterPublicListingCandidates(docs, { now = new Date(), logger = 
   return eligible;
 }
 
-module.exports = { filterPublicListingCandidates };
+function candidateSnapshot(doc) {
+  return JSON.stringify([
+    doc._id, doc.sourceNewsId, doc.sourceArticleId, doc.translationMeta?.sourceArticleId,
+    doc.translationGroupId, doc.translationKey, doc.publishedAt, doc.createdAt, doc.updatedAt,
+  ]);
+}
+
+async function listPublicArticlePage(filter, { skip = 0, limit, select, includeTotal = false } = {}) {
+  if (!Number.isSafeInteger(skip) || skip < 0 || !Number.isSafeInteger(limit) || limit < 1) {
+    throw Object.assign(new Error('Invalid public listing pagination'), { statusCode: 400 });
+  }
+  const options = { now: new Date(), logger: console, deadline: Date.now() + QUERY_MS };
+  // Only identity/ordering fields cross the wire for skipped or counted candidates.
+  const cursor = Article.find(filter, null, { ...queryOptions(options.deadline), lean: true })
+    .select(CANDIDATE_FIELDS).sort(SORT).cursor({ batchSize: BATCH_SIZE });
+  const selected = [];
+  let total = 0;
+  let readFailed = false;
+  try {
+    while (true) {
+      const batch = [];
+      for (let index = 0; index < BATCH_SIZE; index += 1) {
+        const doc = await cursor.next();
+        if (!doc) break;
+        batch.push(doc);
+      }
+      if (!batch.length) break;
+      const eligible = await eligibleBatch(batch, options);
+      for (const doc of eligible) {
+        if (total >= skip && selected.length < limit) selected.push(doc);
+        total += 1;
+      }
+      if ((!includeTotal && selected.length === limit) || batch.length < BATCH_SIZE) break;
+      queryOptions(options.deadline);
+    }
+  } catch (error) {
+    readFailed = true;
+    throw error;
+  } finally {
+    try {
+      await cursor.close();
+    } catch (error) {
+      if (!readFailed) throw error;
+      console.warn('[public.articleListing] cursor cleanup failed after a read error', { name: error.name });
+    }
+  }
+  if (!selected.length) return { docs: [], total };
+
+  const pageFilter = {
+    ...filter, $and: [...(filter.$and || []), { _id: { $in: selected.map(doc => doc._id) } }],
+  };
+  const query = Article.find(pageFilter, null, queryOptions(options.deadline));
+  if (select) query.select(`${select} ${CANDIDATE_FIELDS}`);
+  const rows = await query.limit(limit).lean();
+  if (!Array.isArray(rows)) throw new Error('Invalid public listing page result');
+  const byId = new Map(rows.map(doc => [String(doc._id), doc]));
+  const docs = selected.map(doc => byId.get(String(doc._id)));
+  if (rows.length !== selected.length || docs.some((doc, index) => (
+    !doc || candidateSnapshot(doc) !== candidateSnapshot(selected[index])
+  ))) throw listingChanged();
+  if ((await eligibleBatch(docs, options)).length !== docs.length) throw listingChanged();
+  return { docs, total };
+}
+
+module.exports = { PUBLIC_LISTING_IDENTITY_FIELDS, filterPublicListingCandidates, listPublicArticlePage };

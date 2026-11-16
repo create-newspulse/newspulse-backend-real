@@ -18,6 +18,7 @@ const { syncPublicArticleFromNews } = require('../services/syncPublicArticleFrom
 const { accountAuthFixture } = require('./helpers/accountAuthFixture');
 const { matches: matchesAggregateFilter } = require('./helpers/pulseDialogueAggregate');
 const { localizeArticleForLang } = require('../services/mapArticleForLang');
+const { publicListingCursor } = require('./helpers/publicListingCursor');
 
 function makeOpaqueAdminToken(email = 'admin@example.invalid') {
   return `np.${Buffer.from(`${email}:0`, 'utf8').toString('base64')}`;
@@ -125,6 +126,7 @@ function makeFindQuery(items) {
     skip(n) { rows = rows.slice(n); return this; },
     limit(n) { rows = rows.slice(0, n); return this; },
     lean: async () => rows,
+    cursor() { return publicListingCursor(() => this.lean()); },
   };
 }
 
@@ -234,6 +236,7 @@ test('synchronized Gujarat copies pass the unchanged Regional query without admi
   const originalUpsert = PublicArticle.findOneAndUpdate;
   const originalFind = PublicArticle.find;
   const copies = [];
+  const sourceDocs = [];
   const sources = [
     { location: { state: 'Gujarat', stateSlug: null } },
     { location: { state: null, stateSlug: 'gujarat' } },
@@ -275,6 +278,7 @@ test('synchronized Gujarat copies pass the unchanged Regional query without admi
         translationStatus: { en: 'ready' },
         ...metadata,
       };
+      sourceDocs.push(source);
       assert.ok(await syncPublicArticleFromNews(source, { throwOnError: true }));
     }
     for (const copy of copies.slice(0, 5)) {
@@ -299,7 +303,7 @@ test('synchronized Gujarat copies pass the unchanged Regional query without admi
         stateTags: ['gujarat'],
       }),
     ];
-    stubs = stubModels({ publicArticles: [...copies, ...unsynchronizedCopies] });
+    stubs = stubModels({ news: sourceDocs, publicArticles: [...copies, ...unsynchronizedCopies] });
     const res = await request(app).get('/api/public/regional?state=gujarat&lang=en&limit=30');
     assert.equal(res.status, 200);
     assert.deepEqual(res.body.data.items.map((item) => item.slug), [
@@ -308,7 +312,8 @@ test('synchronized Gujarat copies pass the unchanged Regional query without admi
     assert.equal(res.body.data.total, 5);
     assert.ok(res.body.data.items.every((item) => item.title === 'English translation'));
     assert.equal(stubs.captured.publicFind[0].category, 'regional');
-    assert.deepEqual(stubs.captured.publicCount, stubs.captured.publicFind);
+    assert.equal(stubs.captured.publicCount.length, 0, 'Totals come from the parent-validated candidate cursor');
+    assert.deepEqual(stubs.captured.publicFind[1].$and.slice(0, -1), stubs.captured.publicFind[0].$and);
   } finally {
     if (stubs) stubs.restore();
     PublicArticle.findOneAndUpdate = originalUpsert;
@@ -372,7 +377,10 @@ for (const lang of ['en', 'hi']) {
       }
       assert.deepEqual(items.map(item => item.slug), eligible.map(doc => doc.slug));
       assert.equal(items[0].title, native.title);
-      assert.deepEqual(stubs.captured.publicFind, stubs.captured.publicCount);
+      assert.equal(stubs.captured.publicCount.length, 0, 'Unvalidated countDocuments must not supply totals');
+      for (let index = 0; index < stubs.captured.publicFind.length; index += 2) {
+        assert.deepEqual(stubs.captured.publicFind[index + 1].$and.slice(0, -1), stubs.captured.publicFind[index].$and);
+      }
       assert.doesNotThrow(() => PublicArticle.where(stubs.captured.publicFind[0]).cast(PublicArticle));
     } finally {
       stubs.restore();
