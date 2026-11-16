@@ -363,15 +363,19 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const metadata = options.metadata || prepareSourceSyncMetadata(master, { now, bumpVersion: false });
 
-  const updatedChildren = await withActiveArticleSource(master._id, async (current, session, transaction) => {
+  const { updatedChildren, publicDocs } = await withActiveArticleSource(master._id, async (current, session, transaction) => {
     if (getGroupKey(current) !== groupKey) {
       throw Object.assign(new Error('Translation group changed. Reload and retry.'), { statusCode: 409 });
     }
     master = current;
-    const childDocs = await News.find({
+    const allChildren = await News.find({
       _id: { $ne: master._id },
       $or: [{ translationKey: groupKey }, { translationGroupId: groupKey }],
     }, null, { session });
+    const history = options.preserveDeletedEditions
+      ? allChildren.filter(child => child.status === 'deleted' || child.deletedAt) : [];
+    const childDocs = options.preserveDeletedEditions
+      ? allChildren.filter(child => child.status !== 'deleted' && !child.deletedAt) : allChildren;
     transaction.saveScope?.assertNewsRecords([current, ...childDocs]);
     const patches = new Map();
     if (!faithTopicOnly) {
@@ -438,16 +442,25 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
       changed.push(child);
     }
     const groupDocs = [master, ...changed];
-    await syncNewsTranslationBuckets(groupDocs, { session, now, saveScope: transaction.saveScope });
+    const translationDocs = [...history, ...groupDocs];
+    await syncNewsTranslationBuckets(translationDocs, {
+      session, now, saveScope: transaction.saveScope, preserveDeletedEditions: options.preserveDeletedEditions,
+    });
     const ordered = transaction.saveScope
       ? transaction.saveScope.orderPublicRecords(groupDocs)
       : [...groupDocs].sort((a, b) =>
         Number(isPubliclyVisibleNewsArticle(a, { now })) - Number(isPubliclyVisibleNewsArticle(b, { now })));
-    for (const doc of ordered) await syncPublicArticleFromNews(doc, {
-      logger, groupDocs, session, now, throwOnError: true, saveScope: transaction.saveScope,
-    });
+    const publicDocs = [];
+    for (const doc of ordered) {
+      const publicDoc = await syncPublicArticleFromNews(doc, {
+        logger, groupDocs: translationDocs, session, now, throwOnError: true, saveScope: transaction.saveScope,
+        preserveSourceIdentity: options.preserveSourceIdentity, preserveDeletedEditions: options.preserveDeletedEditions,
+        preservePublicationMetadata: options.preservePublicationMetadata,
+      });
+      publicDocs.push(publicDoc);
+    }
     await transaction.saveScope?.verifyPublicCopies(session);
-    return changed;
+    return { updatedChildren: changed, publicDocs };
   }, options);
 
   const result = {
@@ -457,7 +470,7 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
   };
   if (options.invalidate !== false) {
     const invalidate = async () => {
-      result.revalidation = await invalidateArticleContent([master, ...updatedChildren], {
+      result.revalidation = await invalidateArticleContent([master, ...updatedChildren, ...publicDocs], {
         reason: options.reason || 'translation_group_sync', publicVisibilityRemoved: true, logger,
       });
     };

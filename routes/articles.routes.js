@@ -1047,7 +1047,8 @@ function hasArticleContentEdit(update, before) {
 
 function isIdentityPreservingContentSave(body, current) {
   const language = getStoredArticleEffectiveLanguage(current);
-  return Boolean(current && (hasArticleContentEdit(body) || Object.prototype.hasOwnProperty.call(body, 'body'))
+  return Boolean(current
+    && (hasArticleContentEdit(body) || Object.prototype.hasOwnProperty.call(body, 'body') || isFaithTopicOnlyUpdate(current, body))
     && hasUnchangedArticleControls(body, current)
     && ['language', 'lang'].every(key => body[key] === undefined || normalizeLanguage(body[key]) === language)
     && (body.originalLang === undefined || normalizeLanguage(body.originalLang) === normalizeLanguage(current.originalLang))
@@ -3164,7 +3165,7 @@ async function updateArticle(req, res, next) {
         const current = await News.findById(rawId, null, { session }).lean();
         if (!current) throw scopeChanged();
         transaction.authorizeSave = identitySafeAuthorizer(
-          articleSaveAuthorizer(req, update, { faithTopicOnly: true, preserveDeletedEditions }), { topic: update.topic }
+          articleSaveAuthorizer(req, update, { faithTopicOnly: true, preserveDeletedEditions, preservePublicationMetadata }), { topic: update.topic }
         );
         transaction.saveScope = await transaction.authorizeSave(current, session, transaction);
         transaction.saveIntentValidated = true;

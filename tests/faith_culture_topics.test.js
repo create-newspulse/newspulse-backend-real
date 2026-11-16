@@ -6,11 +6,12 @@ const vm = require('node:vm');
 const path = require('node:path');
 const { createRequire } = require('node:module');
 const express = require('express');
+const mongoose = require('mongoose');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
 const { installEditorialFixture, seedGroup } = require('./helpers/editorialLifecycleFixture');
 const { FAITH_TOPIC_CODES, buildFaithTopicPatch } = require('../lib/faithCultureTopics');
-const { computeContentFingerprint, buildChildNewsSyncPatch } = require('../services/translationGroupSync.service');
+const { computeContentFingerprint, buildChildNewsSyncPatch, isFaithTopicSyncChild } = require('../services/translationGroupSync.service');
 const { sourceHashForDoc } = require('../services/articleTranslationGeneration.service');
 const publicSyncService = require('../services/syncPublicArticleFromNews.service');
 const invalidation = require('../services/publicContentInvalidation.service');
@@ -157,6 +158,18 @@ function assertDerivedTranslations(state) {
   }
 }
 
+async function seedHistoricalPublicCopies(state) {
+  for (const doc of state.rows.News) {
+    await publicSyncService.syncPublicArticleFromNews(doc, { groupDocs: state.rows.News, throwOnError: true });
+  }
+  for (const [index, copy] of state.rows.Article.entries()) {
+    copy.slug = `original-public-${copy.language}`;
+    copy.slugs = Object.fromEntries(locales.map(lang => [lang, `public-alias-${copy.language}-${lang}`]));
+    copy.publishedAt = new Date(`2019-0${index + 1}-01T08:00:00.000Z`);
+  }
+  return clone(state.rows.Article);
+}
+
 const draftPayload = { title: 'Faith and Culture story', description: 'Story summary', content: 'Story body', category: 'faith-culture', language: 'en' };
 
 test('The Faith authoring allowlist contains exactly the seven approved codes', () => {
@@ -271,7 +284,51 @@ for (const base of locales) {
       assert.equal(write.options.runValidators, true);
     }
   });
+
+  test(`Faith ${base} topic Save Update preserves historical public metadata and invalidates public URLs`, async context => {
+    const records = [article(1, base, { sourceLanguage: base }), ...locales.filter(lang => lang !== base).map((lang, index) => article(index + 2, lang, { sourceLanguage: base }))];
+    const state = setup(context, records);
+    const before = records.map(withoutSyncMetadata);
+    const copies = await seedHistoricalPublicCopies(state);
+    for (const [index, topic] of ['faith-spiritual-life', null].entries()) {
+      assert.equal(success(await state.put({ topic })).topic, topic);
+      assert.deepEqual([...state.docs.values()].map(withoutSyncMetadata), before);
+      assert.equal(state.rows.Article.length, copies.length);
+      assert.equal(state.invalidations.length, index + 1);
+      assert.equal(state.cacheInvalidations, index + 1);
+      const targets = state.invalidations[index];
+      for (const previous of copies) {
+        const current = state.rows.Article.find(copy => copy._id === previous._id);
+        assert.ok(current);
+        for (const field of [
+          '_id', 'slug', 'slugs', 'publishedAt', 'status', 'deletedAt',
+          'sourceNewsId', 'sourceArticleId', 'sourceLanguage', 'language', 'originalLang',
+          'translationGroupId', 'translationKey', 'title', 'summary', 'content',
+        ]) assert.deepEqual(clone(current[field]), previous[field], `${base} public ${field}`);
+        for (const publicPath of [
+          `/news/${previous.slug}`, `/news/${previous.slugs.en}`,
+          `/hi/news/${previous.slugs.hi}`, `/gu/news/${previous.slugs.gu}`,
+        ]) assert.ok(targets.paths.includes(publicPath), publicPath);
+        assert.ok(targets.tags.includes(`article:${previous._id}`));
+      }
+    }
+    assert.deepEqual(state.saves, []);
+    assert.deepEqual(state.generated, []);
+    assert.deepEqual(state.outdated, []);
+  });
 }
+
+test('Master synchronization without the preservation flag retains existing publication metadata behavior', async context => {
+  const state = setup(context);
+  await seedHistoricalPublicCopies(state);
+  const master = state.docs.get(id(1));
+  master.topic = 'faith-spiritual-life';
+  master.syncVersion++;
+  const result = await state.sync.syncTranslationGroupFromMaster(master, { faithTopicOnly: true });
+  assert.equal(result.ok, true);
+  assert.equal(result.childrenUpdated, 2);
+  assertDerivedTranslations(state);
+});
 
 test('Faith can set a topic on an existing untagged source', async context => {
   const state = setup(context, [article(1, 'en', { topic: undefined }), article(2, 'hi', { topic: undefined })]);
@@ -434,14 +491,16 @@ for (const lang of locales) {
   }
 }
 
-test('Topic synchronization skips unrelated sources, unsupported locales and other categories', async context => {
+test('Topic synchronization leaves unrelated groups unchanged while updating valid siblings', async context => {
   const skipped = [
-    article(4, 'hi', { sourceArticleId: id(90) }),
-    article(5, 'gu', { sourceArticleId: id(5) }),
+    article(4, 'hi'),
+    article(5, 'gu'),
     article(6, 'fr'),
     article(7, 'hi', { category: 'youth-pulse', topic: 'campus-buzz' }),
-    article(8, 'gu', { translationGroupId: 'another-group', translationKey: 'another-group' }),
-  ];
+    article(8, 'gu'),
+  ].map(doc => ({
+    ...doc, sourceArticleId: doc._id, translationGroupId: `unrelated-${doc._id}`, translationKey: `unrelated-${doc._id}`,
+  }));
   const state = setup(context, [article(1), article(2, 'hi'), article(3, 'gu', { sourceArticleId: undefined }), ...skipped]);
   success(await state.put({ topic: 'language-cultural-identity' }));
   for (const doc of skipped) {
@@ -453,6 +512,39 @@ test('Topic synchronization skips unrelated sources, unsupported locales and oth
   }
   assert.equal(state.docs.get(id(2)).topic, 'language-cultural-identity');
   assert.equal(state.docs.get(id(3)).topic, 'language-cultural-identity');
+});
+
+test('Topic synchronization rejects contradictory persisted groups before any writes', async context => {
+  const invalid = [
+    article(4, 'hi', { sourceArticleId: id(90) }),
+    article(5, 'gu', { sourceArticleId: id(5) }),
+    article(6, 'fr'),
+    article(7, 'hi', { category: 'youth-pulse', topic: 'campus-buzz' }),
+    article(8, 'gu', { translationGroupId: 'another-group', translationKey: 'another-group' }),
+  ];
+  const state = setup(context, [article(1), article(2, 'hi'), article(3, 'gu', { sourceArticleId: undefined }), ...invalid]);
+  const before = clone(state.rows);
+  const response = await state.put({ topic: 'language-cultural-identity' });
+  assert.equal(response.status, 409);
+  assert.equal(response.body.code, 'TRANSLATION_SOURCE_IDENTITY_INVALID');
+  assert.deepEqual(clone(state.rows), before);
+  assert.equal(state.writes.length, 0);
+  assert.equal(state.saves.length, 0);
+  assert.equal(state.generated.length, 0);
+  assert.equal(state.publicSync.length, 0);
+  assert.equal(state.cacheInvalidations, 0);
+});
+
+test('Topic child filtering still skips unrelated sources, unsupported locales and other categories', () => {
+  const source = article(1);
+  for (const child of [
+    article(4, 'hi', { sourceArticleId: id(90) }),
+    article(5, 'gu', { sourceArticleId: id(5) }),
+    article(6, 'fr'),
+    article(7, 'hi', { category: 'youth-pulse', topic: 'campus-buzz' }),
+  ]) assert.equal(isFaithTopicSyncChild(source, child), false);
+  assert.equal(isFaithTopicSyncChild(source, article(2, 'hi')), true);
+  assert.equal(isFaithTopicSyncChild(source, article(3, 'gu', { sourceArticleId: undefined })), true);
 });
 
 test('Topic synchronization recognizes existing EN/HI/GU language aliases without rewriting them', async context => {
@@ -492,6 +584,55 @@ for (const topic of ['faith-spiritual-life', null]) {
     assert.ok(state.transactions[1].committed && state.transactions[1].ended);
   });
 }
+
+test('Retried topic synchronization invalidates only committed public URLs after commit', async context => {
+  const state = setup(context);
+  const originalCopies = await seedHistoricalPublicCopies(state);
+  const master = state.docs.get(id(1));
+  master.topic = 'faith-spiritual-life';
+  master.syncVersion++;
+  const start = mongoose.startSession;
+  let committedCopies;
+  context.mock.method(mongoose, 'startSession', async () => {
+    const session = await start();
+    const transact = session.withTransaction.bind(session);
+    session.withTransaction = async work => {
+      await assert.rejects(transact(async () => {
+        await work();
+        assert.equal(state.cacheInvalidations, 0);
+        assert.deepEqual(state.invalidations, []);
+        throw new Error('Synthetic topic synchronization retry');
+      }), /Synthetic topic synchronization retry/);
+      for (const copy of state.rows.Article) {
+        copy.slug = `retry-${copy.slug}`;
+        copy.slugs = Object.fromEntries(Object.entries(copy.slugs).map(([lang, slug]) => [lang, `retry-${slug}`]));
+      }
+      committedCopies = clone(state.rows.Article);
+      await transact(work);
+    };
+    return session;
+  });
+  const result = await state.sync.syncTranslationGroupFromMaster(master, {
+    faithTopicOnly: true, preservePublicationMetadata: true,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(state.cacheInvalidations, 1);
+  assert.equal(state.invalidations.length, 1);
+  for (const previous of committedCopies) {
+    const current = state.rows.Article.find(copy => copy._id === previous._id);
+    for (const field of ['slug', 'slugs', 'publishedAt']) {
+      assert.deepEqual(clone(current[field]), previous[field], field);
+    }
+    for (const publicPath of [
+      `/news/${previous.slug}`, `/news/${previous.slugs.en}`,
+      `/hi/news/${previous.slugs.hi}`, `/gu/news/${previous.slugs.gu}`,
+    ]) assert.ok(state.invalidations[0].paths.includes(publicPath), publicPath);
+  }
+  for (const copy of originalCopies) {
+    assert.ok(!state.invalidations[0].paths.includes(`/news/${copy.slug}`), 'aborted public URL must not leak');
+  }
+  assert.ok(state.transactions[0].committed && state.transactions[0].ended);
+});
 
 test('A source/category race returns 409 without changing source or sibling metadata', async context => {
   const state = installEditorialFixture(context);
