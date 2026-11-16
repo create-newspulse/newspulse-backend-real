@@ -12,7 +12,10 @@ const { assertArticleSlugsUnique, buildStoryIdentityFilter } = require('./articl
 const { withActiveArticleSource, buildPublicCopyFilter, afterArticleCommit, inArticleTransaction } = require('./articleLifecycle.service');
 const { articlePublicationAuthorizer } = require('./articleSaveAccess.service');
 const { invalidateArticleContent } = require('./publicContentInvalidation.service');
-const { generateArticleTranslations } = require('./articleTranslationGeneration.service');
+const {
+  generateArticleTranslations, findExistingTranslation, resolveRequestTranslationSource,
+} = require('./articleTranslationGeneration.service');
+const { translationSourceIdentityError } = require('./translationGroupStatus');
 const {
   normalizeTranslationGroupKey,
   prepareSourceSyncMetadata,
@@ -41,26 +44,6 @@ function normalizeLanguage(value) {
   return null;
 }
 
-function stripHtmlForLangDetect(value) {
-  return String(value ?? '').replace(/<[^>]*>/g, ' ');
-}
-
-function countUnicodeMatches(value, regex) {
-  const matches = String(value || '').match(regex);
-  return matches ? matches.length : 0;
-}
-
-function inferLanguageFromDocText({ title, description, content } = {}) {
-  const text = stripHtmlForLangDetect(`${title || ''} ${description || ''} ${content || ''}`);
-  if (!text.trim()) return null;
-  const guCount = countUnicodeMatches(text, /[\u0A80-\u0AFF]/g);
-  const hiCount = countUnicodeMatches(text, /[\u0900-\u097F]/g);
-  const min = 12;
-  if (guCount >= min && guCount > hiCount) return 'gu';
-  if (hiCount >= min && hiCount > guCount) return 'hi';
-  return null;
-}
-
 function safeText(value) {
   return String(value ?? '').trim();
 }
@@ -76,12 +59,6 @@ function hasFullTranslationBucket(bucket) {
 
 function getStoredLanguageForArticle(docLike) {
   return normalizeLanguage(docLike?.language) || normalizeLanguage(docLike?.lang) || normalizeLanguage(docLike?.originalLang) || null;
-}
-
-function isSourceTranslationDoc(docLike, fallbackId) {
-  const ownId = String(docLike?._id || fallbackId || '').trim();
-  const sourceId = String(docLike?.sourceArticleId || '').trim();
-  return !sourceId || (ownId && sourceId === ownId);
 }
 
 function isActiveTranslationArticle(docLike) {
@@ -133,9 +110,10 @@ function ensureNewsSlugs(docLike) {
   if ((!docLike.slug || !String(docLike.slug).trim()) && slugs[baseLang]) docLike.slug = slugs[baseLang];
 }
 
-function ensureTranslationGroupIdForDoc(doc) {
+function ensureTranslationGroupIdForDoc(doc, verifiedKey) {
   if (!doc) return null;
-  const existing = normalizeTranslationGroupKey(doc.translationGroupId) || normalizeTranslationGroupKey(doc.translationKey);
+  const existing = normalizeTranslationGroupKey(verifiedKey)
+    || normalizeTranslationGroupKey(doc.translationGroupId) || normalizeTranslationGroupKey(doc.translationKey);
   const groupKey = existing || new mongoose.Types.ObjectId().toString();
   doc.translationGroupId = groupKey;
   doc.translationKey = groupKey;
@@ -201,8 +179,8 @@ async function findTranslationGroupDocs(sourceDoc, session) {
   return News.find(buildStoryIdentityFilter(sourceDoc), null, { session });
 }
 
-function buildManualTranslationSibling(sourceDoc, targetLang, groupKey, actor) {
-  const bucket = sourceDoc?.translations?.[targetLang];
+function buildManualTranslationSibling(sourceDoc, targetLang, groupKey, actor, cachedDoc = sourceDoc) {
+  const bucket = cachedDoc?.translations?.[targetLang];
   if (!hasFullTranslationBucket(bucket)) return null;
   const sourceObject = sourceDoc && typeof sourceDoc.toObject === 'function' ? sourceDoc.toObject({ virtuals: true }) : { ...(sourceDoc || {}) };
   const slugs = sourceObject.slugs && typeof sourceObject.slugs === 'object' && !Array.isArray(sourceObject.slugs)
@@ -244,10 +222,10 @@ function buildManualTranslationSibling(sourceDoc, targetLang, groupKey, actor) {
     lang: targetLang,
     language: targetLang,
     originalLang: targetLang,
-    sourceLanguage: getStoredLanguageForArticle(sourceDoc) || 'en',
+    sourceLanguage: getStoredLanguageForArticle(sourceDoc),
     translationKey: groupKey,
     translationGroupId: groupKey,
-    sourceArticleId: sourceObject._id,
+    sourceArticleId: sourceDoc._id,
     syncMode: 'auto',
     status: 'draft',
     publishedAt: null,
@@ -262,8 +240,8 @@ function buildManualTranslationSibling(sourceDoc, targetLang, groupKey, actor) {
     translatedByProvider: bucket.provider || 'manual',
     translationMeta: {
       provider: bucket.provider || 'manual',
-      sourceArticleId: sourceObject._id,
-      sourceLanguage: getStoredLanguageForArticle(sourceDoc) || 'en',
+      sourceArticleId: sourceDoc._id,
+      sourceLanguage: getStoredLanguageForArticle(sourceDoc),
       targetLanguage: targetLang,
       machineGenerated: false,
       humanEdited: true,
@@ -277,19 +255,24 @@ function buildManualTranslationSibling(sourceDoc, targetLang, groupKey, actor) {
 async function createSiblingsFromCachedTranslations(sourceDoc, missingLanguages, groupKey, actor, options) {
   const created = [];
   for (const lang of missingLanguages) {
-    if (!buildManualTranslationSibling(sourceDoc, lang, groupKey, actor)) continue;
+    const requested = options.requestedEdition || sourceDoc;
+    if (!hasFullTranslationBucket(requested.translations?.[lang])
+      && !hasFullTranslationBucket(sourceDoc.translations?.[lang])) continue;
     const doc = await withActiveArticleSource(sourceDoc._id, async (current, session) => {
       if (String(current.translationGroupId || current.translationKey) !== groupKey) {
         throw Object.assign(new Error('Translation group changed. Reload and retry.'), { statusCode: 409 });
       }
-      const payload = buildManualTranslationSibling(current, lang, groupKey, actor);
+      const cachedDoc = String(requested._id) === String(current._id) ? current
+        : await News.findById(requested._id, null, { session }).lean();
+      if (!cachedDoc) throw translationSourceIdentityError('The requested translation edition is missing.');
+      const verified = await resolveRequestTranslationSource(cachedDoc, session);
+      if (String(verified.source._id) !== String(current._id) || verified.sourceGroupKey !== groupKey) {
+        throw translationSourceIdentityError('The translation source changed during publication.');
+      }
+      const payload = buildManualTranslationSibling(current, lang, groupKey, actor,
+        hasFullTranslationBucket(cachedDoc.translations?.[lang]) ? cachedDoc : current);
       if (!payload) return null;
-      const existing = await News.findOne({
-        $and: [
-          { $or: [{ translationGroupId: groupKey }, { translationKey: groupKey }] },
-          { $or: [{ language: lang }, { lang }] },
-        ],
-      }, null, { session }).select('_id status deletedAt').lean();
+      const existing = await findExistingTranslation(groupKey, lang, current._id, verified.existingEditionIds, session);
       if (existing?.status === 'deleted' || existing?.deletedAt) {
         throw Object.assign(new Error('Restore the translation group before publishing.'), { statusCode: 409 });
       }
@@ -387,49 +370,74 @@ async function publishArticleInSession(articleIdOrDoc, options = {}) {
   const actor = options.actor || getActor(req);
   const logger = options.logger || console;
   const requestedId = typeof articleIdOrDoc === 'object' && articleIdOrDoc !== null ? articleIdOrDoc._id : articleIdOrDoc;
-  const sourceDoc = options.session || typeof articleIdOrDoc !== 'object'
+  const requestedDoc = options.session || typeof articleIdOrDoc !== 'object'
     ? await News.findById(requestedId, null, { session: options.session })
     : articleIdOrDoc;
 
-  if (!sourceDoc) {
+  if (!requestedDoc) {
     const error = new Error('Article not found');
     error.statusCode = 404;
     throw error;
   }
 
-  const id = String(requestedId || sourceDoc._id || '').trim();
+  const id = String(requestedDoc._id || requestedId || '').trim();
   if (id && mongoose.Types.ObjectId.isValid(id) === false) {
     const error = new Error('Invalid id');
     error.statusCode = 400;
     throw error;
   }
 
-  const missing = getPublishReadyMissingFields(sourceDoc);
+  const missing = getPublishReadyMissingFields(requestedDoc);
   if (missing.length) {
     const error = new Error(`Missing required fields: ${missing.join(', ')}`);
     error.statusCode = 400;
     error.details = { missingFields: missing };
     throw error;
   }
-  if (sourceDoc.status === 'deleted' || sourceDoc.deletedAt) {
+  if (requestedDoc.status === 'deleted' || requestedDoc.deletedAt) {
     throw Object.assign(new Error('Restore the deleted story before publishing.'), { statusCode: 409 });
   }
 
-  if (options.saveScope?.publicationGroupKey && !sourceDoc.translationGroupId && !sourceDoc.translationKey) {
-    sourceDoc.translationGroupId = options.saveScope.publicationGroupKey;
-    sourceDoc.translationKey = options.saveScope.publicationGroupKey;
+  const requested = typeof requestedDoc.toObject === 'function' ? requestedDoc.toObject() : requestedDoc;
+  const { source, members, ...identity } = await resolveRequestTranslationSource(requested, options.session);
+  if (members.some(doc => doc.status === 'deleted' || doc.deletedAt)) {
+    throw Object.assign(new Error('Restore the complete translation group before publishing.'), { statusCode: 409 });
   }
-  const groupKey = ensureTranslationGroupIdForDoc(sourceDoc);
-  const currentBase = normalizeLanguage(sourceDoc.originalLang) || normalizeLanguage(sourceDoc.lang) || normalizeLanguage(sourceDoc.language) || 'en';
-  const inferredBase = inferLanguageFromDocText({ title: sourceDoc.title, description: sourceDoc.description, content: sourceDoc.content });
-  const resolvedBase = currentBase !== 'en' ? currentBase : (inferredBase || currentBase);
-  sourceDoc.originalLang = resolvedBase;
-  sourceDoc.lang = resolvedBase;
-  sourceDoc.language = resolvedBase;
+  for (const member of members) await options.authorizeSave?.(member, options.session);
+  const sourceDoc = String(source._id) === id ? requestedDoc
+    : await News.findById(source._id, null, { session: options.session });
+  if (!sourceDoc) throw translationSourceIdentityError('The canonical source article is missing.');
+  const sourceMissing = getPublishReadyMissingFields(sourceDoc);
+  if (sourceMissing.length) {
+    throw Object.assign(new Error(`Missing required fields: ${sourceMissing.join(', ')}`), {
+      statusCode: 400, details: { missingFields: sourceMissing },
+    });
+  }
+  const authorizeSource = req ? articlePublicationAuthorizer(req, identity.sourceGroupKey ? {
+    translationGroupId: identity.sourceGroupKey, translationKey: identity.sourceGroupKey,
+  } : {}) : options.authorizeSave;
+  const requestedScope = options.saveScope;
+  const saveScope = authorizeSource ? await authorizeSource(sourceDoc, options.session) : options.saveScope;
+  options = { ...options, ...identity, saveScope, requestedEdition: requestedDoc };
+  const groupKey = ensureTranslationGroupIdForDoc(sourceDoc, identity.sourceGroupKey);
+  options.sourceGroupKey = groupKey;
+  sourceDoc.originalLang = identity.sourceLanguage;
+  sourceDoc.lang = identity.sourceLanguage;
+  sourceDoc.language = identity.sourceLanguage;
   ensureNewsSlugs(sourceDoc);
-  if (isSourceTranslationDoc(sourceDoc)) Object.assign(sourceDoc, prepareSourceSyncMetadata(sourceDoc, { now: new Date() }));
-  await assertArticleSlugsUnique(sourceDoc, { session: options.session });
+  Object.assign(sourceDoc, prepareSourceSyncMetadata(sourceDoc, { now: new Date() }));
   options.saveScope?.adoptSourceIdentity(sourceDoc);
+  options.saveScope?.assertNewsRecords(members.map(doc => String(doc._id) === String(sourceDoc._id)
+    ? sourceDoc : { ...doc, sourceArticleId: doc.sourceArticleId || sourceDoc._id }));
+  await assertArticleSlugsUnique(sourceDoc, { session: options.session });
+  if (String(sourceDoc._id) !== id
+    && (requestedDoc.translationGroupId !== groupKey || requestedDoc.translationKey !== groupKey)) {
+    ensureTranslationGroupIdForDoc(requestedDoc, groupKey);
+    requestedScope?.adoptSourceIdentity(requestedDoc);
+    await saveDoc(requestedDoc, { validateModifiedOnly: true, session: options.session, saveScope: requestedScope });
+    options.saveScope = authorizeSource ? await authorizeSource(sourceDoc, options.session) : options.saveScope;
+    options.saveScope?.adoptSourceIdentity(sourceDoc);
+  }
   await saveDoc(sourceDoc, { validateModifiedOnly: true, session: options.session, saveScope: options.saveScope });
 
   const { generated } = await ensureRequiredTranslations(sourceDoc, groupKey, actor, options);
@@ -439,16 +447,22 @@ async function publishArticleInSession(articleIdOrDoc, options = {}) {
     if (String(current.translationGroupId || current.translationKey) !== groupKey) {
       throw Object.assign(new Error('Translation group changed. Reload and retry.'), { statusCode: 409 });
     }
+    const verified = await resolveRequestTranslationSource(current, session);
+    if (String(verified.source._id) !== String(sourceDoc._id) || verified.sourceGroupKey !== groupKey) {
+      throw translationSourceIdentityError('The translation source changed during publication.');
+    }
     const groupDocs = await findTranslationGroupDocs(current, session);
     const saveScope = transaction.saveScope;
     saveScope?.assertNewsRecords(groupDocs);
     const readiness = buildTranslationGroupPublishReadiness(groupDocs);
-    if (groupDocs.some(doc => doc.status === 'deleted' || doc.deletedAt) || !readiness.ok) {
+    if (groupDocs.some(doc => doc.status === 'deleted' || doc.deletedAt) || !readiness.ok
+      || !readiness.readyDocs.some(doc => String(doc._id) === id)) {
       throw Object.assign(new Error('The translation group changed. Review every edition before publishing.'), { statusCode: 409 });
     }
     const previous = readiness.readyDocs.map(doc => ({ doc, state: snapshotPublishState(doc) }));
     const changedDocs = [];
-    const bylineSource = readiness.readyDocs.find((doc) => isSourceTranslationDoc(doc)) || sourceDoc;
+    const bylineSource = readiness.readyDocs.find(doc => String(doc._id) === String(sourceDoc._id));
+    if (!bylineSource) throw translationSourceIdentityError('The canonical source article is missing.');
     const publicationDate = bylineSource.publishedAt
       || readiness.readyDocs.map(doc => doc.publishedAt).filter(Boolean).sort((a, b) => new Date(a) - new Date(b))[0]
       || now;
@@ -486,7 +500,11 @@ async function publishArticleInSession(articleIdOrDoc, options = {}) {
       ensureNewsSlugs(doc);
       await assertArticleSlugsUnique(doc, { session });
       await preparePulseDialogueForPublication(doc);
-      if (isSourceTranslationDoc(doc)) Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
+      if (String(doc._id) === String(sourceDoc._id)) Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
+      else {
+        doc.sourceArticleId = doc.sourceArticleId || sourceDoc._id;
+        doc.sourceLanguage = doc.sourceLanguage || identity.sourceLanguage;
+      }
       saveScope?.approvePublishedRecord(doc);
       await saveDoc(doc, { session, saveScope });
     }
@@ -520,7 +538,7 @@ async function publishArticleInSession(articleIdOrDoc, options = {}) {
     if (typeof doc.$session === 'function') doc.$session(null);
   }
 
-  const sourcePublishedDoc = readiness.readyDocs.find((doc) => String(doc._id || '') === String(sourceDoc._id || '')) || sourceDoc;
+  const requestedPublishedDoc = readiness.readyDocs.find(doc => String(doc._id) === id);
   const result = {
     ok: true,
     statusCode: 200,
@@ -528,7 +546,7 @@ async function publishArticleInSession(articleIdOrDoc, options = {}) {
     translationGroupId: groupKey,
     publishedLanguages: readiness.readyDocs.map((doc) => getStoredLanguageForArticle(doc)).filter(Boolean),
     articles: readiness.readyDocs,
-    article: sourcePublishedDoc,
+    article: requestedPublishedDoc,
     generated,
     changed: changedDocs.length > 0,
     publicSync: { ok: true, failedArticleIds: [] },
@@ -537,21 +555,21 @@ async function publishArticleInSession(articleIdOrDoc, options = {}) {
     if (changedDocs.length) {
     try {
       await PushHistory.create({
-        articleId: sourcePublishedDoc._id,
+        articleId: requestedPublishedDoc._id,
         type: 'publish',
         action: 'publish',
-        slug: sourcePublishedDoc.slug,
-        title: sourcePublishedDoc.title,
+        slug: requestedPublishedDoc.slug,
+        title: requestedPublishedDoc.title,
         channel: 'SITE',
         at: now,
         byUserId: actor.byUserId && mongoose.Types.ObjectId.isValid(String(actor.byUserId)) ? actor.byUserId : null,
         status: 'SUCCESS',
         meta: {
           source: options.source || 'publish',
-          oldStatus: previous.find((item) => item.doc === sourcePublishedDoc)?.state?.status || null,
+          oldStatus: previous.find((item) => item.doc === requestedPublishedDoc)?.state?.status || null,
           newStatus: 'published',
-          oldStage: previous.find((item) => item.doc === sourcePublishedDoc)?.state?.workflowStage || null,
-          newStage: sourcePublishedDoc.workflowStage,
+          oldStage: previous.find((item) => item.doc === requestedPublishedDoc)?.state?.workflowStage || null,
+          newStage: requestedPublishedDoc.workflowStage,
           publishedLanguages: readiness.readyDocs.map((doc) => getStoredLanguageForArticle(doc)).filter(Boolean),
         },
       });

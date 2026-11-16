@@ -176,12 +176,13 @@ test('publishing source-linked legacy editions does not generate duplicate trans
   assert.ok(state.invalidations.every(payload => !payload.q));
 });
 
-test('publication keeps stale legacy duplicate copies hidden and preserves their chronology', async context => {
+test('publication keeps verified stale legacy duplicate copies hidden and preserves their chronology', async context => {
   const state = installEditorialFixture(context);
   const { ids, publication } = seedGroup(state);
   const staleId = '607f1f77bcf86cd79943b999';
   state.rows.Article.push({
     _id: staleId, slug: 'obsolete-public-copy', translationGroupId: 'story-test-group',
+    sourceNewsId: ids[0], sourceArticleId: ids[0],
     status: 'published', publishedAt: publication, language: 'en',
   });
   const response = await state.request('post', `/api/articles/${ids[0]}/publish`, {});
@@ -190,6 +191,25 @@ test('publication keeps stale legacy duplicate copies hidden and preserves their
   const stale = state.rows.Article.find(doc => doc._id === staleId);
   assert.equal(stale.status, 'draft');
   assert.equal(date(stale.publishedAt), date(publication));
+});
+
+test('publication rejects an unowned legacy duplicate without hiding or adopting it', async context => {
+  const state = installEditorialFixture(context);
+  const { ids, publication } = seedGroup(state);
+  state.rows.Article.push({
+    _id: '607f1f77bcf86cd79943b999', slug: 'obsolete-public-copy', translationGroupId: 'story-test-group',
+    status: 'published', publishedAt: publication, language: 'en',
+  });
+  const before = structuredClone(state.rows);
+  const response = await state.request('post', `/api/articles/${ids[0]}/publish`, {});
+  assert.equal(response.status, 409);
+  assert.equal(response.body.ok, false);
+  assert.equal(response.body.success, false);
+  assert.match(response.body.message, /public copy.*(?:missing|conflict)/i);
+  assert.match(response.body.message, /Founder review/);
+  assert.deepEqual(state.rows, before);
+  assert.equal(state.calls.some(call => ['save', 'create', 'updateOne', 'updateMany', 'findOneAndUpdate', 'findByIdAndUpdate'].includes(call.method)), false);
+  assert.equal(state.invalidations.length, 0);
 });
 
 test('lifecycle state and history validate against the real News schema', async context => {

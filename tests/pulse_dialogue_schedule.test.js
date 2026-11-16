@@ -141,6 +141,7 @@ function installPublishMocks(t, docs) {
   ];
   const publicUpdates = [];
   const pushHistory = [];
+  t.mock.method(PublicArticle, 'find', () => queryDoc([]));
 
   News.findById = (id) => queryDoc(docs.find((doc) => String(doc._id) === String(id)) || null);
   News.find = (query = {}) => {

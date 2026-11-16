@@ -116,6 +116,7 @@ function installPublishMocks(t, docs, options = {}) {
     endSession: async () => {},
   }));
   t.mock.method(News, 'updateMany', async () => ({ acknowledged: true, matchedCount: docs.length, modifiedCount: docs.length }));
+  t.mock.method(PublicArticle, 'find', () => queryDoc([]));
   const originals = [
     {
       target: News,
@@ -162,7 +163,9 @@ function installPublishMocks(t, docs, options = {}) {
   News.findOne = (query) => {
     const raw = JSON.stringify(query || {});
     const lang = ['en', 'hi', 'gu'].find((candidate) => raw.includes(`"language":"${candidate}"`) || raw.includes(`"lang":"${candidate}"`));
-    const existing = lang ? docs.find((doc) => doc.language === lang || doc.lang === lang) : null;
+    const id = query?._id && !query._id.$ne ? String(query._id) : null;
+    const existing = id ? docs.find(doc => String(doc._id) === id)
+      : lang ? docs.find((doc) => doc.language === lang || doc.lang === lang) : null;
     return queryDoc(existing || null);
   };
   News.updateOne = async () => ({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });

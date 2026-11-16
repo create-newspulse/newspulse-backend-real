@@ -559,9 +559,13 @@ for (const protection of ['Founder approval', 'private', 'unknown parent', 'cros
     if (protection === 'unknown parent') state.rows.News[1].sourceArticleId = actorId('admin');
     if (protection === 'cross-group linkage') state.rows.News[1].translationGroupId = 'different-group';
     if (protection === 'foreign copy') state.rows.Article[1].sourceNewsId = actorId('admin');
-    assertDenied(state, state.content(), await state.request('patch', `/api/articles/${ids[0]}`, {
+    const before = state.content();
+    const response = await state.request('patch', `/api/articles/${ids[0]}`, {
       status: 'published', title: 'Must not change protected group',
-    }, 'editor'));
+    }, 'editor');
+    const identityConflict = ['unknown parent', 'cross-group linkage'].includes(protection);
+    assertDenied(state, before, response, identityConflict ? 409 : 403);
+    if (identityConflict) assert.equal(response.body.code, 'TRANSLATION_SOURCE_IDENTITY_INVALID');
   });
 }
 
