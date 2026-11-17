@@ -7,6 +7,7 @@ const { normalizeSpotlightPriority } = require('./spotlightPriority.service');
 const { buildPublicPulseDialogueFromArticle } = require('./pulseDialogue.service');
 const { getStoryKeys, buildStoryIdentityFilter, UNOWNED_PUBLIC_COPY_FILTER } = require('./articleSlugUniqueness.service');
 const News = require('../models/News');
+const { PUBLIC_COVER_IMAGE_FALLBACK_UNSET } = require('./articleCoverImage.service');
 const { isPubliclyVisibleNewsArticle } = require('./publicArticleVisibility.service');
 const {
   loadTranslationGroupStatus, resolvePersistedTranslationSourceId,
@@ -424,7 +425,8 @@ async function _syncPublicArticleFromNews(newsDoc, options = {}) {
     if (location) tags = _mergeLocationTags(tags, location);
     if (Object.values(geo).some(Boolean)) tags = _mergeLocationTags(tags, geo);
   }
-  const coverUrl =
+  const coverRemoved = newsDoc.coverImage?.removed === true;
+  const coverUrl = coverRemoved ? null :
     (newsDoc.coverImage && typeof newsDoc.coverImage === 'object' && !Array.isArray(newsDoc.coverImage) ? newsDoc.coverImage.url : null) ||
     newsDoc.coverImageUrl ||
     newsDoc.imageURL ||
@@ -436,7 +438,7 @@ async function _syncPublicArticleFromNews(newsDoc, options = {}) {
         publicId: newsDoc.coverImage && typeof newsDoc.coverImage === 'object' ? (newsDoc.coverImage.publicId || null) : null,
         alt: newsDoc.coverImage && typeof newsDoc.coverImage === 'object' ? (newsDoc.coverImage.alt || null) : null,
       }
-    : { url: null, publicId: null, alt: null };
+    : { url: null, publicId: null, alt: null, ...(coverRemoved ? { removed: true } : {}) };
   const pulseDialogue = await buildPublicPulseDialogueFromArticle(newsDoc);
 
   const update = {
@@ -563,6 +565,10 @@ async function _syncPublicArticleFromNews(newsDoc, options = {}) {
 
   const updateOp = { $set: update };
   if (!pulseDialogue) updateOp.$unset = { pulseDialogue: '' };
+  const clearCoverFallbacks = options.clearCoverFallbacks || coverRemoved;
+  if (clearCoverFallbacks) {
+    updateOp.$unset = { ...updateOp.$unset, ...PUBLIC_COVER_IMAGE_FALLBACK_UNSET };
+  }
   if (options.preserveSourceIdentity) {
     // Content saves preserve existing copy identity; missing links never imply a new original.
     const identity = options.preserveSourceIdentity;
@@ -594,7 +600,10 @@ async function _syncPublicArticleFromNews(newsDoc, options = {}) {
   const saved = await PublicArticle.findOneAndUpdate(
     target.filter,
     updateOp,
-    { upsert: target.upsert, new: true, setDefaultsOnInsert: true, runValidators: true, session: options.session }
+    {
+      upsert: target.upsert, new: true, setDefaultsOnInsert: true, runValidators: true, session: options.session,
+      ...(clearCoverFallbacks ? { strict: false } : {}),
+    }
   ).lean();
   if (!saved && (options.saveScope || !target.upsert)) throw Object.assign(new Error('Article save scope changed. Reload and retry.'), {
     statusCode: 409, code: 'ARTICLE_SAVE_SCOPE_CHANGED',

@@ -133,6 +133,7 @@ function _normalizeCoverImage(ret) {
       url: v.url ? String(v.url) : null,
       publicId: v.publicId ? String(v.publicId) : null,
       alt: v.alt ? String(v.alt) : null,
+      ...(v.removed === true ? { removed: true } : {}),
     };
   } else if (v === undefined) {
     // leave as-is
@@ -280,6 +281,7 @@ const articleSchema = new mongoose.Schema(
       url: { type: String, default: null },
       publicId: { type: String, default: null },
       alt: { type: String, default: null },
+      removed: { type: Boolean, default: undefined },
     },
     externalUrls: { type: [String], default: [] },
     embeds: { type: [String], default: [] },

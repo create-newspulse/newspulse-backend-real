@@ -13,6 +13,7 @@ const {
 const { slugifyUnicode } = require('../lib/slug');
 const { FAITH_TOPIC_CODES, isFaithCultureCategory } = require('../lib/faithCultureTopics');
 const { normalizeLanguage } = require('../middleware/lang');
+const { COVER_IMAGE_FALLBACK_UNSET, getStoredCoverImageUrl } = require('./articleCoverImage.service');
 
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 
@@ -499,8 +500,10 @@ async function syncTranslationGroupMetadataInSession(doc, options) {
     .filter(([key]) => sharedFields.has(key) || key.startsWith('location.')));
   const language = normalizeLang(doc.language || doc.lang);
   if (language && supplied('slug') && !options.preservePublicationMetadata) shared[`slugs.${language}`] = doc.slug;
-  const imageChanged = ['coverImage', 'coverImageUrl', 'imageURL'].some(changed);
-  const beforeImage = before.coverImage?.url || before.coverImageUrl || before.imageURL || null;
+  const imageChanged = input.coverImage?.removed === true
+    || ['coverImage', 'coverImageUrl', 'imageURL'].some(changed);
+  const beforeImage = getStoredCoverImageUrl(before);
+  const nextImage = getStoredCoverImageUrl(doc);
   const members = await News.find(buildStoryIdentityFilter(doc), null, { session: options.session }).lean();
   const history = options.preserveDeletedEditions
     ? members.filter(member => member.status === 'deleted' || member.deletedAt) : [];
@@ -508,16 +511,28 @@ async function syncTranslationGroupMetadataInSession(doc, options) {
     ? members.filter(member => member.status !== 'deleted' && !member.deletedAt) : members;
   options.saveScope?.assertNewsRecords(writable);
   const updated = [];
+  const coverFallbackCleanupIds = new Set();
   for (const member of writable) {
     const patch = { ...shared };
-    const memberImage = member.coverImage?.url || member.coverImageUrl || member.imageURL || null;
-    if (imageChanged && (!memberImage || memberImage === beforeImage || String(member._id) === String(doc._id))) {
+    const memberImage = getStoredCoverImageUrl(member);
+    const inheritsImage = member.coverImage?.removed === true
+      ? before.coverImage?.removed === true : !memberImage || memberImage === beforeImage;
+    const syncImage = imageChanged && (inheritsImage || String(member._id) === String(doc._id));
+    const clearCoverFallbacks = syncImage && (doc.coverImage?.removed === true || (nextImage && nextImage !== beforeImage));
+    if (syncImage) {
       patch.coverImage = doc.coverImage;
       patch.coverImageUrl = doc.coverImageUrl || doc.coverImage?.url || null;
       patch.imageURL = doc.imageURL || patch.coverImageUrl;
+      if (clearCoverFallbacks) coverFallbackCleanupIds.add(String(member._id));
     }
     const next = Object.keys(patch).length
-      ? await News.findByIdAndUpdate(member._id, { $set: patch }, { new: true, runValidators: false, session: options.session }).lean()
+      ? await News.findByIdAndUpdate(member._id, {
+        $set: patch, ...(clearCoverFallbacks ? { $unset: { ...COVER_IMAGE_FALLBACK_UNSET } } : {}),
+      }, {
+        new: true, runValidators: false, session: options.session,
+        // Only the server-built legacy cleanup may address fields absent from the current schema.
+        ...(clearCoverFallbacks ? { strict: false } : {}),
+      }).lean()
       : member;
     if (!next) throw new Error('Article group changed during metadata synchronization');
     updated.push(next);
@@ -541,6 +556,7 @@ async function syncTranslationGroupMetadataInSession(doc, options) {
         previousDoc: String(member._id) === String(doc._id) ? before : undefined,
         preserveSourceIdentity: options.preserveSourceIdentity, preserveDeletedEditions: options.preserveDeletedEditions,
         preservePublicationMetadata: options.preservePublicationMetadata,
+        clearCoverFallbacks: coverFallbackCleanupIds.has(String(member._id)),
       });
       publicDocs.push(publicDoc);
     }

@@ -396,6 +396,7 @@ const newsSchema = new mongoose.Schema({
     url: { type: String, default: null },
     publicId: { type: String, default: null },
     alt: { type: String, default: null },
+    removed: { type: Boolean, default: undefined },
   },
   externalUrls: { type: [String], default: [] },
   embeds: { type: [String], default: [] },

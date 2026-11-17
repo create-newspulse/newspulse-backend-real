@@ -27,6 +27,9 @@ const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('..
 const { isFaithCultureCategory, buildFaithTopicPatch, isFaithTopicOnlyUpdate } = require('../lib/faithCultureTopics');
 const { canonicalizeSlug, detectSlugLocale, getSlugCandidates, safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
+const {
+  buildCoverImagePatch, getStoredCoverImageUrl, PUBLIC_COVER_IMAGE_FALLBACK_UNSET,
+} = require('../services/articleCoverImage.service');
 const { buildArticleCreatorFields } = require('../lib/articleCreator');
 const { requireFounderArticleMutation } = require('../lib/articleMutationActor');
 const { INDIA_STATES_UTS, tagStatesFromText, isValidStateSlug } = require('../src/utils/locationTagger');
@@ -591,7 +594,8 @@ function validatePublishable(doc) {
 
 function withCoverImageUrl(obj) {
   if (!obj) return obj;
-  const coverUrl =
+  const coverRemoved = obj.coverImage?.removed === true;
+  const coverUrl = coverRemoved ? null :
     (obj.coverImage && typeof obj.coverImage === 'object' && !Array.isArray(obj.coverImage) ? obj.coverImage.url : null) ||
     (typeof obj.coverImage === 'string' ? obj.coverImage : null) ||
     obj.coverImageUrl ||
@@ -605,6 +609,7 @@ function withCoverImageUrl(obj) {
         url: v.url ? String(v.url) : (coverUrl || null),
         publicId: v.publicId ? String(v.publicId) : null,
         alt: v.alt ? String(v.alt) : null,
+        ...(coverRemoved ? { removed: true } : {}),
       };
     }
     if (typeof v === 'string') return { url: v, publicId: null, alt: null };
@@ -1042,7 +1047,8 @@ function hasArticleContentEdit(update, before) {
     || Object.prototype.hasOwnProperty.call(update, 'description')
     || Object.prototype.hasOwnProperty.call(update, 'content')
     || Object.prototype.hasOwnProperty.call(update, 'seo')
-    || Object.prototype.hasOwnProperty.call(update, 'coverImage')
+    || ['coverImage', 'coverImageUrl', 'imageURL', 'removeCoverImage']
+      .some(key => Object.prototype.hasOwnProperty.call(update, key))
   ));
 }
 
@@ -2796,9 +2802,6 @@ async function updateArticle(req, res, next) {
       tags,
       status: statusInput,
       scheduledAt,
-      imageURL: imageURLRaw,
-      coverImageUrl: coverImageUrlRaw,
-      coverImage,
     } = requestBody;
     let status = statusInput;
     const sharedSyncFields = _buildSharedSyncFieldsFromBody(requestBody);
@@ -2819,8 +2822,6 @@ async function updateArticle(req, res, next) {
     const bodyText = _normalizeOptionalString(bodyRaw);
     const category = _normalizeCategoryValue(categoryRaw);
     const language = _normalizeOptionalString(languageRaw !== undefined ? languageRaw : langRaw);
-    const imageURL = _normalizeOptionalString(imageURLRaw);
-    const coverImageUrl = _normalizeOptionalString(coverImageUrlRaw);
 
     const summaryOrDescription0 = summary !== undefined ? summary : description;
     // Prevent wiping required field: if provided, description must be non-empty.
@@ -3066,26 +3067,7 @@ async function updateArticle(req, res, next) {
       await assertSlugUnique(resolvedSlug, rawId, before || {});
     }
 
-    const resolvedCoverImageUrl = coverImageUrl ?? imageURL;
-
-    const coverObj = (coverImage && typeof coverImage === 'object' && !Array.isArray(coverImage)) ? coverImage : null;
-    const prevCover = (() => {
-      const v = before && before.coverImage;
-      if (v && typeof v === 'object' && !Array.isArray(v)) return v;
-      const u = before && (before.coverImageUrl || before.imageURL);
-      return u ? { url: u, publicId: null, alt: null } : null;
-    })();
-    let nextCover = null;
-    if (coverObj) {
-      nextCover = {
-        url: prevCover && prevCover.url ? String(prevCover.url) : null,
-        publicId: prevCover && prevCover.publicId ? String(prevCover.publicId) : null,
-        alt: prevCover && prevCover.alt ? String(prevCover.alt) : null,
-      };
-      if (coverObj.url !== undefined) nextCover.url = absolutizeUploadsUrl(coverObj.url);
-      if (coverObj.publicId !== undefined) nextCover.publicId = coverObj.publicId ? String(coverObj.publicId) : null;
-      if (coverObj.alt !== undefined) nextCover.alt = coverObj.alt ? String(coverObj.alt) : null;
-    }
+    const coverImagePatch = buildCoverImagePatch(requestBody, before || publicBefore);
 
     const tagsArr = tags !== undefined
       ? ensureTrackTag(parseTags(tags), sharedSyncFields.track !== undefined ? sharedSyncFields.track : before?.track)
@@ -3136,18 +3118,7 @@ async function updateArticle(req, res, next) {
       ...(tagsArr ? { tags: tagsArr, geo } : {}),
       ...(status !== undefined && status !== null && String(status).trim() !== '' ? { status: String(status).toLowerCase() } : {}),
       ...(scheduled !== undefined ? { scheduledAt: scheduled } : {}),
-      ...(imageURL !== undefined ? { imageURL } : {}),
-      ...(coverImageUrl !== undefined ? { coverImageUrl: absolutizeUploadsUrl(coverImageUrl) } : {}),
-      ...(resolvedCoverImageUrl !== undefined && coverImageUrl === undefined ? { coverImageUrl: absolutizeUploadsUrl(resolvedCoverImageUrl) } : {}),
-      ...(resolvedCoverImageUrl !== undefined && imageURL === undefined ? { imageURL: resolvedCoverImageUrl } : {}),
-      ...(nextCover ? {
-        coverImage: nextCover,
-        ...(nextCover.url ? {
-          // keep legacy fields in sync for older clients
-          coverImageUrl: nextCover.url,
-          ...(imageURL === undefined ? { imageURL: nextCover.url } : {}),
-        } : {}),
-      } : {}),
+      ...coverImagePatch,
       ...(resolvedSlug !== undefined && !preservePublicationMetadata ? { slug: resolvedSlug, [`slugs.${effectiveLang}`]: resolvedSlug } : {}),
       ...sharedSyncFields,
       ...sponsoredArticleFields.value,
@@ -3504,26 +3475,8 @@ async function updateArticle(req, res, next) {
         articleUpdate.stateNames = [];
       }
 
-      // coverImage (preferred) + legacy coverImageUrl/imageURL -> coverImage.url
-      const nextCoverForArticle = (() => {
-        const coverObj2 = (coverImage && typeof coverImage === 'object' && !Array.isArray(coverImage)) ? coverImage : null;
-        const urlFromLegacy = resolvedCoverImageUrl !== undefined ? absolutizeUploadsUrl(resolvedCoverImageUrl) : null;
-
-        if (!coverObj2 && urlFromLegacy === null) return null;
-
-        const out = { url: null, publicId: null, alt: null };
-        if (coverObj2) {
-          if (coverObj2.url !== undefined) out.url = absolutizeUploadsUrl(coverObj2.url);
-          if (coverObj2.publicId !== undefined) out.publicId = coverObj2.publicId ? String(coverObj2.publicId) : null;
-          if (coverObj2.alt !== undefined) out.alt = coverObj2.alt ? String(coverObj2.alt) : null;
-        }
-
-        if (out.url === null && urlFromLegacy) out.url = urlFromLegacy;
-        return out;
-      })();
-
-      if (nextCoverForArticle) {
-        articleUpdate.coverImage = nextCoverForArticle;
+      if (coverImagePatch.coverImage) {
+        articleUpdate.coverImage = coverImagePatch.coverImage;
       }
 
       // Strip undefined fields so we don't unset enums accidentally.
@@ -3532,15 +3485,23 @@ async function updateArticle(req, res, next) {
       }
 
       let articleDoc = null;
+      const clearCoverFallbacks = articleUpdate.coverImage?.removed === true
+        || (articleUpdate.coverImage?.url && articleUpdate.coverImage.url !== getStoredCoverImageUrl(articleBefore));
       try {
         const articleUpdateOp = { $set: articleUpdate };
         if (editorialPatch.shouldUnset) articleUpdateOp.$unset = { editorialType: '' };
+        if (clearCoverFallbacks) {
+          articleUpdateOp.$unset = { ...articleUpdateOp.$unset, ...PUBLIC_COVER_IMAGE_FALLBACK_UNSET };
+        }
         mutationResult = await inArticleTransaction(async (session, transaction) => {
           const current = await PublicArticle.findById(rawId, null, { session }).lean();
           if (!current) return null;
           const access = await authorizeArticleSave(req, current, articleUpdate, session, { publicOnly: true, ignoreComputed: true });
           const saved = await PublicArticle.findOneAndUpdate(
-            access?.filter || { _id: rawId }, articleUpdateOp, { new: true, runValidators: true, session }
+            access?.filter || { _id: rawId }, articleUpdateOp, {
+              new: true, runValidators: true, session,
+              ...(clearCoverFallbacks ? { strict: false } : {}),
+            }
           );
           if (!saved) throw scopeChanged();
           transaction.afterCommit.push(() => invalidateArticleCaches(

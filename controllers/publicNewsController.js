@@ -1,5 +1,6 @@
 const { withPublicAuthorByline } = require('../services/authorByline.service');
 const { serializePublicArticle } = require('../services/publicArticleSerializer.service');
+const { PUBLIC_COVER_IMAGE_FALLBACK_UNSET } = require('../services/articleCoverImage.service');
 const mongoose = require('mongoose');
 const { isContentDatabaseUnavailable } = require('../lib/contentErrors');
 
@@ -721,6 +722,10 @@ function _extractFirstImgSrcFromHtml(html) {
 
 function withCoverImageUrl(obj) {
   const out = withPublicAuthorByline({ ...(obj || {}) });
+  const coverRemoved = out.coverImage?.removed === true;
+  if (coverRemoved) {
+    for (const field of Object.keys(PUBLIC_COVER_IMAGE_FALLBACK_UNSET)) delete out[field];
+  }
 
   // Normalize imageUrl with the requested priority, plus legacy fields.
   // Priority: imageUrl || coverImage || image || thumbnail || images[0] || null
@@ -736,10 +741,10 @@ function withCoverImageUrl(obj) {
     candidates.push(_extractImageUrlFromAny(out.images[0]));
   }
 
-  let imageUrl = candidates.find(Boolean) || null;
+  let imageUrl = coverRemoved ? null : candidates.find(Boolean) || null;
 
   // Optional fallback: extract from body HTML when no explicit image exists.
-  if (!imageUrl) {
+  if (!coverRemoved && !imageUrl) {
     imageUrl = _extractFirstImgSrcFromHtml(out.content) || null;
   }
 
@@ -747,7 +752,8 @@ function withCoverImageUrl(obj) {
 
   // Keep backward-compatible coverImageUrl populated.
   const coverFromObj = (out.coverImage && typeof out.coverImage === 'object') ? _normalizeOptionalString(out.coverImage.url) : null;
-  out.coverImageUrl = _normalizeOptionalString(out.coverImageUrl) || _normalizeOptionalString(out.imageURL) || coverFromObj || out.imageUrl || null;
+  out.coverImageUrl = coverRemoved ? null
+    : _normalizeOptionalString(out.coverImageUrl) || _normalizeOptionalString(out.imageURL) || coverFromObj || out.imageUrl || null;
 
   // Normalize optional alt/caption fields (pass-through if present).
   const alt =

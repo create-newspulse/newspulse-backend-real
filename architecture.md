@@ -1050,6 +1050,22 @@ Canonical
 allowlists continue to ignore resubmitted computed sync/timestamp/ID fields
 rather than treating them as editable data. The raw legacy updater rejects
 changes to server-controlled fields and Mongo operator payloads from staff.
+
+Cover-image updates on the existing article PUT/PATCH use `removeCoverImage: true`
+for explicit removal. Omitted, null, blank and placeholder image fields alone
+keep the current cover; `removeCoverImage: false` is also a keep/no-op control.
+A nonempty `coverImage.url` (preferred), legacy string `coverImage`,
+`coverImageUrl` or `imageURL` replaces it. The boolean removal flag takes
+precedence over stale image values echoed by the editor.
+Removal clears the canonical URL/asset metadata and legacy cover/image/thumbnail
+fallback fields in the same authorized transaction. An optional persisted
+`coverImage.removed` marker prevents public reads from selecting an inline body
+image as the cover; the article body and gallery remain unchanged. Replacement
+clears that marker. Shared-image editions follow the existing group propagation
+rules, while independently customized edition images are retained.
+Image-only saves preserve existing publication URLs/dates/status, text and
+edition identity, and use the existing Staff save authorization without new grants.
+
 Creation follows the policy above rather than a blanket `news_edit` requirement;
 existing creator stamping and authorized draft contracts remain intact.
 Canonical create-as-published uses the same verified publication authority.
