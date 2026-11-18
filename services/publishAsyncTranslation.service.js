@@ -1,5 +1,6 @@
 const News = require('../models/News');
-const { slugifyUnicode } = require('../lib/slug');
+const { slugifyUnicode, slugifyLocalizedTitle, hasPublishedArticleUrls } = require('../lib/slug');
+const { assertArticleSlugsUnique } = require('./articleSlugUniqueness.service');
 const googleTranslate = require('./googleTranslate.service');
 const { syncPublicArticleFromNews } = require('./syncPublicArticleFromNews.service');
 const { syncTranslationGroupFromMaster } = require('./translationGroupSync.service');
@@ -137,15 +138,33 @@ async function withTranslationWrite(id, expectedSource, options, work) {
 }
 
 async function persistTranslationUpdate(id, update, expectedSource, logger, reason, options = {}) {
-  return withTranslationWrite(id, expectedSource, options, async (_current, session, transaction) => {
-    const updated = await News.findByIdAndUpdate(id, update, { new: true, runValidators: false, session });
+  return withTranslationWrite(id, expectedSource, options, async (current, session, transaction) => {
+    const set = { ...update.$set };
+    const slugs = { ...(current.slugs || {}) };
+    let slugChanged = false;
+    for (const lang of SUPPORTED_LANGS) {
+      const field = `slugs.${lang}`;
+      if (!Object.prototype.hasOwnProperty.call(set, field)) continue;
+      if (hasPublishedArticleUrls(current) || slugs[lang]) delete set[field];
+      else {
+        slugs[lang] = set[field];
+        slugChanged = true;
+      }
+    }
+    if (slugChanged) await assertArticleSlugsUnique({ ...current, slugs }, { session });
+    const updated = await News.findByIdAndUpdate(id, { ...update, $set: set }, { new: true, runValidators: false, session });
     if (!updated) throw Object.assign(new Error('The source story changed.'), { statusCode: 409, code: 'TRANSLATION_SOURCE_CHANGED' });
     if (updated.translationGroupId || updated.translationKey) {
-      await syncTranslationGroupFromMaster(updated, { ...transaction, logger, reason, invalidate: updated.status === 'published' });
+      await syncTranslationGroupFromMaster(updated, {
+        ...transaction, logger, reason, invalidate: updated.status === 'published',
+        preservePublicationUrls: hasPublishedArticleUrls(updated),
+      });
     } else {
-      await syncPublicArticleFromNews(updated, { session, logger, throwOnError: true });
+      const publicDoc = await syncPublicArticleFromNews(updated, {
+        session, logger, throwOnError: true, preservePublicationUrls: hasPublishedArticleUrls(updated),
+      });
       await afterArticleCommit(transaction, updated, () =>
-        invalidateArticleContent(updated, { reason, logger, publicVisibilityRemoved: true }));
+        invalidateArticleContent([updated, publicDoc], { reason, logger, publicVisibilityRemoved: true }));
     }
     return updated;
   });
@@ -680,8 +699,9 @@ async function translateAndSave(newsId, options = {}) {
         [`translationError.${dst}`]: null,
         [`translationNextRetryAt.${dst}`]: null,
         [`translationUpdatedAt.${dst}`]: now,
-        [`slugs.${dst}`]: slugifyUnicode(titleT),
       };
+      const localizedSlug = slugifyLocalizedTitle(titleT, dst);
+      if (localizedSlug) setOk[`slugs.${dst}`] = localizedSlug;
 
       // Always keep base language status as ready.
       setOk[`translationStatus.${baseLang}`] = 'ready';

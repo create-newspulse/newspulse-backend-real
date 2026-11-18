@@ -18,9 +18,12 @@ const {
 } = require('../services/publicArticleVisibility.service');
 const { getLinkedSponsoredFeatureForArticle } = require('../services/sponsoredFeatures.service');
 const { publicCopyCandidates } = require('../services/syncPublicArticleFromNews.service');
+const {
+  findArticleSlugMatches, resolveCanonicalArticleSlug, assertSameArticleStory, ambiguousArticleSlug,
+} = require('../services/articleSlugResolution.service');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey, getPublicCategoryMatchValues } = require('../lib/categories');
 const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
-const { getSlugCandidates, safeDecodeURIComponent, canonicalizeSlug, slugifyUnicode, detectSlugLocale } = require('../lib/slug');
+const { detectSlugLocale, pickLocalizedArticleSlug } = require('../lib/slug');
 const { timeAsync } = require('../lib/timingDiagnostics');
 const {
   UNAVAILABLE_MESSAGE: FAITH_UNAVAILABLE_MESSAGE,
@@ -46,6 +49,10 @@ function isDbReady() {
 }
 
 function publicNewsReadError(res, error) {
+  if (error?.code === 'ARTICLE_SLUG_AMBIGUOUS' || error?.code === 'TRANSLATION_SOURCE_IDENTITY_INVALID') {
+    console.warn('[public-news] Ambiguous article lookup', { code: error.code });
+    return res.status(409).json({ ok: false, code: 'ARTICLE_SLUG_AMBIGUOUS', message: 'Article slug is ambiguous. Use the article ID.' });
+  }
   const status = isContentDatabaseUnavailable(error) ? 503 : 500;
   console.error('[public-news] Read failed', { status, code: error?.code || null });
   return res.status(status).json({
@@ -245,9 +252,12 @@ async function findPublishedTranslationSiblingForLang(doc, requestedLang, select
   filter.$and.push(exactLangMatch);
   if (doc._id) filter._id = { $ne: doc._id };
 
-  return News.findOne(filter)
+  const siblings = await News.find(filter)
     .select(selectFields || PUBLIC_DETAIL_SELECT)
     .lean();
+  if (siblings.length > 1) throw ambiguousArticleSlug();
+  if (siblings.length) await assertSameArticleStory([doc, ...siblings]);
+  return siblings[0] || null;
 }
 
 function buildOriginalLangMatch(lang) {
@@ -480,13 +490,6 @@ async function translatePublicNews(req, res) {
       if (prevGeneratedAt) doc.translations[target].generatedAt = prevGeneratedAt;
     }
 
-    // Keep per-language slugs in sync with stored translations.
-    doc.slugs = doc.slugs || {};
-    const titleForSlug = String(doc.translations[target].title || '').trim();
-    if (titleForSlug) {
-      doc.slugs[target] = slugifyUnicode(titleForSlug);
-    }
-
     try {
       // Mongoose applies this predicate to save's update, so a concurrent visibility change wins.
       doc.$where = buildPubliclyVisibleNewsArticleFilter();
@@ -623,12 +626,13 @@ const PUBLIC_SELECT = [
 ].join(' ');
 
 // Detail endpoints need `translations` for caching + instant language switching.
-const PUBLIC_DETAIL_SELECT = `${PUBLIC_SELECT} originalLang translations translationStatus translationError translationNextRetryAt`;
+const PUBLIC_DETAIL_SELECT = `${PUBLIC_SELECT} originalLang translations translationStatus translationError translationNextRetryAt sourceArticleId translationMeta.sourceArticleId`;
 
 // Feed needs translationStatus to filter and translations to localize.
 const PUBLIC_FEED_SELECT = `${PUBLIC_SELECT} originalLang translations translationStatus`;
 
 const PUBLIC_ARTICLE_DETAIL_SELECT = [
+  'status',
   'pulseDialogue',
   'authorByline.enabled',
   'authorByline.snapshot',
@@ -640,6 +644,7 @@ const PUBLIC_ARTICLE_DETAIL_SELECT = [
   'tags',
   'category',
   'language',
+  'lang',
   'originalLang',
   'translationKey',
   'translationGroupId',
@@ -833,7 +838,7 @@ function attachMobileResponseFields(obj, { includeBody = false } = {}) {
   return serializePublicArticle(out);
 }
 
-async function withPublicCopyPublication(doc) {
+async function withPublicCopyPublication(doc, { parentDocs } = {}) {
   let copies;
   try {
     ({ copies } = await publicCopyCandidates(doc, { preservePublicationMetadata: true }));
@@ -844,21 +849,24 @@ async function withPublicCopyPublication(doc) {
     return doc;
   }
   const copy = copies[0];
-  if (!copy || !isPubliclyVisibleNewsArticle(copy) || !await hasVisibleNewsSource(copy)) return doc;
+  if (!copy || !isPubliclyVisibleNewsArticle(copy) || !await hasVisibleNewsSource(copy, { parentDocs })) return doc;
   return { ...doc, slug: copy.slug, slugs: copy.slugs || null, publishedAt: copy.publishedAt ?? null };
 }
 
-async function findPublicNewsFallback(slugOrId) {
-  const base = buildPubliclyVisiblePublicArticleFilter();
-  const lookup = isObjectIdLike(slugOrId) ? { _id: slugOrId } : {
-    $or: ['slug', 'slugs.en', 'slugs.hi', 'slugs.gu'].map(field => ({
-      [field]: { $in: getSlugCandidates(slugOrId) },
-    })),
-  };
-  const copy = await PublicArticle.findOne({
-    ...base, $and: [...(base.$and || []), lookup],
-  }).select(PUBLIC_ARTICLE_DETAIL_SELECT).lean();
-  if (!copy || !await hasVisibleNewsSource(copy)) return null;
+async function findPublicNewsFallback(slugOrId, requestedLang, { slugOnly = false, parentDocs } = {}) {
+  let copy;
+  if (!slugOnly && isObjectIdLike(slugOrId)) {
+    copy = await PublicArticle.findOne({
+      ...buildPubliclyVisiblePublicArticleFilter(), _id: slugOrId,
+    }).select(PUBLIC_ARTICLE_DETAIL_SELECT).lean();
+  } else {
+    const matches = await findArticleSlugMatches(slugOrId, {
+      requestedLang, newsSelect: PUBLIC_DETAIL_SELECT, articleSelect: PUBLIC_ARTICLE_DETAIL_SELECT, parentDocs,
+    });
+    if (matches.news) return { doc: matches.news, docSource: 'news' };
+    copy = matches.publicArticle;
+  }
+  if (!copy || !await hasVisibleNewsSource(copy, { parentDocs })) return null;
   if (!copy.sourceNewsId) return { doc: _mapPublicArticleToNewsLikeShape(copy), docSource: 'publicArticle' };
   const doc = await News.findOne({
     ...buildPublicPublishedFilter({}), _id: copy.sourceNewsId,
@@ -868,13 +876,7 @@ async function findPublicNewsFallback(slugOrId) {
 
 function pickCanonicalSlug(doc, lang) {
   const target = normalizeLang(lang) || normalizeLang(doc?.lang || doc?.language) || 'en';
-  const slugs = doc && doc.slugs && typeof doc.slugs === 'object' ? doc.slugs : null;
-  return (
-    (slugs && slugs[target]) ||
-    doc?.slug ||
-    (slugs && (slugs.en || slugs.hi || slugs.gu)) ||
-    null
-  );
+  return pickLocalizedArticleSlug(doc, target);
 }
 
 function attachLocalizationFields(doc, requestedLang) {
@@ -890,18 +892,18 @@ function attachLocalizationFields(doc, requestedLang) {
   return doc;
 }
 
-function _buildFrontendNewsPath(doc, lang) {
+function _buildFrontendNewsPath(doc, lang, canonicalSlug = null) {
   const desired = normalizeLang(lang) || _resolveBaseLang(doc);
-  const slug = pickCanonicalSlug(doc, desired) || (doc && doc._id ? String(doc._id) : null);
+  const slug = canonicalSlug || pickCanonicalSlug(doc, desired);
   if (!slug) return null;
 
   const prefix = desired === 'en' ? '' : `/${desired}`;
   return `${prefix}/news/${encodeURIComponent(String(slug))}`;
 }
 
-function _buildPublicNewsApiPath(doc, requestedLang, { fallbackEnabled = false } = {}) {
+function _buildPublicNewsApiPath(doc, requestedLang, { fallbackEnabled = false, canonicalSlug = null } = {}) {
   const desired = normalizeLang(requestedLang);
-  const slug = pickCanonicalSlug(doc, desired) || pickCanonicalSlug(doc, _resolveBaseLang(doc)) || (doc && doc._id ? String(doc._id) : null);
+  const slug = canonicalSlug || pickCanonicalSlug(doc, desired);
   if (!slug) return null;
 
   const params = [];
@@ -936,7 +938,7 @@ function _hasPublishedLocale(doc, lang) {
   return _getPublishedLocales(doc).includes(desired);
 }
 
-function _attachPublicRouteData(doc, requestedLang, { fallbackEnabled = false, realTranslations = null } = {}) {
+function _attachPublicRouteData(doc, requestedLang, { fallbackEnabled = false, realTranslations = null, canonicalSlug = null } = {}) {
   const requested = normalizeLang(requestedLang) || _resolveBaseLang(doc);
   const resolved = normalizeLang(doc?.resolvedLang) || _resolveBaseLang(doc);
   const publishedLocales = _getPublishedLocales(doc);
@@ -966,8 +968,12 @@ function _attachPublicRouteData(doc, requestedLang, { fallbackEnabled = false, r
     publishedLocales,
     fallbackEnabled: Boolean(fallbackEnabled),
   };
-  doc.canonicalDetailUrl = _buildFrontendNewsPath(doc, safeDetailLang);
-  doc.detailApiUrl = _buildPublicNewsApiPath(doc, requested, { fallbackEnabled });
+  if (canonicalSlug) {
+    doc.canonicalSlug = canonicalSlug;
+    doc.localizedSlug = canonicalSlug;
+  }
+  doc.canonicalDetailUrl = _buildFrontendNewsPath(doc, safeDetailLang, canonicalSlug);
+  doc.detailApiUrl = _buildPublicNewsApiPath(doc, requested, { fallbackEnabled, canonicalSlug });
   return doc;
 }
 
@@ -1795,6 +1801,7 @@ async function getPublicNewsBySlugOrId(req, res) {
     let docSource = 'news';
     const fallbackEnabled = isFallbackModeEnabled(req);
     const resolverUsed = isObjectIdLike(slugOrIdRaw) ? 'id' : 'slug';
+    const parentDocs = new Map();
 
     const requestedLang = getRequestedLang(req);
     const shouldDebug = debugEnabled && (!debugOnly || debugOnly === slugOrIdRaw);
@@ -1810,28 +1817,14 @@ async function getPublicNewsBySlugOrId(req, res) {
       } catch (_) {}
     };
 
-    const lookup = { ...base, $and: [...(base.$and || [])] };
-    if (isObjectIdLike(slugOrIdRaw)) {
-      lookup._id = slugOrIdRaw;
-    } else {
-      const slugCandidates = getSlugCandidates(slugOrIdRaw);
-      const slugFilter = slugCandidates.length === 1 ? slugCandidates[0] : { $in: slugCandidates };
-      lookup.$and.push({
-        $or: [
-          { slug: slugFilter },
-          { 'slugs.en': slugFilter },
-          { 'slugs.hi': slugFilter },
-          { 'slugs.gu': slugFilter },
-        ],
-      });
-    }
-
     debug('lookup_built', { isObjectIdLike: isObjectIdLike(slugOrIdRaw) });
 
-    doc = await News.findOne(lookup).select(PUBLIC_DETAIL_SELECT).lean();
+    if (isObjectIdLike(slugOrIdRaw)) {
+      doc = await News.findOne({ ...base, _id: slugOrIdRaw }).select(PUBLIC_DETAIL_SELECT).lean();
+    }
 
     if (!doc) {
-      const fallback = await findPublicNewsFallback(slugOrIdRaw);
+      const fallback = await findPublicNewsFallback(slugOrIdRaw, requestedLang, { parentDocs });
       if (fallback) {
         doc = fallback.doc;
         docSource = fallback.docSource;
@@ -1848,7 +1841,7 @@ async function getPublicNewsBySlugOrId(req, res) {
       doc = siblingForRequestedLang;
       docSource = 'news';
     }
-    if (docSource === 'news') doc = await withPublicCopyPublication(doc);
+    if (docSource === 'news') doc = await withPublicCopyPublication(doc, { parentDocs });
     const realTranslations = await getPublishedRealTranslationAvailability(doc);
 
     if (_matchesDebugStory(doc, slugOrIdRaw)) {
@@ -1886,7 +1879,10 @@ async function getPublicNewsBySlugOrId(req, res) {
       await _attachLinkedSponsoredFeature(out);
       await attachPublicPulseDialogueContributor(out, out.resolvedLang || base);
       attachLocalizationFields(out, out.resolvedLang);
-      _attachPublicRouteData(out, out.resolvedLang, { fallbackEnabled, realTranslations });
+      const canonicalSlug = await resolveCanonicalArticleSlug(out, out.resolvedLang, {
+        publicCopy: docSource === 'publicArticle', resolvedAlias: resolverUsed === 'slug' ? slugOrIdRaw : null, parentDocs,
+      });
+      _attachPublicRouteData(out, out.resolvedLang, { fallbackEnabled, realTranslations, canonicalSlug });
       return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
     }
 
@@ -1974,7 +1970,10 @@ async function getPublicNewsBySlugOrId(req, res) {
     await _attachLinkedSponsoredFeature(out);
     await attachPublicPulseDialogueContributor(out, desired);
     attachLocalizationFields(out, desired);
-    _attachPublicRouteData(out, desired, { fallbackEnabled, realTranslations });
+    const canonicalSlug = await resolveCanonicalArticleSlug(out, out.resolvedLang || desired, {
+      publicCopy: docSource === 'publicArticle', resolvedAlias: resolverUsed === 'slug' ? slugOrIdRaw : null, parentDocs,
+    });
+    _attachPublicRouteData(out, desired, { fallbackEnabled, realTranslations, canonicalSlug });
     return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
   } catch (e) {
     return publicNewsReadError(res, e);
@@ -2002,55 +2001,19 @@ async function getPublicNewsBySlug(req, res) {
       return m && m[1] ? String(m[1]).trim() : '';
     })();
 
-    const decoded = String(safeDecodeURIComponent(decodedParam) ?? '').trim();
-    const candidates = new Set();
-    if (decoded) candidates.add(decoded);
-    if (decodedParam) candidates.add(decodedParam);
-    if (rawFromUrl) candidates.add(rawFromUrl);
-
-    // Also try canonical/normalized forms for stable lookups.
-    const canonRaw = canonicalizeSlug(rawFromUrl || decodedParam);
-    if (canonRaw) candidates.add(canonRaw);
-    const canonDecoded = decoded ? canonicalizeSlug(decoded) : '';
-    if (canonDecoded) candidates.add(canonDecoded);
-
-    for (const c of getSlugCandidates(decodedParam)) candidates.add(c);
-    for (const c of getSlugCandidates(rawFromUrl || decodedParam)) candidates.add(c);
-    if (decoded) {
-      for (const c of getSlugCandidates(decoded)) candidates.add(c);
-    }
-
-    const slugCandidates = Array.from(candidates).filter(Boolean);
-    const slugFilter = slugCandidates.length <= 1 ? (slugCandidates[0] || decodedParam) : { $in: slugCandidates };
-
-    const slugClause = {
-      $or: [
-        { slug: slugFilter },
-        { 'slugs.en': slugFilter },
-        { 'slugs.hi': slugFilter },
-        { 'slugs.gu': slugFilter },
-      ],
-    };
-
-    const base = buildPublicPublishedFilter({});
     const requestedLang = getRequestedLang(req);
 
     const fallbackEnabled = isFallbackModeEnabled(req);
-    let doc = await News.findOne({ ...base, $and: [...(base.$and || []), slugClause] }).select(PUBLIC_DETAIL_SELECT).lean();
-    let docSource = 'news';
-    if (!doc) {
-      const fallback = await findPublicNewsFallback(rawFromUrl || decodedParam);
-      if (fallback) {
-        doc = fallback.doc;
-        docSource = fallback.docSource;
-      }
-    }
+    const parentDocs = new Map();
+    const match = await findPublicNewsFallback(rawFromUrl || decodedParam, requestedLang, { slugOnly: true, parentDocs });
+    const doc = match?.doc;
+    const docSource = match?.docSource;
 
     if (!doc) return res.status(404).json({ message: 'Not found' });
 
     const siblingForRequestedLang = await findPublishedTranslationSiblingForLang(doc, requestedLang, PUBLIC_DETAIL_SELECT);
     const resolvedDoc = siblingForRequestedLang || docSource === 'news'
-      ? await withPublicCopyPublication(siblingForRequestedLang || doc) : doc;
+      ? await withPublicCopyPublication(siblingForRequestedLang || doc, { parentDocs }) : doc;
     const realTranslations = await getPublishedRealTranslationAvailability(resolvedDoc);
 
     let out = withCoverImageUrl(resolvedDoc);
@@ -2066,7 +2029,10 @@ async function getPublicNewsBySlug(req, res) {
       try { delete out.translationStatus; } catch (_) {}
       await _attachLinkedSponsoredFeature(out);
       attachLocalizationFields(out, desired);
-      _attachPublicRouteData(out, out.resolvedLang, { fallbackEnabled, realTranslations });
+      const canonicalSlug = await resolveCanonicalArticleSlug(out, out.resolvedLang, {
+        publicCopy: !siblingForRequestedLang && docSource === 'publicArticle', resolvedAlias: rawFromUrl || decodedParam, parentDocs,
+      });
+      _attachPublicRouteData(out, out.resolvedLang, { fallbackEnabled, realTranslations, canonicalSlug });
       return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
     }
 
@@ -2136,7 +2102,10 @@ async function getPublicNewsBySlug(req, res) {
     try { delete out.translationNextRetryAt; } catch (_) {}
     await _attachLinkedSponsoredFeature(out);
     attachLocalizationFields(out, desired);
-    _attachPublicRouteData(out, desired, { fallbackEnabled, realTranslations });
+    const canonicalSlug = await resolveCanonicalArticleSlug(out, out.resolvedLang || desired, {
+      publicCopy: !siblingForRequestedLang && docSource === 'publicArticle', resolvedAlias: rawFromUrl || decodedParam, parentDocs,
+    });
+    _attachPublicRouteData(out, desired, { fallbackEnabled, realTranslations, canonicalSlug });
     return res.status(200).json(attachMobileResponseFields(out, { includeBody: true }));
   } catch (e) {
     return publicNewsReadError(res, e);

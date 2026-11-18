@@ -10,6 +10,7 @@ const PublicSiteSettings = require('../models/PublicSiteSettings');
 const google = require('../services/googleTranslationService');
 const { installEditorialFixture, seedGroup } = require('./helpers/editorialLifecycleFixture');
 const { loadTranslationGroupStatus } = require('../services/translationGroupStatus');
+const { slugifyLocalizedTitle } = require('../lib/slug');
 
 const LANGUAGES = ['gu', 'hi', 'en'];
 const CONTENT_MODELS = ['News', 'Article', 'TranslationJob', 'PublicConfigVersion'];
@@ -729,11 +730,12 @@ test('legacy compatibility: verified legacy member exclusion does not bypass for
   held.sourceArticleId = legacyId(source._id);
   held.translationMeta.sourceArticleId = held.sourceArticleId;
   const foreignId = '507f1f77bcf86cd799439999';
+  const generatedSlug = slugifyLocalizedTitle(`${missingLanguage} ${source.title}`, missingLanguage);
   state.rows.News.push({
     ...structuredClone(source), _id: foreignId, sourceArticleId: foreignId,
     language: missingLanguage, lang: missingLanguage, originalLang: missingLanguage, sourceLanguage: missingLanguage,
     translationGroupId: 'foreign-story', translationKey: 'foreign-story',
-    slug: source.slugs[missingLanguage], slugs: { [missingLanguage]: source.slugs[missingLanguage] },
+    slug: generatedSlug, slugs: { [missingLanguage]: generatedSlug },
   });
   castIdentityQueries(context);
   const before = state.content();

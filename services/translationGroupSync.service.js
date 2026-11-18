@@ -10,7 +10,7 @@ const {
   buildArticleRevalidationTargets,
   invalidateArticleContent,
 } = require('./publicContentInvalidation.service');
-const { slugifyUnicode } = require('../lib/slug');
+const { slugifyLocalizedTitle, hasPublishedArticleUrls } = require('../lib/slug');
 const { FAITH_TOPIC_CODES, isFaithCultureCategory } = require('../lib/faithCultureTopics');
 const { normalizeLanguage } = require('../middleware/lang');
 const { COVER_IMAGE_FALLBACK_UNSET, getStoredCoverImageUrl } = require('./articleCoverImage.service');
@@ -250,10 +250,10 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
   const nextPublishedAt = child.publishedAt || master.publishedAt || (nextStatus === 'published' ? now : null);
   const nextDeletedAt = sourceStatus === 'deleted' ? (master.deletedAt || now) : null;
   const localizedSlug = normalizeNullableString(child.slug)
-    || normalizeNullableString(master?.slugs?.[childLang])
-    || (localized.title ? slugifyUnicode(localized.title) : null)
-    || normalizeNullableString(child.slug)
-    || normalizeNullableString(master.slug);
+    || (!hasPublishedArticleUrls(child) && localized.title ? slugifyLocalizedTitle(localized.title, childLang) : null);
+  const slugs = hasPublishedArticleUrls(child) ? cloneSimple(child.slugs || {})
+    : { ...cloneSimple(master.slugs || {}), ...cloneSimple(child.slugs || {}) };
+  if (!hasPublishedArticleUrls(child) && !child.slugs?.[childLang] && localizedSlug) slugs[childLang] = localizedSlug;
   const childCoverObject = isPlainObject(child.coverImage) ? cloneSimple(child.coverImage) : null;
   const childCoverUrl = normalizeNullableString(child?.coverImage?.url)
     || normalizeNullableString(child.coverImageUrl)
@@ -273,7 +273,7 @@ function buildChildNewsSyncPatch(masterDoc, childDoc, options = {}) {
     description: localized.description,
     content: localized.content,
     slug: localizedSlug,
-    slugs: cloneSimple(master.slugs || {}),
+    slugs,
     category: normalizeNullableString(master.category),
     ...(isFaithCultureCategory(master.category)
       ? { topic: master.topic ?? null }
@@ -457,6 +457,7 @@ async function syncTranslationGroupFromMaster(masterDoc, options = {}) {
         logger, groupDocs: translationDocs, session, now, throwOnError: true, saveScope: transaction.saveScope,
         preserveSourceIdentity: options.preserveSourceIdentity, preserveDeletedEditions: options.preserveDeletedEditions,
         preservePublicationMetadata: options.preservePublicationMetadata,
+        preservePublicationUrls: options.preservePublicationUrls,
       });
       publicDocs.push(publicDoc);
     }
@@ -556,6 +557,7 @@ async function syncTranslationGroupMetadataInSession(doc, options) {
         previousDoc: String(member._id) === String(doc._id) ? before : undefined,
         preserveSourceIdentity: options.preserveSourceIdentity, preserveDeletedEditions: options.preserveDeletedEditions,
         preservePublicationMetadata: options.preservePublicationMetadata,
+        preservePublicationUrls: options.preservePublicationUrls,
         clearCoverFallbacks: coverFallbackCleanupIds.has(String(member._id)),
       });
       publicDocs.push(publicDoc);

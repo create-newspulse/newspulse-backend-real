@@ -6,6 +6,7 @@ const mongoose = require('mongoose');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey, isSupportedPublicCategory } = require('../lib/categories');
 const { buildYouthPulseTrackFilter, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { getSlugCandidates, detectSlugLocale } = require('../lib/slug');
+const { findArticleSlugMatches, resolveCanonicalArticleSlug } = require('../services/articleSlugResolution.service');
 const { mapArticleForLang, localizeArticleForLang } = require('../services/mapArticleForLang');
 const {
   buildPubliclyVisiblePublicArticleFilter,
@@ -235,27 +236,14 @@ async function getArticleBySlug(req, res, next) {
     // If this looks like a Mongo ObjectId, defer to the existing /api/articles/:id route.
     if (/^[0-9a-f]{24}$/i.test(slug)) return next();
 
-    const slugFilter = candidates.length === 1 ? slug : { $in: candidates };
-    const baseFilter = buildPubliclyVisiblePublicArticleFilter();
-    const filter = {
-      ...baseFilter,
-      $and: [
-        ...((baseFilter && Array.isArray(baseFilter.$and)) ? baseFilter.$and : []),
-        { $or: [
-          { slug: slugFilter },
-          { 'slugs.en': slugFilter },
-          { 'slugs.hi': slugFilter },
-          { 'slugs.gu': slugFilter },
-        ] },
-      ],
-    };
-
-    const doc = withEditorialTypeFallback(await Article.findOne(filter).lean());
+    const explicitTarget = normalizeLanguage(req.query.lang || req.query.language || req.lang);
+    const parentDocs = new Map();
+    const { publicArticle } = await findArticleSlugMatches(req.params.slug, { requestedLang: explicitTarget, parentDocs });
+    const doc = withEditorialTypeFallback(publicArticle);
     if (!doc) {
       return res.status(404).json({ message: 'Article not found' });
     }
 
-    const explicitTarget = normalizeLanguage(req.query.lang || req.query.language || req.lang);
     const target = explicitTarget || detectSlugLocale(doc, req.params.slug);
     if (target) {
       const mapped = localizeArticleForLang(doc, target, { fallbackToBase: true });
@@ -267,22 +255,27 @@ async function getArticleBySlug(req, res, next) {
         });
       }
 
+      const canonicalSlug = await resolveCanonicalArticleSlug(doc, mapped.resolvedLang || target, {
+        publicCopy: true, resolvedAlias: req.params.slug, parentDocs,
+      });
       return res.json(serializePublicArticle({
         ...doc,
         title: mapped.title,
         summary: mapped.summary,
         content: mapped.content,
-        slug: mapped.slug,
+        slug: canonicalSlug,
         language: mapped.lang,
         requestedLang: mapped.requestedLang,
         resolvedLang: mapped.resolvedLang,
         isTranslated: mapped.isTranslated,
-        canonicalSlug: mapped.canonicalSlug,
+        canonicalSlug,
         availableLocales: getAvailableArticleLocales(doc),
       }));
     }
 
-    const canonicalSlug = (doc.slug || null);
+    const canonicalSlug = await resolveCanonicalArticleSlug(doc, null, {
+      publicCopy: true, resolvedAlias: req.params.slug, parentDocs,
+    });
     return res.json(serializePublicArticle({
       ...doc,
       canonicalSlug,

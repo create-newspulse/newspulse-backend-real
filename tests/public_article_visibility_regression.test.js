@@ -469,8 +469,8 @@ test('GET /api/public/news/:slug cannot retrieve a draft News record or draft pu
     const res = await request(app).get('/api/public/news/draft-detail?lang=en');
 
     assert.equal(res.status, 404);
-    assert.equal(stubs.captured.newsFindOne[0].$and.some((clause) => clause.status === 'published'), true);
-    assert.equal(stubs.captured.publicFindOne[0].$and.some((clause) => clause.status === 'published'), true);
+    assert.equal(stubs.captured.newsFind[0].$and.some((clause) => clause.status === 'published'), true);
+    assert.equal(stubs.captured.publicFind[0].$and.some((clause) => clause.status === 'published'), true);
   } finally {
     stubs.restore();
   }

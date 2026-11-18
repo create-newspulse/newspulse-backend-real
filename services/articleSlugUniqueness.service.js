@@ -1,4 +1,5 @@
 const News = require('../models/News');
+const PublicArticle = require('../models/Article');
 const { canonicalizeSlug, getSlugCandidates } = require('../lib/slug');
 const UNOWNED_PUBLIC_COPY_FILTER = Object.freeze({
   sourceNewsId: null, sourceArticleId: null, translationGroupId: null, translationKey: null,
@@ -46,6 +47,18 @@ async function assertArticleSlugsUnique(doc, options = {}) {
     throw Object.assign(new Error('Slug already exists'), {
       status: 409, statusCode: 409, code: 'SLUG_CONFLICT',
     });
+  }
+  const copies = await PublicArticle.find({ $or: filter.$or }, null, { session: options.session }).lean();
+  if (copies.length) {
+    const { assertSameArticleStory } = require('./articleSlugResolution.service');
+    try {
+      await assertSameArticleStory([doc], copies, options);
+    } catch (error) {
+      if (!['ARTICLE_SLUG_AMBIGUOUS', 'TRANSLATION_SOURCE_IDENTITY_INVALID'].includes(error.code)) throw error;
+      throw Object.assign(new Error('Slug already exists'), {
+        status: 409, statusCode: 409, code: 'SLUG_CONFLICT',
+      });
+    }
   }
 }
 

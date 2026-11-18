@@ -1,6 +1,6 @@
 const PublicArticle = require('../models/Article');
 const mongoose = require('mongoose');
-const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
+const { canonicalizeSlug, slugifyUnicode, hasPublishedArticleUrls } = require('../lib/slug');
 const { INDIA_STATES_UTS, isValidStateSlug } = require('../src/utils/locationTagger');
 const { ensureTrackTag, normalizeTrackValue } = require('./communitySubmissionWorkflow');
 const { normalizeSpotlightPriority } = require('./spotlightPriority.service');
@@ -325,10 +325,11 @@ async function assertPublicCopyOwnership(copy, persisted, { session, preserveDel
 
 async function publicCopyCandidates(newsDoc, options = {}) {
   let match = buildPublicArticleMatch(newsDoc, options);
+  const preserveUrls = options.preservePublicationMetadata || options.preservePublicationUrls;
   // A slug collision is inspected even when its stale keys exclude it from the write match.
   let copies = await PublicArticle.find(match, null, { session: options.session }).lean();
   let persisted;
-  if (options.preservePublicationMetadata && !copies.length) {
+  if (preserveUrls && !copies.length) {
     persisted = await News.findById(newsDoc._id, null, { session: options.session })
       .select(TRANSLATION_GROUP_FIELDS).lean();
     if (!persisted) throw translationSourceIdentityError('The public copy CMS edition is missing.');
@@ -347,7 +348,7 @@ async function publicCopyCandidates(newsDoc, options = {}) {
   }
   const collisions = await PublicArticle.find({ slug: normalizeSlug(newsDoc.slug) }, null, { session: options.session }).lean();
   const candidates = new Map([...copies, ...collisions].map(copy => [String(copy._id), copy]));
-  if (options.preservePublicationMetadata && copies.length > 1) {
+  if (preserveUrls && copies.length > 1) {
     throw translationSourceIdentityError('More than one public copy matches this CMS edition.');
   }
   if (candidates.size) {
@@ -554,8 +555,13 @@ async function _syncPublicArticleFromNews(newsDoc, options = {}) {
   };
 
   const { match, copies } = await publicCopyCandidates(newsDoc, options);
+  const preservePublicationUrls = copies.length > 0
+    && (options.preservePublicationUrls || copies.some(hasPublishedArticleUrls))
+    && (!options.previousDoc || normalizeSlug(options.previousDoc.slug) === slug);
   const target = options.saveScope
-    ? await options.saveScope.publicWriteTarget(newsDoc, match, options.session)
+    ? await options.saveScope.publicWriteTarget(newsDoc, match, options.session, {
+        preservePublicationDate: preservePublicationUrls,
+      })
     : copies.length
       ? { filter: { $and: [match, publicCopyIdentityGuard(copies[0])] }, upsert: false }
       : { filter: { _id: new mongoose.Types.ObjectId() }, upsert: true };
@@ -587,6 +593,12 @@ async function _syncPublicArticleFromNews(newsDoc, options = {}) {
       'slug', 'slugs', 'status', 'publishedAt', 'publishAt', 'scheduledAt', 'deletedAt',
       'locked', 'embargoUntil', 'visibility', 'isPrivate',
     ]) {
+      updateOp.$setOnInsert = { ...updateOp.$setOnInsert, [field]: update[field] };
+      delete update[field];
+    }
+  } else if (preservePublicationUrls) {
+    // Publishing/translation refreshes must not repair historical public URLs or dates.
+    for (const field of ['slug', 'slugs', 'publishedAt']) {
       updateOp.$setOnInsert = { ...updateOp.$setOnInsert, [field]: update[field] };
       delete update[field];
     }

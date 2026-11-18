@@ -108,7 +108,7 @@ test('buildChildNewsSyncPatch clears stale child content when translated locale 
   assert.equal(patch.title, '');
   assert.equal(patch.description, '');
   assert.equal(patch.content, '');
-  assert.equal(patch.slug, 'master-hi');
+  assert.equal(patch.slug, null);
   assert.equal(patch.category, 'tech');
   assert.deepEqual(patch.tags, ['science', 'water']);
   assert.equal(String(patch.sourceArticleId), '69c832dfa5f8e74cf2bf87b7');
@@ -165,7 +165,8 @@ test('buildChildNewsSyncPatch publishes localized child when translated bucket i
   assert.equal(patch.title, 'ગુજરાતી શીર્ષક');
   assert.equal(patch.description, 'ગુજરાતી સાર');
   assert.equal(patch.content, '<p>ગુજરાતી લેખ</p>');
-  assert.equal(patch.slug, 'master-gu');
+  assert.equal(patch.slug, 'ગુજરાતી-શીર્ષક');
+  assert.equal(patch.slugs.gu, 'ગુજરાતી-શીર્ષક');
   assert.deepEqual(patch.seo, {
     metaTitle: 'SEO Title',
     metaDescription: 'SEO Description',

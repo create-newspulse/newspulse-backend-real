@@ -4,7 +4,7 @@ const { prepareAuthorBylineForPublication } = require('./authorByline.service');
 const News = require('../models/News');
 const PublicArticle = require('../models/Article');
 const PushHistory = require('../models/PushHistory');
-const { slugifyUnicode } = require('../lib/slug');
+const { slugifyLocalizedTitle, ensureNewsSlugs, hasPublishedArticleUrls } = require('../lib/slug');
 const { buildArticleCreatorFields } = require('../lib/articleCreator');
 const { syncPublicArticleFromNews, sponsoredArticleFields, syncNewsTranslationBuckets } = require('./syncPublicArticleFromNews.service');
 const { isPubliclyVisibleNewsArticle } = require('./publicArticleVisibility.service');
@@ -86,30 +86,6 @@ function getActor(req) {
   };
 }
 
-function getTitleForLangFromDocLike(docLike, lang) {
-  const desired = normalizeLanguage(lang);
-  if (!desired) return '';
-  const translated = docLike?.translations?.[desired];
-  if (typeof translated?.title === 'string' && translated.title.trim()) return translated.title;
-  const baseLang = normalizeLanguage(docLike?.lang) || normalizeLanguage(docLike?.language) || null;
-  if (baseLang === desired) return String(docLike?.title || '');
-  return '';
-}
-
-function ensureNewsSlugs(docLike) {
-  if (!docLike) return;
-  const slugs = { ...(docLike.slugs || {}) };
-  for (const lang of REQUIRED_LANGUAGES) {
-    const title = getTitleForLangFromDocLike(docLike, lang);
-    if (!slugs[lang] && title && title.trim()) slugs[lang] = slugifyUnicode(title);
-  }
-
-  const baseLang = normalizeLanguage(docLike?.lang) || normalizeLanguage(docLike?.language) || 'en';
-  if (!slugs[baseLang] && docLike.title) slugs[baseLang] = slugifyUnicode(docLike.title);
-  docLike.slugs = slugs;
-  if ((!docLike.slug || !String(docLike.slug).trim()) && slugs[baseLang]) docLike.slug = slugs[baseLang];
-}
-
 function ensureTranslationGroupIdForDoc(doc, verifiedKey) {
   if (!doc) return null;
   const existing = normalizeTranslationGroupKey(verifiedKey)
@@ -186,7 +162,12 @@ function buildManualTranslationSibling(sourceDoc, targetLang, groupKey, actor, c
   const slugs = sourceObject.slugs && typeof sourceObject.slugs === 'object' && !Array.isArray(sourceObject.slugs)
     ? { ...sourceObject.slugs }
     : {};
-  slugs[targetLang] = slugs[targetLang] || slugifyUnicode(bucket.title || sourceObject.title || 'article');
+  slugs[targetLang] = slugifyLocalizedTitle(bucket.title, targetLang);
+  if (!slugs[targetLang]) {
+    throw Object.assign(new Error('The localized title cannot produce a valid edition slug.'), {
+      statusCode: 422, code: 'TRANSLATION_SLUG_INVALID',
+    });
+  }
   const coverImage = sourceObject.coverImage && typeof sourceObject.coverImage === 'object' && !Array.isArray(sourceObject.coverImage)
     ? { ...sourceObject.coverImage }
     : undefined;
@@ -443,7 +424,7 @@ async function publishArticleInSession(articleIdOrDoc, options = {}) {
   const { generated } = await ensureRequiredTranslations(sourceDoc, groupKey, actor, options);
   const now = options.now instanceof Date ? options.now : new Date();
 
-  const { readiness, previous, changedDocs } = await withActiveArticleSource(sourceDoc._id, async (current, session, transaction) => {
+  const { readiness, previous, changedDocs, publicDocs } = await withActiveArticleSource(sourceDoc._id, async (current, session, transaction) => {
     if (String(current.translationGroupId || current.translationKey) !== groupKey) {
       throw Object.assign(new Error('Translation group changed. Reload and retry.'), { statusCode: 409 });
     }
@@ -477,6 +458,7 @@ async function publishArticleInSession(articleIdOrDoc, options = {}) {
         doc.lang = lang;
         if (!normalizeLanguage(doc.originalLang)) doc.originalLang = lang;
       }
+      ensureNewsSlugs(doc);
       doc.status = 'published';
       doc.deletedAt = null;
       doc.publishedAt = doc.publishedAt || publicationDate;
@@ -497,7 +479,6 @@ async function publishArticleInSession(articleIdOrDoc, options = {}) {
           note: options.reason || req?.body?.reason || null,
         });
       }
-      ensureNewsSlugs(doc);
       await assertArticleSlugsUnique(doc, { session });
       await preparePulseDialogueForPublication(doc);
       if (String(doc._id) === String(sourceDoc._id)) Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
@@ -528,11 +509,15 @@ async function publishArticleInSession(articleIdOrDoc, options = {}) {
     }
     const ordered = [...readiness.readyDocs].sort((a, b) =>
       Number(isPubliclyVisibleNewsArticle(a, { now })) - Number(isPubliclyVisibleNewsArticle(b, { now })));
+    const publicDocs = [];
     for (const doc of ordered) {
-      await syncPublicArticleFromNews(doc, { logger, groupDocs: readiness.readyDocs, throwOnError: true, session, now, saveScope });
+      publicDocs.push(await syncPublicArticleFromNews(doc, {
+        logger, groupDocs: readiness.readyDocs, throwOnError: true, session, now, saveScope,
+        preservePublicationUrls: hasPublishedArticleUrls(previous.find(item => item.doc === doc)?.state),
+      }));
     }
     await saveScope?.verifyPublishedGroup(session, sourceDoc);
-    return { readiness, previous, changedDocs };
+    return { readiness, previous, changedDocs, publicDocs };
   }, options);
   for (const doc of readiness.readyDocs) {
     if (typeof doc.$session === 'function') doc.$session(null);
@@ -577,7 +562,7 @@ async function publishArticleInSession(articleIdOrDoc, options = {}) {
       logger.warn?.('[pushHistory] create failed', error?.message || error);
     }
     }
-    result.revalidation = await invalidateArticleContent(readiness.readyDocs, {
+    result.revalidation = await invalidateArticleContent([...readiness.readyDocs, ...publicDocs], {
       previousDocs: options.previousDocs, reason: 'article_publish', publicVisibilityRemoved: true, logger,
     });
   });

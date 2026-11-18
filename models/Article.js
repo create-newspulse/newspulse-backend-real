@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { canonicalizeSlug, slugifyUnicode } = require('../lib/slug');
+const { canonicalizeSlug, slugifyUnicode, hasPublishedArticleUrls } = require('../lib/slug');
 const { YOUTH_PULSE_TRACKS, normalizeTrackValue } = require('../services/communitySubmissionWorkflow');
 const { SPOTLIGHT_PRIORITY_VALUES, normalizeSpotlightPriority } = require('../services/spotlightPriority.service');
 const { DIALOGUE_FORMAT_VALUES } = require('../services/pulseDialogue.service');
@@ -365,14 +365,14 @@ articleSchema.pre('validate', function preValidate(next) {
 
     if (this.slugs && typeof this.slugs === 'object') {
       for (const k of ['en', 'hi', 'gu']) {
-        if (this.slugs[k] !== undefined && this.slugs[k] !== null) {
+        if (this.isModified(`slugs.${k}`) && this.slugs[k] !== undefined && this.slugs[k] !== null) {
           this.slugs[k] = canonicalizeSlug(this.slugs[k]);
         }
       }
     }
 
     const docLang = String(this.language || 'en').trim().toLowerCase();
-    if ((!this.slug || !String(this.slug).trim()) && this.slugs && this.slugs[docLang]) {
+    if (!hasPublishedArticleUrls(this) && (!this.slug || !String(this.slug).trim()) && this.slugs && this.slugs[docLang]) {
       this.slug = this.slugs[docLang];
     }
 

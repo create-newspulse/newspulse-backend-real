@@ -77,10 +77,10 @@ function isEditorialRankingEligible(doc) {
     && !doc?.sponsorFeatureLinkedId && !/^sponsored(?:[\s_-]|$)/i.test(String(doc?.category || ''));
 }
 
-async function hasVisibleNewsSource(doc) {
+async function hasVisibleNewsSource(doc, options) {
   // Load lazily because listing validation uses the visibility predicates above.
   const { filterPublicListingCandidates } = require('./publicArticleListing.service');
-  const eligible = await filterPublicListingCandidates([doc]);
+  const eligible = await filterPublicListingCandidates([doc], options);
   return eligible.length === 1;
 }
 

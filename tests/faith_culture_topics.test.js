@@ -138,15 +138,16 @@ function withoutSyncMetadata(doc) {
   return result;
 }
 
-function assertDerivedTranslations(state) {
+function assertDerivedTranslations(state, publicCopies = []) {
   for (const doc of state.rows.News) {
     const copy = state.rows.Article.find(item => item.sourceNewsId === doc._id);
     assert.ok(copy, 'the existing public synchronization must persist each edition');
+    const metadata = publicCopies.find(item => item.sourceNewsId === doc._id) || doc;
     assert.equal(copy.title, doc.title);
     assert.equal(copy.content, doc.content);
-    assert.equal(copy.slug, doc.slug);
+    assert.equal(copy.slug, metadata.slug);
     assert.equal(copy.language, doc.lang);
-    assert.equal(new Date(copy.publishedAt).getTime(), new Date(doc.publishedAt).getTime());
+    assert.equal(new Date(copy.publishedAt).getTime(), new Date(metadata.publishedAt).getTime());
     for (const member of state.rows.News) {
       for (const cached of [doc, copy]) {
         assert.equal(cached.translationStatus[member.lang], 'ready');
@@ -318,16 +319,20 @@ for (const base of locales) {
   });
 }
 
-test('Master synchronization without the preservation flag retains existing publication metadata behavior', async context => {
+test('Master synchronization retains historical public URLs and dates without requiring a preservation flag', async context => {
   const state = setup(context);
-  await seedHistoricalPublicCopies(state);
+  const copies = await seedHistoricalPublicCopies(state);
   const master = state.docs.get(id(1));
   master.topic = 'faith-spiritual-life';
   master.syncVersion++;
   const result = await state.sync.syncTranslationGroupFromMaster(master, { faithTopicOnly: true });
   assert.equal(result.ok, true);
   assert.equal(result.childrenUpdated, 2);
-  assertDerivedTranslations(state);
+  assertDerivedTranslations(state, copies);
+  for (const previous of copies) {
+    const current = state.rows.Article.find(copy => copy._id === previous._id);
+    assert.deepEqual(current.slugs, previous.slugs);
+  }
 });
 
 test('Faith can set a topic on an existing untagged source', async context => {

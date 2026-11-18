@@ -6,6 +6,7 @@ process.env.NODE_ENV = 'test';
 process.env.GOOGLE_TRANSLATE_API_KEY = process.env.GOOGLE_TRANSLATE_API_KEY || 'test-key';
 
 const News = require('../models/News');
+const PublicArticle = require('../models/Article');
 const googleTranslate = require('../services/googleTranslate.service');
 const translationEnabled = require('../services/translationEnabled');
 const syncPublicArticle = require('../services/syncPublicArticleFromNews.service');
@@ -31,6 +32,8 @@ function makeLean(doc) {
 }
 
 test.beforeEach(context => {
+  context.mock.method(News, 'findOne', () => makeLean(null));
+  context.mock.method(PublicArticle, 'find', () => makeLean([]));
   context.mock.method(mongoose, 'startSession', async () => ({
     withTransaction: async work => work(),
     endSession: async () => {},

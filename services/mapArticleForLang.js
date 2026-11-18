@@ -1,3 +1,4 @@
+const { pickLocalizedArticleSlug } = require('../lib/slug');
 const SUPPORTED_LANGS = ['en', 'hi', 'gu'];
 
 function normalizeLang(v) {
@@ -37,23 +38,6 @@ function _hasFullBucket(bucket) {
 
 function _getBaseLang(article) {
   return normalizeLang(article?.originalLang) || normalizeLang(article?.lang || article?.language) || 'en';
-}
-
-function _getSlugForLang(article, lang) {
-  const desired = normalizeLang(lang);
-  if (!desired) return null;
-
-  const slugs = article?.slugs && typeof article.slugs === 'object' && !Array.isArray(article.slugs)
-    ? article.slugs
-    : null;
-  const localized = slugs?.[desired];
-  return _isNonEmptyString(localized) ? String(localized).trim() : null;
-}
-
-function _getBaseSlug(article) {
-  if (_isNonEmptyString(article?.slug)) return String(article.slug).trim();
-  const base = _getBaseLang(article);
-  return _getSlugForLang(article, base) || null;
 }
 
 function _hasUsableTranslation(article, lang, { allowMissingStatus = false } = {}) {
@@ -119,8 +103,8 @@ function localizeArticleForLang(article, lang, { fallbackToBase = false, allowMi
   if (!article || typeof article !== 'object') return null;
 
   const base = _getBaseLang(article);
-  const baseSlug = _getBaseSlug(article);
-  const localizedSlug = _getSlugForLang(article, desired) || baseSlug;
+  const baseSlug = pickLocalizedArticleSlug(article, base);
+  const localizedSlug = pickLocalizedArticleSlug(article, desired);
 
   const originalBucket = article?.translations?.[base];
   const originalProvider = _normalizeProvider(originalBucket?.provider || 'manual');
@@ -168,8 +152,8 @@ function localizeArticleForLang(article, lang, { fallbackToBase = false, allowMi
     title: String(article.title || ''),
     summary: String(_pickSummary(article) || ''),
     content: String(article.content || ''),
-    slug: localizedSlug,
-    canonicalSlug: localizedSlug,
+    slug: baseSlug,
+    canonicalSlug: baseSlug,
     provider: originalProvider,
     generatedAt: originalGeneratedAt,
     isTranslated: false,

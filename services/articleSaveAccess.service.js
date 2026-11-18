@@ -312,7 +312,7 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
         if (docs.length !== publicOrder.size || docs.some(doc => !publicOrder.has(String(doc._id)))) throw scopeChanged();
         return [...docs].sort((a, b) => publicOrder.get(String(a._id)) - publicOrder.get(String(b._id)));
       },
-      async publicWriteTarget(doc, filter, activeSession) {
+      async publicWriteTarget(doc, filter, activeSession, { preservePublicationDate = false } = {}) {
         const matches = await PublicArticle.find(filter, null, { session: activeSession }).lean();
         for (const copy of matches) {
           if (!copies.has(String(copy._id)) && !createdCopies.has(String(copy._id))) throw saveDenied();
@@ -324,7 +324,7 @@ async function authorizeArticleSave(req, sourceLike, patch = {}, session, {
           const copy = matches[0];
           writtenCopySources.set(String(copy._id), preservePublicationMetadata
             ? { ...plain(doc), ...Object.fromEntries(PUBLIC_VISIBILITY_FIELDS.map(field => [field, copy[field]])), workflow: undefined }
-            : plain(doc));
+            : { ...plain(doc), ...(preservePublicationDate ? { publishedAt: copy.publishedAt } : {}) });
           return {
             filter: { $and: [filter, { _id: copy._id, status: copy.status }] },
             upsert: false,

@@ -50,21 +50,25 @@ function identity(doc, publicCopy = false) {
   }
 }
 
-async function eligibleBatch(docs, { now, deadline, logger }) {
+async function loadPublicArticleParents(ids, { parentDocs = new Map(), deadline = Date.now() + QUERY_MS, session } = {}) {
+  const missing = [...new Set(ids)].filter(id => id && !parentDocs.has(id));
+  if (!missing.length) return parentDocs;
+  const rows = await News.find({ _id: { $in: missing } }, null, { ...queryOptions(deadline), session })
+    .select(PARENT_FIELDS).lean();
+  if (!Array.isArray(rows)) throw new Error('Invalid public listing parent lookup result');
+  for (const id of missing) parentDocs.set(id, null);
+  for (const row of rows) parentDocs.set(String(row._id), row);
+  return parentDocs;
+}
+
+async function eligibleBatch(docs, { now, deadline, logger, parentDocs }) {
   const identities = docs.map(doc => identity(doc, true));
   const ids = [...new Set(identities.flatMap(item => [item.ownerId, item.sourceId]).filter(Boolean))];
-  const parents = new Map();
+  const parents = parentDocs || new Map();
   const parentIdentities = new Map();
   const load = async values => {
-    if (!values.length) return;
-    const rows = await News.find({ _id: { $in: values } }, null, queryOptions(deadline))
-      .select(PARENT_FIELDS).lean();
-    if (!Array.isArray(rows)) throw new Error('Invalid public listing parent lookup result');
-    for (const row of rows) {
-      const id = String(row._id);
-      parents.set(id, row);
-      parentIdentities.set(id, identity(row));
-    }
+    await loadPublicArticleParents(values, { parentDocs: parents, deadline });
+    for (const [id, row] of parents) if (row) parentIdentities.set(id, identity(row));
   };
   await load(ids);
   const canonicalIds = [...new Set(identities.map(item => (
@@ -99,9 +103,9 @@ async function eligibleBatch(docs, { now, deadline, logger }) {
   return eligible;
 }
 
-async function filterPublicListingCandidates(docs, { now = new Date(), logger = console } = {}) {
+async function filterPublicListingCandidates(docs, { now = new Date(), logger = console, parentDocs } = {}) {
   if (!Array.isArray(docs)) throw new Error('Invalid public listing candidates');
-  const options = { now, logger, deadline: Date.now() + QUERY_MS };
+  const options = { now, logger, deadline: Date.now() + QUERY_MS, parentDocs };
   const eligible = [];
   for (let offset = 0; offset < docs.length; offset += BATCH_SIZE) {
     eligible.push(...await eligibleBatch(docs.slice(offset, offset + BATCH_SIZE), options));
@@ -173,4 +177,6 @@ async function listPublicArticlePage(filter, { skip = 0, limit, select, includeT
   return { docs, total };
 }
 
-module.exports = { PUBLIC_LISTING_IDENTITY_FIELDS, filterPublicListingCandidates, listPublicArticlePage };
+module.exports = {
+  PUBLIC_LISTING_IDENTITY_FIELDS, filterPublicListingCandidates, loadPublicArticleParents, listPublicArticlePage,
+};

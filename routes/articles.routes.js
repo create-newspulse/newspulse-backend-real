@@ -25,7 +25,11 @@ const { createIndexedMediaRecord } = require('../services/mediaLibraryService');
 const PushHistory = require('../models/PushHistory');
 const { buildPublicCategoryFilter, getCanonicalPublicCategoryKey } = require('../lib/categories');
 const { isFaithCultureCategory, buildFaithTopicPatch, isFaithTopicOnlyUpdate } = require('../lib/faithCultureTopics');
-const { canonicalizeSlug, detectSlugLocale, getSlugCandidates, safeDecodeURIComponent, slugifyUnicode } = require('../lib/slug');
+const {
+  canonicalizeSlug, detectSlugLocale, safeDecodeURIComponent, slugifyUnicode,
+  slugifyLocalizedTitle, isLocalizedArticleSlug, pickLocalizedArticleSlug, ensureNewsSlugs,
+} = require('../lib/slug');
+const { findArticleSlugMatches, resolveCanonicalArticleSlug } = require('../services/articleSlugResolution.service');
 const { absolutizeUploadsUrl } = require('../lib/publicBaseUrl');
 const {
   buildCoverImagePatch, getStoredCoverImageUrl, PUBLIC_COVER_IMAGE_FALLBACK_UNSET,
@@ -60,7 +64,7 @@ const {
   syncTranslationGroupFromMaster,
   syncTranslationGroupMetadata,
 } = require('../services/translationGroupSync.service');
-const { assertSlugUnique: assertStorySlugUnique } = require('../services/articleSlugUniqueness.service');
+const { assertSlugUnique: assertStorySlugUnique, assertArticleSlugsUnique } = require('../services/articleSlugUniqueness.service');
 const {
   changeArticleGroupStatus, restoreArticleGroup, assessArticleRestoreEligibility, permanentlyDeleteArticleGroups, findArticleGroup, withActiveArticleSource,
   inArticleTransaction, serializeNewsArticle, articleMutationMetadata,
@@ -409,8 +413,8 @@ function normalizeSlug(slug) {
   return canonicalizeSlug(slug);
 }
 
-function slugifyFromTitle(title) {
-  return slugifyUnicode(title);
+function slugifyFromTitle(title, lang) {
+  return slugifyLocalizedTitle(title, lang);
 }
 
 function normalizeLanguage(v) {
@@ -544,38 +548,6 @@ function _buildLocationQueryFromRequest(req) {
   }
 
   return andClauses;
-}
-
-function getTitleForLangFromDocLike(docLike, lang) {
-  const desired = normalizeLanguage(lang);
-  if (!desired) return '';
-
-  const t = docLike && docLike.translations && docLike.translations[desired];
-  const fromTranslations = t && typeof t.title === 'string' ? t.title : '';
-  if (fromTranslations && fromTranslations.trim()) return fromTranslations;
-
-  const baseLang = normalizeLanguage(docLike?.lang) || normalizeLanguage(docLike?.language) || null;
-  if (baseLang === desired) return String(docLike?.title || '');
-  return '';
-}
-
-function ensureNewsSlugs(docLike) {
-  if (!docLike) return;
-  const out = { ...(docLike.slugs || {}) };
-  for (const lang of ['en', 'hi', 'gu']) {
-    const t = getTitleForLangFromDocLike(docLike, lang);
-    if (!out[lang] && t && t.trim()) out[lang] = slugifyUnicode(t);
-  }
-
-  const baseLang = normalizeLanguage(docLike?.lang) || normalizeLanguage(docLike?.language) || 'en';
-  if (!out[baseLang] && docLike.title) {
-    out[baseLang] = slugifyUnicode(docLike.title);
-  }
-
-  docLike.slugs = out;
-  if ((!docLike.slug || !String(docLike.slug).trim()) && out[baseLang]) {
-    docLike.slug = out[baseLang];
-  }
 }
 
 async function assertSlugUnique(slug, excludeId, story) {
@@ -1365,10 +1337,23 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       return res.status(403).json({ ok: false, success: false, status: 403, message: 'Access Denied. Founder permission is required.' });
     }
 
+    const languageInput = language !== undefined ? language : langRaw;
+    const langFromPayload = normalizeLanguage(languageInput);
+    const inferredLang = inferLanguageFromDocText({ title, description: normalizedDescription, content: content ?? body ?? '' });
+    const langNorm = (
+      (langFromPayload && langFromPayload !== 'en')
+        ? langFromPayload
+        : (inferredLang && inferredLang !== 'en')
+          ? inferredLang
+          : (langFromPayload || 'en')
+    );
     let resolvedSlug = normalizeSlug(slug);
-    if (!resolvedSlug) resolvedSlug = slugifyFromTitle(title);
+    if (!resolvedSlug) resolvedSlug = slugifyFromTitle(title, langNorm);
     if (!resolvedSlug) {
       return res.status(400).json({ ok: false, success: false, message: 'Slug is required (or title must be slugifiable)' });
+    }
+    if (!isLocalizedArticleSlug(resolvedSlug, langNorm)) {
+      return res.status(400).json({ ok: false, success: false, code: 'INVALID_LOCALIZED_SLUG', message: 'A valid slug for the article language is required.' });
     }
 
     // Ensure slug uniqueness; if auto-generated from title, try a few suffixes.
@@ -1408,16 +1393,6 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
       city: locationBody.city ?? req.body?.city,
     });
 
-    const languageInput = language !== undefined ? language : langRaw;
-    const langFromPayload = normalizeLanguage(languageInput);
-    const inferredLang = inferLanguageFromDocText({ title, description: normalizedDescription, content: content ?? body ?? '' });
-    const langNorm = (
-      (langFromPayload && langFromPayload !== 'en')
-        ? langFromPayload
-        : (inferredLang && inferredLang !== 'en')
-          ? inferredLang
-          : (langFromPayload || 'en')
-    );
     const slugs = { ...(req.body && req.body.slugs && typeof req.body.slugs === 'object' ? req.body.slugs : {}) };
     slugs[langNorm] = resolvedSlug;
     // Best-effort for other languages if titles exist in `translations` payload.
@@ -1426,7 +1401,8 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
         const t = req.body.translations && req.body.translations[k];
         const titleForSlug = t && typeof t.title === 'string' ? t.title : '';
         if (titleForSlug && titleForSlug.trim()) {
-          slugs[k] = slugifyUnicode(titleForSlug);
+          const localizedSlug = slugifyLocalizedTitle(titleForSlug, k);
+          if (localizedSlug) slugs[k] = localizedSlug;
         }
       }
     }
@@ -1513,6 +1489,7 @@ router.post('/articles', requireAdminAuth, async (req, res, next) => {
 
     const creation = await inArticleTransaction(async (session, transaction) => {
       await authorizeArticleCreation(req, createDoc, session, { publication: initialStatus === 'published' });
+      await assertArticleSlugsUnique(createDoc, { session });
       const [doc] = await News.create([createDoc], { session });
       if (_isSourceTranslationDoc(doc) && initialStatus !== 'published') {
         Object.assign(doc, prepareSourceSyncMetadata(doc, { now }));
@@ -1959,47 +1936,7 @@ function _buildReadyTranslationMatch(desiredLang, { requireNonBlankStrings = fal
 
 function _pickLocaleAwareSlug(doc, requestedLang) {
   const target = normalizeLanguage(requestedLang) || normalizeLanguage(doc?.originalLang) || normalizeLanguage(doc?.lang || doc?.language) || 'en';
-  const slugs = doc && doc.slugs && typeof doc.slugs === 'object' && !Array.isArray(doc.slugs) ? doc.slugs : null;
-  const localized = slugs && slugs[target] ? String(slugs[target]).trim() : '';
-  if (localized) return localized;
-  if (doc && doc.slug) {
-    const base = String(doc.slug).trim();
-    if (base) return base;
-  }
-  return (slugs && (slugs.en || slugs.hi || slugs.gu)) || null;
-}
-
-function _buildSlugLookupClause(slugNorm) {
-  return {
-    $or: [
-      { slug: slugNorm },
-      { 'slugs.en': slugNorm },
-      { 'slugs.hi': slugNorm },
-      { 'slugs.gu': slugNorm },
-    ],
-  };
-}
-
-function _mergePublicVisibilityWithClause(baseFilter, clause) {
-  return {
-    ...baseFilter,
-    $and: [
-      ...((baseFilter && Array.isArray(baseFilter.$and)) ? baseFilter.$and : []),
-      clause,
-    ],
-  };
-}
-
-function _buildNewsSlugLookup(slugNorm, isAdminRequest) {
-  const slugClause = _buildSlugLookupClause(slugNorm);
-  if (isAdminRequest) return slugClause;
-  return _mergePublicVisibilityWithClause(buildPubliclyVisibleNewsArticleFilter(), slugClause);
-}
-
-function _buildPublicArticleSlugLookup(slugNorm, isAdminRequest) {
-  const slugClause = _buildSlugLookupClause(slugNorm);
-  if (isAdminRequest) return slugClause;
-  return _mergePublicVisibilityWithClause(buildPubliclyVisiblePublicArticleFilter(), slugClause);
+  return pickLocalizedArticleSlug(doc, target);
 }
 
 function _resolveImageUrlFromNewsDoc(doc) {
@@ -2549,10 +2486,10 @@ router.get('/articles/slug/:slug', optionalAdminAuth, authorizeAdminArticleDetai
 
     const isAdminRequest = Boolean(req.admin);
     const sendArticle = article => res.status(200).json(isAdminRequest ? article : serializePublicArticle(article));
-    const query = _buildNewsSlugLookup(slugNorm, isAdminRequest);
-    const doc = await News.findOne(query).lean();
-    let fallback = doc ? null : await PublicArticle.findOne(_buildPublicArticleSlugLookup(slugNorm, isAdminRequest)).lean();
-    if (fallback && !isAdminRequest && !await hasVisibleNewsSource(fallback)) fallback = null;
+    const parentDocs = new Map();
+    const { news: doc, publicArticle: fallback } = await findArticleSlugMatches(raw, {
+      requestedLang: normalizeLanguage(req.query.lang || req.query.language || req.lang), publicOnly: !isAdminRequest, parentDocs,
+    });
     const out = isAdminRequest ? (doc || fallback) : withPublicAuthorByline(doc || fallback);
     if (!out) return res.status(200).json({ exists: false });
 
@@ -2561,10 +2498,12 @@ router.get('/articles/slug/:slug', optionalAdminAuth, authorizeAdminArticleDetai
     if (!desired) return sendArticle(withCoverImageUrl(out));
 
     const out0 = withCoverImageUrl(out);
+    const canonicalSlug = await resolveCanonicalArticleSlug(out0, desired, {
+      publicCopy: !doc, publicOnly: !isAdminRequest, resolvedAlias: raw, parentDocs,
+    });
 
     if (out0 && out0.translations && typeof out0.translations === 'object') {
       const localized = await localizeNewsDocWithOptionalTranslate({ docLike: out0, desiredLang: desired, logger: console });
-      const canonicalSlug = _pickLocaleAwareSlug(out0, desired);
       return sendArticle({
         ...withCoverImageUrl(localized.out),
         slug: canonicalSlug || localized.out?.slug || out0.slug || null,
@@ -2579,7 +2518,6 @@ router.get('/articles/slug/:slug', optionalAdminAuth, authorizeAdminArticleDetai
 
     if (out0 && out0.i18n && typeof out0.i18n === 'object') {
       const localized = localizeFromArticleI18n(out0, desired);
-      const canonicalSlug = _pickLocaleAwareSlug(out0, desired);
       return sendArticle({
         ...withCoverImageUrl(localized.out),
         slug: canonicalSlug || localized.out?.slug || out0.slug || null,
@@ -2594,8 +2532,8 @@ router.get('/articles/slug/:slug', optionalAdminAuth, authorizeAdminArticleDetai
 
     return sendArticle({
       ...out0,
-      canonicalSlug: _pickLocaleAwareSlug(out0, desired),
-      localizedSlug: _pickLocaleAwareSlug(out0, desired),
+      canonicalSlug,
+      localizedSlug: canonicalSlug,
       requestedLang: desired,
       resolvedLang: normalizeLanguage(out0?.lang) || normalizeLanguage(out0?.language) || desired,
       isTranslated: false,
@@ -2622,10 +2560,10 @@ router.get('/articles/by-slug/:slug', optionalAdminAuth, authorizeAdminArticleDe
 
     const isAdminRequest = Boolean(req.admin);
     const sendArticle = article => res.status(200).json(isAdminRequest ? article : serializePublicArticle(article));
-    const query = _buildNewsSlugLookup(slugNorm, isAdminRequest);
-    const doc = await News.findOne(query).lean();
-    let fallback = doc ? null : await PublicArticle.findOne(_buildPublicArticleSlugLookup(slugNorm, isAdminRequest)).lean();
-    if (fallback && !isAdminRequest && !await hasVisibleNewsSource(fallback)) fallback = null;
+    const parentDocs = new Map();
+    const { news: doc, publicArticle: fallback } = await findArticleSlugMatches(raw, {
+      requestedLang: normalizeLanguage(req.query.lang || req.query.language || req.lang), publicOnly: !isAdminRequest, parentDocs,
+    });
     const out = isAdminRequest ? (doc || fallback) : withPublicAuthorByline(doc || fallback);
     if (!out) return res.status(200).json({ exists: false });
 
@@ -2634,10 +2572,12 @@ router.get('/articles/by-slug/:slug', optionalAdminAuth, authorizeAdminArticleDe
     if (!desired) return sendArticle(withCoverImageUrl(out));
 
     const out0 = withCoverImageUrl(out);
+    const canonicalSlug = await resolveCanonicalArticleSlug(out0, desired, {
+      publicCopy: !doc, publicOnly: !isAdminRequest, resolvedAlias: raw, parentDocs,
+    });
 
     if (out0 && out0.translations && typeof out0.translations === 'object') {
       const localized = await localizeNewsDocWithOptionalTranslate({ docLike: out0, desiredLang: desired, logger: console });
-      const canonicalSlug = _pickLocaleAwareSlug(out0, desired);
       return sendArticle({
         ...withCoverImageUrl(localized.out),
         slug: canonicalSlug || localized.out?.slug || out0.slug || null,
@@ -2652,7 +2592,6 @@ router.get('/articles/by-slug/:slug', optionalAdminAuth, authorizeAdminArticleDe
 
     if (out0 && out0.i18n && typeof out0.i18n === 'object') {
       const localized = localizeFromArticleI18n(out0, desired);
-      const canonicalSlug = _pickLocaleAwareSlug(out0, desired);
       return sendArticle({
         ...withCoverImageUrl(localized.out),
         slug: canonicalSlug || localized.out?.slug || out0.slug || null,
@@ -2667,8 +2606,8 @@ router.get('/articles/by-slug/:slug', optionalAdminAuth, authorizeAdminArticleDe
 
     return sendArticle({
       ...out0,
-      canonicalSlug: _pickLocaleAwareSlug(out0, desired),
-      localizedSlug: _pickLocaleAwareSlug(out0, desired),
+      canonicalSlug,
+      localizedSlug: canonicalSlug,
       requestedLang: desired,
       resolvedLang: normalizeLanguage(out0?.lang) || normalizeLanguage(out0?.language) || desired,
       isTranslated: false,

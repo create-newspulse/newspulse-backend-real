@@ -141,6 +141,37 @@ Language state has multiple related representations:
 - Per-language slugs, cached translation buckets, and readiness/error/retry
   metadata support language-specific reads.
 
+### Localized article URLs
+
+[lib/slug.js](./lib/slug.js) selects canonical slugs from the requested locale,
+or an explicitly owned legacy slug in the stored edition's language. A foreign
+script, another locale's legacy alias, blank value or ID-shaped slug cannot
+become that locale's canonical slug. Existing locale-owned Latin transliterations
+remain supported. When no usable slug exists, the canonical path uses the
+article's existing ObjectId; `/api/public/news/:slugOrId?lang=...` resolves that
+fallback for CMS editions and eligible public-only copies. Reads never derive
+an unpersisted URL from a title.
+
+New editions generate Unicode slugs from their own localized titles, including
+Indic combining marks. Title-derived 24-hex slugs receive a locale suffix so
+they cannot be confused with the ID route. Slug checks include legacy and
+localized aliases in News and Public Article records. Alias reads retain
+decoded and percent-encoded compatibility, validate public-copy ownership and
+reject conflicting stories or duplicate requested editions with HTTP 409
+`ARTICLE_SLUG_AMBIGUOUS`, rather than choosing an arbitrary document or redirect.
+Detail responses also verify a different canonical alias before advertising it.
+An ID lookup or an unambiguous legacy alias keeps the stable ID fallback when
+its localized canonical alias collides, rather than routing back to that conflict.
+These detail lookups reuse the bounded ownership reads through a request-local
+parent snapshot; no ownership cache is shared between requests.
+
+Published URL fields are not automatically regenerated, backfilled or replaced
+by translation refreshes, model validation, ordinary saves or synchronization.
+Missing localized URLs use the ID fallback until an explicit reviewed correction.
+Stored IDs, translation relationships, publication dates/status and editorial
+SEO text are not changed by URL selection. This behavior requires no migration
+or rewrite of existing published records.
+
 Request translation generation uses the source validation in
 [translationGroupStatus.js](./services/translationGroupStatus.js) inside its
 existing transaction, authorizes every resolved edition, and generates from the

@@ -6,6 +6,7 @@ process.env.NODE_ENV = 'test';
 process.env.GOOGLE_TRANSLATE_API_KEY = process.env.GOOGLE_TRANSLATE_API_KEY || 'test-key';
 
 const News = require('../models/News');
+const PublicArticle = require('../models/Article');
 const { installEditorialFixture } = require('./helpers/editorialLifecycleFixture');
 const googleTranslation = require('../services/googleTranslationService');
 const {
@@ -25,6 +26,7 @@ function queryResult(value) {
 
 test.beforeEach((t) => {
   sources.clear();
+  t.mock.method(PublicArticle, 'find', () => queryResult([]));
   t.mock.method(News, 'findById', (id) => queryResult(sources.get(String(id)) || null));
   t.mock.method(News, 'updateMany', async () => ({ acknowledged: true, matchedCount: sources.size, modifiedCount: sources.size }));
   t.mock.method(mongoose, 'startSession', async () => ({

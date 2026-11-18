@@ -3,7 +3,7 @@ const News = require('../models/News');
 const PublicArticle = require('../models/Article');
 const PublicSiteSettings = require('../models/PublicSiteSettings');
 const TranslationJob = require('../models/TranslationJob');
-const { slugifyUnicode } = require('../lib/slug');
+const { slugifyLocalizedTitle, canonicalizeSlug } = require('../lib/slug');
 const { buildArticleCreatorFields } = require('../lib/articleCreator');
 const { invalidateArticleLanguageCaches } = require('../lib/cache');
 const googleTranslation = require('./googleTranslationService');
@@ -145,9 +145,14 @@ async function translateArticleFields(source, sourceLang, targetLang) {
 
 function buildTranslatedPayload(source, translated, { targetLang, sourceLang, groupKey, sourceHash, jobId, requestedBy }) {
   const slugs = source.slugs && typeof source.slugs === 'object' && !Array.isArray(source.slugs) ? { ...source.slugs } : {};
-  const localizedSlug = slugifyUnicode(translated.title || source.title || 'article');
-  const targetSlug = slugs[targetLang]
-    || (localizedSlug === source.slug ? `${localizedSlug}-${targetLang}` : localizedSlug);
+  const localizedSlug = slugifyLocalizedTitle(translated.title, targetLang);
+  if (!localizedSlug) {
+    throw Object.assign(new Error('The localized title cannot produce a valid edition slug.'), {
+      statusCode: 422, code: 'TRANSLATION_SLUG_INVALID',
+    });
+  }
+  const targetSlug = localizedSlug === canonicalizeSlug(source.slug)
+    ? `${localizedSlug}-${targetLang}` : localizedSlug;
   slugs[targetLang] = targetSlug;
 
   const coverImage = source.coverImage && typeof source.coverImage === 'object' ? { ...source.coverImage } : undefined;
@@ -363,12 +368,10 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
           jobId: job?._id || null, requestedBy,
         });
         if (current) {
-          for (const field of ['status', 'publishedAt', 'publishAt', 'scheduledAt', 'deletedAt', 'workflowStage']) delete payload[field];
-          payload.slug = current.slug || payload.slug;
-          payload.slugs = { ...payload.slugs, ...current.slugs, [targetLang]: payload.slug };
+          for (const field of ['status', 'publishedAt', 'publishAt', 'scheduledAt', 'deletedAt', 'workflowStage', 'slug', 'slugs']) delete payload[field];
           transaction.saveScope?.assertTranslationPlan([{ ...pickSourceObject(current), ...payload }]);
         }
-        await assertArticleSlugsUnique({ ...payload, _id: current?._id }, {
+        await assertArticleSlugsUnique({ ...pickSourceObject(current), ...payload, _id: current?._id }, {
           session,
           ...(options.legacySourceReferences ? {
             verifiedEditionIds: Object.values(options.existingEditionIds || {}).filter(Boolean),
@@ -381,20 +384,20 @@ async function generateArticleTranslations(sourceDocInput, options = {}) {
           )
           : (await News.create([{ ...payload, ...buildArticleCreatorFields(options.req) }], { session }))[0];
         if (!doc) throw Object.assign(new Error('Translation changed during generation. Retry the operation.'), { statusCode: 409 });
-        if (doc.status === 'published') await syncTranslationGroupMetadata(doc, {
+        const syncResult = doc.status === 'published' ? await syncTranslationGroupMetadata(doc, {
           ...transaction,
           previousDoc: current.toObject(),
-          patch: { title: doc.title, description: doc.description, content: doc.content, slug: doc.slug },
-          invalidate: false, session,
-        });
-        return { doc, wasExisting: Boolean(current) };
+          patch: { title: doc.title, description: doc.description, content: doc.content },
+          preservePublicationMetadata: true, invalidate: false, session,
+        }) : null;
+        return { doc, wasExisting: Boolean(current), publicDocs: syncResult?.publicDocs || [] };
       }, options);
       if (result.skipped) {
         skipped[targetLang] = result.skipped;
         continue;
       }
       (result.wasExisting ? updated : created)[targetLang] = String(result.doc._id);
-      if (result.doc.status === 'published') changedPublicDocs.push(result.doc);
+      if (result.doc.status === 'published') changedPublicDocs.push(result.doc, ...result.publicDocs);
       changedSlugs.push(result.doc.slug);
     }
   } catch (error) {
